@@ -1,0 +1,552 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>第06章 複数カーソルと検索 — ゼロから作るテキストエディタ</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500;600&family=Source+Serif+4:opsz,wght@8..60,400;8..60,600;8..60,700&family=Noto+Serif+JP:wght@400;600;700&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<div class="shell">
+
+  <aside class="spine">
+    <a class="wordmark" href="index.html">MINT EDITOR · from scratch</a>
+    <div class="book-title">ゼロから作る<br>テキストエディタ</div>
+    <div class="book-sub">TypeScript と Canvas で mint editor を組む</div>
+
+    <div class="legend"><span>読む <b>↓</b></span><span>組む <b>↑</b></span></div>
+
+    <nav aria-label="目次">
+      <ul class="toc">
+        <li><a class="nav-item" href="index.html"><span class="nav-num">序</span><span class="nav-label">はじめに・準備<span class="nav-tag">Setup</span></span></a></li>
+        <li><a class="nav-item" href="00-overview.html"><span class="nav-num">00</span><span class="nav-label">文字を打てる箱の正体<span class="nav-tag">Overview</span></span></a></li>
+        <li><a class="nav-item" href="01-buffer.html"><span class="nav-num">01</span><span class="nav-label">テキストを持つ<span class="nav-tag">Buffer</span></span></a></li>
+        <li><a class="nav-item" href="02-document.html"><span class="nav-num">02</span><span class="nav-label">行とカーソル<span class="nav-tag">Doc</span></span></a></li>
+        <li><a class="nav-item" href="03-history.html"><span class="nav-num">03</span><span class="nav-label">編集と取り消し<span class="nav-tag">Undo</span></span></a></li>
+        <li><a class="nav-item" href="04-view.html"><span class="nav-num">04</span><span class="nav-label">画面に描く<span class="nav-tag">Canvas</span></span></a></li>
+        <li><a class="nav-item" href="05-input.html"><span class="nav-num">05</span><span class="nav-label">入力を受ける<span class="nav-tag">Input</span></span></a></li>
+        <li><a class="nav-item current" aria-current="page" href="06-search.html"><span class="nav-num">06</span><span class="nav-label">複数カーソルと検索<span class="nav-tag">Multi</span></span></a></li>
+        <li><a class="nav-item" href="07-highlight.html"><span class="nav-num">07</span><span class="nav-label">色をつける<span class="nav-tag">Syntax</span></span></a></li>
+        <li><a class="nav-item" href="08-ime.html"><span class="nav-num">08</span><span class="nav-label">日本語を打つ<span class="nav-tag">IME</span></span></a></li>
+        <li><a class="nav-item" href="09-assemble.html"><span class="nav-num">09</span><span class="nav-label">開いて保存する・組み立て<span class="nav-tag">Assemble</span></span></a></li>
+      </ul>
+    </nav>
+
+    <div class="spine-foot">
+      各章は一つの部品・機能。<br>下（バッファ）から上（UI）へ<br>積み上げて動かしていく。
+    </div>
+  </aside>
+
+  <main class="reading">
+    <div class="progress-tag">第06章 / 全10章 · 層: MULTI · 読了目安 2〜2.5時間</div>
+    <div class="eyebrow"><span>MULTI</span><span class="depth">— 選択の集合という、たった一つの考え方</span></div>
+    <h1>複数カーソルと検索</h1>
+    <p class="lede">この章は、いっけん別々に見える2つの機能 —— <strong>複数カーソル</strong>と<strong>検索・置換</strong> —— を作ります。でも作り終えると、両者が<strong>まったく同じ骨組み</strong>の上に立っていることが見えてきます。その骨組みとは、第00章で引いた <code>SelRange</code> の伏線 ——「カーソルとは、幅ゼロの選択範囲である」。カーソルが N 本あるとは <code>SelRange</code> が N 個あるというだけ。検索の結果とは、ヒットした区間を <code>SelRange</code> の集合に変換したものにすぎない。この章で書くコードはどれも短い。短いのに、エディタの体験をいちばん派手に変える機能です。そして途中で、範囲が<strong>重なると壊れる</strong>という、複数カーソル最大の落とし穴を正面から潰します。</p>
+
+    <div class="box goal"><div class="box-k">◈ この章のゴール</div>
+      <p>次の 3 つを、自分の目と手で確認できたら達成です。</p>
+      <ol>
+        <li><code>selection.ts</code> の <code>normalizeSelections</code> を読み、「なぜ編集の前に<strong>重なりを潰す</strong>必要があるのか」を、具体的なバグの例とともに自分の言葉で言える。</li>
+        <li><code>search.ts</code> の <code>findAll</code> を読み、リテラル検索・正規表現・単語単位・大文字小文字の4つが、<code>RegExp</code> 1本の組み立て方の違いで表せることを説明できる。</li>
+        <li><code>npx vitest run src/core/selection.test.ts</code> と <code>search.test.ts</code> が PASS する。複数カーソルと検索という「派手な機能」の芯が、DOM を一切触らない純粋ロジックとして検証されているのを目視する。</li>
+      </ol>
+    </div>
+
+    <div class="box map"><div class="box-k">☰ この章のステップ</div>
+      <ol>
+        <li><a href="#step-1">複数カーソル = <code>SelRange</code> が N 個（00章の伏線回収）</a></li>
+        <li><a href="#step-2">重なりを潰す下ごしらえ — <code>normalizeSelections</code> の骨格</a></li>
+        <li><a href="#step-3">統合の心臓 — 重なり判定と和集合</a></li>
+        <li><a href="#step-4">なぜ削除の前に必ず通すのか — box hazard の正体</a></li>
+        <li><a href="#step-5">あえて置かなかった関数 — <code>mapOffset</code> の不在</a></li>
+        <li><a href="#step-6">検索の芯 — <code>findAll</code> とオプションの畳み込み</a></li>
+        <li><a href="#step-7">列挙のループ — 空一致と安全弁</a></li>
+        <li><a href="#step-8">検索バーの骨格 — <code>FindBar</code> の DOM と <code>[hidden]</code> の罠</a></li>
+        <li><a href="#step-9">検索バーの配線 — 中継に徹する UI</a></li>
+      </ol>
+    </div>
+
+    <h2>なぜ「複数カーソル」と「検索」を同じ章で作るのか</h2>
+    <p>この2つは、機能の見た目としてはまるで違います。片方は <code>Alt</code>+クリックでカーソルを増やす操作、もう片方は <code>Ctrl+F</code> で検索バーを開いて文字を探す操作。ユーザーから見れば別物です。それでも本書が同じ章に入れたのには、はっきりした理由があります。<strong>両者は同じ土台 —— 「選択範囲の集合」—— の上に立っているから</strong>です。</p>
+    <p>第00章で <code>SelRange</code> を作ったとき、コメントにこう書きました ——「<code>anchor === head</code> なら『ただのカーソル』」。つまり選択とカーソルは別の型ではなく、幅ゼロかどうかの違いだけ。そしてエディタはカーソルを<strong>1本のときも含めて、常に <code>SelRange</code> の配列</strong>で持ちます。ここから2つの帰結が転がり出てきます。</p>
+    <ul>
+      <li><strong>複数カーソル</strong>とは、この配列の長さが2以上になった状態にすぎない。特別なモードでも、別のデータ構造でもありません。</li>
+      <li><strong>検索</strong>とは、ヒットした区間（<code>{from, to}</code> のリスト）を、そのまま <code>SelRange</code> の集合に変換する操作。「全部を選択」も「1件ずつジャンプ」も「一括置換」も、複数カーソルの仕組みの上にそのまま乗ります。</li>
+    </ul>
+    <p>だからこの章は、まず「複数の <code>SelRange</code> をどう健全に保つか」（<code>selection.ts</code>）を固め、その上に「区間のリストを産む装置」（<code>search.ts</code>）と「それを操る UI」（<code>findbar.ts</code>）を乗せます。順番に意味があります。検索は複数カーソルの応用であって、逆ではないからです。</p>
+
+    <h2 class="step" id="step-1"><span class="step-no">Step 1</span>複数カーソル = SelRange が N 個</h2>
+    <p>作る（読む）ファイルは <code>core/selection.ts</code>。名前は「selection（選択）」ですが、扱うのは複数カーソルそのものです。カーソルは選択範囲の特殊形（幅ゼロ）なので、両者を分けずに1つのファイルで面倒を見ます。まずファイル先頭の <code>import</code> と、設計思想を宣言する冒頭コメントです。</p>
+
+    <div class="file-tag">core/selection.ts</div>
+    <pre><code><span class="kw">import type</span> { SelRange } <span class="kw">from</span> <span class="st">"./types"</span>;
+<span class="kw">import</span> { rangeMax, rangeMin } <span class="kw">from</span> <span class="st">"./types"</span>;
+
+<span class="cm">/**
+ * 選択範囲（複数カーソル）のユーティリティ。
+ *
+ * エディタはカーソルを常に「SelRange の配列」として持つ。
+ * 1本のときも配列長 1。複数カーソルは特別扱いではなく、これが標準形。
+ * 編集や移動のあとは normalizeSelections で「昇順・重複なし」に直す。
+ */</span></code></pre>
+
+    <p>コメントの3行が、この章の設計をほぼ言い切っています。「<strong>1本のときも配列長 1</strong>」——ここが肝です。多くの自作エディタは「カーソル1本」を基本形にして、複数カーソルを<strong>あとから継ぎ足した特別モード</strong>として実装します。すると「1本のときのコード」と「複数のときのコード」が二重に生まれ、両者の食い違いがバグの温床になります。本書は逆です。<strong>最初から配列</strong>にして、1本は「長さ 1 の配列」として扱う。特別扱いをゼロにすることで、コードが1系統で済みます。</p>
+    <p><code>import</code> の1行目に注目してください。<code>import type { SelRange }</code> と、わざわざ <code>type</code> を付けています。<code>SelRange</code> は<strong>型としてしか使わない</strong>（実行時の値ではない）ので、これを明示すると、コンパイル後の JavaScript からこの import が完全に消えます。一方 2行目の <code>rangeMin</code>/<code>rangeMax</code> は<strong>実際に呼び出す関数</strong>なので、普通の <code>import</code> です。第00章で <code>types.ts</code> に置いた小道具が、さっそくここで働き始めます。</p>
+
+    <div class="gonote"><div class="box-k">TS メモ · import type と「型は消える」</div>
+      <p>TypeScript の <code>import type { X }</code> は「<code>X</code> を型としてだけ取り込む」という宣言です。普通の <code>import { X }</code> との違いは、コンパイル後に<strong>痕跡が残るかどうか</strong>。型は実行時には存在しないので、<code>import type</code> で入れたものはビルドで丸ごと削除され、バンドルに余計な依存を残しません。逆に <code>rangeMin</code> のような「実行時に呼ぶ関数」を <code>import type</code> で入れると、実行時に「そんな関数はない」と壊れます。<strong>使い分けの原則は単純です ——「値として使うなら普通の import、型注釈にしか出てこないなら import type」</strong>。本書のコアは型と値をきっちり分けているので、この区別がそのままファイルの依存関係の地図になります。</p>
+    </div>
+
+    <p>さて、複数カーソルを「<code>SelRange</code> の配列」で持つと決めた瞬間、避けて通れない問題が生まれます。配列の中身が<strong>汚れる</strong>のです。ユーザーが <code>Alt</code>+クリックであちこちにカーソルを撒くと、順番はバラバラになります。選択を広げれば、隣のカーソルと<strong>重なる</strong>こともあります。同じ場所に2本置いてしまうことすらあります。この「汚れた配列」をそのまま編集に使うと壊れる —— だから編集や移動のあとに毎回、配列を<strong>健全な形に直す</strong>関数が要ります。それが <code>normalizeSelections</code> です。次のステップで骨格から読んでいきます。</p>
+
+    <h2 class="step" id="step-2"><span class="step-no">Step 2</span>重なりを潰す下ごしらえ — normalizeSelections の骨格</h2>
+    <p><code>normalizeSelections</code> の仕事は、コメントにあるとおり「<strong>昇順・重複なしに直す</strong>」こと。入力は好き放題に汚れた <code>SelRange</code> の配列、出力は「前から順に並び、どの2つも重ならない」きれいな配列です。まずは前半、空配列の処理と「並べ替え」までを読みます。</p>
+
+    <div class="file-tag">core/selection.ts（つづき）</div>
+    <pre><code><span class="cm">/** 昇順に整列し、重なる・接するカーソルを1つに統合する */</span>
+<span class="kw">export function</span> normalizeSelections(sels: <span class="kw">readonly</span> <span class="ty">SelRange</span>[]): <span class="ty">SelRange</span>[] {
+  <span class="kw">if</span> (sels.length === <span class="st">0</span>) <span class="kw">return</span> [{ anchor: <span class="st">0</span>, head: <span class="st">0</span> }];
+  <span class="kw">const</span> sorted = [...sels].sort((a, b) =&gt; rangeMin(a) - rangeMin(b) || rangeMax(a) - rangeMax(b));
+  <span class="kw">const</span> out: <span class="ty">SelRange</span>[] = [sorted[<span class="st">0</span>]];</code></pre>
+
+    <p>3行しかありませんが、それぞれに設計判断が詰まっています。上から見ます。</p>
+    <p>引数の型は <code>readonly SelRange[]</code>。<code>readonly</code> が付いているのは、「<strong>渡された配列を、この関数は書き換えない</strong>」という約束です。呼び出し側は「自分の持っているカーソル配列を渡したら、勝手に壊されるのでは」と心配せずに済みます。だから中では <code>[...sels]</code> と<strong>コピーを作ってから</strong> <code>sort</code> します。<code>Array.prototype.sort</code> は元の配列を破壊的に並べ替えるので、<code>readonly</code> の約束を守るにはコピーが必須です。この小さな作法が、上位（<code>editor.ts</code>）が安心してこの関数を呼べる根拠になります。</p>
+    <p>1行目の <code>if (sels.length === 0) return [{ anchor: 0, head: 0 }]</code> は<strong>空配列の番人</strong>です。カーソルが1本もない状態は、エディタとしてあり得ません（少なくとも1本はどこかにいるべき）。だから空が来たら「文書先頭に1本」を返して、以降のコードが「配列は必ず1本以上」を前提にできるようにします。<code>sorted[0]</code> をいきなり触る2行下のコードが安全なのは、この番人のおかげです。</p>
+    <p>2行目の <code>sort</code> の比較関数が、この関数の並び順を決めます。</p>
+    <pre><code>(a, b) =&gt; rangeMin(a) - rangeMin(b) || rangeMax(a) - rangeMax(b)</code></pre>
+    <p>まず <code>rangeMin</code>（範囲の左端）で比べ、<strong>左端が同じなら</strong> <code>rangeMax</code>（右端）で比べます。第00章の落とし穴を思い出してください ——「<code>anchor</code> が必ず前とは限らない」。右から左へ選択すると <code>head &lt; anchor</code> になるので、<code>anchor</code> で直接ソートすると順序が壊れます。だから<strong>方向に依存しない</strong> <code>rangeMin</code>/<code>rangeMax</code> でソートするのが正解です。<code>||</code> でつないでいるのは、JavaScript では「左端の差が <code>0</code>（＝同じ）なら右端の差を使う」という二段構えのイディオムです。</p>
+    <p>そして最後の <code>const out: SelRange[] = [sorted[0]]</code>。統合の結果を溜める配列 <code>out</code> を、<strong>先頭要素だけ入れて</strong>始めます。次のステップのループは「2番目以降を、<code>out</code> の末尾と見比べながら」進みます。ソート済みの配列を先頭から舐めて隣接をまとめる —— <strong>区間マージ</strong>の定番の型です。</p>
+
+    <div class="gonote"><div class="box-k">TS メモ · sort の比較関数と「差を返す」流儀</div>
+      <p><code>Array.prototype.sort</code> の比較関数は、<code>2つの要素 a, b</code> を受け取り、<strong>数値を返す</strong>約束です。負なら「<code>a</code> が前」、正なら「<code>b</code> が前」、<code>0</code> なら「同順」。だから <code>rangeMin(a) - rangeMin(b)</code> のように<strong>差を返す</strong>のが定石です。<code>a &lt; b ? -1 : 1</code> と書いても動きますが、差を返す方が短く、同値（<code>0</code>）が自然に表現できます。ここで <code>|| rangeMax(a) - rangeMax(b)</code> と続けているのは、「左端の差が <code>0</code> のとき（＝ falsy）だけ、右端の差を評価する」ため。JavaScript の <code>||</code> は「左が falsy なら右を返す」演算子なので、これで<strong>第1キー・第2キーの多段ソート</strong>が1行で書けます。<code>sort</code> はコピーを取らず<strong>その場で並べ替える</strong>点に注意 —— だから本文で <code>[...sels]</code> の浅いコピーを先に作っています。</p>
+    </div>
+
+    <h2 class="step" id="step-3"><span class="step-no">Step 3</span>統合の心臓 — 重なり判定と和集合</h2>
+    <p>下ごしらえ（ソート）が済んだので、いよいよ本体のループです。ソート済みの <code>sorted</code> を2番目から順に見て、直前の要素（<code>out</code> の末尾）と<strong>重なるか</strong>を判定し、重なれば<strong>1つに統合</strong>、重ならなければ<strong>そのまま追加</strong>します。</p>
+
+    <div class="file-tag">core/selection.ts（つづき・これで全文）</div>
+    <pre><code>  <span class="kw">for</span> (<span class="kw">let</span> i = <span class="st">1</span>; i &lt; sorted.length; i++) {
+    <span class="kw">const</span> prev = out[out.length - <span class="st">1</span>];
+    <span class="kw">const</span> cur = sorted[i];
+    <span class="kw">const</span> overlap =
+      rangeMin(cur) &lt; rangeMax(prev) ||
+      <span class="cm">// 空カーソル同士が同位置なら1つにする</span>
+      (rangeMin(cur) === rangeMax(prev) &amp;&amp; (rangeMin(cur) === rangeMax(cur) || rangeMin(prev) === rangeMax(prev)) &amp;&amp; rangeMin(cur) === rangeMin(prev));
+    <span class="kw">if</span> (overlap) {
+      <span class="cm">// 統合: 範囲は和集合、向きは後から来た方に合わせる</span>
+      <span class="kw">const</span> lo = <span class="ty">Math</span>.min(rangeMin(prev), rangeMin(cur));
+      <span class="kw">const</span> hi = <span class="ty">Math</span>.max(rangeMax(prev), rangeMax(cur));
+      <span class="kw">const</span> headForward = cur.head &gt;= cur.anchor;
+      out[out.length - <span class="st">1</span>] = headForward ? { anchor: lo, head: hi } : { anchor: hi, head: lo };
+    } <span class="kw">else</span> {
+      out.push(cur);
+    }
+  }
+  <span class="kw">return</span> out;
+}</code></pre>
+
+    <p>ループの中の <code>prev</code> と <code>cur</code> が主役です。<code>prev = out[out.length - 1]</code> は「これまでに確定した並びの<strong>いちばん右</strong>」、<code>cur = sorted[i]</code> は「これから吟味する<strong>次の要素</strong>」。ソート済みなので、<code>cur</code> の左端は必ず <code>prev</code> の左端以上。だから<strong>重なりが起きるとしたら「<code>cur</code> の左端が <code>prev</code> の右端に食い込むとき」だけ</strong>です。これを判定するのが <code>overlap</code> です。</p>
+
+    <p><code>overlap</code> の式は2つの条件を <code>||</code> でつないでいます。順に解きほぐします。</p>
+    <p><strong>第1条件</strong> <code>rangeMin(cur) &lt; rangeMax(prev)</code>。「<code>cur</code> の左端が <code>prev</code> の右端より<strong>手前</strong>」——つまり範囲が実際にかぶっています。ここで <code>&lt;</code>（未満）であって <code>&lt;=</code>（以下）でない点が重要です。<code>rangeMin(cur) === rangeMax(prev)</code> のとき、たとえば <code>[0,3)</code> と <code>[3,6)</code> は<strong>接している</strong>だけで、重なってはいません。半開区間 <code>[from, to)</code> の流儀（第00章）では、<code>3</code> は前者に含まれず後者に含まれるので、両者は1文字も共有しない。だから<strong>接触は統合しない</strong>——これがテスト「接しているだけの範囲は統合しない」が守っている性質です。</p>
+    <p><strong>第2条件</strong>（<code>||</code> の右側）は、第1条件だけでは取りこぼす特殊ケースを拾います。コメントどおり「<strong>空カーソル同士が同位置</strong>」の場合です。<code>Alt</code>+クリックで同じ場所を2回押すと、幅ゼロのカーソルが2本重なります。このとき第1条件は <code>rangeMin(cur) &lt; rangeMax(cur)</code>... いや、幅ゼロだと <code>rangeMin === rangeMax</code> なので <code>rangeMin(cur) &lt; rangeMax(prev)</code> は成立しません（同位置なら <code>&lt;</code> でなく <code>===</code>）。だから明示的に「同位置」を判定します。式を分解すると:</p>
+    <ul>
+      <li><code>rangeMin(cur) === rangeMax(prev)</code> — 端がぴったり接している。</li>
+      <li><code>(rangeMin(cur) === rangeMax(cur) || rangeMin(prev) === rangeMax(prev))</code> — <strong>どちらかが幅ゼロ（空カーソル）</strong>である。</li>
+      <li><code>rangeMin(cur) === rangeMin(prev)</code> — 左端も一致している（＝完全に同じ位置）。</li>
+    </ul>
+    <p>この3つがすべて成り立つのは、「同じ位置にある空カーソル」か「範囲の端にぴたり重なった空カーソル」のときだけ。テスト「同じ位置の空カーソルは1つになる」（<code>{4,4}</code> が2本 → 1本）が、まさにこの枝を通ります。<strong>接触は残すが、同位置の空カーソルは1つに畳む</strong> —— この微妙な線引きが、複数カーソルの使い心地を決めます。</p>
+
+    <p>重なると判定されたら、<code>if (overlap)</code> の中で<strong>統合</strong>します。範囲は<strong>和集合</strong>——左端は2つの左端の小さい方（<code>lo</code>）、右端は大きい方（<code>hi</code>）。ここまでは素直です。難しいのは<strong>向き</strong>です。統合後のカーソルは <code>anchor</code>→<code>head</code> のどちらを向くべきか。コードは「<strong>後から来た方（<code>cur</code>）の向きに合わせる</strong>」と決めています。</p>
+    <pre><code>  <span class="kw">const</span> headForward = cur.head &gt;= cur.anchor;
+  out[out.length - <span class="st">1</span>] = headForward ? { anchor: lo, head: hi } : { anchor: hi, head: lo };</code></pre>
+    <p><code>cur.head &gt;= cur.anchor</code> は「<code>cur</code> が<strong>前向き</strong>（head が右）か」の判定です。前向きなら統合後も前向き（<code>{anchor: lo, head: hi}</code>）、後ろ向きなら後ろ向き（<code>{anchor: hi, head: lo}</code>）。なぜ <code>cur</code> に合わせるのか —— ユーザーが最後に動かしたカーソルが <code>cur</code> だからです。直前の操作の向きを残すのが、いちばん直感に合います。そして重要なのは、<strong>統合結果で <code>out</code> の末尾を上書きしている</strong>こと（<code>out[out.length - 1] = ...</code>）。<code>push</code> ではなく代入。すでに入っている <code>prev</code> を、より大きな統合範囲に<strong>差し替える</strong>わけです。重ならなければ <code>else</code> で <code>out.push(cur)</code> —— 新しい塊として後ろに足します。</p>
+
+    <div class="gonote"><div class="box-k">TS メモ · 区間マージという定型と、その正しさ</div>
+      <p>このループは、アルゴリズムの世界で「<strong>interval merge（区間の統合）</strong>」と呼ばれる定型です。手順は決まっています ——（1）左端でソートする、（2）先頭を答えに入れる、（3）2番目以降を順に見て、答えの末尾と重なれば末尾を伸ばし、重ならなければ新しく足す。この型の<strong>正しさ</strong>は「ソート済みなら、<code>cur</code> が重なる可能性があるのは直前の <code>prev</code> だけ」という性質に支えられています。<code>cur</code> より前の要素はすべて <code>prev</code> に畳み込まれているので、<code>prev</code> とだけ比べれば十分。だから二重ループ（全ペア比較、<code>O(n²)</code>）が要らず、ソートの <code>O(n log n)</code> ＋一巡の <code>O(n)</code> で済みます。カーソルが数百本あっても一瞬です。エディタのコアで「素朴だが正しく、しかも速い」型を選ぶ —— 本書が一貫して大事にしている姿勢です。</p>
+    </div>
+
+    <h2 class="step" id="step-4"><span class="step-no">Step 4</span>なぜ削除の前に必ず通すのか — box hazard の正体</h2>
+    <p><code>normalizeSelections</code> は「配列をきれいにする」だけの地味な関数に見えます。でもこれを<strong>正しいタイミングで呼ばない</strong>と、複数カーソルは静かに壊れます。ここが、この章でいちばん大事な落とし穴です。</p>
+
+    <div class="box hazard"><div class="box-k">⚠ 落とし穴 — 削除系コマンドは、境界を伸ばした結果で範囲が重なる</div>
+      <p>複数カーソルで <strong>Backspace</strong> や「行削除」を実行する場面を考えてください。空カーソル（幅ゼロ）に対する Backspace は、内部的には「カーソルの<strong>1つ手前まで範囲を伸ばして</strong>削除する」操作になります。つまり <code>{5,5}</code> のカーソルが <code>[4,5)</code> の削除範囲に化ける。ところが、すぐ隣に選択範囲 <code>[2,5)</code> がいたらどうなるか —— 伸ばした結果 <code>[4,5)</code> と <code>[2,5)</code> が<strong>重なります</strong>。この重なった2つを<strong>そのまま <code>applyEdits</code> に渡すと</strong>、同じ文字を二重に消したり、オフセットがずれて<strong>まったく別の場所を壊したり</strong>します。<br>
+      対策はただ一つ。<strong>削除範囲を組み立てたら、<code>applyEdits</code> に渡す前に必ず <code>normalizeSelections</code>（重なりの統合）を通す</strong>こと。重なった <code>[2,5)</code> と <code>[4,5)</code> は、統合されて <code>[2,5)</code> の1つになり、削除は1回で正しく走ります。「境界を伸ばす操作のあとは、編集の直前に正規化」——これを削除系コマンドの<strong>不文律</strong>にしてください。プロジェクトの <code>CLAUDE.md</code> にも、過去に踏んだ罠として明記してあります。</p>
+    </div>
+
+    <p>なぜこれが「静かに」壊れるのか。重なりは<strong>いつも起きるわけではない</strong>からです。カーソルが離れて散っていれば、削除で境界を伸ばしても隣とぶつかりません。テストも普段は通ります。ところが「選択範囲のすぐ隣に空カーソルを置く」という、ユーザーがたまにやる配置でだけ、範囲が重なって破綻する。<strong>再現条件が狭いバグほど、発見が遅れて厄介</strong>です。だから本書は、この危険を<strong>コードの構造で封じます</strong> ——「編集を適用する直前に <code>normalizeSelections</code> を必ず通す」というパイプラインの形にしておけば、うっかり忘れようがありません。</p>
+
+    <div class="box do"><div class="box-k">▸ 動かして確認</div>
+      <p>複数カーソルの芯である <code>normalizeSelections</code> は、DOM を一切触らない純粋関数です。だから Node 上の vitest だけで、重なり・接触・同位置・逆順の全パターンを検証できます。まずこのファイルのテストを走らせましょう。</p>
+      <pre class="term"><code><span class="ps">$</span> cd src
+<span class="ps">$</span> npx vitest run src/core/selection.test.ts
+<span class="out">✓ src/core/selection.test.ts (4 tests)
+   ✓ 昇順に並べ替える
+   ✓ 重なる範囲は統合される
+   ✓ 同じ位置の空カーソルは1つになる
+   ✓ 接しているだけの範囲は統合しない
+ Test Files  1 passed (1)
+      Tests  4 passed (4)</span></code></pre>
+      <p>4つのテスト名を、Step 2・Step 3 で読んだコードと突き合わせてください。「<strong>重なる範囲は統合される</strong>」は <code>[0,5)</code> と <code>[3,8)</code> が <code>[0,8)</code> の1つに畳まれること（第1条件）。「<strong>同じ位置の空カーソルは1つになる</strong>」は <code>{4,4}</code>×2 が第2条件で統合されること。「<strong>接しているだけの範囲は統合しない</strong>」は <code>[0,3)</code> と <code>[3,6)</code> が2つのまま残ること（<code>&lt;</code> であって <code>&lt;=</code> でない理由）。落とし穴で説明した「削除前の重なり」を防いでいるのが、まさにこの「重なる範囲は統合される」の性質です。</p>
+    </div>
+
+    <h2 class="step" id="step-5"><span class="step-no">Step 5</span>あえて置かなかった関数 — mapOffset の不在</h2>
+    <p><code>selection.ts</code> の末尾には、コードではなく<strong>3行のコメント</strong>があります。これは「書かなかったこと」の記録 —— 設計の判断ログです。エディタを作っていると、誰もが一度は欲しくなる関数について書かれています。</p>
+
+    <div class="file-tag">core/selection.ts（末尾のコメント）</div>
+    <pre><code><span class="cm">// 「編集後のオフセット付け替え」の汎用関数（mapOffset）は置いていない。
+// カーソルの付け替えは editor.ts の各コマンドが delta の足し込みで直接計算する。
+// 同じロジックを2か所に持つと、どちらが正か迷う資産になるため（レビュー指摘）。</span></code></pre>
+
+    <p>「編集後のオフセット付け替え」とは何か。文書のどこかに文字が挿入・削除されると、その<strong>後ろにあるカーソルの位置がずれます</strong>。たとえばオフセット <code>3</code> に <code>"XYZ"</code>（3文字）を挿入すると、それより後ろのカーソルは全部 <code>+3</code> 動かさないと、指していた文字がずれてしまう。この「編集に合わせてオフセットを付け替える」処理は、複数カーソル編集のあちこちで必要になります。だから <code>mapOffset(offset, edits)</code> のような<strong>汎用関数を1つ作りたくなる</strong> —— これは自然な誘惑です。</p>
+    <p>しかし本書は、あえて<strong>作りませんでした</strong>。理由がコメントの3行目です ——「<strong>同じロジックを2か所に持つと、どちらが正か迷う資産になる</strong>」。カーソルの付け替えは、実際には <code>editor.ts</code> の<strong>各コマンド</strong>（Backspace、複数カーソル入力、一括置換……）が、自分の文脈で <code>delta</code>（挿入・削除で増減した文字数）を足し込んで直接計算しています。ここに「汎用の <code>mapOffset</code>」をもう1つ用意すると、<strong>同じ計算が2系統</strong>できてしまう。片方を直してもう片方を直し忘れる、あるいは「正しいのはどっちだ?」と将来の自分が悩む —— それは<strong>負債</strong>です。</p>
+    <p>これは Don't Repeat Yourself（DRY）の<strong>裏返し</strong>の教訓です。「共通化できるものは共通化せよ」は正しい。でも「共通化<strong>できそう</strong>に見えて、実は文脈ごとに微妙に違うもの」を無理に1つの関数に押し込むと、かえって混乱を生みます。カーソルの付け替えは、コマンドごとに「どの範囲が、どれだけ動いたか」の解釈が違う。だから<strong>各コマンドの中で明示的に計算する方が、正しさが追いやすい</strong>。このコメントは、レビューで「共通化しないの?」と問われたときの<strong>答えを、コードに刻んで残した</strong>ものです。</p>
+
+    <div class="gonote"><div class="box-k">TS メモ · 「書かなかった理由」をコメントで残す価値</div>
+      <p>コメントは普通「このコードは何をしているか」を説明します。でも本当に価値が高いのは、<strong>「なぜこう書かなかったか」</strong>を残すコメントです。コードを読む人は、書かれているものは読めますが、<strong>検討されて捨てられた選択肢</strong>は読めません。「<code>mapOffset</code> を置かなかった。なぜなら二重管理を避けるため」と書いておけば、将来「共通化した方がいいのでは?」と思った人が、同じ検討を一からやり直さずに済みます。設計判断の<strong>棄却理由</strong>は、コードそのものと同じくらい重要な資産です。本書のコアには、この種の「不在の記録」がいくつも埋まっています。</p>
+    </div>
+
+    <p>これで <code>selection.ts</code> は全文です。たった40行足らず。複数カーソルという派手な機能の<strong>芯</strong>が、これだけで済んでいます。「カーソルは <code>SelRange</code> の配列」「編集前に正規化」「付け替えは各コマンドで」—— この3つの約束だけで、複数カーソルは成立します。ここからは、その上に<strong>検索</strong>を乗せていきます。</p>
+
+    <h2 class="step" id="step-6"><span class="step-no">Step 6</span>検索の芯 — findAll とオプションの畳み込み</h2>
+    <p>作る（読む）ファイルは <code>core/search.ts</code>。検索は「文字列の中から、パターンに一致する区間をすべて見つける」だけの純粋関数です。DOM も、検索バーの UI も、ここには一切登場しません。まずファイル冒頭のコメントと、検索の設定を表す2つの型です。</p>
+
+    <div class="file-tag">core/search.ts</div>
+    <pre><code><span class="cm">/**
+ * 検索 — テキストからパターンの一致位置一覧を得る。
+ *
+ * 結果はただの区間のリスト。これを「選択範囲の集合」に変換すれば
+ * 複数カーソルの仕組みの上に、全選択・一括置換がそのまま乗る。
+ */</span>
+
+<span class="kw">export interface</span> <span class="ty">SearchOptions</span> {
+  caseSensitive?: <span class="ty">boolean</span>;
+  regex?: <span class="ty">boolean</span>;
+  wholeWord?: <span class="ty">boolean</span>;
+}
+
+<span class="kw">export interface</span> <span class="ty">Match</span> {
+  from: <span class="ty">number</span>;
+  to: <span class="ty">number</span>;
+}
+
+<span class="cm">/** 一致が異常に多いときの安全弁 */</span>
+<span class="kw">const</span> MAX_MATCHES = <span class="st">50_000</span>;</code></pre>
+
+    <p>冒頭コメントが、Step 1 で予告した「同じ骨組み」の話を回収しています ——「結果はただの区間のリスト。これを『選択範囲の集合』に変換すれば、複数カーソルの仕組みの上に、全選択・一括置換がそのまま乗る」。検索は複数カーソルの<strong>応用</strong>だと、コードの入り口で宣言しているわけです。<code>findAll</code> が返す <code>Match[]</code>（<code>{from, to}</code> のリスト）を、そのまま <code>SelRange[]</code>（<code>{anchor, head}</code>）に読み替えれば、「一致箇所を全部選択」＝「その数だけカーソルを立てる」になります。だから一括置換は「複数カーソルで一斉に文字を入れる」のと同じ操作 —— <strong>検索専用のコードを書かなくていい</strong>。これが Step 1 で「同じ章で作る」と言った理由の、コードでの証明です。</p>
+    <p>2つの型を見ます。<code>SearchOptions</code> は検索の<strong>モード</strong>を表し、3つのフラグはすべて <code>?</code> 付き（省略可能）です。<code>caseSensitive</code>（大文字小文字を区別）、<code>regex</code>（正規表現として解釈）、<code>wholeWord</code>（単語単位）。省略時はすべて <code>false</code> 相当 —— つまり既定は「大文字小文字を無視した、素直なリテラル検索」です。<code>Match</code> は結果の1件で、<code>{from, to}</code> の半開区間。第00章から一貫して使ってきた区間の表し方です。</p>
+    <p><code>MAX_MATCHES = 50_000</code> は<strong>安全弁</strong>です。<code>50_000</code> の <code>_</code> は桁区切り（<code>50000</code> と同じ値・可読性のため）。なぜ上限が要るのか —— <code>a</code> のような1文字を10万行のファイルで検索すると、一致が数十万件に達し、それだけで <code>Match</code> の配列がメモリを食い、UI が固まります。5万件も見つかれば実用上「多すぎ」なので、そこで打ち切る。ユーザー体験を守るための<strong>現実的な線引き</strong>です。</p>
+
+    <p>続いて <code>findAll</code> の本体、前半です。オプションから<strong>正規表現を組み立てる</strong>ところまで。</p>
+
+    <div class="file-tag">core/search.ts（つづき）</div>
+    <pre><code><span class="kw">export function</span> findAll(text: <span class="ty">string</span>, query: <span class="ty">string</span>, opts: <span class="ty">SearchOptions</span> = {}): <span class="ty">Match</span>[] {
+  <span class="kw">if</span> (query.length === <span class="st">0</span>) <span class="kw">return</span> [];
+  <span class="kw">let</span> source: <span class="ty">string</span>;
+  <span class="kw">if</span> (opts.regex) {
+    source = query;
+  } <span class="kw">else</span> {
+    source = escapeRegExp(query);
+  }
+  <span class="kw">if</span> (opts.wholeWord) {
+    source = <span class="st">`\\b(?:${source})\\b`</span>;
+  }
+  <span class="kw">let</span> re: <span class="ty">RegExp</span>;
+  <span class="kw">try</span> {
+    re = <span class="kw">new</span> <span class="ty">RegExp</span>(source, opts.caseSensitive ? <span class="st">"g"</span> : <span class="st">"gi"</span>);
+  } <span class="kw">catch</span> {
+    <span class="kw">return</span> []; <span class="cm">// 不正な正規表現は「一致なし」として扱う</span>
+  }</code></pre>
+
+    <p>この前半の見どころは、<strong>4つの検索モードを、たった1つの <code>RegExp</code> の組み立て方の違いに畳み込んでいる</strong>ことです。第00章で <code>Edit</code> を1形に統一したのと同じ発想が、ここでも効いています。上から順に、<code>source</code>（正規表現の元になる文字列）を段階的に組み立てていきます。</p>
+    <p>まず <code>if (query.length === 0) return []</code>。空の検索語は「一致なし」。検索バーを空にしたときにヒットが消えるのは、この1行のおかげです。</p>
+    <p>次が<strong>リテラルか正規表現かの分岐</strong>です。<code>opts.regex</code> が真なら、ユーザーの入力 <code>query</code> を<strong>そのまま</strong>正規表現として使う。偽なら <code>escapeRegExp(query)</code> を通します。この <code>escapeRegExp</code>（後半で読みます）が肝で、<code>a.b</code> のような入力に含まれる <code>.</code> や <code>*</code> といった正規表現の<strong>特殊文字を無力化</strong>します。これがないと、リテラル検索のつもりで <code>a.b</code> と打っても、<code>.</code> が「任意の1文字」と解釈されて <code>aXb</code> までヒットしてしまう。テスト「正規表現の特殊文字はリテラルとして扱う」（<code>a.b</code> で検索して <code>aXb</code> にはヒットしない）が、この分岐を守っています。</p>
+    <p>次に <code>opts.wholeWord</code> が真なら、いま組み立てた <code>source</code> を <code>\b(?:...)\b</code> で<strong>包みます</strong>。<code>\b</code> は「単語の境界」を表す正規表現で、<code>(?:...)</code> は「グループ化するがキャプチャはしない」非キャプチャグループ。これで <code>cat</code> は単語の <code>cat</code> にはヒットしても、<code>catalog</code> の中の <code>cat</code> にはヒットしなくなります。テスト「単語単位の検索」（<code>cat catalog cat</code> で <code>cat</code> を単語検索 → 2件）が、この包み込みの効果です。<code>(?:...)</code> でくくるのは、<code>source</code> が <code>a|b</code> のような<strong>選択</strong>を含んでいても、<code>\b</code> が全体に正しくかかるようにするためです。</p>
+    <p>最後に <code>new RegExp(source, ...)</code> で正規表現オブジェクトを生成します。第2引数のフラグが <code>caseSensitive ? "g" : "gi"</code>。<code>g</code> は「全一致を列挙する（グローバル）」フラグで、これは常に付きます。<code>i</code> は「大文字小文字を無視する」フラグで、<code>caseSensitive</code> が偽のときだけ付く。だから既定（<code>gi</code>）は区別なし、<code>caseSensitive</code> 指定時（<code>g</code>）は区別あり。テスト「caseSensitive で区別する」（<code>Foo foo FOO</code> で <code>foo</code> を区別検索 → 1件）が効いています。</p>
+    <p>そして全体を <code>try { ... } catch { return [] }</code> で包んでいるのが、地味ですが重要な守りです。<code>regex</code> モードでユーザーが <code>[</code> のような<strong>壊れた正規表現</strong>を打つと、<code>new RegExp</code> は例外を投げます。それを <code>catch</code> して「一致なし（<code>[]</code>）」として扱う。<strong>入力途中の不完全な正規表現でエディタが落ちない</strong>ようにするための安全網です。テスト「不正な正規表現は一致なし」（<code>[</code> を regex 検索 → 0件）が、この <code>catch</code> を通ります。検索バーは1文字打つたびに <code>findAll</code> を呼ぶので、打ちかけの <code>[</code> で毎回例外が飛んだら使い物になりません。</p>
+
+    <div class="gonote"><div class="box-k">TS メモ · なぜ「区間」を返して DOM を返さないのか</div>
+      <p><code>findAll</code> は、ヒットした場所を <code>{from, to}</code> という<strong>ただの数のペア</strong>で返します。「ハイライトした DOM 要素」でも「画面上の座標」でもありません。これは第00章から続く <code>core/</code> の鉄則 ——「<strong>純粋ロジックはブラウザを知らない</strong>」——の実践です。区間だけを返すから、この関数は Node 上のテストで何度でも検証できます（日本語・正規表現・単語境界の全パターンを機械で回せる）。そして返ってきた区間を「どう見せるか」（黄色く塗るのか、カーソルを立てるのか）は、上の層（<code>editor.ts</code>・<code>view.ts</code>）が決める。<strong>「何を見つけたか」と「どう見せるか」を分離する</strong> —— この境界のおかげで、検索ロジックは UI の都合から自由でいられます。</p>
+    </div>
+
+    <h2 class="step" id="step-7"><span class="step-no">Step 7</span>列挙のループ — 空一致と安全弁</h2>
+    <p>正規表現 <code>re</code> が組み上がったら、あとは<strong>テキスト全体を舐めて一致を全部集める</strong>だけです。<code>search.ts</code> の残り —— 列挙ループと、リテラル用のエスケープ関数です。</p>
+
+    <div class="file-tag">core/search.ts（つづき・これで全文）</div>
+    <pre><code>  <span class="kw">const</span> matches: <span class="ty">Match</span>[] = [];
+  <span class="kw">let</span> m: <span class="ty">RegExpExecArray</span> | <span class="ty">null</span>;
+  <span class="kw">while</span> ((m = re.exec(text)) !== <span class="ty">null</span>) {
+    matches.push({ from: m.index, to: m.index + m[<span class="st">0</span>].length });
+    <span class="kw">if</span> (m[<span class="st">0</span>].length === <span class="st">0</span>) re.lastIndex++; <span class="cm">// 空一致で無限ループしない</span>
+    <span class="kw">if</span> (matches.length &gt;= MAX_MATCHES) <span class="kw">break</span>;
+  }
+  <span class="kw">return</span> matches;
+}
+
+<span class="kw">function</span> escapeRegExp(s: <span class="ty">string</span>): <span class="ty">string</span> {
+  <span class="kw">return</span> s.replace(/[.*+?^${}()|[\]\\]/g, <span class="st">"\\$&amp;"</span>);
+}</code></pre>
+
+    <p>ループの主役は <code>re.exec(text)</code> です。<code>g</code> フラグ付きの正規表現に対して <code>exec</code> を繰り返し呼ぶと、<strong>呼ぶたびに次の一致を返し</strong>、もう無ければ <code>null</code> を返します。だから <code>while ((m = re.exec(text)) !== null)</code> は「一致がある限り回り続ける」ループになります。<code>g</code> フラグの正規表現は内部に <code>lastIndex</code>（次にどこから探すか）を覚えていて、<code>exec</code> のたびにそれが前進する —— この<strong>状態を持つ</strong>性質が、列挙を1本の <code>while</code> で書ける理由です。</p>
+    <p>一致 <code>m</code> が返ったら、<code>{from: m.index, to: m.index + m[0].length}</code> を <code>matches</code> に積みます。<code>m.index</code> は一致の開始位置、<code>m[0]</code> は一致した文字列そのもの、その <code>.length</code> を足せば終了位置。半開区間 <code>[from, to)</code> がそのまま得られます。テスト「リテラル検索」で <code>Foo foo FOO</code> の最初のヒットが <code>{from:0, to:3}</code> になるのは、この計算どおりです。</p>
+    <p>次の1行が、正規表現検索の<strong>古典的な罠</strong>を防いでいます。</p>
+    <pre><code>  <span class="kw">if</span> (m[<span class="st">0</span>].length === <span class="st">0</span>) re.lastIndex++; <span class="cm">// 空一致で無限ループしない</span></code></pre>
+    <p><code>x*</code> や <code>a?</code> のような正規表現は、<strong>幅ゼロの一致（空一致）</strong>を返すことがあります。「<code>x</code> が0個以上」は、<code>x</code> が無い場所でも「0個ある」として一致するからです。空一致のとき <code>lastIndex</code> は前進しないので、<code>exec</code> は<strong>同じ位置で永遠に空一致を返し続け</strong>、ループが止まりません。これを防ぐため、空一致を見つけたら手動で <code>re.lastIndex++</code> と<strong>1つ先へ押し出します</strong>。テスト「空一致で無限ループしない」（<code>x*</code> を regex 検索して<strong>ループが止まり</strong>、1件以上返る）が、この <code>if</code> を通ります。正規表現エンジンを自前で回すとき、これは<strong>必ず</strong>踏む罠なので、覚えておく価値があります。</p>
+    <p>最後の <code>if (matches.length &gt;= MAX_MATCHES) break</code> が、Step 6 で用意した安全弁の使用箇所です。5万件溜まったら <code>break</code> でループを抜ける。これで、どんな入力が来ても <code>findAll</code> が<strong>暴走しない</strong>ことが保証されます。</p>
+
+    <p>ファイル最後の <code>escapeRegExp</code> は、Step 6 のリテラル検索が使っていた「特殊文字の無力化」の実体です。</p>
+    <pre><code>  <span class="kw">return</span> s.replace(/[.*+?^${}()|[\]\\]/g, <span class="st">"\\$&amp;"</span>);</code></pre>
+    <p><code>/[.*+?^${}()|[\]\\]/g</code> は「正規表現で特別な意味を持つ文字」を並べた文字クラスです。<code>.</code>（任意の1文字）、<code>*</code>（0回以上）、<code>+</code>、<code>?</code>、<code>^</code>、<code>$</code>、括弧類、<code>|</code>（選択）、そして <code>\</code>（バックスラッシュ自身）。これらを見つけたら、置換文字列 <code>"\\$&amp;"</code> で置き換えます。<code>$&amp;</code> は「一致した文字そのもの」を表す特殊な参照なので、<code>\\$&amp;</code> は「その文字の前に <code>\</code> を1つ足す」——つまり<strong>エスケープ</strong>する意味になります。<code>a.b</code> なら <code>a\.b</code> になり、<code>.</code> は「任意の1文字」ではなく「ピリオドそのもの」として扱われる。これで、ユーザーがどんな記号を打っても<strong>文字どおりに検索</strong>できます。</p>
+
+    <div class="box hazard"><div class="box-k">⚠ 落とし穴 — リテラル検索でエスケープを忘れると、検索が「化ける」</div>
+      <p>もし <code>escapeRegExp</code> を通さず、ユーザー入力をそのまま <code>new RegExp</code> に渡したらどうなるか。<code>(</code> を1文字検索しただけで <code>new RegExp("(")</code> が例外を投げ（括弧が閉じていない）、<code>catch</code> で握りつぶされて「一致なし」に。ユーザーには「<code>(</code> が検索できないエディタ」に見えます。<code>.</code> を検索すれば全文字にヒットし、<code>*</code> を検索すれば直前の文字の繰り返しと誤解される。<strong>記号を含むコードを検索する場面はいくらでもある</strong>ので、これは実用で頻繁に踏みます。「リテラル検索とは、入力を<strong>エスケープしてから</strong>正規表現にすること」——この一手を省くと、検索は静かに化けます。<code>regex</code> モードのときだけエスケープを<strong>スキップ</strong>する（ユーザーが正規表現を意図しているから）—— この出し分けが Step 6 の分岐でした。</p>
+    </div>
+
+    <div class="box do"><div class="box-k">▸ 動かして確認</div>
+      <p>検索の芯 <code>findAll</code> も純粋関数です。4つのモード・空一致・不正入力・日本語まで、すべて Node 上で検証できます。</p>
+      <pre class="term"><code><span class="ps">$</span> npx vitest run src/core/search.test.ts
+<span class="out">✓ src/core/search.test.ts (8 tests)
+   ✓ リテラル検索（既定は大文字小文字を区別しない）
+   ✓ caseSensitive で区別する
+   ✓ 正規表現の特殊文字はリテラルとして扱う
+   ✓ regex オプションで正規表現検索
+   ✓ 単語単位の検索
+   ✓ 不正な正規表現は一致なし
+   ✓ 空一致で無限ループしない
+   ✓ 日本語の検索
+ Test Files  1 passed (1)
+      Tests  8 passed (8)</span></code></pre>
+      <p>8つのテスト名が、Step 6・Step 7 で読んだコードの一行一行に対応しています。とくに「<strong>日本語の検索</strong>」（<code>こんにちは、こんばんは</code> で <code>こん</code> → 2件）に注目してください。<code>findAll</code> のコードには「日本語対応」の特別な処理は<strong>1行もありません</strong>。それでも通るのは、JavaScript の <code>RegExp</code> と文字列が UTF-16 で素直に動くから。<strong>特別扱いを足さずに多言語で正しく動く</strong>のが、良い設計の副産物です。</p>
+    </div>
+
+    <h2 class="step" id="step-8"><span class="step-no">Step 8</span>検索バーの骨格 — FindBar の DOM と [hidden] の罠</h2>
+    <p>ここまでの <code>selection.ts</code> と <code>search.ts</code> は、DOM を知らない純粋ロジックでした。最後に、それを人間が操るための<strong>検索バー UI</strong>を作ります。ファイルは <code>editor/findbar.ts</code> —— 名前のとおり <code>core/</code> ではなく <code>editor/</code>（DOM 層）に置かれます。まずクラスの宣言と、<code>innerHTML</code> による DOM 構築までです。</p>
+
+    <div class="file-tag">editor/findbar.ts</div>
+    <pre><code><span class="kw">import type</span> { Editor } <span class="kw">from</span> <span class="st">"./editor"</span>;
+
+<span class="cm">/**
+ * FindBar — 検索・置換の小さな UI。
+ * 検索ロジックはすべて editor 側にあり、ここは入力を中継するだけ。
+ */</span>
+<span class="kw">export class</span> <span class="ty">FindBar</span> {
+  <span class="kw">readonly</span> el: <span class="ty">HTMLElement</span>;
+  <span class="kw">private</span> editor: <span class="ty">Editor</span>;
+  <span class="kw">private</span> queryInput: <span class="ty">HTMLInputElement</span>;
+  <span class="kw">private</span> replaceInput: <span class="ty">HTMLInputElement</span>;
+  <span class="kw">private</span> countLabel: <span class="ty">HTMLElement</span>;
+  <span class="kw">private</span> replaceRow: <span class="ty">HTMLElement</span>;
+  <span class="kw">private</span> caseBtn: <span class="ty">HTMLButtonElement</span>;
+  <span class="kw">private</span> regexBtn: <span class="ty">HTMLButtonElement</span>;
+  <span class="kw">private</span> wordBtn: <span class="ty">HTMLButtonElement</span>;
+  <span class="cm">/** 閉じたときにエディタへフォーカスを返す */</span>
+  onClose: (() =&gt; <span class="ty">void</span>) | <span class="ty">null</span> = <span class="ty">null</span>;
+
+  <span class="kw">constructor</span>(editor: <span class="ty">Editor</span>) {
+    <span class="kw">this</span>.editor = editor;
+    <span class="kw">this</span>.el = document.createElement(<span class="st">"div"</span>);
+    <span class="kw">this</span>.el.className = <span class="st">"findbar"</span>;
+    <span class="kw">this</span>.el.hidden = <span class="kw">true</span>;
+    <span class="kw">this</span>.el.innerHTML = <span class="st">`
+      &lt;div class="findbar-row"&gt;
+        &lt;input class="find-query" placeholder="検索" spellcheck="false"&gt;
+        &lt;button class="opt case" title="大文字と小文字を区別"&gt;Aa&lt;/button&gt;
+        &lt;button class="opt word" title="単語単位"&gt;\\b&lt;/button&gt;
+        &lt;button class="opt regex" title="正規表現"&gt;.*&lt;/button&gt;
+        &lt;span class="find-count"&gt;&lt;/span&gt;
+        &lt;button class="nav prev" title="前へ (Shift+Enter)"&gt;↑&lt;/button&gt;
+        &lt;button class="nav next" title="次へ (Enter)"&gt;↓&lt;/button&gt;
+        &lt;button class="nav close" title="閉じる (Esc)"&gt;✕&lt;/button&gt;
+      &lt;/div&gt;
+      &lt;div class="findbar-row replace-row" hidden&gt;
+        &lt;input class="find-replace" placeholder="置換" spellcheck="false"&gt;
+        &lt;button class="act one"&gt;置換&lt;/button&gt;
+        &lt;button class="act all"&gt;すべて置換&lt;/button&gt;
+      &lt;/div&gt;`</span>;
+
+    <span class="kw">this</span>.queryInput = <span class="kw">this</span>.el.querySelector(<span class="st">".find-query"</span>)!;
+    <span class="kw">this</span>.replaceInput = <span class="kw">this</span>.el.querySelector(<span class="st">".find-replace"</span>)!;
+    <span class="kw">this</span>.countLabel = <span class="kw">this</span>.el.querySelector(<span class="st">".find-count"</span>)!;
+    <span class="kw">this</span>.replaceRow = <span class="kw">this</span>.el.querySelector(<span class="st">".replace-row"</span>)!;
+    <span class="kw">this</span>.caseBtn = <span class="kw">this</span>.el.querySelector(<span class="st">".case"</span>)!;
+    <span class="kw">this</span>.regexBtn = <span class="kw">this</span>.el.querySelector(<span class="st">".regex"</span>)!;
+    <span class="kw">this</span>.wordBtn = <span class="kw">this</span>.el.querySelector(<span class="st">".word"</span>)!;</code></pre>
+
+    <p>クラス冒頭のコメントが、この UI の立ち位置を1行で言い切っています ——「<strong>検索ロジックはすべて editor 側にあり、ここは入力を中継するだけ</strong>」。<code>FindBar</code> は自分では何も検索しません。<code>findAll</code> を呼ぶのは <code>editor.ts</code> の役目で、<code>FindBar</code> はボタンや入力欄のイベントを <code>editor</code> のメソッド呼び出しに<strong>翻訳して中継する</strong>だけ。だから <code>import type { Editor }</code> で <code>editor</code> を握り、あとはその窓口を叩き続けます。UI とロジックの分離が、ここでも徹底されています。</p>
+    <p>クラスのプロパティ宣言を見ると、<code>private</code> がずらりと並んでいます。<code>queryInput</code>（検索語の入力欄）、<code>replaceInput</code>（置換語）、<code>countLabel</code>（「3 / 12」のような件数表示）、3つのオプションボタン（<code>caseBtn</code>・<code>regexBtn</code>・<code>wordBtn</code>）——どれも<strong>内部で使う DOM 要素への参照</strong>で、外から触られたくないので <code>private</code> です。唯一 <code>readonly el: HTMLElement</code> だけが公開されていて、これが検索バー全体のルート要素。<code>editor.ts</code> はこの <code>el</code> を画面のどこかに差し込みます。</p>
+    <p><code>onClose</code> は<strong>コールバック</strong>です。<code>(() =&gt; void) | null</code> という型は「引数なし・戻り値なしの関数、または <code>null</code>」。検索バーを閉じたとき、<strong>フォーカスをエディタ本体に返す</strong>処理を、ここに差し込めるようにしています。<code>FindBar</code> 自身は「フォーカスをどこに返すか」を知らない（それは組み立て役の <code>editor.ts</code> が決める）ので、その判断を外から注入できる穴を空けているわけです。</p>
+    <p>コンストラクタでは <code>document.createElement("div")</code> で箱を作り、<code>this.el.innerHTML = \`...\`</code> で<strong>中身のHTMLを一気に流し込みます</strong>。テンプレートリテラル（バッククォート）の中に、検索行（<code>findbar-row</code>）と置換行（<code>replace-row</code>）の2段が書かれています。1段目には検索入力・3つのオプションボタン（<code>Aa</code>=大小区別 / <code>\b</code>=単語 / <code>.*</code>=正規表現）・件数表示・前後移動・閉じるボタン。2段目には置換入力と「置換」「すべて置換」ボタン。そして <code>innerHTML</code> を入れた直後に <code>querySelector</code> で各要素を<strong>拾い直して</strong>、プロパティに保持します。末尾の <code>!</code> は「これは <code>null</code> ではない」と TypeScript に断言する印です（自分で書いた HTML なので、その要素が必ず在ることを知っているから）。</p>
+
+    <div class="box hazard"><div class="box-k">⚠ 落とし穴 — <code>.findbar-row { display:flex }</code> が UA の <code>[hidden]</code> を上書きする</div>
+      <p>上のHTMLをよく見てください。2段目の置換行には <code>hidden</code> 属性が付いています（<code>&lt;div class="findbar-row replace-row" hidden&gt;</code>）。<code>hidden</code> は「この要素を隠せ」という標準の属性で、ブラウザの<strong>既定スタイル（UA スタイルシート）</strong>には <code>[hidden] { display: none }</code> が入っています。ふつうはこれだけで隠れる。<strong>ところが</strong>、検索バーの見た目のために <code>.findbar-row { display: flex }</code> という CSS を書くと、<strong>これが UA の <code>display:none</code> を打ち負かします</strong>。クラスセレクタ（<code>.findbar-row</code>）は属性セレクタ（<code>[hidden]</code>）より詳細度が高いうえ、作者スタイルは UA スタイルより優先されるからです。結果、<code>hidden</code> を付けたはずの置換行が<strong>常に見えてしまう</strong>。<br>
+      対策は、CSS 側で <code>[hidden] { display: none !important }</code> を<strong>明示的に足す</strong>こと。<code>!important</code> で「<code>hidden</code> なら何があっても隠す」を最優先にします。これは <code>display</code> 系のスタイルを当てる要素に <code>hidden</code> を併用するとき<strong>必ず</strong>踏む罠で、プロジェクトの <code>CLAUDE.md</code> にも記録してあります。「<code>hidden</code> 属性は <code>display</code> 指定に負ける」——このひと言を覚えておけば、UI が「隠したのに消えない」で悩む時間が消えます。</p>
+    </div>
+
+    <h2 class="step" id="step-9"><span class="step-no">Step 9</span>検索バーの配線 — 中継に徹する UI</h2>
+    <p>DOM を組み終えたら、あとは<strong>イベントを <code>editor</code> のメソッドに配線する</strong>だけです。コンストラクタの後半 —— キー入力・ボタンクリックの登録です。</p>
+
+    <div class="file-tag">editor/findbar.ts（つづき）</div>
+    <pre><code>    <span class="kw">this</span>.queryInput.addEventListener(<span class="st">"input"</span>, () =&gt; <span class="kw">this</span>.applyQuery());
+    <span class="kw">this</span>.queryInput.addEventListener(<span class="st">"keydown"</span>, (e) =&gt; {
+      <span class="kw">if</span> (e.key === <span class="st">"Enter"</span>) {
+        e.preventDefault();
+        <span class="kw">this</span>.editor.findNext(e.shiftKey ? -<span class="st">1</span> : <span class="st">1</span>);
+        <span class="kw">this</span>.updateCount();
+      } <span class="kw">else if</span> (e.key === <span class="st">"Escape"</span>) {
+        e.preventDefault();
+        <span class="kw">this</span>.close();
+      }
+    });
+    <span class="kw">this</span>.replaceInput.addEventListener(<span class="st">"keydown"</span>, (e) =&gt; {
+      <span class="kw">if</span> (e.key === <span class="st">"Enter"</span>) {
+        e.preventDefault();
+        <span class="kw">this</span>.editor.replaceCurrent(<span class="kw">this</span>.replaceInput.value);
+        <span class="kw">this</span>.updateCount();
+      } <span class="kw">else if</span> (e.key === <span class="st">"Escape"</span>) {
+        e.preventDefault();
+        <span class="kw">this</span>.close();
+      }
+    });
+
+    <span class="kw">const</span> toggle = (btn: <span class="ty">HTMLButtonElement</span>) =&gt; {
+      btn.classList.toggle(<span class="st">"on"</span>);
+      <span class="kw">this</span>.applyQuery();
+      <span class="kw">this</span>.queryInput.focus();
+    };
+    <span class="kw">this</span>.caseBtn.addEventListener(<span class="st">"click"</span>, () =&gt; toggle(<span class="kw">this</span>.caseBtn));
+    <span class="kw">this</span>.regexBtn.addEventListener(<span class="st">"click"</span>, () =&gt; toggle(<span class="kw">this</span>.regexBtn));
+    <span class="kw">this</span>.wordBtn.addEventListener(<span class="st">"click"</span>, () =&gt; toggle(<span class="kw">this</span>.wordBtn));
+
+    <span class="kw">this</span>.el.querySelector(<span class="st">".prev"</span>)!.addEventListener(<span class="st">"click"</span>, () =&gt; {
+      <span class="kw">this</span>.editor.findNext(-<span class="st">1</span>);
+      <span class="kw">this</span>.updateCount();
+    });
+    <span class="kw">this</span>.el.querySelector(<span class="st">".next"</span>)!.addEventListener(<span class="st">"click"</span>, () =&gt; {
+      <span class="kw">this</span>.editor.findNext(<span class="st">1</span>);
+      <span class="kw">this</span>.updateCount();
+    });
+    <span class="kw">this</span>.el.querySelector(<span class="st">".close"</span>)!.addEventListener(<span class="st">"click"</span>, () =&gt; <span class="kw">this</span>.close());
+    <span class="kw">this</span>.el.querySelector(<span class="st">".one"</span>)!.addEventListener(<span class="st">"click"</span>, () =&gt; {
+      <span class="kw">this</span>.editor.replaceCurrent(<span class="kw">this</span>.replaceInput.value);
+      <span class="kw">this</span>.updateCount();
+    });
+    <span class="kw">this</span>.el.querySelector(<span class="st">".all"</span>)!.addEventListener(<span class="st">"click"</span>, () =&gt; {
+      <span class="kw">this</span>.editor.replaceAll(<span class="kw">this</span>.replaceInput.value);
+      <span class="kw">this</span>.updateCount();
+    });
+
+    editor.onDidChange(() =&gt; {
+      <span class="kw">if</span> (!<span class="kw">this</span>.el.hidden) <span class="kw">this</span>.updateCount();
+    });
+  }</code></pre>
+
+    <p>ここは「イベント → <code>editor</code> のメソッド」の対応表です。ひとつずつ見ると、UI が本当に<strong>中継しかしていない</strong>ことがよく分かります。</p>
+    <ul>
+      <li><strong>検索欄への入力</strong>（<code>"input"</code>）→ <code>applyQuery()</code>。1文字打つたびに検索をやり直します（インクリメンタルサーチ）。</li>
+      <li><strong>検索欄で Enter</strong> → <code>editor.findNext(e.shiftKey ? -1 : 1)</code>。次の一致へジャンプ。<code>Shift</code> を押していれば <code>-1</code>（前へ）、なければ <code>1</code>（次へ）。<strong>前方・後方の両方向</strong>が、引数の符号ひとつで表せています。</li>
+      <li><strong>Escape</strong> → <code>close()</code>。検索バーを閉じます。</li>
+      <li><strong>3つのオプションボタン</strong> → <code>toggle</code>。ボタンに <code>on</code> クラスを付け外しし（<code>classList.toggle("on")</code>）、<code>applyQuery()</code> で検索し直し、フォーカスを検索欄に戻す。「大小区別」「単語」「正規表現」の ON/OFF が、CSS クラスの有無だけで表現されています。</li>
+      <li><strong>置換欄で Enter / 「置換」ボタン</strong> → <code>editor.replaceCurrent(...)</code>。いまの一致を1件だけ置換。</li>
+      <li><strong>「すべて置換」ボタン</strong> → <code>editor.replaceAll(...)</code>。全一致を一括置換 —— これが Step 6 で言った「複数カーソルの上に乗る一括置換」です。</li>
+    </ul>
+    <div class="box hazard"><div class="box-k">⚠ 落とし穴 — 置換文字列に <code>$1</code> は書けない（本書では未実装）</div>
+      <p>ここまで正規表現検索を作ってきたので、置換でも <code>(\w+)</code> で捕まえたものを <code>$1_new</code> のように<strong>後方参照</strong>で使いたくなります。エディタでは定番の機能ですが、<strong>本書の実装は対応していません</strong>。<code>replaceAll</code> の中身を見ると理由がはっきりします。</p>
+      <pre><code><span class="kw">const</span> edits: <span class="ty">Edit</span>[] = matches.map((m) =&gt; ({ from: m.from, to: m.to, text: replacement }));</code></pre>
+      <p><code>text: replacement</code> —— 置換欄に打った文字列を<strong>そのまま</strong>入れているだけで、<code>$1</code> を捕獲グループに差し替える処理がどこにもありません。だから <code>$1_new</code> と打てば、リテラルの <code>$1_new</code> という7文字が入ります。</p>
+      <p>これは<strong>意図的に切った機能</strong>です。後方参照を入れるには、<code>findAll</code> が一致位置だけでなく<strong>捕獲グループの中身も</strong>持ち帰る必要があり（いまの <code>Match</code> は <code>from</code>/<code>to</code> の2つだけ）、置換のたびに文字列テンプレートを展開する処理も要る。第01章から一貫している「<strong>まず動く意味論を作り、飾りは後で</strong>」という方針で、v1 では見送りました。<strong>拡張するならここが入口</strong>——<code>Match</code> に <code>groups: string[]</code> を足すところから始まります。</p>
+    </div>
+
+    <p>どのハンドラも、最後に <code>this.updateCount()</code> を呼んで件数表示を更新しています。そして各アクションの本体（実際に検索し、置換する処理）は<strong>すべて <code>this.editor.xxx()</code> の中</strong>にあり、<code>FindBar</code> は一切ロジックを持ちません。<code>preventDefault()</code> が随所にあるのは、Enter で<strong>フォームが送信されたり改行が入ったり</strong>する既定動作を止めるためです。</p>
+    <p>最後の <code>editor.onDidChange(...)</code> が、地味ですが効いています。文書が編集されたとき（一括置換の直後など）、<strong>検索バーが開いていれば</strong>（<code>!this.el.hidden</code>）件数を更新する。置換して一致が減ったら、その場で「3 / 12」→「3 / 8」のように表示が追随します。<strong>状態の変化に UI が自動で追いつく</strong>配線です。</p>
+
+    <p>クラスの残り —— <code>isOpen</code> と、開閉・検索適用・件数更新のメソッドです。</p>
+
+    <div class="file-tag">editor/findbar.ts（つづき・これで全文）</div>
+    <pre><code>  <span class="kw">get</span> isOpen(): <span class="ty">boolean</span> {
+    <span class="kw">return</span> !<span class="kw">this</span>.el.hidden;
+  }
+
+  open(withReplace: <span class="ty">boolean</span>, initialQuery: <span class="ty">string</span>): <span class="ty">void</span> {
+    <span class="kw">this</span>.el.hidden = <span class="kw">false</span>;
+    <span class="kw">this</span>.replaceRow.hidden = !withReplace;
+    <span class="kw">if</span> (initialQuery) <span class="kw">this</span>.queryInput.value = initialQuery;
+    <span class="kw">this</span>.queryInput.select();
+    <span class="kw">this</span>.queryInput.focus();
+    <span class="kw">this</span>.applyQuery();
+  }
+
+  close(): <span class="ty">void</span> {
+    <span class="kw">this</span>.el.hidden = <span class="kw">true</span>;
+    <span class="kw">this</span>.editor.setSearch(<span class="st">""</span>);
+    <span class="kw">this</span>.onClose?.();
+  }
+
+  <span class="kw">private</span> applyQuery(): <span class="ty">void</span> {
+    <span class="kw">this</span>.editor.setSearch(<span class="kw">this</span>.queryInput.value, {
+      caseSensitive: <span class="kw">this</span>.caseBtn.classList.contains(<span class="st">"on"</span>),
+      regex: <span class="kw">this</span>.regexBtn.classList.contains(<span class="st">"on"</span>),
+      wholeWord: <span class="kw">this</span>.wordBtn.classList.contains(<span class="st">"on"</span>),
+    });
+    <span class="kw">this</span>.updateCount();
+  }
+
+  <span class="kw">private</span> updateCount(): <span class="ty">void</span> {
+    <span class="kw">const</span> total = <span class="kw">this</span>.editor.matches.length;
+    <span class="kw">const</span> active = <span class="kw">this</span>.editor.activeMatchNumber();
+    <span class="kw">this</span>.countLabel.textContent = <span class="kw">this</span>.editor.searchQuery ? (total &gt; <span class="st">0</span> ? <span class="st">`${active || "-"} / ${total}`</span> : <span class="st">"一致なし"</span>) : <span class="st">""</span>;
+  }
+}</code></pre>
+
+    <p><code>get isOpen()</code> は「バーが開いているか」を <code>!this.el.hidden</code> で返すゲッターです。<code>hidden</code> 属性を<strong>状態の唯一の置き場</strong>にしているのがポイント —— 別途 <code>this.opened = true</code> のようなフラグを持たない。DOM の状態と JS のフラグが二重にあると食い違いのバグを生むので、<strong>真実の源を1つ</strong>に絞っています。Step 4 で <code>mapOffset</code> を「二重管理を避けて」置かなかったのと、同じ精神です。</p>
+    <p><code>open(withReplace, initialQuery)</code> は検索バーを開きます。<code>hidden = false</code> で表示し、<code>replaceRow.hidden = !withReplace</code> で「置換モードなら2段目も出す」を制御（Step 8 の <code>[hidden]</code> の罠が、ここで効いてきます）。<code>initialQuery</code> があれば検索欄に入れ、<code>select()</code> で全選択して <code>focus()</code>。エディタで単語を選んでから <code>Ctrl+F</code> を押すと、その単語が検索欄に<strong>入った状態で開く</strong>のは、この <code>initialQuery</code> の受け渡しです。最後に <code>applyQuery()</code> で即検索。</p>
+    <p><code>close()</code> は逆に <code>hidden = true</code> で隠し、<code>editor.setSearch("")</code> で<strong>検索状態をクリア</strong>（ハイライトを消す）し、<code>this.onClose?.()</code> でコールバックを呼びます。<code>?.</code>（オプショナルチェーン）は「<code>onClose</code> が <code>null</code> でなければ呼ぶ」という安全な呼び出し。Step 8 で空けておいた「フォーカスを返す穴」が、ここで発火します。</p>
+    <p><code>applyQuery()</code> が、この UI と <code>core/</code> をつなぐ<strong>結節点</strong>です。検索欄の値と、3つのオプションボタンの <code>on</code> クラスの有無を読み取り、<code>editor.setSearch(query, options)</code> に渡す。ここで作られる <code>options</code> オブジェクトが、そのまま Step 6 の <code>SearchOptions</code> になり、<code>findAll</code> へ流れていきます。<strong>ボタンの見た目（<code>on</code> クラス）が、検索ロジックのフラグに変換される</strong>瞬間です。UI の状態が純粋ロジックの入力に化ける、この一箇所だけを見れば、検索機能の全体の流れがつかめます。</p>
+    <p><code>updateCount()</code> は件数表示を組み立てます。<code>total</code>（総一致数）と <code>active</code>（いま何件目にいるか）を <code>editor</code> から取り、<code>`${active || "-"} / ${total}`</code>（例「3 / 12」）を表示。ただし検索語が空なら何も出さず（末尾の <code>: ""</code>）、一致ゼロなら「一致なし」。<code>active || "-"</code> は「アクティブな番号が <code>0</code>（未確定）なら <code>-</code> を出す」小技です。ここでも<strong>件数の計算そのものは <code>editor</code> 側</strong>（<code>matches.length</code>・<code>activeMatchNumber()</code>）にあり、<code>FindBar</code> は受け取って<strong>並べるだけ</strong>。最後まで「中継に徹する」を貫いています。</p>
+
+    <div class="box do"><div class="box-k">▸ ブラウザで動かす</div>
+      <p><code>findbar.ts</code> は DOM を触るので、テストはブラウザで確かめます。<code>src/</code> で開発サーバを立て、実際に検索・置換を触ってみましょう（Windows で日本語パスだと Vite が落ちる場合は、英語パスへコピーしてから）。</p>
+      <pre class="term"><code><span class="ps">$</span> npm run dev
+<span class="out">  VITE v5.4.x  ready in 320 ms
+  ➜  Local:   http://localhost:5173/</span></code></pre>
+      <p><code>Ctrl+F</code> で検索バーを開き、<code>.*</code> ボタン（正規表現）を ON にして <code>\d+</code> を検索 → 数字の並びが全部ハイライトされる。<code>\b</code> ボタン（単語）を ON にして <code>cat</code> を検索 → <code>catalog</code> の中の <code>cat</code> にはヒットしない。<code>Ctrl+H</code> で置換行を出し、「すべて置換」で一括置換 → 件数表示が即座に減る。この一つひとつが、Step 6〜9 で読んだコードの動く姿です。</p>
+    </div>
+
+    <h2>つまずき FAQ</h2>
+    <details class="qa"><summary>複数カーソルなのに、なぜ <code>selection.ts</code> には「カーソルを増やす」コードがないの?</summary>
+      <div class="qa-body"><p><code>selection.ts</code> の仕事は「<strong>複数の <code>SelRange</code> を健全に保つ</strong>」ことだけだからです。カーソルを増やす操作（<code>Alt</code>+クリックで配列に <code>SelRange</code> を <code>push</code> する）は、DOM のクリックを受け取る <code>editor.ts</code>/<code>input.ts</code> の仕事。<code>selection.ts</code> はブラウザを知らない純粋ロジックなので、「どうやって増えたか」には関与せず、「増えて汚れた配列をきれいにする」（<code>normalizeSelections</code>）だけを引き受けます。<strong>増やすのは DOM 層、整えるのはコア層</strong>——この分業が、複数カーソルの芯を Node のテストで検証可能にしています。</p></div>
+    </details>
+    <details class="qa"><summary>「接しているだけの範囲は統合しない」のに、なぜ「同位置の空カーソルは統合する」の? 矛盾では?</summary>
+      <div class="qa-body"><p>矛盾しません。<strong>幅のある範囲</strong>が接する場合（<code>[0,3)</code> と <code>[3,6)</code>）は、半開区間なので1文字も共有していない —— <code>3</code> は前者に入らず後者に入る。だから別々のカーソルとして残す方が自然です（ユーザーが2つの範囲を選んだ意図が保たれる）。一方、<strong>幅ゼロのカーソル</strong>が同じ位置に2本ある場合（<code>{4,4}</code>×2）は、見た目にも操作上も完全に区別できない「重複」なので、1本に畳むべきです。この2つを分けるのが <code>overlap</code> 判定の第2条件で、「端が接し、<strong>かつ</strong>どちらかが幅ゼロ、<strong>かつ</strong>左端も一致」という3条件で「同位置の空カーソル」だけを厳密に拾っています。</p></div>
+    </details>
+    <details class="qa"><summary>リテラル検索で <code>escapeRegExp</code> するくらいなら、<code>String.prototype.indexOf</code> で探せばいいのでは?</summary>
+      <div class="qa-body"><p><code>indexOf</code> でもリテラル検索はできますが、<strong>4つのモードを1つのコードに統一できなくなります</strong>。本書は「リテラル / 正規表現 / 単語単位 / 大小区別」を、すべて <code>RegExp</code> の組み立て方の違いに畳み込みました（Step 6）。リテラルだけ <code>indexOf</code>、正規表現だけ <code>RegExp</code>、と実装を分けると、単語単位や大小区別をそれぞれ二重に書くはめになります。<code>escapeRegExp</code> で「リテラルも正規表現の特殊形」に統一したことで、列挙ループ（Step 7）が<strong>1本で済む</strong>。第00章の <code>Edit</code> を1形に畳んだのと同じ「統一形」の発想です。</p></div>
+    </details>
+
+    <h2>理解度チェック</h2>
+    <p>次の問いに<strong>自分の言葉で</strong>答えられたら、この章は卒業です。</p>
+    <details class="qa"><summary>1. 「複数カーソル」を、第00章の <code>SelRange</code> の言葉で説明せよ。なぜ特別なデータ構造が要らないのか。</summary>
+      <div class="qa-body"><p>カーソルは <code>SelRange</code>（<code>{anchor, head}</code>）の特殊形 —— <code>anchor === head</code> の幅ゼロの範囲。エディタはカーソルを<strong>常に <code>SelRange</code> の配列</strong>で持ち、1本のときも長さ 1 の配列として扱う。だから複数カーソルとは「配列の長さが2以上」というだけで、専用のデータ構造もモードも要らない。1本と複数を同じコードで扱えるので、両者の食い違いバグが構造的に生まれない。選択とカーソルを1つの型に畳んだ第00章の設計が、ここで回収される。</p></div>
+    </details>
+    <details class="qa"><summary>2. 削除系コマンドで <code>normalizeSelections</code> を <code>applyEdits</code> の前に通さないと、何が起きるか。具体例で述べよ。</summary>
+      <div class="qa-body"><p>削除は空カーソルの境界を伸ばす（<code>{5,5}</code> の Backspace が <code>[4,5)</code> になる）。隣に選択範囲 <code>[2,5)</code> があると、伸ばした結果 <code>[4,5)</code> と重なる。この重なった2範囲をそのまま <code>applyEdits</code> に渡すと、同じ文字を二重に消す・オフセットがずれて別の場所を壊す、といった破綻が起きる。<code>normalizeSelections</code> を通せば <code>[2,5)</code> と <code>[4,5)</code> は <code>[2,5)</code> の1つに統合され、削除が正しく1回で走る。再現条件が狭い（選択の隣に空カーソル）ため発見が遅れやすく、だから「編集の直前に必ず正規化」を構造で強制する。</p></div>
+    </details>
+    <details class="qa"><summary>3. <code>findAll</code> は4つの検索モードをどう1つの <code>RegExp</code> に畳み込むか。<code>escapeRegExp</code> と <code>\b(?:...)\b</code> と <code>gi</code> フラグの役割を述べよ。</summary>
+      <div class="qa-body"><p><strong>リテラル vs 正規表現</strong>: <code>regex</code> が偽なら <code>escapeRegExp</code> で特殊文字を無力化し（<code>a.b</code> → <code>a\.b</code>）、文字どおり検索する。真なら入力をそのまま使う。<strong>単語単位</strong>: <code>wholeWord</code> が真なら組み立て済みの <code>source</code> を <code>\b(?:...)\b</code> で包み、単語境界に挟まれた一致だけにする。<strong>大小区別</strong>: <code>caseSensitive</code> が真なら <code>g</code>、偽なら <code>gi</code>（<code>i</code> で無視）。<code>g</code> は全一致列挙のため常に付ける。4モードが「<code>RegExp</code> の元文字列とフラグの組み立て方の違い」に統一され、列挙ループは1本で済む。</p></div>
+    </details>
+
+    <h2>まとめ — 次の層へ</h2>
+    <p>この章で、エディタの体験をいちばん派手に変える2つの機能 —— 複数カーソルと検索・置換 —— を、驚くほど小さなコードで組み上げました。芯にあったのは、第00章で仕込んだ<strong>ただ一つの考え方</strong>です ——「カーソルとは幅ゼロの選択範囲であり、それを<strong>配列</strong>で持つ」。この一手のおかげで、複数カーソルは特別扱いを要さず、検索は「区間のリストを <code>SelRange</code> の集合に読み替える」だけで複数カーソルの上に乗りました。<code>selection.ts</code> は40行足らず、<code>search.ts</code> はエスケープ込みで50行。派手な機能ほど、良い土台の上では小さく書ける。</p>
+    <p>途中で潰した2つの落とし穴も、この章の収穫です。<strong>削除前の重なりは <code>normalizeSelections</code> で必ず正規化する</strong>——再現条件の狭いバグを、コードの構造で封じました。<strong><code>[hidden]</code> は <code>display</code> 指定に負ける</strong>——<code>!important</code> で明示的に守りました。どちらも「一度踏まないと気づけない」種類の罠で、だからこそ <code>CLAUDE.md</code> とこの章に記録として残しています。そして <code>mapOffset</code> を<strong>あえて置かなかった</strong>判断ログ —— 書かなかった理由をコードに刻む価値も、ここで学びました。</p>
+    <p>次の第07章では、いよいよエディタに<strong>色</strong>をつけます。いま検索でヒットを黄色くハイライトしたのと同じ「区間を色で塗る」発想を、こんどはソースコードの<strong>文法</strong>に対して行います。文字列を字句（トークン）に切り分ける <code>tokenizer.ts</code> と、それを色分けする <code>highlighter.ts</code>。検索が「探した区間を塗る」なら、シンタックスハイライトは「文法で切った区間を塗る」——地続きの世界へ進みます。</p>
+
+    <div class="chap-foot">
+      <a class="pager" href="05-input.html"><span class="dir">← 前へ</span>第05章 · 入力を受ける</a>
+      <a class="pager next" href="07-highlight.html"><span class="dir">次へ →</span>第07章 · 色をつける</a>
+    </div>
+  </main>
+</div>
+</body>
+</html>

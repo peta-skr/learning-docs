@@ -1,0 +1,578 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>第09章 画面をつける — 手を動かして作るオンラインジャッジ</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500;600&family=Source+Serif+4:opsz,wght@8..60,400;8..60,600;8..60,700&family=Noto+Serif+JP:wght@400;600;700&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<div class="shell">
+
+  <aside class="spine">
+    <a class="wordmark" href="index.html">JUDGE · from scratch</a>
+    <div class="book-title">手を動かして作る<br>オンラインジャッジ</div>
+    <div class="book-sub">Go で サンドボックスから Web まで</div>
+
+    <div class="legend"><span>読む <b>↓</b></span><span>組む <b>↑</b></span></div>
+
+    <nav aria-label="目次">
+      <ul class="toc">
+        <li><a class="nav-item" href="index.html"><span class="nav-num">序</span><span class="nav-label">はじめに・準備<span class="nav-tag">Setup</span></span></a></li>
+        <li><a class="nav-item" href="00-smallest.html"><span class="nav-num">00</span><span class="nav-label">いちばん小さいジャッジ<span class="nav-tag">Judge</span></span></a></li>
+        <li><a class="nav-item" href="01-process.html"><span class="nav-num">01</span><span class="nav-label">プロセスと標準入出力<span class="nav-tag">IO</span></span></a></li>
+        <li><a class="nav-item" href="02-verdict.html"><span class="nav-num">02</span><span class="nav-label">verdict — 判定の種類<span class="nav-tag">Verdict</span></span></a></li>
+        <li><a class="nav-item" href="03-threat.html"><span class="nav-num">03</span><span class="nav-label">なぜ他人のコードは危険か<span class="nav-tag">Threat</span></span></a></li>
+        <li><a class="nav-item" href="04-sandbox.html"><span class="nav-num">04</span><span class="nav-label">コンテナに閉じ込める<span class="nav-tag">Sandbox</span></span></a></li>
+        <li><a class="nav-item" href="05-limits.html"><span class="nav-num">05</span><span class="nav-label">時間とメモリを断ち切る<span class="nav-tag">Limits</span></span></a></li>
+        <li><a class="nav-item" href="06-lang.html"><span class="nav-num">06</span><span class="nav-label">いろんな言語で<span class="nav-tag">Lang</span></span></a></li>
+        <li><a class="nav-item" href="07-store.html"><span class="nav-num">07</span><span class="nav-label">問題とテストケースを持つ<span class="nav-tag">Store</span></span></a></li>
+        <li><a class="nav-item" href="08-queue.html"><span class="nav-num">08</span><span class="nav-label">提出を「あとで」捌く<span class="nav-tag">Queue</span></span></a></li>
+        <li><a class="nav-item current" aria-current="page" href="09-web.html"><span class="nav-num">09</span><span class="nav-label">画面をつける<span class="nav-tag">Web</span></span></a></li>
+      </ul>
+    </nav>
+
+    <div class="spine-foot">
+      各章は「実行の心臓部」から<br>始めて「Web」へ登る。<br>下（採点の核）から上（画面）へ<br>積み上げて動かしていく。
+    </div>
+  </aside>
+
+  <main class="reading">
+    <div class="progress-tag">第09章 / 全10章 · 層: WEB · 読了目安 3〜3.5時間</div>
+    <div class="eyebrow"><span>WEB</span><span class="depth">— 最上層・画面と一気通貫</span></div>
+    <h1>画面をつける</h1>
+    <p class="lede">ここまでで、採点の芯（第00章）・隔離実行（第04章）・複数言語（第06章）・問題の保存（第07章）・非同期のジョブキュー（第08章）が揃いました。残るは<strong>「人が触る面」</strong>——問題を選び、エディタでコードを書き、提出し、緑の <code>AC</code> を見る、あの画面です。この最終章では、これまで作った基盤に <strong>net/http の Web API</strong> をかぶせ、React で書いた画面を<strong>同じ Go バイナリが静的配信</strong>し、序章で先に触った完成品を、自分の手で一気通貫に繋ぎます。提出は「即受付 → 採点中 → ポーリングで結果取得」の非同期フローで動きます。</p>
+
+    <div class="box goal"><div class="box-k">◈ この章のゴール</div>
+      <p>次の 3 つを、自分の目と手で確認できたら達成です。そしてこれは<strong>本書全体のゴール</strong>でもあります。</p>
+      <ol>
+        <li><code>go run ./cmd/server</code> でサーバが起動し、ブラウザで <code>http://localhost:8080</code> を開くと問題一覧が出て、<strong>Go でも React でも別々に立ち上げなくていい</strong>（1バイナリで両方配信される）ことを確認できる。</li>
+        <li>問題を開いてコードを提出すると、画面がまず「<strong>採点中…</strong>」になり、<strong>ポーリング</strong>で結果を取りに行って数秒後に verdict が緑や赤に変わる——この非同期の流れを、フロント（<code>useEffect</code> / <code>setTimeout</code>）とバックエンド（<code>202 Accepted</code>）の両側で説明できる。</li>
+        <li>API のルーティング（<code>GET /api/problems/{slug}</code> など）、提出の受付（<code>POST /api/submissions</code>）、結果の取得（<code>GET /api/submissions/{id}</code>）、静的配信の <strong>SPA フォールバック</strong>が、それぞれ何のためにあるかを言える。</li>
+      </ol>
+    </div>
+
+    <div class="box map"><div class="box-k">☰ この章のステップ</div>
+      <ol>
+        <li><a href="#step-1">全体像 — 1つの Go プロセスが API とフロントを配る</a></li>
+        <li><a href="#step-2">ルーティングを組む — <code>net/http</code> の <code>ServeMux</code></a></li>
+        <li><a href="#step-3">JSON の入口と出口 — <code>writeJSON</code> / <code>readJSON</code></a></li>
+        <li><a href="#step-4">提出を受け付ける — <code>202 Accepted</code> と即レス</a></li>
+        <li><a href="#step-5">結果を取りに来させる — 提出取得エンドポイント</a></li>
+        <li><a href="#step-6">React を静的配信する — <code>FileServerFS</code> と SPA フォールバック</a></li>
+        <li><a href="#step-7">フロント — 提出 → 採点中 → ポーリングで結果表示</a></li>
+        <li><a href="#step-8">エディタと verdict バッジ — CodeMirror</a></li>
+      </ol>
+    </div>
+
+    <h2>一気通貫を仕上げる</h2>
+    <p>ここまでの8章は、すべて<strong>「見えない機構」</strong>でした。コードを隔離して走らせ、時間とメモリを測り、結果を DB に書き、ジョブを非同期に捌く——どれも本質ですが、人の目には触れません。触れるのはこの章で作る<strong>画面</strong>だけです。逆に言えば、画面はこれまでの機構の<strong>薄い皮</strong>にすぎません。難しい仕事はもう全部、下の層が終えています。この章の API ハンドラを読むと、驚くほど短いことに気づくはずです。<code>Store</code> から問題を引き、<code>Worker</code> に提出を積み、結果を JSON にして返す——それだけ。長い8章の積み上げが、ここで<strong>数十行のハンドラに収束する</strong>のを見届けるのが、この章のいちばんの醍醐味です。</p>
+    <p>そしてもう一つ、この章には<strong>設計上の心地よさ</strong>があります。API サーバとフロントを<strong>1つの Go バイナリにまとめる</strong>こと。世に多いのは「バックエンドは Node、フロントは別ポートの dev サーバ、本番は Nginx が配る」という多段構成ですが、本書は違います。<code>go run ./cmd/server</code> ひとつで API もフロントも配信される。この単純さが、セルフホストの個人開発とどれほど相性が良いかを、この章で体感します。</p>
+
+    <h2>Go が API とフロントを配信する — その利点</h2>
+    <p>本書のバックエンドは <strong>Go の単一バイナリ</strong>です。net/http で API を提供し、<strong>同じプロセス</strong>が React のビルド成果物（<code>frontend/dist/</code> の HTML・JS・CSS）を静的ファイルとして配ります。この「1バイナリで API + 静的配信」という構成の利点は、個人開発・セルフホストの文脈で特に大きい。</p>
+    <ul>
+      <li><strong>デプロイが1個で済む。</strong> 配るのは Go バイナリ1つ（と <code>frontend/dist/</code>）だけ。Nginx も、フロント用の別サーバも要りません。「ビルドして、置いて、起動する」で終わります。</li>
+      <li><strong>CORS が要らない。</strong> フロントと API が<strong>同一オリジン</strong>（同じ <code>localhost:8080</code>）で配られるので、ブラウザの同一オリジンポリシーに引っかかりません。<code>fetch("/api/problems")</code> と相対パスで叩けて、CORS ヘッダの設定も、プリフライトの悩みもゼロ。これは Step 6・Step 7 で効いてきます。</li>
+      <li><strong>本番と開発の差が小さい。</strong> 開発中は Vite の dev サーバ（<code>npm run dev</code>）を別ポートで使い、API だけ <code>/api</code> をプロキシする、という手もありますが、本番は「<code>npm run build</code> で <code>dist/</code> を作り、Go に配らせる」だけ。動く姿が本番とほぼ同じで、「開発では動いたのに本番で壊れる」が起きにくい。</li>
+    </ul>
+    <p>この章では、その「1バイナリ」の中身を上から順に開けていきます。まず全体の地図から。</p>
+
+    <h2 class="step" id="step-1"><span class="step-no">Step 1</span>全体像 — 1つの Go プロセスが API とフロントを配る</h2>
+    <p>コードに入る前に、この章で完成する構図を目に焼き付けます。ブラウザ（React）と Go プロセスの間に流れるものを、提出の一連の流れとして描くとこうです。</p>
+
+    <div class="ascii">1つの Go プロセスに、ブラウザがすべてを尋ねる
+
+  ┌─────────────── ブラウザ（React SPA） ───────────────┐
+  │  問題を開く   コードを書く   提出する   結果を待つ      │
+  └───┬─────────────┬─────────────┬────────────┬─────────┘
+      │ GET         │ (エディタ)   │ POST        │ GET（1秒ごと）
+      │ /api/       │             │ /api/       │ /api/submissions/{id}
+      │ problems    │             │ submissions │  ← ポーリング
+      ▼             ▼             ▼            ▼
+  ┌───────────────── Go 単一プロセス（:8080） ────────────┐
+  │                                                       │
+  │   net/http ServeMux                                   │
+  │   ├─ /api/...  → API ハンドラ ─┐                       │
+  │   └─ /       → 静的配信（dist）│                       │
+  │                               ▼                       │
+  │   Store（SQLite）   Worker（goroutine キュー・第08章）  │
+  │        ▲                 │                            │
+  │        └── 採点結果を書く ┘  ← Docker で隔離実行（第04章）│
+  └───────────────────────────────────────────────────────┘</div>
+
+    <p>注目すべきは、ブラウザが話す相手が<strong>ずっと同じ 1 つのプロセス</strong>だという点です。問題一覧を取るのも、React 本体（JS/CSS）をダウンロードするのも、提出するのも、結果をポーリングするのも、全部 <code>:8080</code>。<code>ServeMux</code> が「<code>/api/</code> で始まるものは API ハンドラへ、それ以外は静的ファイルへ」と交通整理をします。そして提出の結果は<strong>すぐには返りません</strong>。第08章で作ったキューに積まれ、裏で採点され、DB に書かれる。だからブラウザは提出後、<strong>1秒ごとに「もう終わった?」と尋ねに来る（ポーリング）</strong>。この非同期の呼吸が、この章のもう一つの主題です。</p>
+    <p>実装の在り処を先に押さえます。API は <code>internal/api/api.go</code> の <code>Server</code> 型に集約され、起動は <code>cmd/server/main.go</code>。フロントは <code>frontend/src/</code> の React（<code>api.ts</code> がクライアント、<code>pages/ProblemDetail.tsx</code> が提出画面の中核）です。順に開けていきます。</p>
+
+    <h2 class="step" id="step-2"><span class="step-no">Step 2</span>ルーティングを組む — net/http の ServeMux</h2>
+    <p>API の入口は <code>Server.Handler()</code> です。ここが「どの URL とメソッドが、どのハンドラに繋がるか」の一覧表——ルーティング表になっています。まず <code>Server</code> 型と、その配線を見ます。</p>
+
+    <div class="file-tag">internal/api/api.go（Server と依存）</div>
+    <pre><code><span class="kw">type</span> <span class="ty">Server</span> <span class="kw">struct</span> {
+	Store     *store.<span class="ty">Store</span>
+	Judger    *judge.<span class="ty">Judger</span>
+	Worker    *judge.<span class="ty">Worker</span>
+	Sandbox   *judge.<span class="ty">DockerSandbox</span>
+	StaticDir <span class="ty">string</span>
+
+	<span class="cm">// 試し実行は提出ワーカーを通さず直接 docker run するため、</span>
+	<span class="cm">// 連打によるホスト資源枯渇を防ぐ同時実行数の上限を設ける（NF-06）。</span>
+	tryRunSem <span class="kw">chan</span> <span class="kw">struct</span>{}
+}</code></pre>
+
+    <p><code>Server</code> は、これまでの章で作った部品を<strong>フィールドとして束ねている</strong>だけです。<code>Store</code>（第07章の SQLite）、<code>Worker</code>（第08章のジョブキュー）、<code>Judger</code> と <code>Sandbox</code>（第04〜06章の採点機構）、そして <code>StaticDir</code>（配る React の場所）。API 層は<strong>新しい仕事をほとんど持たず、下の層に取り次ぐ</strong>のが役目——このフィールドの顔ぶれが、それを物語っています。<code>tryRunSem</code> だけは API 層固有の道具で、「試し実行」の同時数を絞るための<strong>セマフォ</strong>（容量つきチャネル）です（Step 4 の余談で触れます）。次が配線本体です。</p>
+
+    <div class="file-tag">internal/api/api.go（ルーティング）</div>
+    <pre><code><span class="kw">func</span> (s *<span class="ty">Server</span>) Handler() http.<span class="ty">Handler</span> {
+	s.initSem()
+	mux := http.NewServeMux()
+
+	mux.HandleFunc(<span class="st">"GET /api/health"</span>, s.handleHealth)
+	mux.HandleFunc(<span class="st">"GET /api/problems"</span>, s.handleListProblems)
+	mux.HandleFunc(<span class="st">"POST /api/problems"</span>, s.handleCreateProblem)
+	mux.HandleFunc(<span class="st">"GET /api/problems/{slug}"</span>, s.handleGetProblem)
+	mux.HandleFunc(<span class="st">"PUT /api/problems/{id}"</span>, s.handleUpdateProblem)
+	mux.HandleFunc(<span class="st">"GET /api/submissions"</span>, s.handleListSubmissions)
+	mux.HandleFunc(<span class="st">"POST /api/submissions"</span>, s.handleCreateSubmission)
+	mux.HandleFunc(<span class="st">"GET /api/submissions/{id}"</span>, s.handleGetSubmission)
+	mux.HandleFunc(<span class="st">"POST /api/runs"</span>, s.handleTryRun)
+
+	s.mountStatic(mux)
+
+	<span class="kw">return</span> logMiddleware(mux)
+}</code></pre>
+
+    <p>9 本の <code>HandleFunc</code>（＝9 個のエンドポイント）と、静的配信をマウントする <code>mountStatic</code> の1行——<strong>この10行が、API の全貌です</strong>。ここに本書のバックエンドが外に見せる機能が全部並んでいます。<strong>問題を一覧・作成・取得・更新し、提出を作成・一覧・取得し、試し実行する。</strong>それだけ。各行の意味を、フロントの動きと対応させて読みます。</p>
+    <ul>
+      <li><code>GET /api/problems</code> → 問題一覧（トップページが叩く）。<code>GET /api/problems/{slug}</code> → 1問の詳細（問題を開いたとき）。<code>{slug}</code> が URL の一部を変数として受け取る<strong>パスパラメータ</strong>です。</li>
+      <li><code>POST /api/submissions</code> → <strong>提出</strong>。この章の主役の一つ（Step 4）。<code>GET /api/submissions/{id}</code> → <strong>その提出の結果を取りに来る</strong>（Step 5、ポーリングの相手）。</li>
+      <li><code>POST /api/runs</code> → 「試し実行」。提出せずに自分の入力でコードを1回走らせる補助機能（F-08）。<code>GET /api/health</code> → Docker が生きているかの疎通確認（画面上部の警告表示に使う）。</li>
+    </ul>
+    <p>ここで注目したいのが、<code>"GET /api/problems"</code> のように<strong>メソッドとパスを1つの文字列で書けている</strong>ことです。これは Go 1.22 で <code>net/http</code> の <code>ServeMux</code> が強化された機能で、<strong>外部のルーターライブラリ（chi や gorilla/mux）を入れずに</strong>、標準ライブラリだけでメソッド分岐とパスパラメータが書けます。本書が「標準ライブラリ中心」を貫けている土台がこれです。</p>
+
+    <div class="gonote"><div class="box-k">GO メモ · net/http の ServeMux とメソッド付きパターン（Go 1.22+）</div>
+      <p>Go 1.22 から、<code>ServeMux</code> のパターンに<strong>HTTP メソッドとワイルドカード</strong>が書けるようになりました。<code>"GET /api/problems/{slug}"</code> は「GET メソッドで、<code>/api/problems/</code> の後ろの一片を <code>slug</code> という名前で捕まえる」という意味です。ハンドラ側では <code>r.PathValue("slug")</code> でその値を取り出せます（Step 5 で <code>PathValue("id")</code> を使います）。<br>
+      それ以前の Go では、この「メソッドで分岐する」「URL から ID を抜く」を自前で書くか、chi のような外部ルーターに頼るのが普通でした。標準の <code>ServeMux</code> がそれを飲み込んだことで、<strong>依存を1つも増やさずに</strong>RESTish な API が組めます。本書がバックエンドで使う外部ライブラリは、実質 SQLite ドライバ（<code>modernc.org/sqlite</code>）だけ——この身軽さは、この <code>ServeMux</code> の進化に負うところが大きいのです。<br>
+      <code>HandleFunc(pattern, fn)</code> の <code>fn</code> は <code>func(w http.ResponseWriter, r *http.Request)</code> という決まった形の関数で、<code>w</code> に書き込めばレスポンスになり、<code>r</code> からリクエストの情報（ボディ・パス・クエリ）を読みます。この2引数が、Go の HTTP の世界のすべての入口です。</p>
+    </div>
+
+    <p>最後の <code>logMiddleware(mux)</code> は、組み上げた <code>mux</code> を<strong>薄い包み紙で包んで</strong>返しています。中身を見ると、ミドルウェアの正体がよく分かります。</p>
+
+    <div class="file-tag">internal/api/api.go（logMiddleware）</div>
+    <pre><code><span class="kw">func</span> logMiddleware(next http.<span class="ty">Handler</span>) http.<span class="ty">Handler</span> {
+	<span class="kw">return</span> http.HandlerFunc(<span class="kw">func</span>(w http.<span class="ty">ResponseWriter</span>, r *http.<span class="ty">Request</span>) {
+		start := time.Now()
+		next.ServeHTTP(w, r)
+		<span class="kw">if</span> strings.HasPrefix(r.URL.Path, <span class="st">"/api/"</span>) {
+			log.Printf(<span class="st">"%s %s (%s)"</span>, r.Method, r.URL.Path, time.Since(start).Round(time.Millisecond))
+		}
+	})
+}</code></pre>
+
+    <p>ミドルウェアとは「<strong>本体のハンドラを呼ぶ前後に、共通の処理を挟む</strong>包み紙」です。ここでは時刻を記録し（<code>start</code>）、本体 <code>next.ServeHTTP</code> を呼び、<code>/api/</code> へのアクセスなら所要時間つきでログを1行出す。静的ファイル（JS・CSS・画像）のアクセスまでログに出すとうるさいので、<code>/api/</code> で始まるものだけに絞っています。<code>Handler</code> を受け取って <code>Handler</code> を返すこの形が、ミドルウェアを<strong>いくつでも重ねられる</strong>理由です（認証を足したいなら、同じ形の包みをもう1枚被せるだけ）。</p>
+
+    <h2 class="step" id="step-3"><span class="step-no">Step 3</span>JSON の入口と出口 — writeJSON / readJSON</h2>
+    <p>API は結局「JSON を受け取り、JSON を返す」機械です。その入口と出口を、小さなヘルパーに切り出してあります。全ハンドラがこの3つを使い回すので、先に押さえます。</p>
+
+    <div class="file-tag">internal/api/api.go（JSON ヘルパー）</div>
+    <pre><code><span class="kw">func</span> writeJSON(w http.<span class="ty">ResponseWriter</span>, status <span class="ty">int</span>, v <span class="kw">any</span>) {
+	w.Header().Set(<span class="st">"Content-Type"</span>, <span class="st">"application/json; charset=utf-8"</span>)
+	w.WriteHeader(status)
+	_ = json.NewEncoder(w).Encode(v)
+}
+
+<span class="kw">func</span> writeErr(w http.<span class="ty">ResponseWriter</span>, status <span class="ty">int</span>, msg <span class="ty">string</span>) {
+	writeJSON(w, status, <span class="kw">map</span>[<span class="ty">string</span>]<span class="ty">string</span>{<span class="st">"error"</span>: msg})
+}
+
+<span class="kw">func</span> readJSON(w http.<span class="ty">ResponseWriter</span>, r *http.<span class="ty">Request</span>, v <span class="kw">any</span>) <span class="ty">bool</span> {
+	r.Body = http.MaxBytesReader(w, r.Body, <span class="st">4</span>&lt;&lt;<span class="st">20</span>)
+	<span class="kw">if</span> err := json.NewDecoder(r.Body).Decode(v); err != <span class="kw">nil</span> {
+		writeErr(w, http.StatusBadRequest, <span class="st">"invalid JSON: "</span>+err.Error())
+		<span class="kw">return</span> <span class="kw">false</span>
+	}
+	<span class="kw">return</span> <span class="kw">true</span>
+}</code></pre>
+
+    <p><strong>出口 <code>writeJSON</code>。</strong> <code>Content-Type</code> を JSON に設定し、HTTP ステータスコードを書き、<code>json.NewEncoder(w).Encode(v)</code> で任意の値 <code>v</code> を JSON に直接<strong>ストリーム出力</strong>します。いったん <code>[]byte</code> に組み立ててから書くのではなく、レスポンスの書き込み先 <code>w</code> へ直に流し込むのが省メモリで素直です。<code>v any</code>（何でも受け取る）なので、構造体でもマップでも渡せます。</p>
+    <p><strong>エラー出口 <code>writeErr</code>。</strong> <code>writeJSON</code> を使って <code>{"error": "..."}</code> という決まった形の JSON を返すだけ。フロントの <code>api.ts</code> は「レスポンスが失敗なら <code>body.error</code> を読む」約束（Step 7 で見ます）なので、この統一形が<strong>フロントとバックの契約</strong>になっています。</p>
+    <p><strong>入口 <code>readJSON</code>。</strong> リクエストボディを JSON として <code>v</code> にデコードし、失敗したら <code>400 Bad Request</code> を返して <code>false</code> を返す。ハンドラ側は <code>if !readJSON(...) { return }</code> の1行で「不正な JSON なら即座に打ち切る」を表現できます。ここで見逃せないのが最初の行、<strong><code>http.MaxBytesReader(w, r.Body, 4&lt;&lt;20)</code></strong> です。これはボディの読み取り上限を <strong>4MB</strong>（<code>4&lt;&lt;20</code> バイト）に縛るガードで、<strong>巨大なリクエストでサーバのメモリを食い潰す攻撃を防ぎます</strong>。認証なしのローカル前提とはいえ、「信頼できない入力には上限をかける」という本書の思想が、API 層の入口にも現れています。</p>
+
+    <div class="gonote"><div class="box-k">GO メモ · encoding/json と、Go の型 ⇄ JSON の対応</div>
+      <p><code>json.NewEncoder(w).Encode(v)</code> は Go の値を JSON にして <code>w</code> へ書き出し、<code>json.NewDecoder(r.Body).Decode(v)</code> は JSON を読んで Go の値へ流し込みます。どちらも構造体の<strong>フィールドタグ</strong>（<code>`json:"problem_id"`</code> のような注釈）を見て、Go のフィールド名と JSON のキー名を対応づけます。Step 4 で出てくる <code>struct { ProblemID int64 `json:"problem_id"` }</code> は、「JSON の <code>problem_id</code> を Go の <code>ProblemID</code> に入れる」という宣言です。<br>
+      Go の慣習ではフィールド名は大文字始まり（エクスポート）でないと JSON にできませんが、JSON のキーは <code>snake_case</code> にしたい——このズレをタグが埋めます。本書のフロント（TypeScript）の型（<code>api.ts</code> の <code>interface Submission</code> など）は、この JSON のキー名とちょうど対応しており、<strong>Go の構造体タグと TS の interface が「同じ JSON」を両側から見ている</strong>形になっています。片方を変えたらもう片方も直す——これが型のある両端の規律です。</p>
+    </div>
+
+    <h2 class="step" id="step-4"><span class="step-no">Step 4</span>提出を受け付ける — 202 Accepted と即レス</h2>
+    <p>いよいよこの章の心臓、<strong>提出</strong>です。第08章で「提出は即座に受け付けて、採点は裏で」という非同期の骨格を作りました。その<strong>受付口</strong>が、この <code>handleCreateSubmission</code> です。ここが「採点を待たずに即レスを返す」を実装している場所——ポーリングという設計が生まれる起点です。</p>
+
+    <div class="file-tag">internal/api/api.go（handleCreateSubmission）</div>
+    <pre><code><span class="kw">func</span> (s *<span class="ty">Server</span>) handleCreateSubmission(w http.<span class="ty">ResponseWriter</span>, r *http.<span class="ty">Request</span>) {
+	<span class="kw">var</span> req <span class="kw">struct</span> {
+		ProblemID <span class="ty">int64</span>  <span class="st">`json:"problem_id"`</span>
+		Language  <span class="ty">string</span> <span class="st">`json:"language"`</span>
+		Code      <span class="ty">string</span> <span class="st">`json:"code"`</span>
+	}
+	<span class="kw">if</span> !readJSON(w, r, &amp;req) {
+		<span class="kw">return</span>
+	}
+	<span class="kw">if</span> len(req.Code) == <span class="st">0</span> || len(req.Code) &gt; maxCodeBytes {
+		writeErr(w, http.StatusBadRequest, fmt.Sprintf(<span class="st">"code must be 1..%d bytes"</span>, maxCodeBytes))
+		<span class="kw">return</span>
+	}
+	p, err := s.Store.GetProblemByID(req.ProblemID)
+	<span class="kw">if</span> err != <span class="kw">nil</span> {
+		writeErr(w, http.StatusNotFound, <span class="st">"problem not found"</span>)
+		<span class="kw">return</span>
+	}
+	<span class="kw">if</span> _, err := judge.SpecFor(req.Language, p.Type); err != <span class="kw">nil</span> {
+		writeErr(w, http.StatusBadRequest, err.Error())
+		<span class="kw">return</span>
+	}
+	id, err := s.Store.CreateSubmission(p.ID, req.Language, req.Code)
+	<span class="kw">if</span> err != <span class="kw">nil</span> {
+		writeErr(w, http.StatusInternalServerError, err.Error())
+		<span class="kw">return</span>
+	}
+	<span class="kw">if</span> err := s.Worker.Enqueue(id); err != <span class="kw">nil</span> {
+		_ = s.Store.FinishSubmission(id, string(judge.IE), <span class="st">"queue full"</span>, <span class="st">0</span>, <span class="st">0</span>)
+		writeErr(w, http.StatusServiceUnavailable, err.Error())
+		<span class="kw">return</span>
+	}
+	<span class="cm">// 非同期受け付け（NF-09）: 即 ID を返し、クライアントはポーリングする</span>
+	writeJSON(w, http.StatusAccepted, <span class="kw">map</span>[<span class="ty">string</span>]<span class="ty">int64</span>{<span class="st">"id"</span>: id})
+}</code></pre>
+
+    <p>このハンドラは<strong>「検証 → 保存 → キューに積む → 即レス」</strong>という一本道です。上から追います。</p>
+    <p><strong>入力を受け取り、検証する。</strong> 匿名の構造体 <code>req</code> に <code>readJSON</code> でボディを流し込み、問題 ID・言語・コードを得ます。次に <code>len(req.Code)</code> でコード長を検査——空でも、上限 <code>maxCodeBytes</code>（<strong>64KB</strong>、<code>64&lt;&lt;10</code>）を超えてもダメ。これは要件 NF-06 の「提出コード上限」です。続けて <code>GetProblemByID</code> で問題が実在するかを確かめ（無ければ <code>404</code>）、<code>SpecFor(language, type)</code> で「その言語×問題タイプの組み合わせが対応済みか」を確かめます（未対応なら <code>400</code>）。ここで <code>SpecFor</code> を呼ぶのは、<strong>提出を受け付ける前に「そもそも採点できる組み合わせか」を弾く</strong>ためで、SQL 問題に Go を出す、といった無理を入口で止めます。</p>
+    <p><strong>保存して、キューに積む。</strong> <code>CreateSubmission</code> で提出を DB に記録し、<code>id</code> を得ます。この時点では提出は <code>pending</code>（採点待ち）状態です。そして <code>s.Worker.Enqueue(id)</code> ——第08章で作ったジョブキューに提出 ID を投げ込む。ここで採点は<strong>始まりません</strong>。キューに積んだら、ワーカー goroutine が<strong>自分のペースで</strong>取り出して採点します。<code>Enqueue</code> が失敗する（キューが満杯）場合の始末も律儀です。その提出を <code>IE</code>（"queue full"）で確定させてから <code>503</code> を返す——採点されないまま <code>pending</code> で宙ぶらりんになる提出を作らない、という配慮です。</p>
+    <p><strong>そして即レス。</strong> 最後の行が、この章の要です。<strong><code>writeJSON(w, http.StatusAccepted, map[string]int64{"id": id})</code></strong>。ステータスは <code>200 OK</code> ではなく <strong><code>202 Accepted</code></strong>。この <code>202</code> は HTTP の世界で<strong>「リクエストは受け付けた。でも処理はまだ完了していない」</strong>を意味する、まさにこの状況のためのコードです。返すのは提出の <code>id</code> だけ。verdict はまだありません（採点が始まってすらいない）。クライアントはこの <code>id</code> を握って、<strong>「この提出、もう終わった?」を後から尋ねに来る</strong>——それが Step 5 の取得エンドポイントであり、Step 7 のポーリングです。</p>
+
+    <div class="box hazard"><div class="box-k">⚠ 落とし穴 — 提出ハンドラの中で採点を待ってはいけない</div>
+      <p>ここで最もやってはいけないのは、<code>handleCreateSubmission</code> の中で<strong>採点が終わるまで待って、verdict ごと返す</strong>ことです。一見その方が親切に見えます（クライアントは1回のリクエストで結果が得られる）。しかし採点は<strong>数秒〜数十秒</strong>かかります。その間 HTTP コネクションを掴んだまま待つと、(1) ブラウザや途中のプロキシのタイムアウトに引っかかって接続が切れる、(2) 同時提出が増えるとコネクションが溜まってサーバが詰まる、(3) 途中でユーザーがページを閉じたら採点結果が宙に浮く——といった問題が一気に噴きます。だから<strong>「受け付けた証（<code>202</code> と <code>id</code>）だけ即返し、重い採点は裏へ回す」</strong>。この分離こそ第08章のジョブキューを作った理由で、この章のポーリングはその必然的な帰結です。<strong>非同期の受付</strong>と<strong>結果の後追い取得</strong>はワンセット——片方だけでは成立しません。</p>
+    </div>
+
+    <div class="gonote"><div class="box-k">GO メモ · 匿名構造体でリクエストボディを受ける</div>
+      <p><code>var req struct { ProblemID int64 `json:"problem_id"` ... }</code> は、<strong>その場限りの名前のない構造体</strong>を宣言しています。このハンドラでしか使わない入力の形を、わざわざ <code>type</code> で名前付きの型にせず、その場で定義して <code>readJSON</code> に渡す——Go でリクエストボディを受けるときの定石です。フィールドタグ <code>`json:"problem_id"`</code> が、JSON の <code>problem_id</code> キーをこのフィールドに対応づけます。<br>
+      レスポンス側の <code>map[string]int64{"id": id}</code> も同じ発想で、<code>{"id": 42}</code> という小さな JSON を返すためだけに、名前付きの型を作らずマップを使っています。「一度きりの形は、その場で作って捨てる」——この軽さが、ハンドラを短く保つコツです。</p>
+    </div>
+
+    <p>なお、ルーティング表にあった <code>POST /api/runs</code>（試し実行）は、この提出フローとは別系統です。提出は<strong>キュー経由で全テストケースを採点</strong>しますが、試し実行は<strong>キューを通さず、その場で1回だけ</strong>コードを走らせて stdout を見せる補助機能。連打でホストを枯渇させないよう、冒頭で見た <code>tryRunSem</code>（容量2のチャネル）で同時実行を2本までに絞り、空きが無ければ即 <code>503</code> を返します。<code>select { case sem &lt;- struct{}{}: ...; default: 503 }</code> という「入れなければ諦める」パターンです。提出の非同期フローが本筋なので、試し実行はここまでにします。</p>
+
+    <h2 class="step" id="step-5"><span class="step-no">Step 5</span>結果を取りに来させる — 提出取得エンドポイント</h2>
+    <p><code>202</code> で <code>id</code> だけ返した以上、結果は<strong>別の口から取りに来てもらう</strong>必要があります。それが <code>GET /api/submissions/{id}</code> ——<code>handleGetSubmission</code> です。ポーリングが1秒ごとに叩く相手はここです。</p>
+
+    <div class="file-tag">internal/api/api.go（handleGetSubmission）</div>
+    <pre><code><span class="kw">func</span> (s *<span class="ty">Server</span>) handleGetSubmission(w http.<span class="ty">ResponseWriter</span>, r *http.<span class="ty">Request</span>) {
+	id, err := strconv.ParseInt(r.PathValue(<span class="st">"id"</span>), <span class="st">10</span>, <span class="st">64</span>)
+	<span class="kw">if</span> err != <span class="kw">nil</span> {
+		writeErr(w, http.StatusBadRequest, <span class="st">"invalid id"</span>)
+		<span class="kw">return</span>
+	}
+	sub, err := s.Store.GetSubmission(id)
+	<span class="kw">if</span> err != <span class="kw">nil</span> {
+		writeErr(w, http.StatusNotFound, <span class="st">"submission not found"</span>)
+		<span class="kw">return</span>
+	}
+	results, err := s.Store.GetResults(id)
+	<span class="kw">if</span> err != <span class="kw">nil</span> {
+		writeErr(w, http.StatusInternalServerError, err.Error())
+		<span class="kw">return</span>
+	}
+	writeJSON(w, http.StatusOK, <span class="kw">map</span>[<span class="ty">string</span>]<span class="kw">any</span>{<span class="st">"submission"</span>: sub, <span class="st">"results"</span>: results})
+}</code></pre>
+
+    <p>短いハンドラですが、ポーリングの相手として大事な性質を持っています。順に。</p>
+    <p><strong>パスから <code>id</code> を取り出す。</strong> <code>r.PathValue("id")</code> が URL の <code>{id}</code> 部分の文字列を返し、<code>strconv.ParseInt</code> で数値に変換します。Step 2 の <code>ServeMux</code> のワイルドカードがここで実を結びます。数値でなければ <code>400</code>。</p>
+    <p><strong>提出そのものと、ケースごとの結果を両方引く。</strong> <code>GetSubmission(id)</code> で提出の<strong>いまの状態</strong>（<code>status</code> が <code>pending</code> / <code>running</code> / <code>done</code> のどれか、<code>verdict</code>、経過時間など）を取り、<code>GetResults(id)</code> で<strong>テストケース1件ごとの判定</strong>を取ります。両方を <code>{"submission": ..., "results": ...}</code> にまとめて返す。フロントはこの2つを見て、「全体の verdict」と「各ケースの緑・赤の並び」を描きます。</p>
+    <p><strong>大事なのは「いつ呼んでも答える」こと。</strong> このエンドポイントは<strong>状態を変えません</strong>（読むだけ、冪等）。採点がまだ <code>pending</code> なら「<code>status: pending, results: null</code>」（結果0件のとき <code>GetResults</code> は nil スライスを返すので JSON では <code>null</code>。フロント側は <code>?? []</code> で空配列として扱う）を返し、採点中なら「<code>running</code> と、そこまで済んだケースの結果」を返し、終わっていれば「<code>done</code> と最終 verdict」を返す。<strong>同じ URL を何度叩いても、そのときの最新状態が返るだけ</strong>で、副作用はありません。だからフロントは安心して1秒ごとに叩けます。非同期の受付（Step 4）と、この冪等な取得口が噛み合って、初めて「採点中の画面」が成立します。</p>
+
+    <div class="box hazard">
+      <div class="box-k">⚠ 落とし穴 — 「そこまで済んだケースの結果」は、いまは観測できない</div>
+      <p>いま「採点中なら <code>running</code> と、<strong>そこまで済んだケースの結果</strong>を返す」と書きました。エンドポイントの作りとしてはそのとおりなのですが、<strong>現状の実装では、この途中経過を実際にポーリングで捉えることはほぼできません</strong>。第08章 Step 6 で見たとおり、コンテナ内のランナーはケースごとに逐次結果を吐いているものの、<strong>ホスト側（<code>DockerSandbox.Run</code>）がそれを最後まで溜め込んでから一括で解釈する</strong>ためです。<code>onCase</code> → <code>AddResult</code> は判定ループで<strong>数ミリ秒のうちに全件が並び</strong>、直後に <code>FinishSubmission</code>（<code>done</code> 確定）が来る。1秒間隔のポーリングがその隙間に入り込む余地は、まずありません。</p>
+      <p>つまり読者が実際に観測するのは「<strong>採点中…</strong>（ケース結果は空）」→「<strong>done</strong>＋全ケースの結果が一斉に出現」という2コマです。「3件目まで通過、採点中…」という中間のコマは<strong>出ません</strong>——出ないのが現状では正しい挙動なので、そうならなくても環境の異常ではありません。</p>
+      <p>ではなぜ、このエンドポイントは「途中まで」を返せる形に作ってあるのか。<strong>コンテナ出力の受け取り方（<code>Sandbox.Run</code> とその周辺）を「届いた行から順に解釈する」形に改めれば、この取得口も画面も一切変えずに、そのまま本物の途中経過が乗るから</strong>です（第08章 Step 6）。<strong>いまは一括で並ぶが、そこから先の配管は最初から通してある</strong>——API の設計と、その下の受け取り方の実装は、こうして別々に進化させられます。</p>
+    </div>
+
+    <div class="box hazard"><div class="box-k">⚠ 落とし穴 — ポーリングの間隔と「いつ止めるか」</div>
+      <p>ポーリングには2つの罠があります。第一に<strong>間隔</strong>。速すぎる（例えば 100ms ごと）とサーバに無駄な負荷をかけ、遅すぎる（10秒ごと）と結果表示がもっさりします。本書は <strong>1秒間隔</strong>（Step 7）に落ち着けています。個人用・単一ユーザーの採点なら、これで「押した数秒後に緑」の体感が得られ、負荷も無視できる。第二に<strong>停止条件</strong>。ポーリングは「<code>status</code> が <code>done</code> になったら止める」——これを忘れると、採点が終わった後も永遠に1秒ごとに叩き続ける<strong>暴走ループ</strong>になります。さらに、結果を待っている途中で<strong>ユーザーが別ページに移動したら</strong>、その場合もタイマーを止めないと、消えたはずのコンポーネントが裏でポーリングを続けます。Step 7 の <code>useEffect</code> のクリーンアップ（<code>clearTimeout</code>）が、この後始末を担います。「始めたタイマーは、必ず止める道を用意する」——非同期 UI の鉄則です。</p>
+    </div>
+
+    <h2 class="step" id="step-6"><span class="step-no">Step 6</span>React を静的配信する — FileServerFS と SPA フォールバック</h2>
+    <p>API は揃いました。残るは<strong>画面そのもの</strong>——React のビルド成果物を、この Go プロセスから配ることです。それが Step 2 の <code>Handler()</code> にあった <code>s.mountStatic(mux)</code> の中身です。</p>
+
+    <div class="file-tag">internal/api/api.go（mountStatic）</div>
+    <pre><code><span class="cm">// mountStatic は SPA を配信する。os.DirFS + http.FileServerFS で StaticDir 外に出られない</span>
+<span class="cm">// ようにし、ファイルが無ければ index.html へフォールバックする（クライアントルーティング）。</span>
+<span class="kw">func</span> (s *<span class="ty">Server</span>) mountStatic(mux *http.<span class="ty">ServeMux</span>) {
+	<span class="kw">if</span> s.StaticDir == <span class="st">""</span> {
+		<span class="kw">return</span>
+	}
+	fsys := os.DirFS(s.StaticDir)
+	fileServer := http.FileServerFS(fsys)
+	mux.HandleFunc(<span class="st">"/"</span>, <span class="kw">func</span>(w http.<span class="ty">ResponseWriter</span>, r *http.<span class="ty">Request</span>) {
+		clean := strings.TrimPrefix(filepath.ToSlash(filepath.Clean(<span class="st">"/"</span>+r.URL.Path)), <span class="st">"/"</span>)
+		<span class="kw">if</span> clean == <span class="st">""</span> {
+			clean = <span class="st">"index.html"</span>
+		}
+		<span class="kw">if</span> info, err := fs.Stat(fsys, clean); err != <span class="kw">nil</span> || info.IsDir() {
+			<span class="cm">// 実在しないパスは SPA フォールバック（index.html を返す）</span>
+			http.ServeFileFS(w, r, fsys, <span class="st">"index.html"</span>)
+			<span class="kw">return</span>
+		}
+		fileServer.ServeHTTP(w, r)
+	})
+}</code></pre>
+
+    <p>この関数が解いているのは、SPA（シングルページアプリケーション）を配るときに<strong>必ずぶつかる問題</strong>です。順に。</p>
+    <p><strong><code>os.DirFS</code> で配信元を1つのディレクトリに封じる。</strong> <code>os.DirFS(s.StaticDir)</code> は「このディレクトリ配下だけを見るファイルシステム」を作ります。<code>StaticDir</code>（既定では <code>../frontend/dist</code>）の<strong>外には絶対に出られない</strong>——<code>../../etc/passwd</code> のようなパスで外のファイルを読み出す<strong>ディレクトリトラバーサル攻撃</strong>を、この <code>fs.FS</code> 境界が構造的に封じます。<code>http.FileServerFS(fsys)</code> は、その中のファイルを HTTP で配るハンドラです。</p>
+    <p><strong>ルート <code>/</code> に「何でも来い」のハンドラを置く。</strong> <code>mux.HandleFunc("/", ...)</code> は、<code>/api/</code> にマッチしなかった<strong>すべてのパス</strong>を受けます（<code>ServeMux</code> は最も長く一致するパターンを選ぶので、<code>/api/...</code> は先の API ハンドラに、それ以外は全部この <code>/</code> に来ます）。URL パスを <code>filepath.Clean</code> で正規化して <code>clean</code> を作り、空なら <code>index.html</code> に読み替えます。</p>
+    <p><strong>そして肝の <strong>SPA フォールバック</strong>。</strong> <code>fs.Stat</code> で「そのパスのファイルが実在するか」を確かめ、<strong>実在すればそのファイルを配り</strong>（<code>fileServer.ServeHTTP</code>）、<strong>実在しなければ <code>index.html</code> を返す</strong>（<code>ServeFileFS(..., "index.html")</code>）。なぜこれが要るのか——SPA では、ブラウザのアドレスが <code>/problems/two-sum</code> でも、<strong>サーバにそんなファイルは存在しません</strong>。ルーティングは React（<code>react-router</code>）が<strong>ブラウザの中で</strong>行うからです。ユーザーが <code>/problems/two-sum</code> を直接開いた（またはリロードした）とき、サーバが「そんなファイルない、404」と返してしまうと画面が壊れる。だから<strong>「実在するファイル以外は、とにかく <code>index.html</code>（＝React 本体）を返す」</strong>。あとは React が起動してから、アドレスバーを見て正しいページを描く。この一手が、SPA を静的配信するときの定番の作法です。</p>
+
+    <div class="box hazard"><div class="box-k">⚠ 落とし穴 — 静的配信のパスと、フロントのビルドを忘れる</div>
+      <p>この構成で最初に踏むのは<strong>「画面が真っ白／404」</strong>です。原因はたいてい3つ。第一に、<strong>依存を入れていない</strong>。<code>npm run build</code> は <code>tsc</code> と <code>vite</code> を呼びますが、これらは <code>frontend/node_modules/</code> に入るもので、リポジトリには含まれません。<strong>初回は必ず <code>npm install</code> が要ります</strong>（忘れると「そんなコマンドは無い」で止まります）。第二に、<strong>フロントをビルドしていない</strong>。<code>frontend/dist/</code> は <code>npm run build</code> で<strong>初めて生成される</strong>ディレクトリで、これが無ければ配るものがありません（<code>index.html</code> すら無いのでフォールバック先も無い）。しかも<strong>この場合サーバは警告を出さず、起動ログは正常なまま 404 だけが返る</strong>ので、知らないと原因に辿り着けません。開発の最後で必ず <code>cd frontend</code> → <code>npm run build</code> を通します（PowerShell 5.1 では <code>&amp;&amp;</code> が使えないので2行に分けます）。第三に、<strong>静的パスの指定ミス</strong>。<code>go run ./cmd/server</code> は既定で <code>-static ../frontend/dist</code> を見ます（<code>main.go</code> の <code>flag</code> 既定値）。<code>backend/</code> の中から起動する前提の相対パスなので、別の場所から起動するときは <code>-static</code> でフルパスを渡す必要があります。「API（<code>/api/health</code>）は 200 を返すのに画面が真っ白」なら、まず <code>dist/</code> が存在するか、<code>-static</code> がそこを指しているかを疑ってください。API とフロントで問題の切り分けができるのが、この構成の良いところでもあります。</p>
+    </div>
+
+    <div class="gonote"><div class="box-k">GO メモ · io/fs の抽象と os.DirFS / FileServerFS</div>
+      <p>Go 1.16 で入った <code>io/fs</code> は「ファイルシステムを<strong>インターフェースとして</strong>扱う」仕組みです。<code>os.DirFS(dir)</code> は実ディスク上の <code>dir</code> を <code>fs.FS</code> として見せ、<code>fs.Stat(fsys, name)</code> や <code>http.FileServerFS(fsys)</code> は、その <code>fs.FS</code> 越しにしかファイルへ触れません。<strong>「見える範囲」がインターフェースで区切られている</strong>ので、うっかり配信ディレクトリの外を読み出す事故が起きにくいのが利点です。<br>
+      この抽象のうれしさは、将来 <code>go:embed</code> で <code>dist/</code> を<strong>バイナリに埋め込む</strong>ように変えても、<code>mountStatic</code> のコードがほぼそのまま使える点です。<code>os.DirFS(dir)</code> を <code>embed.FS</code> に差し替えるだけで、「フロントごと1バイナリに固めて配る」——外部ファイルすら要らない究極のセルフホスト——に到達できます。<code>fs.FS</code> という共通の型が、その乗り換えを1行で可能にします（本書のスコープ外ですが、発展の道は開いています）。</p>
+    </div>
+
+    <h2 class="step" id="step-7"><span class="step-no">Step 7</span>フロント — 提出 → 採点中 → ポーリングで結果表示</h2>
+    <p>バックエンドの口が全部開きました。ここからは<strong>ブラウザ側</strong>——React が、その口をどう叩くかです。</p>
+
+    <div class="gonote"><div class="box-k">FRONT メモ · ここから先を読むための React / TypeScript（これだけで足ります）</div>
+      <p>本書で Go 以外の言語が出てくるのは、この Step 7 と Step 8 だけです。<strong>React を書けるようになる必要はありません</strong>——読めれば十分なので、必要な分だけをここにまとめます（序章の道具箱にも同じものがあります）。</p>
+      <p><strong>① 部品は関数、呼ぶときはタグ。</strong> <code>function VerdictBadge({ verdict }) { return … }</code> は「<code>verdict</code> を受け取って画面の断片を返す関数」。呼ぶ側は <code>&lt;VerdictBadge verdict="AC" /&gt;</code> と<strong>タグの形</strong>で書きます。関数に渡す引数のことを <strong>props</strong> と呼びます。</p>
+      <p><strong>② <code>{ }</code> の中は式。</strong> <code>return</code> の右にある <code>&lt;span&gt;…&lt;/span&gt;</code> は文字列ではなく構文（JSX）です。その中の <code>{ }</code> は「ここから先は JS/TS の式」の合図。<code>{verdict}</code> は変数の中身、<code>className={`badge ${verdict}`}</code> は組み立てた文字列（例: <code>"badge AC"</code>）になります。</p>
+      <p><strong>③ <code>useState</code> は「書き換えると画面が描き直される変数」。</strong> <code>const [code, setCode] = useState("")</code> は「<code>code</code> を空文字で始め、<code>setCode(...)</code> で更新する」。ただの代入と違い、<strong><code>setCode</code> を呼ぶと React がこの部品を描き直します</strong>。「状態が変わる → 画面が変わる」が自動で繋がっているのが React の中心です。この章のポーリング（1秒ごとに結果を取り、届いたら表示を更新）は、まさにこの性質で動きます。</p>
+      <p><strong>④ 型注釈は Go とほぼ同じ、書く位置が違うだけ。</strong> <code>path: string</code> は Go の <code>path string</code>、<code>init?: RequestInit</code> の <code>?</code> は「省略可」、<code>req&lt;T&gt;(…): Promise&lt;T&gt;</code> の <code>&lt;T&gt;</code> はジェネリクスです。<code>Promise&lt;T&gt;</code> は「いまは無いが後で <code>T</code> が届く」値で、<code>await</code> を付けると届くまで待って中身が取れます（Go でチャネルから受け取る感覚に近い）。</p>
+      <p>分からない構文が出てきたら、この4つのどれかに当てはめてみてください。<strong>この章のコードは、この4つの組み合わせだけでできています。</strong></p>
+    </div>
+
+    <p>まず API クライアント <code>api.ts</code> の骨格。全ての通信がこの薄い層を通ります。</p>
+
+    <div class="file-tag">frontend/src/api.ts（クライアントの芯）</div>
+    <pre><code><span class="kw">async function</span> req&lt;T&gt;(path: <span class="ty">string</span>, init?: <span class="ty">RequestInit</span>): <span class="ty">Promise</span>&lt;T&gt; {
+  <span class="kw">const</span> res = <span class="kw">await</span> fetch(path, {
+    headers: { <span class="st">"Content-Type"</span>: <span class="st">"application/json"</span> },
+    ...init,
+  });
+  <span class="kw">const</span> body = <span class="kw">await</span> res.json().catch(() =&gt; ({}));
+  <span class="kw">if</span> (!res.ok) {
+    <span class="kw">throw new</span> Error((body <span class="kw">as</span> { error?: <span class="ty">string</span> }).error ?? <span class="st">`HTTP ${res.status}`</span>);
+  }
+  <span class="kw">return</span> body <span class="kw">as</span> T;
+}
+
+<span class="kw">export const</span> api = {
+  <span class="cm">// …（health / listProblems / createProblem / updateProblem / listSubmissions / tryRun と interface 群は省略）</span>
+  getProblem: (slug: <span class="ty">string</span>, full = <span class="kw">false</span>) =&gt;
+    req&lt;{ problem: Problem; testcases: Testcase[] | <span class="kw">null</span> }&gt;(
+      <span class="st">`/api/problems/${encodeURIComponent(slug)}${full ? "?full=1" : ""}`</span>,
+    ),
+
+  submit: (problem_id: <span class="ty">number</span>, language: <span class="ty">string</span>, code: <span class="ty">string</span>) =&gt;
+    req&lt;{ id: <span class="ty">number</span> }&gt;(<span class="st">"/api/submissions"</span>, {
+      method: <span class="st">"POST"</span>,
+      body: JSON.stringify({ problem_id, language, code }),
+    }),
+
+  getSubmission: (id: <span class="ty">number</span>) =&gt;
+    req&lt;{ submission: Submission; results: SubmissionResult[] | <span class="kw">null</span> }&gt;(<span class="st">`/api/submissions/${id}`</span>),
+};</code></pre>
+
+    <p><code>req</code> は <code>fetch</code> の薄い包みです。ここで Step 3 の「フロントとバックの契約」が回収されます。<strong><code>if (!res.ok)</code> のとき <code>body.error</code> を読んで <code>Error</code> を投げる</strong>——バックエンドの <code>writeErr</code> が返す <code>{"error": "..."}</code> を、ちょうどここで受け取っています。両端が同じ JSON の形を約束しているから、この1行で全 API のエラーが例外に化けます。そして呼び出す URL がすべて <strong><code>/api/...</code> の相対パス</strong>——ホスト名もポートも書いていません。これが Step 6 の「同一オリジン配信」の恩恵です。フロントと API が同じ <code>:8080</code> から来るので、相対パスがそのまま正しい API を指し、<strong>CORS の設定は一切不要</strong>。<code>submit</code> が <code>{ id }</code> を返し、<code>getSubmission</code> が <code>{ submission, results }</code> を返す——Step 4・Step 5 のレスポンスと過不足なく一致しているのを確かめてください。</p>
+    <p>そして本章の集大成、<strong>提出画面の非同期ロジック</strong>です。<code>ProblemDetail.tsx</code> から、ポーリングの中核だけを抜き出します。</p>
+
+    <div class="file-tag">frontend/src/pages/ProblemDetail.tsx（ポーリングの中核・抜粋）</div>
+    <pre><code>  <span class="kw">const</span> pollRef = useRef&lt;<span class="ty">number</span> | <span class="ty">undefined</span>&gt;(<span class="kw">undefined</span>);
+
+  <span class="kw">const</span> poll = useCallback((id: <span class="ty">number</span>) =&gt; {
+    api
+      .getSubmission(id)
+      .then((r) =&gt; {
+        setSub(r.submission);
+        setResults(r.results ?? []);
+        <span class="kw">if</span> (r.submission.status !== <span class="st">"done"</span>) {
+          pollRef.current = window.setTimeout(() =&gt; poll(id), <span class="st">1000</span>);
+        }
+      })
+      .catch((e) =&gt; setError(String(e)));
+  }, []);
+
+  <span class="kw">const</span> submit = <span class="kw">async</span> () =&gt; {
+    <span class="kw">if</span> (!problem) <span class="kw">return</span>;
+    setSubmitting(<span class="kw">true</span>);
+    setError(<span class="st">""</span>);
+    setSub(<span class="kw">null</span>);
+    setResults([]);
+    <span class="kw">try</span> {
+      <span class="kw">const</span> { id } = <span class="kw">await</span> api.submit(problem.id, language, code);
+      poll(id);
+    } <span class="kw">catch</span> (e) {
+      setError(String(e));
+    } <span class="kw">finally</span> {
+      setSubmitting(<span class="kw">false</span>);
+    }
+  };
+
+  useEffect(() =&gt; {
+    <span class="cm">// …（問題データの取得は省略）…</span>
+    <span class="kw">return</span> () =&gt; window.clearTimeout(pollRef.current);
+  }, [slug]);</code></pre>
+
+    <p>ここに、Step 4・Step 5 で用意した非同期の受付口と取得口が、ブラウザ側でひとつに繋がります。流れを追います。</p>
+    <p><strong>提出（<code>submit</code>）。</strong> ボタンが押されると、前回の結果をクリアし（<code>setSub(null)</code>）、<code>api.submit(...)</code> を <code>await</code> します。バックエンドは <code>202</code> と <code>{ id }</code> を即返す（Step 4）ので、この <code>await</code> は<strong>すぐ解決します</strong>——採点を待ちません。<code>id</code> を得たら、<strong>その場で <code>poll(id)</code> を呼んでポーリングを開始</strong>します。</p>
+    <p><strong>ポーリング（<code>poll</code>）。</strong> これが本章のクライマックスです。<code>api.getSubmission(id)</code>（Step 5 の取得口）を叩き、返ってきた <code>submission</code> と <code>results</code> を state に入れる。すると React が再描画し、画面に「採点中…」やケースの表が出ます。そして肝が最後の <code>if</code>——<strong><code>if (r.submission.status !== "done")</code> のときだけ、<code>setTimeout</code> で1秒後に自分自身をもう一度呼ぶ</strong>。<code>status</code> が <code>pending</code> や <code>running</code> の間は1秒ごとに叩き続け、<strong><code>done</code> になった瞬間に <code>setTimeout</code> を張らない＝ループが自然に止まる</strong>。Step 5 の落とし穴で挙げた「停止条件」が、この <code>if</code> の一行です。間隔の <code>1000</code>（1秒）も、そこで論じた「速すぎず遅すぎず」の落とし所です。</p>
+    <p><strong>後始末（<code>useEffect</code> のクリーンアップ）。</strong> <code>setTimeout</code> の戻り値（タイマー ID）を <code>pollRef.current</code> に覚えておき、<code>useEffect</code> の<strong>返り値の関数</strong>で <code>window.clearTimeout(pollRef.current)</code> を呼びます。React は、このコンポーネントが画面から消える（別の問題へ移動する、提出履歴へ飛ぶ）とき、この後始末関数を必ず実行します。これが無いと、消えたはずの画面が裏でポーリングを続ける<strong>幽霊ループ</strong>になります。「タイマーを張ったら、消えるときに必ず止める」——Step 5 の落とし穴で予告した、非同期 UI の後始末が、ここで実装されています。</p>
+    <p>この <code>submit</code> → <code>poll</code> → 再描画 → （done で）停止、という循環が、序章で見た<strong>「提出すると画面がまず採点中になり、数秒後に緑が並ぶ」</strong>の正体です。バックエンドの <code>202</code>（受付）とフロントの <code>setTimeout</code>（後追い）が噛み合って、初めてあの体験が成立します。</p>
+
+    <div class="gonote"><div class="box-k">GO メモ · React の useEffect / useRef / setTimeout ポーリング（Go から見た「非同期の後追い」）</div>
+      <p>Go に慣れた目には、React のこのパターンは<strong>「goroutine を張って、後始末で止める」</strong>の UI 版に見えます。<code>useEffect(() =&gt; { ...; return cleanup; }, [deps])</code> は「この副作用を始め、<strong>役目を終えたら <code>cleanup</code> を呼べ</strong>」という宣言で、Go の <code>defer</code> や <code>context</code> のキャンセルに通じる発想です。<code>useRef</code> は「再描画をまたいで値を持ち続ける箱」で、ここではタイマー ID を保持するのに使っています（<code>useState</code> と違い、書き換えても再描画を起こさない）。<br>
+      <code>setTimeout(fn, 1000)</code> は「1秒後に <code>fn</code> を1回だけ実行」。それを <code>fn</code> の中で条件付きに再登録することで、<strong>「終わるまで1秒おきに繰り返す」ループ</strong>を作っています。<code>setInterval</code>（等間隔の連打）を使わず <code>setTimeout</code> の再帰にしているのは、「前回の応答が返ってから1秒後に次を投げる」＝<strong>応答が遅れても多重に走らない</strong>ためで、堅い作法です。Go の「<code>time.After</code> を <code>for</code> の中で待つ」に相当する考え方です。</p>
+    </div>
+
+    <h2 class="step" id="step-8"><span class="step-no">Step 8</span>エディタと verdict バッジ — CodeMirror</h2>
+    <p>画面の残りのピース——<strong>コードを書くエディタ</strong>と、<strong>判定を色で見せるバッジ</strong>——を短く押さえます。どちらも「機構」ではなく「見せ方」ですが、体験を決める部品です。</p>
+    <p>エディタは <strong>CodeMirror 6</strong>（<code>@uiw/react-codemirror</code>）を薄く包んだ <code>CodeEditor</code> コンポーネントです。言語ごとにシンタックスハイライトの拡張を差し替えます。</p>
+
+    <div class="file-tag">frontend/src/components/CodeEditor.tsx（抜粋）</div>
+    <pre><code><span class="cm">// …（@uiw/react-codemirror や各言語モードの import 6 行は省略）</span>
+<span class="kw">function</span> extensionsFor(language: <span class="ty">string</span>): Extension[] {
+  <span class="kw">switch</span> (language) {
+    <span class="kw">case</span> <span class="st">"go"</span>:
+      <span class="kw">return</span> [StreamLanguage.define(go)];
+    <span class="kw">case</span> <span class="st">"javascript"</span>:
+      <span class="kw">return</span> [javascript()];
+    <span class="kw">case</span> <span class="st">"typescript"</span>:
+      <span class="kw">return</span> [javascript({ typescript: <span class="kw">true</span> })];
+    <span class="kw">case</span> <span class="st">"sql"</span>:
+      <span class="kw">return</span> [sql()];
+    <span class="kw">default</span>:
+      <span class="kw">return</span> [];
+  }
+}
+
+<span class="kw">export default function</span> CodeEditor({ language, value, onChange }: {
+  language: <span class="ty">string</span>; value: <span class="ty">string</span>; onChange: (v: <span class="ty">string</span>) =&gt; <span class="ty">void</span>;
+}) {
+  <span class="kw">return</span> (
+    &lt;CodeMirror
+      value={value}
+      height=<span class="st">"420px"</span>
+      theme=<span class="st">"light"</span>
+      extensions={extensionsFor(language)}
+      onChange={onChange}
+      basicSetup={{ lineNumbers: <span class="kw">true</span>, foldGutter: <span class="kw">false</span> }}
+      style={{ border: <span class="st">"1px solid var(--line)"</span>, borderRadius: <span class="st">6</span>, fontSize: <span class="st">13</span> }}
+    /&gt;
+  );
+}</code></pre>
+
+    <p>ポイントは <code>extensions={extensionsFor(language)}</code> の一点。言語セレクトを Go から JavaScript に切り替えると <code>language</code> prop が変わり、CodeMirror のシンタックスハイライトが対応する言語へ切り替わります。本書が対応する4言語（Go / JS / TS / SQL、第06章）が、そのままここのハイライトに対応しているのが分かります。<code>value</code> と <code>onChange</code> で「今のコード」を親（<code>ProblemDetail</code>）と受け渡しするだけの<strong>制御されたコンポーネント</strong>——<strong>エディタ自身は文字列を持たず、表示する値は親からもらい（<code>value</code>）、変更は親に報告する（<code>onChange</code>）</strong>という形です。「いま何が書かれているか」の正本が常に親側の1箇所にあるので、下書き保存も提出も親だけを見れば済みます。実際、書いた内容は親側で <code>localStorage</code> に下書き保存されます（リロードしても消えない配慮）。</p>
+    <p>判定の表示は <code>VerdictBadge</code>。<strong>採点中か、結果が出たか</strong>で見せ方を変える、小さいけれど要のコンポーネントです。</p>
+
+    <div class="file-tag">frontend/src/components/VerdictBadge.tsx</div>
+    <pre><code><span class="kw">export default function</span> VerdictBadge({ verdict, status }: { verdict?: <span class="ty">string</span>; status?: <span class="ty">string</span> }) {
+  <span class="kw">if</span> (status &amp;&amp; status !== <span class="st">"done"</span>) {
+    <span class="kw">return</span> &lt;span className=<span class="st">"badge pending"</span>&gt;{status === <span class="st">"running"</span> ? <span class="st">"採点中…"</span> : <span class="st">"待機中"</span>}&lt;/span&gt;;
+  }
+  <span class="kw">if</span> (!verdict) <span class="kw">return</span> &lt;span className=<span class="st">"badge gray"</span>&gt;-&lt;/span&gt;;
+  <span class="kw">return</span> &lt;span className={<span class="st">`badge ${verdict}`</span>}&gt;{verdict}&lt;/span&gt;;
+}</code></pre>
+
+    <p>この分岐が、ポーリング（Step 7）の状態遷移を<strong>そのまま画面の見た目に翻訳</strong>しています。<code>status</code> が <code>done</code> でない間（<code>pending</code> / <code>running</code>）は「待機中」「採点中…」のバッジを出し、<code>done</code> になったら <code>verdict</code>（<code>AC</code> / <code>WA</code> / <code>TLE</code>…）を<strong>その名前をクラス名にしたバッジ</strong>で出す。<code>className={`badge ${verdict}`}</code> により、CSS 側で <code>.badge.AC</code> は緑、<code>.badge.WA</code> は赤、といった色分けができます。第00章で定めた<strong>7つの verdict という「結果の語彙」</strong>が、10章を経てとうとう<strong>画面の色</strong>になる瞬間です。<code>ProblemDetail</code> はこれを提出全体（<code>&lt;VerdictBadge verdict={sub.verdict} status={sub.status} /&gt;</code>）とケースごと（<code>&lt;VerdictBadge verdict={r.verdict} /&gt;</code>）の<strong>両方</strong>で使います。同じ部品が「提出全体の1個」と「ケースの数だけ」の2つの役割を兼ねられるのは、どちらも<strong>7つの verdict という同じ語彙</strong>で表せるからです。現状のランナーでは、この2種類のバッジは「全体＝採点中／ケース＝まだ0個」から「全体＝確定 verdict／ケース＝全件」へ<strong>ほぼ同時に切り替わります</strong>（Step 5 の落とし穴）。</p>
+
+    <div class="box do"><div class="box-k">▸ 動かして確認 — 一気通貫を、自分の手で</div>
+      <p>いよいよ全部を繋ぎます。<strong>Docker Desktop を起動</strong>した状態で、まずバックエンドが健全にビルド・テストできることを確かめ、次にフロントをビルドし、最後にサーバを起動してブラウザで問題を解きます。</p>
+      <pre class="term"><code><span class="cm"># 1. バックエンドのテスト（採点ロジックは Docker 不要で緑になる）</span>
+<span class="ps">$</span> cd backend
+<span class="ps">$</span> go test ./...
+<span class="out">?       judge/cmd/server        [no test files]
+?       judge/internal/api      [no test files]
+ok      judge/internal/judge    0.41s
+?       judge/internal/store    [no test files]</span>
+
+<span class="cm"># 2. フロントの依存を入れる（初回のみ。node_modules/ ができる）</span>
+<span class="ps">$</span> cd ../frontend
+<span class="ps">$</span> npm install
+
+<span class="cm"># 3. フロントをビルド（frontend/dist/ を生成 — 配る中身がここにできる）</span>
+<span class="ps">$</span> npm run build
+<span class="out">vite v6.4.3 building for production...
+✓ 71 modules transformed.
+dist/index.html                   0.40 kB
+dist/assets/index-*.css           4.00 kB
+dist/assets/index-*.js          789.70 kB
+✓ built in 4.16s</span>
+
+<span class="cm"># 4. サーバ起動（API + 静的配信の 1 バイナリ。既定で ../frontend/dist を配る）</span>
+<span class="ps">$</span> cd ../backend
+<span class="ps">$</span> go run ./cmd/server
+<span class="out">listening on http://127.0.0.1:8080</span></code></pre>
+      <p>あとは<strong>ブラウザで <code>http://localhost:8080</code> を開く</strong>だけです。問題一覧が出て、「2数の和」を開き、Go を選んでエディタに解答を書き、<strong>提出する</strong>を押す。ボタンが「採点中…」に変わり、数秒後——ポーリングが結果を取りに行き——各ケースに緑の <code>AC</code> が並び、提出全体の verdict が <strong><code>AC</code></strong> に変わります。この一連が動いたら、<strong>本書のすべてが繋がった</strong>ということです。API も、静的配信も、非同期の採点も、隔離実行も、全部あなたの手の中で動いています。</p>
+    </div>
+
+    <h2>つまずき FAQ</h2>
+    <details class="qa"><summary>提出したのに、いつまでも「採点中…」のまま結果が出ない。</summary>
+      <div class="qa-body"><p>まず疑うのは <strong>Docker</strong>です。第04章以降、採点は毎回 <code>docker run</code> で行うので、Docker Desktop が起動していないと採点が進みません（画面上部に「Docker に接続できません」の警告が出ているはず。<code>GET /api/health</code> がそれを見ています）。次に疑うのは<strong>ポーリングが止まっていないか</strong>ではなく<strong>採点自体が終わっているか</strong>——ブラウザの開発者ツールの Network タブで <code>GET /api/submissions/{id}</code> を見て、<code>status</code> が <code>running</code> のまま何十秒も進まないなら、サーバのログ（<code>go run</code> の出力）に採点のエラーが出ていないか確認します。逆に <code>status</code> が <code>done</code> なのに画面が更新されないなら、それはフロント側（ポーリングの再描画）の問題です。<strong>「採点が終わっているか（バック）」と「画面が更新されるか（フロント）」を Network タブで切り分ける</strong>のが最短の診断です。</p></div>
+    </details>
+    <details class="qa"><summary>なぜ提出は <code>200 OK</code> ではなく <code>202 Accepted</code> を返すの? ただの好みでは?</summary>
+      <div class="qa-body"><p>好みではなく、<strong>状態を正直に表す</strong>ためです。<code>200 OK</code> は「リクエストが完了し、結果がボディに入っている」を意味します。しかし提出の時点では採点は<strong>始まってすらいない</strong>——verdict はまだ存在しません。ここで <code>200</code> を返すと「完了した」と嘘をつくことになる。<code>202 Accepted</code> はまさに「受け付けたが、処理は非同期でまだ続いている」を表す HTTP コードで、この状況にぴったりです。クライアント（や将来 API を使う第三者）は、<code>202</code> を見た瞬間に「これはポーリングして結果を後から取りに行く種類のレスポンスだ」と判断できます。ステータスコードは<strong>機械が読む契約</strong>——正しいコードを返すことが、正しいドキュメントになります。</p></div>
+    </details>
+    <details class="qa"><summary>なぜフロントを別のサーバ（Nginx や Vite dev サーバ）で配らず、Go に配らせるの?</summary>
+      <div class="qa-body"><p><strong>個人開発・セルフホストで、単純さが正義だから</strong>です。フロントを別サーバで配ると、(1) デプロイ対象が2つになる、(2) フロントと API のオリジンが別になり <strong>CORS の設定が要る</strong>、(3) リバースプロキシ（Nginx）の設定という新しい学習コストが増える——と、運用がふくらみます。Go の1バイナリに <code>http.FileServerFS</code> で配らせれば、デプロイは1個、同一オリジンなので CORS 不要、プロキシも不要。「<code>go run</code> ひとつで全部立ち上がる」体験は、自分専用ツールをサッと起動して使う本書の用途に完璧に合います。もちろん大規模・多人数なら CDN やエッジ配信を検討する価値がありますが、それは本書のスコープ（単一ユーザー・ローカル）の外の話です。<strong>規模に合った構成を選ぶ</strong>——その判断自体が設計です。</p></div>
+    </details>
+
+    <h2>理解度チェック</h2>
+    <p>次の問いに<strong>自分の言葉で</strong>答えられたら、この章——そして本書——は卒業です。</p>
+    <details class="qa"><summary>1. 「提出 → <code>202</code> → ポーリング」という非同期フローは、なぜ「提出ハンドラの中で採点を待って結果を返す」同期フローより良いのか。</summary>
+      <div class="qa-body"><p>採点は数秒〜数十秒かかるため、同期フローでは HTTP コネクションを長時間掴み続け、(1) ブラウザ・プロキシのタイムアウトで接続が切れる、(2) 同時提出でコネクションが溜まりサーバが詰まる、(3) 途中でユーザーがページを閉じると結果が宙に浮く、という問題が起きる。非同期フローは、提出を受け付けたら <code>202 Accepted</code> と <code>id</code> を<strong>即返し</strong>（重い採点は第08章のジョブキューで裏に回し）、クライアントは <code>GET /api/submissions/{id}</code> を<strong>1秒ごとにポーリング</strong>して結果を後から取りに行く。これにより<strong>接続は一瞬で済み</strong>、ページを閉じても採点は裏で進み、結果は後から何度でも取りに行ける（取得口が冪等なので）。<strong>非同期の受付</strong>と<strong>冪等な結果取得口</strong>はワンセットで、片方だけでは成立しない。なお「何ケース目まで通過したか」の途中経過は、取得口としては返せる形になっているが、<strong>ホスト側がコンテナの出力を最後まで溜めてから一括で解釈するため、現状は観測できない</strong>（第08章 Step 6・本章 Step 5）。</p></div>
+    </details>
+    <details class="qa"><summary>2. 静的配信の「SPA フォールバック」とは何をしていて、なぜ必要か。</summary>
+      <div class="qa-body"><p><code>mountStatic</code> は、リクエストされたパスに<strong>実在するファイルがあればそれを配り、無ければ <code>index.html</code> を返す</strong>。これが SPA フォールバック。SPA ではルーティングを React（<code>react-router</code>）が<strong>ブラウザの中で</strong>行うため、<code>/problems/two-sum</code> のようなパスに対応するファイルはサーバに存在しない。ユーザーがそのアドレスを直接開いたりリロードしたとき、サーバが素直に <code>404</code> を返すと画面が壊れる。だから「実在ファイル以外はとにかく <code>index.html</code>（＝React 本体）を返し、あとは React が起動してアドレスを見て正しいページを描く」。<code>os.DirFS</code> で配信ディレクトリの外に出られないようにしつつ（トラバーサル防止）、<code>fs.Stat</code> で実在を確かめてフォールバックを分岐している。</p></div>
+    </details>
+    <details class="qa"><summary>3. フロントのポーリング（<code>poll</code>）が「暴走ループ」にも「幽霊ループ」にもならないのは、どの2つの仕掛けのおかげか。</summary>
+      <div class="qa-body"><p>第一に<strong>停止条件</strong>: <code>poll</code> は <code>if (r.submission.status !== "done")</code> のときだけ <code>setTimeout</code> で自分を再登録する。<code>done</code> になった瞬間に次のタイマーを張らないので、採点完了とともにループが自然に止まる（＝終わっても叩き続ける「暴走」を防ぐ）。第二に<strong>後始末</strong>: <code>setTimeout</code> の ID を <code>pollRef</code> に保持し、<code>useEffect</code> の返り値（クリーンアップ関数）で <code>clearTimeout</code> する。コンポーネントが画面から消える（別ページへ移動する）とき React がこれを呼ぶので、消えた画面が裏でポーリングし続ける「幽霊ループ」を防ぐ。<strong>「終わったら張らない」＋「消えるとき止める」</strong>の2枚で、タイマーの寿命が正しく閉じる。</p></div>
+    </details>
+
+    <h2>まとめ — 完成、そして次へ</h2>
+    <p>この最終章で、<strong>人が触る面</strong>ができました。<code>net/http</code> の <code>ServeMux</code> で API をルーティングし、<code>202 Accepted</code> で提出を非同期に受け付け、冪等な取得口で結果を取りに来させ、<code>http.FileServerFS</code> と SPA フォールバックで React を<strong>同じ Go バイナリから配信</strong>する。フロントは <code>useEffect</code> と <code>setTimeout</code> でポーリングし、CodeMirror でコードを書き、<code>VerdictBadge</code> で判定を色にする。そして <code>go run ./cmd/server</code> の<strong>ひとつのコマンド</strong>で、それらが全部立ち上がる。序章で「先に触ってみよう」と眺めた完成品は、もう<strong>あなたが一行ずつ理解して組んだもの</strong>です。</p>
+
+    <p class="hero-rule">10章を、振り返る。</p>
+    <p>ここで一度、登ってきた道の全体を見下ろします。本書は一貫して<strong>下から上へ</strong>積み上げました。</p>
+    <ul>
+      <li><strong>第00〜02章 — 採点の芯（JUDGE）。</strong> 「実行して、出力を期待値と比べる」。正規化を1枚被せた <code>==</code>、7つの verdict、実行結果を verdict に落とす分岐。<strong>合否を決める目</strong>を、Docker も Web も無しに作った。すべての土台。</li>
+      <li><strong>第03〜05章 — サンドボックス（SANDBOX）。</strong> 「他人のコードは敵」。なぜ隔離が要るのかを理解し、<code>docker run</code> で <code>--network none</code> / read-only / メモリ・pids・cpu 制限の檻に閉じ込め、時間とメモリを断ち切った。危険なコードを安全に走らせる<strong>檻</strong>。</li>
+      <li><strong>第06章 — 複数言語（LANG）。</strong> Go / JS / TS / SQL。言語ごとの実行仕様（コンパイル要否・実行コマンド・比較方法）を抽象化し、<strong>1つの採点機構で多言語</strong>を捌けるようにした。</li>
+      <li><strong>第07章 — 保存（STORE）。</strong> 問題・テストケース・提出履歴を SQLite に持たせ、採点の入力（問題データ）と出力（結果）に<strong>永続の器</strong>を与えた。</li>
+      <li><strong>第08章 — 非同期（QUEUE）。</strong> 「提出を即受付、採点は裏で」。goroutine のワーカーとチャネルのキューで、採点を<strong>非同期に捌く</strong>骨格を作った。</li>
+      <li><strong>第09章 — Web（この章）。</strong> API・静的配信・ポーリング。下の全層に<strong>薄い皮</strong>を被せ、<strong>一気通貫の体験</strong>に仕立てた。</li>
+    </ul>
+    <p>この積み上げ順そのものが、本書のいちばんの主張です。<strong>いきなり画面から作らない。</strong> 一番下の「この出力は正解か?」に正しく答える芯を固め、その上に隔離を、言語を、保存を、非同期を、最後に画面を積む。<strong>下が揺らげば上の緑は信用できない</strong>——だから下から。あなたはもう、LeetCode で <code>Accepted</code> の緑を見たとき、その裏で何が起きているかを<strong>自分のコードで説明できます</strong>。それが「作れないものを、私は理解していない」の反対側——<strong>作ったから、理解している</strong>——という地点です。</p>
+
+    <div class="box map"><div class="box-k">☰ ここから先へ — スコープ外＝発展課題</div>
+      <p>本書は「単一ユーザー・ローカル・標準入出力形式」に絞って一気通貫を成立させました。ここから広げる道は、いくつも開いています。腕試しにどうぞ。</p>
+      <ol>
+        <li><strong>関数実装形式の問題。</strong> 本書は「stdin を読んで stdout に出す」形式だけ。LeetCode 本家のように「関数のシグネチャだけ与えて実装させる」形式は、言語ごとのドライバ（提出関数を呼ぶ薄いラッパ）を用意すれば載る。第06章の言語抽象の自然な拡張。</li>
+        <li><strong>コンテスト機能。</strong> 時間制限つきの一斉開催、順位表、ペナルティ計算。第07・08章の保存とキューの上に、時刻という軸を足す課題。</li>
+        <li><strong>認証と複数ユーザー。</strong> 本書は認証なし（C-05）。ログインを足し、提出履歴をユーザーごとに分ければ、少人数で共有できる。この章の <code>logMiddleware</code> の隣に認証ミドルウェアを1枚足すのが入口。</li>
+        <li><strong>水平スケール。</strong> 本書はワーカーが同一プロセス内の goroutine（第08章）。採点機を別マシンに分け、キューを Redis や外部メッセージブローカーにすれば、採点を横に並べられる。ただしこれは「単一ホストで完結」という本書の思想を離れる一歩——必要になってから、が正しい。</li>
+      </ol>
+      <p>どれも、本書で作った<strong>層の境界</strong>（採点／実行／保存／キュー／Web）がきれいに引けているからこそ、局所的に足せます。良い設計とは「次に何を足せるかが見える」こと。あなたの土台は、もうそれを持っています。</p>
+    </div>
+
+    <p>ここまで、長い道のりでした。地味な文字列比較から始めて、危険なコードを檻に入れ、多言語を捌き、非同期に採点し、画面で緑を返すところまで、一段も飛ばさずに登り切りました。この基盤は<strong>あなた専用のオンラインジャッジ</strong>であり、同時に<strong>「信頼できないコードを安全に実行する」という難問を、自分の手で解いた記録</strong>でもあります。ここで手に入れた「作って理解する」感覚は、次にどんな未知の仕組みに出会っても、あなたを臆させないはずです。<strong>それでは、あなたの手の中で動くジャッジで、次の問題を解きにいきましょう。</strong></p>
+
+    <div class="chap-foot">
+      <a class="pager" href="08-queue.html"><span class="dir">← 前へ</span>第08章 · 提出を「あとで」捌く</a>
+      <a class="pager next" href="index.html"><span class="dir">最初に戻る ↺</span>序章 · はじめに・準備</a>
+    </div>
+  </main>
+</div>
+</body>
+</html>

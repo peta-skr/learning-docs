@@ -1,0 +1,109 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>一本の線を引く — 指数ダッシュボードを作る</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@400;500;600;700&family=Source+Serif+4:opsz,wght@8..60,400;8..60,500;8..60,600&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<div class="shell">
+
+  <aside class="spine">
+    <a class="wordmark" href="index.html">STOCK · from scratch<span class="tick"> ↗</span></a>
+    <div class="book-title">指数ダッシュボードを<br>つくる</div>
+    <div class="book-sub">好きな指数を、好きな期間で</div>
+
+    <div class="legend-rail"><span>読む <b>↓</b></span><span>組む <b>↑</b></span></div>
+
+    <nav aria-label="目次">
+      <ul class="toc">
+        <li><a class="nav-item" href="index.html"><span class="nav-num">序</span><span class="nav-label">はじめに<span class="nav-tag">Intro</span></span></a></li>
+        <li><a class="nav-item current" aria-current="page" href="00-line.html"><span class="nav-num">00</span><span class="nav-label">一本の線を引く<span class="nav-tag">Line</span></span></a></li>
+        <li><a class="nav-item" href="01-fetch.html"><span class="nav-num">01</span><span class="nav-label">データを取ってくる<span class="nav-tag">Fetch</span></span></a></li>
+        <li><a class="nav-item" href="02-store.html"><span class="nav-num">02</span><span class="nav-label">貯めて、切り出す<span class="nav-tag">Store</span></span></a></li>
+        <li><a class="nav-item" href="03-range.html"><span class="nav-num">03</span><span class="nav-label">期間を自由にする<span class="nav-tag">Range</span></span></a></li>
+        <li><a class="nav-item" href="04-overlay.html"><span class="nav-num">04</span><span class="nav-label">二本目を重ねる<span class="nav-tag">Overlay</span></span></a></li>
+        <li><a class="nav-item" href="05-rebase.html"><span class="nav-num">05</span><span class="nav-label">100にそろえる<span class="nav-tag">Rebase</span></span></a></li>
+        <li><a class="nav-item" href="06-downsample.html"><span class="nav-num">06</span><span class="nav-label">長い期間を軽くする<span class="nav-tag">Sample</span></span></a></li>
+        <li><a class="nav-item" href="07-url.html"><span class="nav-num">07</span><span class="nav-label">URLに状態を持たせる<span class="nav-tag">URL</span></span></a></li>
+        <li><a class="nav-item" href="08-finish.html"><span class="nav-num">08</span><span class="nav-label">仕上げと、次の一歩<span class="nav-tag">Finish</span></span></a></li>
+      </ul>
+    </nav>
+
+    <div class="spine-foot">
+      各章は一段の階段。<br>前の章の「できたこと」が<br>次の章の「困りごと」を呼ぶ。
+    </div>
+  </aside>
+
+  <main class="reading">
+    <div class="progress-tag">第00章 / 全9章 · 層: LINE · 読了目安 1〜2時間</div>
+    <div class="eyebrow"><span>Line</span><span class="depth">— 最初の一歩</span></div>
+    <h1>一本の線を引く</h1>
+    <p class="lede">最初の一歩は、データ取得でもデータベースでもありません。<strong>ダミーの終値を、折れ線で画面に出す</strong>。ただそれだけです。</p>
+
+    <div class="box goal"><div class="box-k">◈ この章のゴール</div>
+      <p>手で書いた数日ぶんの終値データが、画面に一本の折れ線として表示される。</p>
+    </div>
+
+    <h2>なぜ、いきなり取得から始めないのか</h2>
+    <p>なぜ、いきなり外部からデータを取りに行かないのか。取得は遅く、失敗し、制限もあります。そこから始めると「線が出る」までが遠い。まずは一番小さな達成——<strong>線が出る感動</strong>——を先に手に入れます。正しさより「出ること」を優先する章です。</p>
+
+    <p>用意するのは、これ以上ないくらい素直な形。日付と終値の並びだけ。</p>
+<pre><code><span class="cm">// まずはハードコードで十分。これが全ての出発点。</span>
+<span class="kw">const</span> series = [
+  { date: <span class="st">"2024-01-04"</span>, close: 4763.5 },
+  { date: <span class="st">"2024-01-05"</span>, close: 4697.2 },
+  { date: <span class="st">"2024-01-08"</span>, close: 4763.5 },
+  <span class="cm">// …数日分</span>
+];</code></pre>
+
+    <p>この配列を折れ線にするだけ。ライブラリでも、SVGを手で描いても構いません。X軸に日付、Y軸に終値。点をつないで線にする。ここで「日付は営業日しか無い（土日が飛ぶ）」ことに気づくはずです。それは正しい姿なので、そのまま受け入れてください。</p>
+
+    <div class="box hazard"><div class="box-k">⚠ つまずきポイント</div>
+      <p>きれいなグリッドや軸ラベルを作り込みたくなりますが、まだです。線が出たら、この章は勝ちです。装飾は後の章で戻ってきます。</p>
+    </div>
+
+    <div class="box do"><div class="box-k">▸ 手を動かす</div>
+      <ol>
+        <li>ダミーのS&amp;P500を折れ線で表示する。</li>
+        <li>もう一つ別のダミー系列を足して、<strong>2本</strong>重ねてみる。──次章以降の伏線です。値のスケールを大きく変えてみると、後で効いてくる問題が顔を出します。</li>
+        <li>Y軸に単位（pt / 円）を出してみる。</li>
+      </ol>
+    </div>
+
+    <h2>つまずき FAQ</h2>
+    <details class="qa"><summary>土日のデータが無くて、線が飛び飛びになります。バグ？</summary>
+      <div class="qa-body"><p>バグではありません。株式市場は営業日（平日かつ休場日でない日）しか値がつきません。土日や祝日にデータが無いのは正しい姿です。X軸を「日付そのもの」ではなく「データがある日を等間隔に並べたもの」として描くと、飛びが気にならなくなります（これは第06章の間引きにもつながる考え方です）。</p></div>
+    </details>
+    <details class="qa"><summary>グラフライブラリを使うべき？ 自分でSVGを描くべき？</summary>
+      <div class="qa-body"><p>この章ではどちらでも構いません。目的は「線が出ること」だけ。ただし、後の章で「開始=100にそろえる」「点を間引く」といった加工をデータ側で行うので、<strong>描画は薄く保ち、加工はデータ側に寄せる</strong>方針にしておくと後が楽です。参考実装は手描きSVG（グラフライブラリ不使用）で、<strong>線を引く責務と、値を作る責務を分けています</strong>——整列・指数化・間引きはすべてサーバ側で済ませ、フロントに残るのはツールチップの表示用計算だけです。</p></div>
+    </details>
+
+    <h2>理解度チェック</h2>
+    <p>次の問いに自分の言葉で答えてから、答えを開いてください。</p>
+    <details class="qa"><summary>Q1. なぜ「取得」より先に「表示」を作るのか？</summary>
+      <div class="qa-body"><p>取得は遅く・失敗し・回数制限があり、そこから始めると最初の達成（線が出る）までが遠くなるから。小さな成功を先に手に入れて、表示という土台を固めてから、次章で本物のデータに差し替える。</p></div>
+    </details>
+    <details class="qa"><summary>Q2. データの形を「日付と終値の並び」という素直な形にしておく利点は？</summary>
+      <div class="qa-body"><p>この平らな形は、後の章（複数指数の重ね・期間の切り出し・間引き・指数化）でもそのまま扱える。素直な形は後で利子を生む——というのがこの教材を貫く設計思想です。</p></div>
+    </details>
+
+    <div class="box done"><div class="box-k">✓ 完了の合図</div>
+      <p>ダミーの終値が、画面に一本の折れ線として出ている。できれば2本重なっていて、スケール差で片方が読みにくい——その「読みにくさ」を覚えておけば、第04・05章で効いてきます。</p>
+    </div>
+
+    <h2>まとめ — 次の層へ</h2>
+    <p>一本の線が出ました。でもこの線は、手で書いたダミーです。次章では、これを<strong>本物の指数データ</strong>に置き換えます。ただし「取得」は「表示」とは性質が違う——遅く、失敗する。だから両者をきれいに切り離すところから始めます。</p>
+
+    <div class="chap-foot">
+      <a class="pager" href="index.html"><span class="dir">← 前へ</span>序章 · はじめに</a>
+      <a class="pager next" href="01-fetch.html"><span class="dir">次へ →</span>第01章 · データを取ってくる</a>
+    </div>
+  </main>
+</div>
+</body>
+</html>

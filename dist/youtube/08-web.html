@@ -1,0 +1,751 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>第08章 画面をつける — 動画サービスをつくる</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500;600&family=Source+Serif+4:opsz,wght@8..60,400;8..60,600;8..60,700&family=Noto+Serif+JP:wght@400;600;700&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<div class="shell">
+
+  <aside class="spine">
+    <a class="wordmark" href="index.html">VIDEO-STREAM · from scratch</a>
+    <div class="book-title">動画サービスを<br>つくる</div>
+    <div class="book-sub">Go と ffmpeg で presigned から HLS 配信まで</div>
+
+    <div class="legend"><span>受け取る <b>↓</b></span><span>届ける <b>↑</b></span></div>
+
+    <nav aria-label="目次">
+      <ul class="toc">
+        <li><a class="nav-item" href="index.html"><span class="nav-num">序</span><span class="nav-label">はじめに・準備<span class="nav-tag">Setup</span></span></a></li>
+        <li><a class="nav-item" href="00-setup.html"><span class="nav-num">00</span><span class="nav-label">土台をつくる<span class="nav-tag">Setup</span></span></a></li>
+        <li><a class="nav-item" href="01-auth.html"><span class="nav-num">01</span><span class="nav-label">人を扱う<span class="nav-tag">Auth</span></span></a></li>
+        <li><a class="nav-item" href="02-upload.html"><span class="nav-num">02</span><span class="nav-label">動画を受け取る<span class="nav-tag">Upload</span></span></a></li>
+        <li><a class="nav-item" href="03-transcode.html"><span class="nav-num">03</span><span class="nav-label">動画を変換する<span class="nav-tag">Transcode</span></span></a></li>
+        <li><a class="nav-item" href="04-deliver.html"><span class="nav-num">04</span><span class="nav-label">動画を届ける<span class="nav-tag">Deliver</span></span></a></li>
+        <li><a class="nav-item" href="05-social.html"><span class="nav-num">05</span><span class="nav-label">反応をつくる<span class="nav-tag">Social</span></span></a></li>
+        <li><a class="nav-item" href="06-discover.html"><span class="nav-num">06</span><span class="nav-label">見つけてもらう<span class="nav-tag">Discover</span></span></a></li>
+        <li><a class="nav-item" href="07-notify.html"><span class="nav-num">07</span><span class="nav-label">つながりを届ける<span class="nav-tag">Notify</span></span></a></li>
+        <li><a class="nav-item current" aria-current="page" href="08-web.html"><span class="nav-num">08</span><span class="nav-label">画面をつける<span class="nav-tag">Web</span></span></a></li>
+        <li><a class="nav-item" href="09-beyond.html"><span class="nav-num">09</span><span class="nav-label">仕上げと次の一歩<span class="nav-tag">Beyond</span></span></a></li>
+      </ul>
+    </nav>
+
+    <div class="spine-foot">
+      各章は動画が通る道の一区間。<br>受け取る（下）から届ける（上）へ、<br>1本の動画を最後まで運びきる。
+    </div>
+  </aside>
+
+  <main class="reading">
+    <div class="progress-tag">第08章 / 全10章 · 層: Web · 読了目安 2〜3時間</div>
+    <div class="eyebrow"><span>Web</span><span class="depth">— 最上層 · 画面</span></div>
+    <h1>画面をつける</h1>
+    <p class="lede">ここまでの7章で、動画は受け取られ・変換され・配信され・反応やつながりまで持ちました。しかしそれらは全部 <code>curl</code> で叩いてきた <strong>API の話</strong>です。この章では、人が実際に触る<strong>画面</strong>を React で組みます。主役は「アップロードのクライアント側フロー」——ブラウザが受付に申請して合鍵をもらい、<strong>保管庫へ直接 PUT しながら進捗バーを伸ばし</strong>、完了を報告する一連の流れ（<code>Upload.tsx</code> + <code>api.ts</code>）。そしてもう一つの主役が、<strong>変換中の動画を「様子を見に行く」ポーリング</strong>——<code>processing</code> から <code>ready</code> へ変わる瞬間を、DB に SSE も張らず、数秒ごとに叩いて見せる（<code>Studio.tsx</code> / <code>Upload.tsx</code>）。画面は API の薄い皮ですが、その皮の張り方に、これまでの設計判断がそのまま映ります。</p>
+
+    <div class="box goal"><div class="box-k">◈ この章のゴール</div>
+      <p>次の3つを、コードとして読み解けたら達成です。</p>
+      <ol>
+        <li>ブラウザから動画を選ぶと、<strong>申請 → 直PUT（進捗表示）→ complete</strong> の3段が走り、動画本体は受付（api）を1バイトも通らないことを、<code>onFile</code> と <code>uploadToStorage</code> で説明できる。</li>
+        <li><code>api.ts</code> の <code>request</code> が、<strong>トークンの添付・JSON 化・エラーの統一</strong>をどう1か所に集約しているか、そして <code>mediaSrc</code> がなぜ <code>?token=</code> を足すのかを説明できる。</li>
+        <li>Studio と Upload の<strong>ポーリング</strong>が、<code>processing → ready/failed</code> を見つけたら止まる（<code>clearInterval</code>）仕組みと、なぜ通知（SSE）ではなくポーリングを選んだかを説明できる。</li>
+      </ol>
+    </div>
+
+    <div class="box map"><div class="box-k">☰ この章のステップ</div>
+      <ol>
+        <li><a href="#step-1">画面全体の骨格 — <code>main.tsx</code> と <code>App.tsx</code>（ルーティング）</a></li>
+        <li><a href="#step-2">受付との会話を1か所に集約する — <code>api.ts</code> の <code>request</code></a></li>
+        <li><a href="#step-3">ヘッダの付けられない URL に鍵を差す — <code>mediaSrc</code> と <code>?token=</code></a></li>
+        <li><a href="#step-4">ログイン状態をアプリ全体で共有する — <code>auth.tsx</code></a></li>
+        <li><a href="#step-5">アップロードのクライアント側フロー — <code>Upload.tsx</code> の3段</a></li>
+        <li><a href="#step-6">保管庫へ直接 PUT しながら進捗を測る — <code>uploadToStorage</code></a></li>
+        <li><a href="#step-7">変換の完了を「様子を見に行く」 — ポーリング</a></li>
+        <li><a href="#step-8">投稿者のダッシュボード — <code>Studio.tsx</code> と状態の可視化</a></li>
+        <li><a href="#step-9">視聴ページとデータの結線 — <code>Watch.tsx</code></a></li>
+        <li><a href="#step-10">画面を配る — vite の proxy と nginx の SPA fallback</a></li>
+      </ol>
+    </div>
+
+    <h2>なぜ最後に「画面」なのか</h2>
+    <p>この本は「動画が通る道」を下から積み上げてきました。土台（第00章）→ 人（第01章）→ アップロード（第02章）→ 変換（第03章）→ 配信（第04章）→ 反応（第05章）→ 発見（第06章）→ 通知（第07章）。ここまで全部、<strong>受付（API）が返す JSON</strong> の話でした。画面はその一番上に乗る、最後の層です。</p>
+    <p>順序が最後なのには理由があります。フロントエンドは<strong>バックエンドが決めた形をなぞる薄い皮</strong>だからです。動画の状態は5つ（<code>uploading → uploaded → processing → ready / failed</code>）と DB が決めている。presigned URL は受付が発行し、動画本体はブラウザが保管庫へ直接上げる、と第02章で決めた。通知は SSE で流れてくる、と第07章で決めた。画面がやることは、これらの決定を人の目に見える形に翻訳することだけ——新しい判断はほとんどありません。だから、下の層が固まってから最後に張るのが自然なのです。</p>
+    <p>とはいえ「薄い皮」にも設計はあります。この章で読むのは主に次の3つの結線です。<strong>(1)</strong> 受付との通信を1か所（<code>api.ts</code>）に集約し、トークン添付・エラー処理を全リクエストで共通化する。<strong>(2)</strong> 動画本体だけは <code>api.ts</code> を通さず、ブラウザが保管庫へ XHR で直接 PUT する（進捗を測るため）。<strong>(3)</strong> 変換の進行という「時間のかかる状態変化」を、ポーリングで画面に反映する。この3つが、これまでの章の設計判断がフロントにどう映るかを教えてくれます。</p>
+
+    <h2>この層が下の層に何を要求するか</h2>
+    <p>これまでの各章は「下の層が上に何を約束するか」で締めてきました。最上層の画面は逆で、<strong>下の層に何を要求するか</strong>を確認しておきます。</p>
+    <ul>
+      <li><strong>状態が JSON で正直に返ってくること</strong> — <code>video.status</code> が <code>processing</code> なら「変換中」、<code>ready</code> なら再生可能、<code>failed</code> なら理由（<code>errorMessage</code>）が付く。画面はこの5状態をラベルとバッジに翻訳するだけ。</li>
+      <li><strong>アップロード用の合鍵（presigned URL）が申請で1つもらえること</strong> — 画面はその URL へ PUT するだけで、署名や有効期限のことは知らない。</li>
+      <li><strong>認証がトークン1本で完結すること</strong> — ログインで受け取った JWT を <code>localStorage</code> に持ち、以降すべてのリクエストに <code>Authorization: Bearer</code> で添えれば通る（第01章）。ヘッダを付けられない <code>&lt;img&gt;</code> や HLS には <code>?token=</code> で代用（第04章の仕様）。</li>
+    </ul>
+    <p>逆に言えば、下の層がこれらを守っていれば、画面はとても素直に書けます。React の状態（<code>useState</code>）に API の返り値を入れ、それを JSX で描く——その繰り返しが大半です。まず、その素直な骨格から見ます。</p>
+
+    <h2 class="step" id="step-1"><span class="step-no">Step 1</span>画面全体の骨格 — main.tsx と App.tsx（ルーティング）</h2>
+    <p>React アプリの入口は <code>src/main.tsx</code> です。やっていることは3行——「<code>root</code> という <code>div</code> を掴んで、そこに <code>&lt;App /&gt;</code> を描け」だけ。</p>
+
+    <div class="file-tag">frontend/src/main.tsx（全文）</div>
+    <pre><code><span class="kw">import</span> React <span class="kw">from</span> <span class="st">"react"</span>;
+<span class="kw">import</span> ReactDOM <span class="kw">from</span> <span class="st">"react-dom/client"</span>;
+<span class="kw">import</span> App <span class="kw">from</span> <span class="st">"./App"</span>;
+<span class="kw">import</span> <span class="st">"./styles.css"</span>;
+
+ReactDOM.createRoot(document.getElementById(<span class="st">"root"</span>)!).render(
+  &lt;React.StrictMode&gt;
+    &lt;App /&gt;
+  &lt;/React.StrictMode&gt;,
+);</code></pre>
+    <p><code>document.getElementById("root")!</code> の末尾の <code>!</code> は TypeScript の<strong>非 null アサーション</strong>——「この要素は必ずあると私が保証する」という宣言です。<code>index.html</code> に <code>&lt;div id="root"&gt;&lt;/div&gt;</code> が確実にあるので、こう書いても安全です。<code>React.StrictMode</code> は開発時にだけ効く「うっかりミス検出器」で、副作用を意図的に2回実行して、後で見るポーリングの後始末（クリーンアップ）が正しく書けているかを炙り出します（この二重実行は本番ビルドでは起きません）。</p>
+
+    <p>次が本体、<code>App.tsx</code>。この章で読む全ページの<strong>地図</strong>です。</p>
+
+    <div class="file-tag">frontend/src/App.tsx（全文）</div>
+    <pre><code><span class="kw">import</span> { BrowserRouter, NavLink, Route, Routes } <span class="kw">from</span> <span class="st">"react-router-dom"</span>;
+<span class="kw">import</span> { AuthProvider, useAuth } <span class="kw">from</span> <span class="st">"./auth"</span>;
+<span class="kw">import</span> { Header } <span class="kw">from</span> <span class="st">"./components/Header"</span>;
+<span class="kw">import</span> { Home } <span class="kw">from</span> <span class="st">"./pages/Home"</span>;
+<span class="kw">import</span> { Watch } <span class="kw">from</span> <span class="st">"./pages/Watch"</span>;
+<span class="kw">import</span> { Upload } <span class="kw">from</span> <span class="st">"./pages/Upload"</span>;
+<span class="kw">import</span> { Studio } <span class="kw">from</span> <span class="st">"./pages/Studio"</span>;
+<span class="kw">import</span> { ChannelPage } <span class="kw">from</span> <span class="st">"./pages/Channel"</span>;
+<span class="kw">import</span> { Feed } <span class="kw">from</span> <span class="st">"./pages/Feed"</span>;
+<span class="kw">import</span> { History } <span class="kw">from</span> <span class="st">"./pages/History"</span>;
+<span class="kw">import</span> { SearchResults } <span class="kw">from</span> <span class="st">"./pages/Search"</span>;
+<span class="kw">import</span> { Login } <span class="kw">from</span> <span class="st">"./pages/Login"</span>;
+
+<span class="kw">function</span> Sidebar() {
+  <span class="kw">const</span> { user } = useAuth();
+  <span class="kw">return</span> (
+    &lt;nav className=<span class="st">"sidebar"</span>&gt;
+      &lt;NavLink to=<span class="st">"/"</span> end&gt;
+        🏠 ホーム
+      &lt;/NavLink&gt;
+      {user &amp;&amp; (
+        &lt;&gt;
+          &lt;NavLink to=<span class="st">"/feed"</span>&gt;📺 登録チャンネル&lt;/NavLink&gt;
+          &lt;NavLink to=<span class="st">"/history"</span>&gt;🕘 履歴&lt;/NavLink&gt;
+          &lt;NavLink to=<span class="st">"/studio"</span>&gt;🎬 動画の管理&lt;/NavLink&gt;
+        &lt;/&gt;
+      )}
+    &lt;/nav&gt;
+  );
+}
+
+<span class="kw">function</span> Shell() {
+  <span class="kw">return</span> (
+    &lt;&gt;
+      &lt;Header /&gt;
+      &lt;div className=<span class="st">"shell"</span>&gt;
+        &lt;Sidebar /&gt;
+        &lt;main className=<span class="st">"main"</span>&gt;
+          &lt;Routes&gt;
+            &lt;Route path=<span class="st">"/"</span> element={&lt;Home /&gt;} /&gt;
+            &lt;Route path=<span class="st">"/watch/:id"</span> element={&lt;Watch /&gt;} /&gt;
+            &lt;Route path=<span class="st">"/upload"</span> element={&lt;Upload /&gt;} /&gt;
+            &lt;Route path=<span class="st">"/studio"</span> element={&lt;Studio /&gt;} /&gt;
+            &lt;Route path=<span class="st">"/channel/:id"</span> element={&lt;ChannelPage /&gt;} /&gt;
+            &lt;Route path=<span class="st">"/feed"</span> element={&lt;Feed /&gt;} /&gt;
+            &lt;Route path=<span class="st">"/history"</span> element={&lt;History /&gt;} /&gt;
+            &lt;Route path=<span class="st">"/search"</span> element={&lt;SearchResults /&gt;} /&gt;
+            &lt;Route path=<span class="st">"/login"</span> element={&lt;Login /&gt;} /&gt;
+            &lt;Route path=<span class="st">"/register"</span> element={&lt;Login register /&gt;} /&gt;
+          &lt;/Routes&gt;
+        &lt;/main&gt;
+      &lt;/div&gt;
+    &lt;/&gt;
+  );
+}
+
+<span class="kw">export default function</span> App() {
+  <span class="kw">return</span> (
+    &lt;AuthProvider&gt;
+      &lt;BrowserRouter&gt;
+        &lt;Shell /&gt;
+      &lt;/BrowserRouter&gt;
+    &lt;/AuthProvider&gt;
+  );
+}</code></pre>
+    <p>下から読むのが分かりやすい。<code>App()</code> が一番外側で、3つの入れ子になっています。<strong><code>AuthProvider</code></strong> が最外——ログイン状態を「アプリ全体で共有する箱」として全体を包みます（Step 4）。その内側に <strong><code>BrowserRouter</code></strong>——URL に応じて表示するページを切り替える仕組み。一番内側の <strong><code>Shell</code></strong> が、常に出るヘッダ・サイドバーと、URL で入れ替わる本文（<code>&lt;Routes&gt;</code>）を並べます。</p>
+    <p>この入れ子の順序には意味があります。<code>AuthProvider</code> がルーターより<strong>外</strong>にあるので、どのページに遷移してもログイン状態は保たれます（ページを跨いで箱が生き続ける）。もし逆だったら、ページ遷移のたびにログイン状態が作り直されてしまう。</p>
+    <p><code>&lt;Routes&gt;</code> の中の <code>&lt;Route&gt;</code> 群が、この章で読むページの一覧そのものです。<code>/watch/:id</code> の <code>:id</code> は<strong>URL パラメータ</strong>——<code>/watch/abc123</code> でアクセスすると <code>Watch</code> ページが <code>id = "abc123"</code> を受け取ります（Step 9）。<code>Sidebar</code> の <code>{user &amp;&amp; (...)}</code> は React 定番の<strong>条件付き描画</strong>で、「<code>user</code> が真（ログイン済み）なら中身を描く、null なら何も描かない」。ログインしていない人には「登録チャンネル・履歴・動画の管理」を出さない、という出し分けが1行で書けます。</p>
+
+    <div class="gonote"><div class="box-k">実装メモ · JSX の {条件 &amp;&amp; JSX} と {配列.map(...)}</div>
+      <p>React の JSX では、<code>{ }</code> の中に JavaScript の式を書けます。よく出る2つのパターンを押さえておくと、この章のコードがすべて読めます。<strong>条件付き描画</strong> <code>{user &amp;&amp; &lt;X/&gt;}</code> は「<code>user</code> が真なら <code>&lt;X/&gt;</code> を、偽なら何も描かない」（<code>&amp;&amp;</code> は左が偽ならそこで止まり、その偽値=<code>false</code> や <code>null</code> は React が「描かない」と解釈する）。<strong>リスト描画</strong> <code>{videos.map((v) =&gt; &lt;Card key={v.id} .../&gt;)}</code> は配列を JSX の配列に変換して並べる。このとき各要素に <code>key</code>（一意なID）を付けるのは、React が「どれが増えて・どれが消えたか」を差分で追うための目印です。<code>&lt;&gt;...&lt;/&gt;</code> は <strong>Fragment</strong> で、余計な <code>div</code> を増やさず複数要素をまとめる空タグです。</p>
+    </div>
+
+    <h2 class="step" id="step-2"><span class="step-no">Step 2</span>受付との会話を1か所に集約する — api.ts の request</h2>
+    <p>この章で最も再利用されるファイルが <code>src/api.ts</code> です。全ページが「受付（API）と話す」ときは必ずここを通ります。まず心臓部——トークンを添えて JSON をやり取りする <code>request</code> 関数から。</p>
+
+    <div class="file-tag">frontend/src/api.ts（トークン保管と request）</div>
+    <pre><code><span class="cm">// 受付（API）との会話をここに集約する。</span>
+
+<span class="kw">const</span> TOKEN_KEY = <span class="st">"minitube_token"</span>;
+
+<span class="kw">export function</span> getToken(): <span class="ty">string</span> | <span class="kw">null</span> {
+  <span class="kw">return</span> localStorage.getItem(TOKEN_KEY);
+}
+
+<span class="kw">export function</span> setToken(token: <span class="ty">string</span> | <span class="kw">null</span>) {
+  <span class="kw">if</span> (token) localStorage.setItem(TOKEN_KEY, token);
+  <span class="kw">else</span> localStorage.removeItem(TOKEN_KEY);
+}
+
+<span class="kw">export class</span> <span class="ty">ApiError</span> <span class="kw">extends</span> <span class="ty">Error</span> {
+  status: <span class="ty">number</span>;
+  <span class="kw">constructor</span>(status: <span class="ty">number</span>, message: <span class="ty">string</span>) {
+    <span class="kw">super</span>(message);
+    <span class="kw">this</span>.status = status;
+  }
+}
+
+<span class="kw">async function</span> request&lt;<span class="ty">T</span>&gt;(path: <span class="ty">string</span>, init: <span class="ty">RequestInit</span> = {}): <span class="ty">Promise</span>&lt;<span class="ty">T</span>&gt; {
+  <span class="kw">const</span> headers = <span class="kw">new</span> <span class="ty">Headers</span>(init.headers);
+  <span class="kw">const</span> token = getToken();
+  <span class="kw">if</span> (token) headers.set(<span class="st">"Authorization"</span>, <span class="st">`Bearer ${token}`</span>);
+  <span class="kw">if</span> (init.body &amp;&amp; <span class="kw">typeof</span> init.body === <span class="st">"string"</span>) {
+    headers.set(<span class="st">"Content-Type"</span>, <span class="st">"application/json"</span>);
+  }
+  <span class="kw">const</span> res = <span class="kw">await</span> fetch(path, { ...init, headers });
+  <span class="kw">if</span> (!res.ok) {
+    <span class="kw">let</span> message = <span class="st">`エラー (${res.status})`</span>;
+    <span class="kw">try</span> {
+      <span class="kw">const</span> data = <span class="kw">await</span> res.json();
+      <span class="kw">if</span> (data.error) message = data.error;
+    } <span class="kw">catch</span> {
+      <span class="cm">/* JSONでないエラーはそのまま */</span>
+    }
+    <span class="kw">throw new</span> <span class="ty">ApiError</span>(res.status, message);
+  }
+  <span class="kw">if</span> (res.status === <span class="st">204</span>) <span class="kw">return</span> <span class="kw">undefined</span> <span class="kw">as</span> <span class="ty">T</span>;
+  <span class="kw">return</span> (<span class="kw">await</span> res.json()) <span class="kw">as</span> <span class="ty">T</span>;
+}</code></pre>
+    <p>この <code>request</code> こそ、フロント全体が受付と話すための<strong>唯一の窓口</strong>です。1関数に、毎回やるべき面倒を全部集約しています。順に読みます。</p>
+    <ul>
+      <li><strong>トークンの保管</strong>——<code>getToken</code> / <code>setToken</code> は、ログインで受け取った JWT を <code>localStorage</code>（ブラウザにタブを閉じても残る保存領域）に読み書きします。第01章で受付が返した <code>token</code> がここに入り、ここから取り出されます。</li>
+      <li><strong>認証ヘッダの自動添付</strong>——<code>if (token) headers.set("Authorization", `Bearer ${token}`)</code>。トークンがあれば毎リクエストに <code>Authorization: Bearer &lt;JWT&gt;</code> を付けます。各ページは「ログインしているか」をいちいち気にせず API を呼べる——付ける/付けないの判断はこの1か所に閉じています。</li>
+      <li><strong>JSON の Content-Type</strong>——<code>init.body</code> が文字列（=JSON.stringify 済み）なら <code>Content-Type: application/json</code> を立てる。後述の <code>putBlob</code>（画像アップロード）は文字列ではなく <code>Blob</code> を送るので、この条件から外れ、勝手に JSON 扱いされません。細かいですが、この <code>typeof ... === "string"</code> の判定が「JSON API」と「バイナリ PUT」を1つの関数で両立させる鍵です。</li>
+      <li><strong>エラーの統一</strong>——<code>if (!res.ok)</code>（HTTP が 200 番台でない）なら、受付が返す <code>{"error": "..."}</code> を取り出して <code>ApiError</code> として <code>throw</code> する。受付は第00章以降ずっと「エラーは <code>{"error": "..."}</code> の形で返す」と決めていた（<code>httpapi</code> の <code>writeError</code>）。フロントはその約束を信じて、日本語のエラー文をそのまま画面に出せます。<code>status</code> も持たせているので、呼び出し側は「401 ならログイン画面へ」のような分岐もできます。</li>
+      <li><strong>204 の特別扱い</strong>——<code>res.status === 204</code>（No Content、本文なし）なら <code>undefined</code> を返す。削除（DELETE）などは本文を返さないので、そこで <code>res.json()</code> を呼ぶと「JSON がない」で落ちます。それを避ける1行です。</li>
+    </ul>
+    <p>そして <code>request&lt;T&gt;</code> の <strong><code>&lt;T&gt;</code>（ジェネリクス）</strong>。呼ぶ側が「返ってくる JSON の型」を指定できます。たとえば <code>request&lt;VideoDetail&gt;(...)</code> と書けば、返り値は <code>VideoDetail</code> 型として扱われ、<code>v.status</code> や <code>v.errorMessage</code> に型が付く。実行時に検証しているわけではなく（受付を信頼している）、あくまで<strong>開発時の型の当てはめ</strong>ですが、これで各ページのデータ操作が安全になります。</p>
+
+    <p>この <code>request</code> を、各 HTTP メソッド用に薄く包んだのが <code>api</code> オブジェクトです。</p>
+
+    <div class="file-tag">frontend/src/api.ts（api オブジェクト）</div>
+    <pre><code><span class="kw">export const</span> api = {
+  get: &lt;<span class="ty">T</span>&gt;(path: <span class="ty">string</span>) =&gt; request&lt;<span class="ty">T</span>&gt;(path),
+  post: &lt;<span class="ty">T</span>&gt;(path: <span class="ty">string</span>, body?: <span class="ty">unknown</span>) =&gt;
+    request&lt;<span class="ty">T</span>&gt;(path, { method: <span class="st">"POST"</span>, body: body === <span class="kw">undefined</span> ? <span class="kw">undefined</span> : JSON.stringify(body) }),
+  patch: &lt;<span class="ty">T</span>&gt;(path: <span class="ty">string</span>, body: <span class="ty">unknown</span>) =&gt;
+    request&lt;<span class="ty">T</span>&gt;(path, { method: <span class="st">"PATCH"</span>, body: JSON.stringify(body) }),
+  del: &lt;<span class="ty">T</span>&gt;(path: <span class="ty">string</span>) =&gt; request&lt;<span class="ty">T</span>&gt;(path, { method: <span class="st">"DELETE"</span> }),
+  putBlob: (path: <span class="ty">string</span>, blob: <span class="ty">Blob</span>) =&gt;
+    request&lt;<span class="ty">void</span>&gt;(path, { method: <span class="st">"PUT"</span>, body: blob, headers: { <span class="st">"Content-Type"</span>: blob.type } }),
+};</code></pre>
+    <p>これで各ページは <code>api.get&lt;VideoDetail&gt;(`/api/videos/${id}`)</code> や <code>api.post(`/api/videos/${id}/complete`)</code> と、意図がそのまま読める形で受付を呼べます。<code>post</code> の <code>body === undefined ? undefined : JSON.stringify(body)</code> は「本文なしの POST」（<code>/complete</code> や <code>/retry</code> のように、URL だけで意味が決まる操作）を許すための細工。<code>putBlob</code> だけは JSON ではなくファイルそのもの（<code>Blob</code>）を送るので、<code>Content-Type</code> をファイルの型（<code>blob.type</code>）に設定します——これはチャンネルのアイコン/バナーや動画のサムネイル画像を、受付経由でアップロードするときに使います（画像は動画と違い小さいので受付を通す。<code>nginx.conf</code> の <code>client_max_body_size 20m</code> がこのためにある）。</p>
+
+    <div class="box hazard"><div class="box-k">⚠ 落とし穴 — なぜ「API 呼び出しの共通化」をここまで徹底するのか</div>
+      <p>もし各ページで生の <code>fetch</code> を直接書いていたら、「トークンを添える」「エラー JSON を取り出す」「204 を避ける」を<strong>10ページ分コピペ</strong>することになります。1か所直したいときに10か所直す羽目になり、必ずどこか漏れる。<code>api.ts</code> にこの3つを閉じ込めたことで、たとえば「401 のときは自動ログアウトする」を足したくなっても、直すのは <code>request</code> の1関数だけ。フロントの規模が小さいうちは「全部 fetch でいいや」と思いがちですが、<strong>横断的な関心事（認証・エラー・シリアライズ）は最初に1か所へ集約する</strong>のが、後で自分を救います。バックエンドで「受付との会話を <code>httpapi</code> に集約した」のと同じ発想が、フロントにも現れています。</p>
+    </div>
+
+    <h2 class="step" id="step-3"><span class="step-no">Step 3</span>ヘッダの付けられない URL に鍵を差す — mediaSrc と ?token=</h2>
+    <p><code>api.ts</code> には、もう一つ本書ならではの関数があります。<code>mediaSrc</code> です。第04章で「<code>?token=</code> クエリでの認証受け付けは仕様」と決めた、その<strong>フロント側の相方</strong>です。</p>
+
+    <div class="file-tag">frontend/src/api.ts（mediaSrc）</div>
+    <pre><code><span class="cm">// &lt;img&gt; や &lt;video&gt; はヘッダを付けられないので、必要なら ?token= を添える。</span>
+<span class="kw">export function</span> mediaSrc(url: <span class="ty">string</span> | <span class="kw">undefined</span>): <span class="ty">string</span> | <span class="kw">undefined</span> {
+  <span class="kw">if</span> (!url) <span class="kw">return</span> <span class="kw">undefined</span>;
+  <span class="kw">const</span> token = getToken();
+  <span class="kw">if</span> (!token) <span class="kw">return</span> url;
+  <span class="kw">return</span> url + (url.includes(<span class="st">"?"</span>) ? <span class="st">"&amp;"</span> : <span class="st">"?"</span>) + <span class="st">"token="</span> + encodeURIComponent(token);
+}</code></pre>
+    <p>なぜこんな関数が要るのか。<code>api.ts</code> の <code>request</code> は <code>Authorization: Bearer</code> ヘッダでトークンを送っていました。ところが——<strong><code>&lt;img src="..."&gt;</code> や <code>&lt;video&gt;</code>、ネイティブ HLS の再生は、ブラウザが URL を叩くだけで、こちらがヘッダを差し込む隙がありません</strong>。サムネイル画像もチャンネルアイコンも、非公開の限定公開動画なら「あなたはこれを見る権利があるか」を受付が確かめる必要があるのに、ヘッダを付けられない。</p>
+    <p>そこで、<strong>URL のクエリ文字列にトークンを載せる</strong>のが <code>mediaSrc</code> です。<code>url + "?token=" + トークン</code>（既に <code>?</code> があれば <code>&amp;</code> で連結）という形。受付側は第04章で「<code>Authorization</code> ヘッダが無ければ <code>?token=</code> も見る」と作ってあるので、これで <code>&lt;img&gt;</code> でも権限チェックが通ります。<code>encodeURIComponent</code> は、トークンに <code>+</code> や <code>/</code>（JWT に出うる文字）が含まれても URL として壊れないようにエスケープするための定番関数です。</p>
+    <p>使われ方を見ると腑に落ちます。<code>VideoGrid.tsx</code> のサムネイル、<code>Watch.tsx</code> や <code>Channel.tsx</code> のアイコン——画像を出す箇所は必ず <code>mediaSrc(url)</code> を通しています。たとえば <code>VideoGrid.tsx</code> ではこう。</p>
+    <div class="file-tag">frontend/src/components/VideoGrid.tsx（サムネイル部分・抜粋）</div>
+    <pre><code><span class="kw">export function</span> VideoCard({ video, showStatus }: { video: <span class="ty">Video</span>; showStatus?: <span class="ty">boolean</span> }) {
+  <span class="kw">const</span> thumb = mediaSrc(video.thumbnailUrl);
+  <span class="kw">return</span> (
+    &lt;Link to={<span class="st">`/watch/${video.id}`</span>} className=<span class="st">"video-card"</span>&gt;
+      &lt;div className=<span class="st">"thumb"</span>&gt;
+        {thumb ? &lt;img src={thumb} alt=<span class="st">""</span> loading=<span class="st">"lazy"</span> /&gt; : &lt;div className=<span class="st">"thumb-empty"</span>&gt;処理中…&lt;/div&gt;}
+        {video.durationSec &gt; <span class="st">0</span> &amp;&amp; &lt;span className=<span class="st">"duration"</span>&gt;{formatDuration(video.durationSec)}&lt;/span&gt;}
+      &lt;/div&gt;
+      <span class="cm">// …（後述の card-meta）</span></code></pre>
+    <p><code>thumb</code>（=<code>mediaSrc(video.thumbnailUrl)</code>）が <code>undefined</code>（サムネイルがまだ無い＝変換中）なら「処理中…」のプレースホルダを出し、あれば <code>&lt;img&gt;</code> を出す。<code>loading="lazy"</code> は「画面に入るまで画像を読み込まない」ブラウザ標準の遅延読み込みで、一覧に大量のサムネイルがあってもスクロールするまで取りに行かせません。<code>video.durationSec &gt; 0</code> のときだけ再生時間バッジを出すのも同じ条件付き描画です。動画本体（HLS の <code>mediaUrl</code>）は Player コンポーネント（第04章）へ渡され、そちらでも同じ <code>?token=</code> の考え方が効きます。</p>
+
+    <div class="gonote"><div class="box-k">実装メモ · クエリにトークンを載せる安全上の割り切り</div>
+      <p>URL にトークンを載せるのは、本来なら慎重になるべき選択です。URL はブラウザ履歴・サーバのアクセスログ・リファラに残りやすく、そこにトークンが写ると漏洩経路になり得ます。この教材が <code>?token=</code> を許すのは、<strong>ヘッダを付けられないメディア要素（<code>&lt;img&gt;</code> / ネイティブ HLS / EventSource）でも認証を通す</strong>という機能上の必要があるからで、学習用として割り切っています。本番では、(1) メディア専用の短命トークン（数分で失効・その URL 専用）を別途発行する、(2) 署名付き URL（presigned のように「この URL 自体に有効期限と署名を埋め込む」）にする、といった手法で、メインの JWT を URL に晒さないのが定石です。第04章の「<code>?token=</code> は仕様」という決定は、この割り切りの上に立っています。</p>
+    </div>
+
+    <h2 class="step" id="step-4"><span class="step-no">Step 4</span>ログイン状態をアプリ全体で共有する — auth.tsx</h2>
+    <p>Step 1 で <code>App</code> の最外を <code>AuthProvider</code> が包んでいました。その中身が <code>src/auth.tsx</code>。「今ログインしているのは誰か」を<strong>アプリ全体で1つだけ持つ</strong>ための仕組み（React の Context）です。</p>
+
+    <div class="file-tag">frontend/src/auth.tsx（Provider の状態と refresh）</div>
+    <pre><code><span class="kw">const</span> AuthContext = createContext&lt;<span class="ty">AuthState</span>&gt;(<span class="kw">null</span>!);
+
+<span class="kw">export function</span> AuthProvider({ children }: { children: <span class="ty">React.ReactNode</span> }) {
+  <span class="kw">const</span> [user, setUser] = useState&lt;<span class="ty">User</span> | <span class="kw">null</span>&gt;(<span class="kw">null</span>);
+  <span class="kw">const</span> [loading, setLoading] = useState(<span class="kw">true</span>);
+
+  <span class="kw">const</span> refresh = useCallback(<span class="kw">async</span> () =&gt; {
+    <span class="kw">if</span> (!getToken()) {
+      setUser(<span class="kw">null</span>);
+      <span class="kw">return</span>;
+    }
+    <span class="kw">try</span> {
+      <span class="kw">const</span> res = <span class="kw">await</span> api.get&lt;{ user: <span class="ty">User</span> }&gt;(<span class="st">"/api/auth/me"</span>);
+      setUser(res.user);
+    } <span class="kw">catch</span> {
+      setToken(<span class="kw">null</span>);
+      setUser(<span class="kw">null</span>);
+    }
+  }, []);
+
+  useEffect(() =&gt; {
+    refresh().finally(() =&gt; setLoading(<span class="kw">false</span>));
+  }, [refresh]);</code></pre>
+    <p>アプリを開いた瞬間に走るのが <code>useEffect(() =&gt; { refresh()... }, [refresh])</code> です。<code>useEffect</code> は「描画が終わった後に1回やること」を書く場所。ここでは <code>refresh</code>——「<code>localStorage</code> にトークンがあれば <code>/api/auth/me</code> を叩いて、まだ有効なら <code>user</code> を復元する」——を実行します。だから、タブを閉じて開き直しても、トークンが生きていればログイン状態が復活する。もしトークンが失効していれば <code>/api/auth/me</code> が失敗し、<code>catch</code> で <code>setToken(null)</code>（腐ったトークンを捨てる）＋ <code>setUser(null)</code>（ログアウト状態にする）。<code>loading</code> は「まだ復元中か」を表すフラグで、これがあるおかげで各ページは「まだ確認中なのにログイン画面へ飛ばす」誤爆を避けられます（Upload ページの <code>if (!loading &amp;&amp; !user)</code> がまさにそれ）。</p>
+
+    <div class="file-tag">frontend/src/auth.tsx（login / register / logout と useAuth）</div>
+    <pre><code>  <span class="kw">const</span> login = useCallback(<span class="kw">async</span> (email: <span class="ty">string</span>, password: <span class="ty">string</span>) =&gt; {
+    <span class="kw">const</span> res = <span class="kw">await</span> api.post&lt;{ token: <span class="ty">string</span>; user: <span class="ty">User</span> }&gt;(<span class="st">"/api/auth/login"</span>, { email, password });
+    setToken(res.token);
+    setUser(res.user);
+  }, []);
+
+  <span class="kw">const</span> register = useCallback(<span class="kw">async</span> (email: <span class="ty">string</span>, password: <span class="ty">string</span>, channelName: <span class="ty">string</span>) =&gt; {
+    <span class="kw">const</span> res = <span class="kw">await</span> api.post&lt;{ token: <span class="ty">string</span>; user: <span class="ty">User</span> }&gt;(<span class="st">"/api/auth/register"</span>, {
+      email,
+      password,
+      channelName,
+    });
+    setToken(res.token);
+    setUser(res.user);
+  }, []);
+
+  <span class="kw">const</span> logout = useCallback(() =&gt; {
+    setToken(<span class="kw">null</span>);
+    setUser(<span class="kw">null</span>);
+  }, []);
+
+  <span class="kw">return</span> (
+    &lt;AuthContext.Provider value={{ user, loading, login, register, logout, refresh }}&gt;
+      {children}
+    &lt;/AuthContext.Provider&gt;
+  );
+}
+
+<span class="kw">export function</span> useAuth() {
+  <span class="kw">return</span> useContext(AuthContext);
+}</code></pre>
+    <p><code>login</code> は「<code>/api/auth/login</code> を叩き、返ってきた <code>token</code> を保存し、<code>user</code> を state に入れる」だけ。<code>register</code> も同じ形で、登録と同時にログイン状態になる（第01章で受付が「登録の返り値にもトークンを含める」と決めていたから）。<code>logout</code> はトークンを捨てて <code>user</code> を <code>null</code> に戻すだけ——サーバ側に「ログアウト API」は要りません（JWT は<strong>ステートレス</strong>で、サーバは状態を持たないため、クライアントが鍵を捨てれば実質ログアウト）。</p>
+    <p>そして最後の <code>useAuth</code>。これが Step 1 の <code>Sidebar</code> や各ページが呼んでいた <code>const { user } = useAuth()</code> の正体です。<code>AuthContext.Provider</code> で配った <code>{ user, loading, login, ... }</code> を、<strong>どの深さのコンポーネントからでも props のバケツリレー無しに取り出せる</strong>のが Context の値打ち。ログイン状態のような「アプリのどこからでも欲しい情報」に最適です。</p>
+
+    <div class="gonote"><div class="box-k">実装メモ · useCallback で関数を「同じ関数」に保つ</div>
+      <p><code>login</code> などを <code>useCallback(fn, [])</code> で包んでいるのは、<strong>再描画のたびに関数を作り直さない</strong>ためです。React は state が変わると関数コンポーネントを丸ごと再実行するので、素朴に書くと <code>login</code> は毎回「別物の関数」になります。すると、それを <code>useEffect</code> の依存配列に入れている箇所（<code>refresh</code> を依存に持つ最初の <code>useEffect</code>）が、毎描画で「依存が変わった」と誤認して無限に再実行しかねない。<code>useCallback(fn, [])</code> は「依存（<code>[]</code>=なし）が変わらない限り、同じ関数の参照を使い回す」ことを保証し、この連鎖を止めます。<code>refresh</code> を <code>useCallback</code> にしているのも、それを依存に持つ <code>useEffect</code> を安定させるためです。</p>
+    </div>
+
+    <h2 class="step" id="step-5"><span class="step-no">Step 5</span>アップロードのクライアント側フロー — Upload.tsx の3段</h2>
+    <p>いよいよこの章の主役、<code>src/pages/Upload.tsx</code> です。第02章で受付側（<code>videos.go</code> の「申請 → presigned 発行 → complete」）を読みました。ここではその<strong>ブラウザ側</strong>——「ファイルを選ぶ → 直接アップロード → 完了報告」を読みます。まず、この画面が持つ状態と、その中心の <code>onFile</code>。</p>
+
+    <div class="file-tag">frontend/src/pages/Upload.tsx（状態定義と onFile）</div>
+    <pre><code><span class="kw">type</span> <span class="ty">Step</span> = <span class="st">"select"</span> | <span class="st">"uploading"</span> | <span class="st">"meta"</span>;
+
+<span class="kw">export function</span> Upload() {
+  <span class="kw">const</span> { user, loading } = useAuth();
+  <span class="kw">const</span> navigate = useNavigate();
+  <span class="kw">const</span> [step, setStep] = useState&lt;<span class="ty">Step</span>&gt;(<span class="st">"select"</span>);
+  <span class="kw">const</span> [percent, setPercent] = useState(<span class="st">0</span>);
+  <span class="kw">const</span> [videoId, setVideoId] = useState(<span class="st">""</span>);
+  <span class="kw">const</span> [status, setStatus] = useState(<span class="st">"uploading"</span>);
+  <span class="kw">const</span> [errorMessage, setErrorMessage] = useState(<span class="st">""</span>);
+  <span class="kw">const</span> [title, setTitle] = useState(<span class="st">""</span>);
+  <span class="kw">const</span> [description, setDescription] = useState(<span class="st">""</span>);
+  <span class="kw">const</span> [visibility, setVisibility] = useState&lt;<span class="ty">Visibility</span>&gt;(<span class="st">"public"</span>);
+  <span class="kw">const</span> [error, setError] = useState(<span class="st">""</span>);
+  <span class="kw">const</span> [saved, setSaved] = useState(<span class="kw">false</span>);
+  <span class="kw">const</span> pollRef = useRef&lt;<span class="ty">number</span>&gt;();
+
+  <span class="cm">// …（変換状況を追うポーリング＝Step 7 で読む）</span>
+
+  <span class="kw">if</span> (!loading &amp;&amp; !user) {
+    <span class="kw">return</span> (
+      &lt;p className=<span class="st">"empty"</span>&gt;
+        アップロードには&lt;Link to=<span class="st">"/login"</span>&gt;ログイン&lt;/Link&gt;が必要です
+      &lt;/p&gt;
+    );
+  }
+
+  <span class="kw">const</span> onFile = <span class="kw">async</span> (file: <span class="ty">File</span>) =&gt; {
+    setError(<span class="st">""</span>);
+    setStep(<span class="st">"uploading"</span>);
+    <span class="kw">try</span> {
+      <span class="cm">// 1. 受付に申請して合鍵をもらう → 2. 保管庫へ直接アップロード → 3. 完了を報告</span>
+      <span class="kw">const</span> init = <span class="kw">await</span> api.post&lt;{ videoId: <span class="ty">string</span>; uploadUrl: <span class="ty">string</span> }&gt;(<span class="st">"/api/uploads"</span>, {
+        filename: file.name,
+      });
+      setVideoId(init.videoId);
+      setTitle(file.name.replace(/\.[^.]+$/, <span class="st">""</span>));
+      <span class="kw">await</span> uploadToStorage(init.uploadUrl, file, setPercent);
+      <span class="kw">await</span> api.post(<span class="st">`/api/videos/${init.videoId}/complete`</span>);
+      setStep(<span class="st">"meta"</span>);
+    } <span class="kw">catch</span> (err) {
+      setError((err <span class="kw">as</span> <span class="ty">Error</span>).message);
+      setStep(<span class="st">"select"</span>);
+    }
+  };</code></pre>
+    <p>まず画面の状態が <code>Step</code> という3つの札で表されています——<code>select</code>（ファイル選択待ち）→ <code>uploading</code>（アップロード中）→ <code>meta</code>（情報入力）。この <code>step</code> の値で、後述の JSX が「今どの画面を出すか」を切り替えます。これはフロント側の小さな<strong>状態機械</strong>で、バックエンドの <code>videos.status</code> の状態遷移が、UI にも相似形で現れているのが分かります。</p>
+    <p>そして本章の心臓 <code>onFile</code>。ユーザーがファイルを選んだ瞬間に呼ばれ、<strong>3段のフロー</strong>が走ります。コメントがそのまま設計書です。</p>
+    <ol>
+      <li><strong>申請（合鍵をもらう）</strong>——<code>api.post("/api/uploads", { filename })</code>。受付に「この名前のファイルを上げたい」と伝えると、<code>videoId</code>（まだ <code>uploading</code> 状態で生まれた動画のID）と <code>uploadUrl</code>（=presigned URL、保管庫への合鍵）が返ってきます。ここで初めて DB に <code>videos</code> 行が1つできる（第02章）。</li>
+      <li><strong>直接アップロード</strong>——<code>await uploadToStorage(init.uploadUrl, file, setPercent)</code>。もらった合鍵の URL へ、ファイルを<strong>ブラウザから保管庫（MinIO）へ直接 PUT</strong> する。ここが本書の肝——<strong>動画本体は受付（api）を一切通りません</strong>。第3引数の <code>setPercent</code> に進捗を報告させ、進捗バーを伸ばします（中身は Step 6）。</li>
+      <li><strong>完了報告</strong>——<code>api.post(`/api/videos/${init.videoId}/complete`)</code>。「上げ終わった」と受付に伝える。受付は保管庫に実物があるか確かめ、動画を <code>uploaded</code> にして変換の注文を注文箱へ積む（第02章・第03章）。</li>
+    </ol>
+    <p>3段が終わると <code>setStep("meta")</code> で情報入力画面へ。<code>setTitle(file.name.replace(/\.[^.]+$/, ""))</code> は「ファイル名から拡張子を落として仮タイトルにする」気の利いた小技（<code>my_video.mp4</code> → <code>my_video</code>）。<code>catch</code> でどの段が失敗しても <code>setStep("select")</code> でファイル選択に戻し、エラー文を出します。</p>
+
+    <div class="box hazard"><div class="box-k">⚠ 落とし穴 — なぜ動画本体を受付に通さないのか（この画面の存在理由）</div>
+      <p>素朴に作るなら「ブラウザ → 受付 → 保管庫」と、動画を受付経由でアップロードしたくなります。しかしそれは第02章の核心的な NG です。動画は<strong>大容量</strong>（数百MB〜GB級）。受付がそれを一旦受け止めると、(1) 受付のメモリ・帯域を動画1本が長時間占有し、他の依頼を捌けなくなる、(2) 受付を水平スケールしても「動画の通り道」がボトルネックになる。だから <strong>presigned URL</strong> で「保管庫への一時的な合鍵」だけを受付が発行し、重いデータ転送はブラウザと保管庫の<strong>直通</strong>にする。<code>Upload.tsx</code> の <code>onFile</code> がこの設計をそのまま体現しています——<code>api.post("/api/uploads")</code> と <code>api.post(".../complete")</code> という2本の<strong>軽い JSON</strong> だけが受付を通り、<strong>重い動画は <code>uploadToStorage</code> で保管庫へ直行</strong>。この非対称こそ、第00章で「受付は重い作業をしない」と言った原則の、フロント側の到達点です。<code>nginx.conf</code> のコメント「<code>client_max_body_size 20m; # 画像アップロード用（動画は保管庫へ直接なのでここを通らない）</code>」が、この事実を裏側から証明しています。</p>
+    </div>
+
+    <h2 class="step" id="step-6"><span class="step-no">Step 6</span>保管庫へ直接 PUT しながら進捗を測る — uploadToStorage</h2>
+    <p><code>onFile</code> が呼んでいた <code>uploadToStorage</code> の中身は <code>api.ts</code> にあります。ここだけ、フロントで唯一 <code>fetch</code> を使わず、あえて<strong>古い XMLHttpRequest（XHR）</strong>を使っています。理由は「進捗を測るため」の1点です。</p>
+
+    <div class="file-tag">frontend/src/api.ts（uploadToStorage）</div>
+    <pre><code><span class="cm">// 保管庫へ直接アップロードする（受付を通らない道）。進捗を報告する。</span>
+<span class="kw">export function</span> uploadToStorage(
+  uploadUrl: <span class="ty">string</span>,
+  file: <span class="ty">File</span>,
+  onProgress: (percent: <span class="ty">number</span>) =&gt; <span class="ty">void</span>,
+): <span class="ty">Promise</span>&lt;<span class="ty">void</span>&gt; {
+  <span class="kw">return new</span> <span class="ty">Promise</span>((resolve, reject) =&gt; {
+    <span class="kw">const</span> xhr = <span class="kw">new</span> <span class="ty">XMLHttpRequest</span>();
+    xhr.open(<span class="st">"PUT"</span>, uploadUrl);
+    xhr.upload.onprogress = (e) =&gt; {
+      <span class="kw">if</span> (e.lengthComputable) onProgress(Math.round((e.loaded / e.total) * <span class="st">100</span>));
+    };
+    xhr.onload = () =&gt; {
+      <span class="kw">if</span> (xhr.status &gt;= <span class="st">200</span> &amp;&amp; xhr.status &lt; <span class="st">300</span>) resolve();
+      <span class="kw">else</span> reject(<span class="kw">new</span> <span class="ty">Error</span>(<span class="st">`アップロードに失敗しました (${xhr.status})`</span>));
+    };
+    xhr.onerror = () =&gt; reject(<span class="kw">new</span> <span class="ty">Error</span>(<span class="st">"アップロードに失敗しました（通信エラー）"</span>));
+    xhr.send(file);
+  });
+}</code></pre>
+    <p>「なぜ <code>fetch</code> じゃないのか」——それが最大の学びどころです。モダンな <code>fetch</code> は<strong>アップロード進捗を教えてくれません</strong>（ダウンロード側のストリームは読めても、送信側の <code>loaded/total</code> を通知する仕組みが標準にない）。ところが動画は大きく、アップロードには秒〜分かかる。ユーザーに「今 43% です」と見せられないと、固まったように見えて不安になる。そこで、進捗イベント <code>xhr.upload.onprogress</code> を持つ<strong>古参の XHR</strong> を、この1か所だけ引っ張り出しています。</p>
+    <p>コードを追います。<code>xhr.open("PUT", uploadUrl)</code> で、presigned URL（保管庫への合鍵）へ PUT する準備。<code>xhr.upload.onprogress</code> が転送のたびに発火し、<code>e.loaded</code>（送った量）÷ <code>e.total</code>（全体）× 100 を四捨五入して <code>onProgress</code>（＝呼び出し元の <code>setPercent</code>）へ渡す。<code>e.lengthComputable</code> は「全体サイズが分かっているか」の確認で、分からなければ進捗を出さない安全策です。<code>xhr.onload</code> は転送完了時に呼ばれ、HTTP ステータスが 2xx なら成功（<code>resolve</code>）、それ以外は失敗（<code>reject</code>）。<code>xhr.onerror</code> はネットワークが切れた等の通信レベルの失敗。<code>xhr.send(file)</code> で実際にファイルを送出します。</p>
+    <p>そして全体を <code>new Promise(...)</code> で包んでいるのが要点。XHR はコールバック方式（<code>onload</code>/<code>onerror</code>）の古い API ですが、Promise で包むことで、呼び出し側の <code>onFile</code> は <code>await uploadToStorage(...)</code> と、まるで <code>fetch</code> のように <code>async/await</code> で書ける。<strong>「古いコールバック API を Promise でくるんで、モダンな await の世界に持ち込む」</strong>——非同期処理を扱うときの定番の橋渡しパターンです。この <code>setPercent</code> で更新される <code>percent</code> が、次の JSX で進捗バーの幅になります。</p>
+
+    <div class="file-tag">frontend/src/pages/Upload.tsx（uploading ステップの表示）</div>
+    <pre><code>      {step === <span class="st">"uploading"</span> &amp;&amp; (
+        &lt;div&gt;
+          &lt;p&gt;保管庫へ直接アップロード中…（受付は通りません）&lt;/p&gt;
+          &lt;div className=<span class="st">"progress"</span>&gt;
+            &lt;div className=<span class="st">"progress-fill"</span> style={{ width: <span class="st">`${percent}%`</span> }} /&gt;
+          &lt;/div&gt;
+          &lt;p&gt;{percent}%&lt;/p&gt;
+        &lt;/div&gt;
+      )}</code></pre>
+    <p><code>style={{ width: `${percent}%` }}</code> の一行で、<code>percent</code> の変化が進捗バーの幅にそのまま反映されます。<code>uploadToStorage</code> が <code>setPercent(43)</code> を呼ぶ → React が再描画する → バーが 43% に伸びる。<strong>状態が変われば画面が自動で追従する</strong>という React の本質が、いちばん素直に見える箇所です。「受付は通りません」という文言を UI に明記しているのも、この教材の設計思想を利用者に伝える意図です。</p>
+
+    <h2 class="step" id="step-7"><span class="step-no">Step 7</span>変換の完了を「様子を見に行く」 — ポーリング</h2>
+    <p>アップロードが終わり <code>step === "meta"</code> になると、動画は <code>uploaded</code> → やがて職人が <code>processing</code> → <code>ready</code>（または <code>failed</code>）へと、<strong>裏で数分かけて変わっていきます</strong>（第03章）。この「時間のかかる状態変化」を、投稿者の画面にどう反映するか。<code>Upload.tsx</code> の答えは<strong>ポーリング</strong>——数秒ごとに受付へ「もう終わった?」と聞きに行くことです。</p>
+
+    <div class="file-tag">frontend/src/pages/Upload.tsx（変換状況のポーリング）</div>
+    <pre><code>  <span class="cm">// 変換状況を投稿者が確認できるように、完了/失敗まで様子を見に行く（FR-U3）</span>
+  useEffect(() =&gt; {
+    <span class="kw">if</span> (step !== <span class="st">"meta"</span> || !videoId) <span class="kw">return</span>;
+    <span class="kw">const</span> poll = <span class="kw">async</span> () =&gt; {
+      <span class="kw">try</span> {
+        <span class="kw">const</span> v = <span class="kw">await</span> api.get&lt;<span class="ty">VideoDetail</span>&gt;(<span class="st">`/api/videos/${videoId}`</span>);
+        setStatus(v.status);
+        setErrorMessage(v.errorMessage ?? <span class="st">""</span>);
+        <span class="kw">if</span> (v.status === <span class="st">"ready"</span> || v.status === <span class="st">"failed"</span>) {
+          window.clearInterval(pollRef.current);
+        }
+      } <span class="kw">catch</span> {
+        <span class="cm">/* 一時的な失敗は次のポーリングに任せる */</span>
+      }
+    };
+    pollRef.current = window.setInterval(poll, <span class="st">3000</span>);
+    poll();
+    <span class="kw">return</span> () =&gt; window.clearInterval(pollRef.current);
+  }, [step, videoId]);</code></pre>
+    <p>この <code>useEffect</code> は、依存配列 <code>[step, videoId]</code> のどちらかが変わると再実行されます。<code>step</code> が <code>meta</code> になり <code>videoId</code> が入った瞬間、ポーリングが始まります。中身を追います。</p>
+    <ul>
+      <li><code>if (step !== "meta" || !videoId) return</code>——まだ情報入力段でない／動画IDが無いなら何もしない（早期リターン）。</li>
+      <li><code>poll</code> は「<code>/api/videos/{id}</code> を叩いて最新の <code>status</code> と <code>errorMessage</code> を state に反映する」1回分の確認。</li>
+      <li><code>window.setInterval(poll, 3000)</code>——3秒ごとに <code>poll</code> を繰り返す<strong>タイマー</strong>を仕掛け、その識別子を <code>pollRef.current</code> に覚えておく。直後に <code>poll()</code> を1回すぐ呼ぶのは「最初の3秒を待たずに現状を出す」ため。</li>
+      <li><code>if (v.status === "ready" || v.status === "failed") { window.clearInterval(...) }</code>——<strong>終着状態に達したらタイマーを止める</strong>。これが肝。変換が完了（<code>ready</code>）または失敗（<code>failed</code>）したら、もう聞きに行く必要はないので、無駄なリクエストを止めます。</li>
+      <li><code>return () =&gt; window.clearInterval(pollRef.current)</code>——<code>useEffect</code> の<strong>クリーンアップ関数</strong>。この画面を離れる（アンマウントする）とき、あるいは依存が変わって effect が張り直されるときに、必ずタイマーを止める。これを書かないと、画面を去った後もタイマーが回り続けて<strong>リークします</strong>。</li>
+    </ul>
+    <p><code>pollRef</code> が <code>useState</code> ではなく <code>useRef</code> なのも意図的です。タイマーの識別子は「描画に使わない、けれど再描画をまたいで覚えておきたい値」。<code>useRef</code> はまさにそれ用の入れ物で、<code>.current</code> を書き換えても再描画を引き起こしません（<code>useState</code> で持つと、識別子を保存するたびに無駄な再描画が走る）。</p>
+
+    <div class="box hazard"><div class="box-k">⚠ 落とし穴 — なぜ SSE（第07章）ではなくポーリングなのか</div>
+      <p>第07章で新着通知を SSE（Server-Sent Events）でリアルタイムに配りました。なら変換完了も SSE で push すればいいのでは? と思うところですが、この教材はあえて<strong>ポーリング</strong>を選んでいます。理由は「関心の寿命」の違いです。変換の進行を気にするのは、<strong>今この動画を上げたばかりの本人が、この画面を開いている数分間だけ</strong>。SSE のように「常時つなぎっぱなしのチャネル」を張るのは、この短命で局所的な関心には重すぎます。3秒ポーリングは、実装が単純で（<code>setInterval</code> + <code>clearInterval</code>）、しかも<strong>終着状態に達したら自動で止まる</strong>ので、常時接続のコストを払わずに済む。一般に、<strong>「短時間・特定ページでだけ知りたい進捗」はポーリング、「いつどこにいても届いてほしい通知」は SSE/push</strong>、と使い分けるのが定石です。ポーリング側の落とし穴は「止め忘れ」——<code>clearInterval</code> を2か所（終着状態・クリーンアップ）に置いているのは、どちらの経路でも確実に止めるためです。</p>
+    </div>
+
+    <p>ポーリングで得た <code>status</code> は、<code>meta</code> ステップの JSX でそのまま可視化されます。</p>
+    <div class="file-tag">frontend/src/pages/Upload.tsx（meta ステップ・状況表示と失敗時のやり直し）</div>
+    <pre><code>      {step === <span class="st">"meta"</span> &amp;&amp; (
+        &lt;div&gt;
+          &lt;p&gt;
+            変換状況: &lt;span className={<span class="st">`badge badge-${status}`</span>}&gt;{statusLabels[status]}&lt;/span&gt;
+            {status === <span class="st">"processing"</span> &amp;&amp; <span class="st">"（裏で職人が変換しています。このまま情報を入力できます）"</span>}
+          &lt;/p&gt;
+          {status === <span class="st">"failed"</span> &amp;&amp; (
+            &lt;p className=<span class="st">"error"</span>&gt;
+              変換に失敗しました: {errorMessage}{<span class="st">" "</span>}
+              &lt;button
+                className=<span class="st">"btn"</span>
+                onClick={() =&gt;
+                  api.post(<span class="st">`/api/videos/${videoId}/retry`</span>).then(() =&gt; setStatus(<span class="st">"uploaded"</span>))
+                }
+              &gt;
+                やり直す
+              &lt;/button&gt;
+            &lt;/p&gt;
+          )}
+          <span class="cm">// …（タイトル・説明・公開範囲・サムネイルのフォーム）</span></code></pre>
+    <p><code>statusLabels[status]</code>（<code>format.ts</code>）が、生の状態名（<code>processing</code>）を人間向けの日本語（「変換中」）に変換します。<code>badge-${status}</code> でステータスごとに CSS クラスを切り替え、色分けします。注目は「<strong>変換を待たずに情報を入力できる</strong>」設計——<code>processing</code> のときも「このまま情報を入力できます」と案内し、下のフォームは常に触れる。これは第00章から一貫する「投稿ボタンを押した瞬間に応答が返り、変換は裏で進む」という体験の、UI 上の完成形です。<code>failed</code> なら理由（<code>errorMessage</code>）と「やり直す」ボタンを出し、押すと <code>/retry</code> を叩いて <code>uploaded</code> に戻す——第03章の <code>job_generation</code> による世代管理付きリトライを、投稿者がボタン1つで起動できる入口です。</p>
+
+    <div class="box do"><div class="box-k">▸ 動かして確認 — アップロードから ready までを画面で追う</div>
+      <p>スタックを起動し（第00章）、ブラウザで開いて実際に動画を1本上げると、この章のフローが全部つながって見えます。</p>
+      <pre class="term"><code><span class="ps">$</span> cd src
+<span class="ps">$</span> docker compose up --build -d
+<span class="cm"># ブラウザで開く（vite の dev ではなく、nginx 配信の本番ビルド）</span>
+<span class="cm">#   http://localhost:3000</span>
+<span class="cm"># 1) 右上から登録/ログイン → 「アップロード」へ</span>
+<span class="cm"># 2) 動画ファイルを選ぶと進捗バーが伸びる（＝保管庫へ直接PUT中）</span>
+<span class="cm"># 3) 100%後、変換状況が「変換待ち→変換中→視聴可能」と3秒ごとに変わる（ポーリング）</span>
+<span class="cm"># 4) 「視聴可能」になったら「動画を見る」で Watch へ
+
+# ネットワークタブで確認: 動画本体の PUT は localhost:9000（MinIO）宛。
+# 受付(:8080/:3000 の /api)には /uploads と /complete の軽いJSONしか飛ばない。</span></code></pre>
+      <p>開発中に画面だけ素早く直したいときは <code>cd src/frontend &amp;&amp; npm install &amp;&amp; npm run dev</code> で vite を <code>:5173</code> に立て、<code>/api</code> は proxy が <code>:8080</code> の受付へ中継します（Step 10）。</p>
+    </div>
+
+    <h2 class="step" id="step-8"><span class="step-no">Step 8</span>投稿者のダッシュボード — Studio.tsx と状態の可視化</h2>
+    <p>Upload が「1本を上げる」画面なら、<code>src/pages/Studio.tsx</code> は「自分の全動画を一覧し、状態を見張る」ダッシュボードです。ここでも<strong>ポーリング</strong>が主役ですが、Upload とは目的が少し違います——「変換中の動画があれば、一覧全体の状態を定期更新する」。</p>
+
+    <div class="file-tag">frontend/src/pages/Studio.tsx（読み込みとポーリング）</div>
+    <pre><code><span class="kw">export function</span> Studio() {
+  <span class="kw">const</span> [videos, setVideos] = useState&lt;<span class="ty">Video</span>[]&gt;([]);
+  <span class="kw">const</span> [editing, setEditing] = useState&lt;<span class="ty">string</span> | <span class="kw">null</span>&gt;(<span class="kw">null</span>);
+  <span class="kw">const</span> [error, setError] = useState(<span class="st">""</span>);
+
+  <span class="kw">const</span> load = useCallback(() =&gt; {
+    api
+      .get&lt;{ videos: <span class="ty">Video</span>[] }&gt;(<span class="st">"/api/studio/videos"</span>)
+      .then((r) =&gt; setVideos(r.videos))
+      .catch((e) =&gt; setError((e <span class="kw">as</span> <span class="ty">Error</span>).message));
+  }, []);
+
+  useEffect(() =&gt; {
+    load();
+    <span class="cm">// 変換中の動画があれば状況を追いかける</span>
+    <span class="kw">const</span> t = window.setInterval(load, <span class="st">5000</span>);
+    <span class="kw">return</span> () =&gt; window.clearInterval(t);
+  }, [load]);
+
+  <span class="kw">const</span> remove = <span class="kw">async</span> (id: <span class="ty">string</span>) =&gt; {
+    <span class="kw">if</span> (!window.confirm(<span class="st">"この動画を削除しますか？（元に戻せません）"</span>)) <span class="kw">return</span>;
+    <span class="kw">await</span> api.del(<span class="st">`/api/videos/${id}`</span>);
+    load();
+  };
+
+  <span class="kw">const</span> retry = <span class="kw">async</span> (id: <span class="ty">string</span>) =&gt; {
+    <span class="kw">try</span> {
+      <span class="kw">await</span> api.post(<span class="st">`/api/videos/${id}/retry`</span>);
+    } <span class="kw">catch</span> (e) {
+      window.alert((e <span class="kw">as</span> <span class="ty">Error</span>).message);
+    }
+    load();
+  };</code></pre>
+    <p><code>load</code> は「<code>/api/studio/videos</code>（＝自分の全動画。公開範囲に関係なく、状態も含めて返る受付エンドポイント）を取り直す」処理。<code>useEffect</code> で最初に1回 <code>load()</code> し、以後 <strong>5秒ごとに <code>load()</code> を繰り返す</strong>タイマーを張ります。Upload のポーリングが「1本の <code>ready/failed</code> を待って止まる」局所ポーリングだったのに対し、Studio は<strong>止めずに回し続ける</strong>——ダッシュボードにいる間ずっと、変換中の動画があれば自動で「変換中→視聴可能」に更新されるようにするためです。ここでも <code>return () =&gt; window.clearInterval(t)</code> のクリーンアップで、画面を去ればタイマーが止まります。</p>
+    <p><code>remove</code> は <code>window.confirm</code> で確認してから <code>DELETE</code>、<code>retry</code> は失敗時に <code>window.alert</code> でメッセージを出しつつ <code>/retry</code>。どちらも最後に <code>load()</code> を呼んで一覧を最新化します——「操作したら取り直す」という素直な更新方針です。</p>
+
+    <p>一覧本体の JSX が、この章で言う「状態の可視化」の具体です。1行ごとに、サムネイル・状態バッジ・公開範囲・そして状態に応じた操作ボタンを出します。</p>
+    <div class="file-tag">frontend/src/pages/Studio.tsx（1行の描画・抜粋）</div>
+    <pre><code>      &lt;div className=<span class="st">"studio-list"</span>&gt;
+        {videos.map((v) =&gt; (
+          &lt;div key={v.id} className=<span class="st">"studio-row"</span>&gt;
+            <span class="cm">// …（サムネイルとタイトルへのリンク）</span>
+              &lt;div className=<span class="st">"card-sub"</span>&gt;
+                &lt;span className={<span class="st">`badge badge-${v.status}`</span>}&gt;{statusLabels[v.status]}&lt;/span&gt;{<span class="st">" "</span>}
+                &lt;span className=<span class="st">"badge"</span>&gt;{visibilityLabels[v.visibility]}&lt;/span&gt;{<span class="st">" "</span>}
+                {formatViews(v.viewCount)}・{timeAgo(v.createdAt)}
+              &lt;/div&gt;
+              {v.status === <span class="st">"failed"</span> &amp;&amp; v.errorMessage &amp;&amp; (
+                &lt;div className=<span class="st">"error"</span>&gt;失敗理由: {v.errorMessage}&lt;/div&gt;
+              )}
+              &lt;div className=<span class="st">"form-row"</span>&gt;
+                &lt;button className=<span class="st">"btn"</span> onClick={() =&gt; setEditing(editing === v.id ? <span class="kw">null</span> : v.id)}&gt;
+                  編集
+                &lt;/button&gt;
+                {(v.status === <span class="st">"failed"</span> || v.status === <span class="st">"uploaded"</span> || v.status === <span class="st">"processing"</span>) &amp;&amp; (
+                  &lt;button className=<span class="st">"btn"</span> onClick={() =&gt; retry(v.id)}&gt;
+                    {v.status === <span class="st">"failed"</span> ? <span class="st">"変換をやり直す"</span> : <span class="st">"進まない場合はやり直す"</span>}
+                  &lt;/button&gt;
+                )}
+                &lt;button className=<span class="st">"btn btn-danger"</span> onClick={() =&gt; remove(v.id)}&gt;
+                  削除
+                &lt;/button&gt;
+              &lt;/div&gt;
+              <span class="cm">// …（editing === v.id なら EditForm を展開）</span></code></pre>
+    <p><strong>状態バッジ</strong>は Upload と同じ <code>badge-${v.status}</code> + <code>statusLabels</code> の組。ここに、この教材が第03章で作り込んだ「停滞救済」の設計が UI に顔を出します——「やり直す」ボタンの<strong>出す条件</strong>を見てください。<code>v.status === "failed" || v.status === "uploaded" || v.status === "processing"</code> の3状態でだけ出す。しかも文言を出し分けています。</p>
+    <ul>
+      <li><code>failed</code> のとき——「<strong>変換をやり直す</strong>」。素直な失敗リトライ。</li>
+      <li><code>uploaded</code> / <code>processing</code> のとき——「<strong>進まない場合はやり直す</strong>」。まだ失敗はしていないが、<strong>職人が途中で消えて注文が宙に浮いたまま止まっている</strong>かもしれない状態。第03章で見た「職人がジョブごと消えると注文が失われる」問題への、投稿者側の救済ボタンです。</li>
+    </ul>
+    <p>受付側は、この <code>/retry</code> を「<code>uploaded</code> は即時、<code>processing</code> は <code>status_changed_at</code> から一定時間（10分）停滞していれば許可」という条件つき <code>UPDATE</code> で捌きます（第03章、CLAUDE.md）。<strong>フロントは「やり直したい」という意図を送るだけで、それが妥当かの判定は受付が握る</strong>——UI は入口、正しさの砦はバックエンド、という役割分担がここに現れています。<code>ready</code> の動画にリトライボタンを出さないのは、完成品を壊す操作を UI 段階で封じているだけで、最終的な安全はやはり受付の条件つき UPDATE が保証します。</p>
+
+    <div class="gonote"><div class="box-k">実装メモ · setEditing(editing === v.id ? null : v.id) というトグル</div>
+      <p>「編集」ボタンの <code>setEditing(editing === v.id ? null : v.id)</code> は、1つの state（<code>editing</code>=今開いている行のID、または <code>null</code>）で<strong>アコーディオンの開閉</strong>を表す定石です。今クリックした行が既に開いているなら閉じる（<code>null</code>）、そうでなければその行を開く（<code>v.id</code>）。各行が個別に「開いているか」の <code>boolean</code> を持つより、「開いているのは高々1つ」という制約を1つの state で表す方が、状態がずれません。下の <code>{editing === v.id &amp;&amp; &lt;EditForm .../&gt;}</code> が、その行だけ編集フォームを展開します。<code>EditForm</code> 内の保存は <code>api.patch(`/api/videos/${video.id}`, {...})</code> でタイトル・説明・公開範囲を更新し、<code>onDone</code> で <code>load()</code> を呼んで一覧を取り直します。</p>
+    </div>
+
+    <h2 class="step" id="step-9"><span class="step-no">Step 9</span>視聴ページとデータの結線 — Watch.tsx</h2>
+    <p>投稿側（Upload/Studio）を読んだので、視聴側 <code>src/pages/Watch.tsx</code> へ。ここは Player（第04章）・Comments（第05章）といった既出コンポーネントを<strong>組み立てる場</strong>で、この章の関心は「複数の API を並行に叩いて1つの画面に束ねる」データの結線です。</p>
+
+    <div class="file-tag">frontend/src/pages/Watch.tsx（URLパラメータと並行フェッチ）</div>
+    <pre><code><span class="kw">export function</span> Watch() {
+  <span class="kw">const</span> { id } = useParams&lt;{ id: <span class="ty">string</span> }&gt;();
+  <span class="kw">const</span> { user } = useAuth();
+  <span class="kw">const</span> [video, setVideo] = useState&lt;<span class="ty">VideoDetail</span> | <span class="kw">null</span>&gt;(<span class="kw">null</span>);
+  <span class="kw">const</span> [channel, setChannel] = useState&lt;<span class="ty">Channel</span> | <span class="kw">null</span>&gt;(<span class="kw">null</span>);
+  <span class="kw">const</span> [related, setRelated] = useState&lt;<span class="ty">Video</span>[]&gt;([]);
+  <span class="kw">const</span> [comments, setComments] = useState&lt;<span class="ty">Comment</span>[]&gt;([]);
+  <span class="kw">const</span> [error, setError] = useState(<span class="st">""</span>);
+
+  useEffect(() =&gt; {
+    <span class="kw">if</span> (!id) <span class="kw">return</span>;
+    setVideo(<span class="kw">null</span>);
+    setError(<span class="st">""</span>);
+    api
+      .get&lt;<span class="ty">VideoDetail</span>&gt;(<span class="st">`/api/videos/${id}`</span>)
+      .then((v) =&gt; {
+        setVideo(v);
+        api.get&lt;<span class="ty">Channel</span>&gt;(<span class="st">`/api/channels/${v.channel.id}`</span>).then(setChannel).catch(() =&gt; {});
+      })
+      .catch((e) =&gt; setError((e <span class="kw">as</span> <span class="ty">Error</span>).message));
+    api.get&lt;{ videos: <span class="ty">Video</span>[] }&gt;(<span class="st">`/api/videos/${id}/related`</span>).then((r) =&gt; setRelated(r.videos)).catch(() =&gt; {});
+    api.get&lt;{ comments: <span class="ty">Comment</span>[] }&gt;(<span class="st">`/api/videos/${id}/comments`</span>).then((r) =&gt; setComments(r.comments)).catch(() =&gt; {});
+  }, [id]);</code></pre>
+    <p><code>const { id } = useParams()</code> が、URL <code>/watch/abc123</code> の <code>:id</code> 部分（<code>"abc123"</code>）を取り出します（Step 1 のルート定義と対）。<code>useEffect(..., [id])</code> の依存が <code>id</code> なので、<strong>URL の動画が変わるたびに（関連動画から別の動画へ飛んだときなど）データを取り直します</strong>。冒頭の <code>setVideo(null)</code> は「取り直す前に一旦『読み込み中』に戻す」ためで、これが無いと前の動画が一瞬残ります。</p>
+    <p>フェッチの構造に注目。動画本体（<code>/api/videos/{id}</code>）・関連動画（<code>/related</code>）・コメント（<code>/comments</code>）を<strong>並行に</strong>叩いています（3本の <code>api.get</code> を待ち合わせず並べる）。動画詳細が取れてから、その中の <code>v.channel.id</code> を使ってチャンネル情報を追加で取る——これだけは前段の結果に依存するので入れ子にしています。各 <code>.catch(() =&gt; {})</code> は「関連やコメントの取得が失敗しても、動画本体は見られるようにする」割り切り。動画本体の失敗だけは <code>setError</code> で画面全体をエラーにします。<strong>「主要データの失敗は致命、周辺データの失敗は握りつぶして本体を守る」</strong>という優先順位が、<code>catch</code> の使い分けに出ています。</p>
+
+    <p>そして描画。第00章から一貫する「<code>ready</code> でない動画は配信しない」原則が、フロントの分岐にも現れます。</p>
+    <div class="file-tag">frontend/src/pages/Watch.tsx（ready 判定と Player の出し分け・抜粋）</div>
+    <pre><code>  <span class="kw">if</span> (error) <span class="kw">return</span> &lt;p className=<span class="st">"error"</span>&gt;{error}&lt;/p&gt;;
+  <span class="kw">if</span> (!video) <span class="kw">return</span> &lt;p className=<span class="st">"empty"</span>&gt;読み込み中…&lt;/p&gt;;
+
+  <span class="kw">return</span> (
+    &lt;div className=<span class="st">"watch"</span>&gt;
+      &lt;div className=<span class="st">"watch-main"</span>&gt;
+        {video.status === <span class="st">"ready"</span> &amp;&amp; video.mediaUrl ? (
+          &lt;Player src={video.mediaUrl} resumeSec={video.resumeSec} onProgress={onProgress} onViewed={onViewed} /&gt;
+        ) : (
+          &lt;div className=<span class="st">"player-placeholder"</span>&gt;
+            &lt;p&gt;
+              この動画はまだ視聴できません（{statusLabels[video.status]}）。
+              {video.status === <span class="st">"failed"</span> &amp;&amp; video.errorMessage &amp;&amp; (
+                &lt;span className=<span class="st">"error"</span>&gt;
+                  &lt;br /&gt;
+                  失敗理由: {video.errorMessage}
+                &lt;/span&gt;
+              )}
+            &lt;/p&gt;
+          &lt;/div&gt;
+        )}</code></pre>
+    <p><code>video.status === "ready" &amp;&amp; video.mediaUrl</code> のときだけ <code>&lt;Player&gt;</code> を出し、そうでなければ「まだ視聴できません（状態ラベル）」のプレースホルダ。<strong>フロントも <code>ready</code> を二重チェック</strong>しているのがポイントです。もちろん本当の砦は受付（第04章 <code>media.go</code> が <code>ready</code> でない動画の <code>mediaUrl</code> を渡さない）ですが、フロントでも状態を見て Player を出さないことで、「変換中の動画を再生しようとして壊れる」ことを未然に防ぎます。<code>Player</code> に渡す <code>onProgress</code>（続きから再生用に再生位置を送る）・<code>onViewed</code>（視聴回数を1つ増やす）は <code>useCallback</code> でくるまれた関数で、Player 側から呼ばれると <code>api.post</code> で受付へ通知します——第04・05章の機能の、フロント側の接続点です。反応（👍/👎）・チャンネル登録のボタンも、押すと <code>api.post</code>/<code>api.del</code> を叩き、返り値で <code>video</code>/<code>channel</code> の state を部分更新して即座に見た目へ反映します（<code>setVideo({ ...video, ...res })</code>）。</p>
+
+    <h2 class="step" id="step-10"><span class="step-no">Step 10</span>画面を配る — vite の proxy と nginx の SPA fallback</h2>
+    <p>最後に、この React アプリが<strong>どうブラウザに届くか</strong>を見ます。開発時と本番で配り方が違い、その両方で「<code>/api</code> は受付へ、それ以外は React へ」という同じ振り分けをします。まず開発時、<code>vite.config.ts</code>。</p>
+
+    <div class="file-tag">frontend/vite.config.ts（全文）</div>
+    <pre><code><span class="kw">import</span> { defineConfig } <span class="kw">from</span> <span class="st">"vite"</span>;
+<span class="kw">import</span> react <span class="kw">from</span> <span class="st">"@vitejs/plugin-react"</span>;
+
+<span class="cm">// 開発時は /api を受付（API）へ中継する。本番は nginx が同じ役をする。</span>
+<span class="kw">export default</span> defineConfig({
+  plugins: [react()],
+  server: {
+    port: <span class="st">5173</span>,
+    proxy: {
+      <span class="st">"/api"</span>: { target: <span class="st">"http://localhost:8080"</span>, changeOrigin: <span class="kw">true</span> },
+    },
+  },
+});</code></pre>
+    <p><code>npm run dev</code> で vite が <code>:5173</code> に開発サーバを立てます。このとき <code>/api</code> で始まるリクエストだけは、vite が受付（<code>:8080</code>）へ<strong>中継（proxy）</strong>します。おかげでフロントのコードは <code>fetch("/api/...")</code> と<strong>相対パスで書ける</strong>——「受付は別ポートにいる」という事情を、コードから隠せます。<code>changeOrigin: true</code> は「中継先から見て、あたかも受付本人へのリクエストのように <code>Host</code> ヘッダを書き換える」設定です。</p>
+
+    <p>本番では、React を静的ファイルにビルドし、<code>nginx</code> が配ります。その振り分けが <code>nginx.conf</code>。</p>
+    <div class="file-tag">frontend/nginx.conf（全文）</div>
+    <pre><code>server {
+  listen <span class="st">80</span>;
+  root <span class="st">/usr/share/nginx/html</span>;
+  index <span class="st">index.html</span>;
+
+  <span class="cm"># 受付（API）への中継。SSE のためにバッファリングを切る</span>
+  location /api/ {
+    proxy_pass <span class="st">http://api:8080</span>;
+    proxy_http_version <span class="st">1.1</span>;
+    proxy_set_header Connection <span class="st">""</span>;
+    proxy_buffering <span class="kw">off</span>;
+    proxy_read_timeout <span class="st">3600s</span>;
+    client_max_body_size <span class="st">20m</span>; <span class="cm"># 画像アップロード用（動画は保管庫へ直接なのでここを通らない）</span>
+  }
+
+  location /healthz {
+    proxy_pass <span class="st">http://api:8080</span>;
+  }
+
+  <span class="cm"># SPA: どのパスでも index.html を返す</span>
+  location / {
+    try_files $uri /index.html;
+  }
+}</code></pre>
+    <p>3つの <code>location</code> があります。<strong><code>/api/</code></strong> は受付コンテナ（<code>api:8080</code>）へ中継——vite の proxy と同じ役目を、本番では nginx が担います。この設定には第07章の SSE への配慮が刻まれています。<code>proxy_buffering off</code>（nginx が応答を溜め込まず、届いた通知を即座に流す）、<code>proxy_read_timeout 3600s</code>（長時間つなぎっぱなしの SSE を切らない）、<code>Connection ""</code>（HTTP/1.1 の keep-alive を保つ）。通知がリアルタイムに届くのは、この3行があってこそです。<code>client_max_body_size 20m</code> は Step 5 で触れた通り——画像は受付を通すので上限を上げるが、<strong>動画はここを通らない</strong>ことをコメントが明言しています。</p>
+    <p>そして最重要が最後の <strong><code>location /</code></strong> の <code>try_files $uri /index.html</code>——<strong>SPA fallback</strong> です。<code>/watch/abc123</code> や <code>/studio</code> といった URL は、サーバのファイルとしては<strong>存在しません</strong>（React Router がブラウザ内で解釈する仮想の経路）。もし普通の nginx なら「そんなファイルない（404）」を返してしまう。<code>try_files $uri /index.html</code> は「まず実ファイル（<code>$uri</code>、たとえば <code>/assets/xxx.js</code>）を探し、無ければ <code>/index.html</code> を返す」。つまり<strong>どんなパスでも React 本体（<code>index.html</code>）を返し、あとは React Router に URL を解釈させる</strong>。これが無いと、ユーザーが <code>/studio</code> を直接開いたりリロードしたりした瞬間に 404 になります。<code>BrowserRouter</code>（Step 1）を使う SPA では、この1行が欠かせません。</p>
+
+    <div class="gonote"><div class="box-k">実装メモ · 開発の vite proxy と本番の nginx が「同じ形」なことの意味</div>
+      <p>開発（vite）と本番（nginx）で、<strong> URL の振り分けルールを揃えてある</strong>のは意図的です。両方とも「<code>/api</code> は受付へ、それ以外はフロントへ」。だからフロントのコードは、開発でも本番でも <code>fetch("/api/...")</code> と<strong>まったく同じ相対パス</strong>で書けます。もし開発時だけ <code>http://localhost:8080/api/...</code> と絶対 URL を書いていたら、本番ビルドで書き換えが必要になり、環境ごとの分岐が増える。<strong>「環境の違いは設定（proxy 先）に閉じ込め、アプリのコードは環境を知らない」</strong>——第00章で config を「環境変数＋既定値」にしたのと同じ 12-Factor の思想が、フロントの配信にも一貫して現れています。</p>
+    </div>
+
+    <h2>つまずき FAQ</h2>
+    <details class="qa"><summary>アップロードの進捗バーが動かない／ずっと 0% のまま。なぜ <code>fetch</code> ではなく XHR なの?</summary>
+      <div class="qa-body"><p>進捗が測れるのは <code>XMLHttpRequest</code> の <code>xhr.upload.onprogress</code> だけだからです。標準の <code>fetch</code> は<strong>アップロード進捗を通知する仕組みを持ちません</strong>（送信ボディを <code>ReadableStream</code> で監視する提案はありますが、ブラウザ対応が限られます）。だから <code>uploadToStorage</code> はこの1か所だけ古参の XHR を使い、<code>e.loaded / e.total</code> から百分率を計算して <code>onProgress</code>（=<code>setPercent</code>）へ渡し、React が進捗バーの <code>width</code> を更新します。もし 0% のまま動かないなら、(1) <code>e.lengthComputable</code> が <code>false</code>（全体サイズ不明）、(2) presigned URL が既に失効している、(3) MinIO の CORS 設定（第00章 <code>MINIO_API_CORS_ALLOW_ORIGIN</code>）が効いておらずブラウザにブロックされている、あたりを疑います。ネットワークタブで <code>localhost:9000</code> 宛の PUT が出ているか確認してください。</p></div>
+    </details>
+    <details class="qa"><summary><code>/studio</code> を直接開くと 404 になる（トップからの遷移なら開けるのに）。</summary>
+      <div class="qa-body"><p>SPA fallback の設定漏れです。<code>/studio</code> はサーバ上に実在するファイルではなく、React Router がブラウザ内で解釈する仮想パス。トップ（<code>/</code>）から遷移する分にはページ全体を再読み込みせず Router が処理するので動きますが、<strong>直接アクセスやリロード</strong>ではブラウザがそのパスをサーバに問い合わせ、<code>nginx</code> が「そんなファイルない」で 404 を返してしまう。<code>nginx.conf</code> の <code>location / { try_files $uri /index.html; }</code> が「未知のパスは全部 <code>index.html</code>（React 本体）を返す」ようにする1行で、これがあれば直開き・リロードでも React Router が URL を解釈できます。開発時（vite）は dev サーバが同等の fallback を内蔵しているので問題は出ませんが、本番の nginx では明示が必要です。</p></div>
+    </details>
+    <details class="qa"><summary>ログインしてサムネイルは出るのに、非公開動画のサムネイルだけ表示されない（403 になる）。</summary>
+      <div class="qa-body"><p><code>mediaSrc</code> を通さず生の URL を <code>&lt;img src&gt;</code> に渡している可能性が高いです。<code>api.ts</code> の <code>request</code> は <code>Authorization</code> ヘッダでトークンを送りますが、<code>&lt;img&gt;</code> はブラウザが URL を叩くだけでヘッダを差し込めません。だから権限チェックのある画像 URL は必ず <code>mediaSrc(url)</code> を通し、<code>?token=</code> をクエリに載せる必要があります（受付は第04章で「ヘッダが無ければ <code>?token=</code> も見る」と作ってある）。<code>VideoGrid.tsx</code> / <code>Watch.tsx</code> / <code>Channel.tsx</code> の画像がすべて <code>mediaSrc(...)</code> 経由なのはこのためです。公開動画のサムネイルはトークン無しでも見えるので気づきにくいですが、非公開・限定公開のものは <code>mediaSrc</code> 漏れが即 403 になります。</p></div>
+    </details>
+
+    <h2>理解度チェック</h2>
+    <p>次の問いに<strong>自分の言葉で</strong>答えられたら、この章は卒業です。</p>
+    <details class="qa"><summary>1. <code>Upload.tsx</code> の <code>onFile</code> が走る3段を順に述べ、そのうち「動画本体が受付（api）を通らない」のはどの段か、なぜそう設計するのかを説明せよ。</summary>
+      <div class="qa-body"><p>3段は <strong>(1) 申請</strong>（<code>api.post("/api/uploads", {filename})</code> で <code>videoId</code> と presigned URL＝<code>uploadUrl</code> をもらう）→ <strong>(2) 直接アップロード</strong>（<code>uploadToStorage(uploadUrl, file, setPercent)</code> でブラウザから保管庫へ PUT）→ <strong>(3) 完了報告</strong>（<code>api.post(".../complete")</code>）。動画本体が受付を通らないのは <strong>(2)</strong> で、ここだけは受付ではなく MinIO（<code>localhost:9000</code>）へ直接 PUT する。理由は動画が大容量だから——受付が一旦受け止めると受付のメモリ・帯域を長時間占有し他の依頼を捌けなくなる。だから受付は「保管庫への合鍵（presigned URL）」という軽い JSON の発行だけを担い、重いデータ転送はブラウザと保管庫の直通にする（第02章の設計）。受付を通るのは <code>/uploads</code> と <code>/complete</code> の軽い2本だけ。</p></div>
+    </details>
+    <details class="qa"><summary>2. アップロードの進捗表示に <code>fetch</code> ではなく <code>XMLHttpRequest</code> を使う理由と、それを <code>Promise</code> で包む理由を述べよ。</summary>
+      <div class="qa-body"><p><code>fetch</code> は<strong>アップロード進捗を通知する標準の仕組みを持たない</strong>のに対し、<code>XMLHttpRequest</code> は <code>xhr.upload.onprogress</code> で <code>e.loaded / e.total</code>（送った量／全体）を逐次教えてくれる。動画は大きくアップロードに時間がかかるので「今 43%」を見せるためにこの1か所だけ古参の XHR を使う。<code>Promise</code> で包むのは、XHR の<strong>コールバック方式</strong>（<code>onload</code>/<code>onerror</code>）を <code>async/await</code> の世界に橋渡しするため。これで呼び出し側の <code>onFile</code> は <code>await uploadToStorage(...)</code> と、あたかも <code>fetch</code> のように直線的に書け、成功で <code>resolve</code>・失敗で <code>reject</code> が <code>await</code> の成否に変換される。</p></div>
+    </details>
+    <details class="qa"><summary>3. 変換完了を知る手段として、この章はポーリングを選んだ。SSE（第07章）ではなくポーリングにした理由と、ポーリングを止める2つの経路を説明せよ。</summary>
+      <div class="qa-body"><p>変換の進行を気にするのは「今この動画を上げた本人が、その画面を開いている数分間だけ」という<strong>短命で局所的な関心</strong>だから。常時接続の SSE はこの用途には重く、<code>setInterval</code>/<code>clearInterval</code> による数秒ポーリングの方が単純で、終着状態に達したら自動で止められる。止める2つの経路は、<strong>(1) 終着状態</strong>——<code>poll</code> 内で <code>v.status</code> が <code>ready</code> または <code>failed</code> になったら <code>window.clearInterval(pollRef.current)</code> でタイマーを止める。<strong>(2) クリーンアップ</strong>——<code>useEffect</code> の <code>return () =&gt; window.clearInterval(...)</code> で、画面を離れる／依存が変わって effect を張り直すときに必ず止める。両方あることで、完了時にも離脱時にもタイマーがリークしない。一般に「短時間・特定ページの進捗」はポーリング、「いつどこでも届く通知」は SSE、と使い分ける。</p></div>
+    </details>
+
+    <h2>まとめ — 次の層へ</h2>
+    <p>この章で、動画が通る道の一番上——<strong>人が触る画面</strong>——が乗りました。フロントは薄い皮でしたが、その張り方に、これまでの設計判断がそのまま映っていました。受付との会話は <code>api.ts</code> に集約され、トークン添付・エラー処理・<code>?token=</code> の代替認証が1か所に閉じた。アップロードは「申請 → 直PUT（XHR で進捗）→ complete」の3段で、<strong>動画本体だけが受付を迂回して保管庫へ直行</strong>する——第02章の presigned 設計の到達点。変換の進行は SSE ではなくポーリングで見せ、<code>ready/failed</code> で自動停止する。Studio の「進まない場合はやり直す」ボタンは、第03章の停滞救済を投稿者の手に渡した。そして vite の proxy と nginx の SPA fallback が、開発と本番で同じ形の振り分けをして画面を配りました。</p>
+    <p>ここまでで、動画サービスは<strong>一通り動く</strong>ようになりました。上げて、変換して、届けて、反応して、つながって、通知して、画面で見る——序章で描いた道を、1本の動画が最後まで通り抜けます。最終章（第09章）では、この「動くもの」を一歩引いて眺めます。<strong>キャッシュ・CDN・クラウド移行の境界設計</strong>を論じ、「学習用の割り切り」を本番へ持ち上げるとしたらどこに線を引き直すのかを整理して、本書全体を締めくくります。</p>
+
+    <div class="chap-foot">
+      <a class="pager" href="07-notify.html"><span class="dir">← 前へ</span>第07章 · つながりを届ける</a>
+      <a class="pager next" href="09-beyond.html"><span class="dir">次へ →</span>第09章 · 仕上げと次の一歩</a>
+    </div>
+  </main>
+</div>
+</body>
+</html>

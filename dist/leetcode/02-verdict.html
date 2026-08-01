@@ -1,0 +1,448 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>第02章 verdict — 判定の種類 — 手を動かして作るオンラインジャッジ</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500;600&family=Source+Serif+4:opsz,wght@8..60,400;8..60,600;8..60,700&family=Noto+Serif+JP:wght@400;600;700&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<div class="shell">
+
+  <aside class="spine">
+    <a class="wordmark" href="index.html">JUDGE · from scratch</a>
+    <div class="book-title">手を動かして作る<br>オンラインジャッジ</div>
+    <div class="book-sub">Go で サンドボックスから Web まで</div>
+
+    <div class="legend"><span>読む <b>↓</b></span><span>組む <b>↑</b></span></div>
+
+    <nav aria-label="目次">
+      <ul class="toc">
+        <li><a class="nav-item" href="index.html"><span class="nav-num">序</span><span class="nav-label">はじめに・準備<span class="nav-tag">Setup</span></span></a></li>
+        <li><a class="nav-item" href="00-smallest.html"><span class="nav-num">00</span><span class="nav-label">いちばん小さいジャッジ<span class="nav-tag">Judge</span></span></a></li>
+        <li><a class="nav-item" href="01-process.html"><span class="nav-num">01</span><span class="nav-label">プロセスと標準入出力<span class="nav-tag">IO</span></span></a></li>
+        <li><a class="nav-item current" aria-current="page" href="02-verdict.html"><span class="nav-num">02</span><span class="nav-label">verdict — 判定の種類<span class="nav-tag">Verdict</span></span></a></li>
+        <li><a class="nav-item" href="03-threat.html"><span class="nav-num">03</span><span class="nav-label">なぜ他人のコードは危険か<span class="nav-tag">Threat</span></span></a></li>
+        <li><a class="nav-item" href="04-sandbox.html"><span class="nav-num">04</span><span class="nav-label">コンテナに閉じ込める<span class="nav-tag">Sandbox</span></span></a></li>
+        <li><a class="nav-item" href="05-limits.html"><span class="nav-num">05</span><span class="nav-label">時間とメモリを断ち切る<span class="nav-tag">Limits</span></span></a></li>
+        <li><a class="nav-item" href="06-lang.html"><span class="nav-num">06</span><span class="nav-label">いろんな言語で<span class="nav-tag">Lang</span></span></a></li>
+        <li><a class="nav-item" href="07-store.html"><span class="nav-num">07</span><span class="nav-label">問題とテストケースを持つ<span class="nav-tag">Store</span></span></a></li>
+        <li><a class="nav-item" href="08-queue.html"><span class="nav-num">08</span><span class="nav-label">提出を「あとで」捌く<span class="nav-tag">Queue</span></span></a></li>
+        <li><a class="nav-item" href="09-web.html"><span class="nav-num">09</span><span class="nav-label">画面をつける<span class="nav-tag">Web</span></span></a></li>
+      </ul>
+    </nav>
+
+    <div class="spine-foot">
+      各章は「実行の心臓部」から<br>始めて「Web」へ登る。<br>下（採点の核）から上（画面）へ<br>積み上げて動かしていく。
+    </div>
+  </aside>
+
+  <main class="reading">
+    <div class="progress-tag">第02章 / 全10章 · 層: VERDICT · 読了目安 2〜3時間</div>
+    <div class="eyebrow"><span>VERDICT</span><span class="depth">— exit code を読み解く</span></div>
+    <h1>verdict — 判定の種類</h1>
+    <p class="lede">提出の結果は、最終的に <code>AC</code> や <code>TLE</code> といった<strong>1つの verdict</strong>に落ちます。では、その verdict はどこから来るのか。第01章で手に入れた「実行結果」——とりわけ<strong>プロセスの終了コード</strong>——を、どう読み解けば <code>TLE</code> と <code>MLE</code> と <code>RE</code> を正しく撃ち分けられるのか。この章の核心は、<strong>「exit code は verdict の原材料である」</strong>という一点です。<code>124</code> はなぜ <code>TLE</code> なのか。同じ <code>137</code> がなぜ <code>MLE</code> にも <code>TLE</code> にもなるのか。<code>decideCase</code> の分岐を、1つずつ厚く読み解きます。</p>
+
+    <div class="box goal"><div class="box-k">◈ この章のゴール</div>
+      <p>次の 3 つを、自分の言葉で説明できたら達成です。</p>
+      <ol>
+        <li><code>decideCase</code> の switch が、終了コード <code>111 / 124 / 137</code> と <code>node</code> の <code>"heap out of memory"</code> を、それぞれ <strong>なぜ</strong> その verdict に落とすのかを追える。とくに <code>137</code> が文脈で <code>MLE</code> と <code>TLE</code> に分かれる理屈を説明できる。</li>
+        <li>Unix の終了コードの慣習（正常は <code>0</code>、シグナルで殺されると <code>128 + シグナル番号</code>）を理解し、<code>137 = 128 + 9 = SIGKILL</code> を暗算で読める。</li>
+        <li><code>JudgeSubmission</code> の判定ループが「最初の非 AC で打ち切り」つつ、<strong>全 AC でも <code>___DONE___</code> に到達していなければ <code>IE</code>（不完全採点）</strong>に倒す理由——「疑わしいときは AC を出さない」という思想——を説明できる。</li>
+      </ol>
+    </div>
+
+    <div class="box map"><div class="box-k">☰ この章のステップ</div>
+      <ol>
+        <li><a href="#step-1">exit 124 — <code>timeout</code> の専用コードで TLE を確定する</a></li>
+        <li><a href="#step-2">exit 137 の両義性 — 同じコードが MLE にも TLE にもなる</a></li>
+        <li><a href="#step-3">node の "heap out of memory" — V8 の自死を MLE と読む</a></li>
+        <li><a href="#step-4">exit 111 と その他非0 — IE と RE の切り分け</a></li>
+        <li><a href="#step-5">exit 0 — ここでようやく出力比較</a></li>
+        <li><a href="#step-6">判定ループ — 打ち切りと、AC を出さない勇気</a></li>
+        <li><a href="#step-7">手を動かす — decideCase に 137 を食わせて確かめる</a></li>
+      </ol>
+    </div>
+
+    <h2>7種の verdict の地図 — exit code は verdict の原材料</h2>
+    <p>第00章で、提出は最終的に7つの verdict のどれか1つに落ちることを見ました。復習を兼ねて、その7語をもう一度並べておきます。この7語のうち、この章の主役は <code>TLE / MLE / RE</code> の3つ——「どうやって見分けるか」の話です。</p>
+
+    <div class="file-tag">internal/judge/verdict.go</div>
+    <pre><code><span class="kw">package</span> judge
+
+<span class="cm">// Verdict は提出の判定結果（要件 §4）。</span>
+<span class="kw">type</span> <span class="ty">Verdict</span> <span class="ty">string</span>
+
+<span class="kw">const</span> (
+	AC  <span class="ty">Verdict</span> = <span class="st">"AC"</span>  <span class="cm">// Accepted</span>
+	WA  <span class="ty">Verdict</span> = <span class="st">"WA"</span>  <span class="cm">// Wrong Answer</span>
+	TLE <span class="ty">Verdict</span> = <span class="st">"TLE"</span> <span class="cm">// Time Limit Exceeded</span>
+	MLE <span class="ty">Verdict</span> = <span class="st">"MLE"</span> <span class="cm">// Memory Limit Exceeded</span>
+	RE  <span class="ty">Verdict</span> = <span class="st">"RE"</span>  <span class="cm">// Runtime Error</span>
+	CE  <span class="ty">Verdict</span> = <span class="st">"CE"</span>  <span class="cm">// Compile Error</span>
+	IE  <span class="ty">Verdict</span> = <span class="st">"IE"</span>  <span class="cm">// Internal Error（ジャッジ側の異常。NF-08）</span>
+)</code></pre>
+
+    <p>第00章では、<code>AC</code>（正解）と <code>WA</code>（出力が違う）を「出力比較」で見分ける <code>CompareOutput</code> を厚く扱いました。しかし現実の提出は、そもそも<strong>正常に走り切らない</strong>ことが山ほどあります。無限ループして時間切れになる（<code>TLE</code>）。巨大な配列を確保してメモリを食い潰す（<code>MLE</code>）。ゼロ除算や配列外アクセスでクラッシュする（<code>RE</code>）。これらは出力を比べる<strong>以前</strong>の問題で、出力比較にたどり着くことすらありません。</p>
+    <p>では、時間切れなのか、メモリ超過なのか、ただのクラッシュなのかを、ジャッジはどう見分けるのか。答えは<strong>プロセスの終了コード（exit code）</strong>です。提出コードを走らせたプロセスが、どういう終わり方をしたか——正常に <code>0</code> で終わったか、シグナルで殺されたか、特定のエラーコードを返したか——を読めば、その提出の運命がかなりの精度でわかります。第00章でこう書きました。</p>
+    <blockquote>
+      この層から見れば、実行結果はただの構造体（終了コードと出力の入れ物）で、そこから verdict を導くのが仕事です。
+      <cite>第00章 · いちばん小さいジャッジ</cite>
+    </blockquote>
+    <p>この章は、その「終了コードから verdict を導く」技術の深掘りです。第00章では <code>decideCase</code> の骨格——「異常を先に潰し、生き残ったものだけを出力比較にかける」という縦の流れ——を通しで眺めました。ここでは同じ <code>decideCase</code> を、<strong>1つの <code>case</code> ずつ立ち止まって</strong>読みます。「なぜ exit code をここまで細かく解釈するのか」——それがこの章の主題です。まず、この章で読む対象を再掲します。第00章と一字一句同じコードですが、今回はこれを解剖台に載せます。</p>
+
+    <div class="file-tag">internal/judge/judge.go（decideCase）</div>
+    <pre><code><span class="cm">// decideCase は1ケースの verdict を決める（02_tech_stack.md の判定ロジック）。</span>
+<span class="kw">func</span> decideCase(c <span class="ty">CaseOutcome</span>, p *store.<span class="ty">Problem</span>, tc store.<span class="ty">Testcase</span>) <span class="ty">Verdict</span> {
+	<span class="kw">switch</span> {
+	<span class="kw">case</span> c.ExitCode == <span class="st">111</span>:
+		<span class="kw">return</span> IE <span class="cm">// sql シード投入失敗（問題データ側の異常）</span>
+	<span class="kw">case</span> c.ExitCode == <span class="st">124</span>:
+		<span class="cm">// timeout コマンドが時間超過で発火した専用コード（ランナーが -s TERM で送る）。</span>
+		<span class="cm">// TLE を elapsed に頼らず exit コードだけで確定できる。</span>
+		<span class="kw">return</span> TLE
+	<span class="kw">case</span> c.ExitCode != <span class="st">0</span> &amp;&amp; bytes.Contains(c.Stderr, []<span class="ty">byte</span>(<span class="st">"heap out of memory"</span>)):
+		<span class="cm">// node はコンテナ上限より先に V8 ヒープ上限で自死する。</span>
+		<span class="cm">// 正常終了(exit 0)の提出が偶然この文字列を出力しても MLE にしないよう、</span>
+		<span class="cm">// 異常終了を条件に加える。</span>
+		<span class="kw">return</span> MLE
+	<span class="kw">case</span> c.ExitCode == <span class="st">137</span>:
+		<span class="cm">// SIGKILL(128+9)。時間超過は 124 で捕捉済みなので、ここに来る 137 は</span>
+		<span class="cm">// 原則カーネル OOM killer による停止（＝メモリ超過）とみなす。</span>
+		<span class="cm">// 例外: 提出が SIGTERM を握りつぶし timeout の -k(3s猶予) で KILL された場合も 137。</span>
+		<span class="cm">// その場合 elapsed は必ず制限時間を超えるので、制限超過のときだけ TLE に倒す</span>
+		<span class="cm">// （制限時間内で 137 になったものは真の OOM なので MLE のまま）。</span>
+		<span class="kw">if</span> c.ElapsedMS &gt; p.TimeLimitMS {
+			<span class="kw">return</span> TLE
+		}
+		<span class="kw">return</span> MLE
+	<span class="kw">case</span> c.ExitCode != <span class="st">0</span>:
+		<span class="kw">return</span> RE
+	}
+	<span class="cm">// exit 0: 出力比較</span>
+	<span class="kw">if</span> c.ElapsedMS &gt; p.TimeLimitMS {
+		<span class="kw">return</span> TLE
+	}
+	<span class="kw">if</span> p.Type == <span class="st">"sql"</span> {
+		ok, err := CompareResultSet(string(c.Stdout), tc.Expected, p.SQLOrderMatters)
+		<span class="kw">if</span> err != <span class="kw">nil</span> || !ok {
+			<span class="kw">return</span> WA
+		}
+		<span class="kw">return</span> AC
+	}
+	<span class="kw">if</span> !CompareOutput(string(c.Stdout), tc.Expected) {
+		<span class="kw">return</span> WA
+	}
+	<span class="kw">return</span> AC
+}</code></pre>
+
+    <p>switch の <code>case</code> は上から順に評価され、最初に真になった枝で <code>return</code> します。<strong>だから順序そのものが判定ロジックの一部</strong>です。この章はこの switch を、実コードの並び順（<code>111 → 124 → heap out of memory → 137 → その他 → exit 0</code>）ではなく、<strong>理解しやすい順</strong>（<code>124 → 137 → heap out of memory → 111 → exit 0</code>）——まず一番わかりやすい <code>124</code>（TLE 確定）から始め、次に一番奥深い <code>137</code>（両義性）、そして特殊な <code>heap out of memory</code> と <code>111</code>、最後に <code>exit 0</code>——で読み解きます。実際のコードの並び順（<code>111</code> が先頭）と読む順が違う理由は、Step 4 で明かします。</p>
+
+    <div class="gonote"><div class="box-k">GO メモ · プロセスの終了コードとシグナル — 128 + n の意味（第00章の復習＋深掘り）</div>
+      <p><strong>第00章 Step 5 で先出しした内容の再掲です。</strong>あちらでは「<code>0</code>＝正常 / <code>124</code>＝時間切れ / <code>137</code>＝SIGKILL」の3つだけに絞りましたが、この章は<strong>終了コードそのものが主役</strong>なので、改めて仕組みから押さえ直します。すでに腑に落ちている人は読み飛ばして構いません。</p>
+      <p>Unix のプロセスは、終わるときに <strong>0〜255 の整数</strong>（終了コード / exit status）を親に返します。慣習は明快で、<strong><code>0</code> は正常終了、それ以外はすべて何らかの異常</strong>です。プログラムが自分の意思で <code>exit(1)</code> のように返す値もあれば、<strong>シグナルで強制終了されたとき</strong>にシェルが合成する値もあります。<br>
+      後者が本章の主役です。プロセスがシグナル <code>n</code> で殺されると、シェル（や <code>timeout</code>）は終了コードを <strong><code>128 + n</code></strong> として報告します。だから<strong><code>137 = 128 + 9</code></strong>。シグナル <code>9</code> は <code>SIGKILL</code>——「問答無用でプロセスを消す」最強のシグナルです。同様に <code>143 = 128 + 15 = SIGTERM</code>（穏やかな終了要求）、<code>139 = 128 + 11 = SIGSEGV</code>（不正メモリアクセス）。<code>137</code> を見たら「あ、SIGKILL で殺されたな」と暗算で読めるようになると、この章の分岐が一気に見通せます。<br>
+      もう一つ、<code>timeout</code> コマンド（GNU coreutils）は特別な終了コードを持ちます。監視対象が時間内に終わらず打ち切ったとき、<code>timeout</code> 自身が <strong><code>124</code></strong> を返します。これは「シグナル由来の 128+n」とは別系統の、<code>timeout</code> 専用の合図です。本章のジャッジはこの <code>124</code> と <code>137</code> の2つを主な手がかりに、TLE と MLE を撃ち分けます。</p>
+    </div>
+
+    <h2 class="step" id="step-1"><span class="step-no">Step 1</span>exit 124 — timeout の専用コードで TLE を確定する</h2>
+    <p>まず一番わかりやすい分岐から。時間切れ（<code>TLE</code>）の確定です。</p>
+    <div class="file-tag">internal/judge/judge.go（decideCase より抜粋）</div>
+    <pre><code>	<span class="kw">case</span> c.ExitCode == <span class="st">124</span>:
+		<span class="cm">// timeout コマンドが時間超過で発火した専用コード（ランナーが -s TERM で送る）。</span>
+		<span class="cm">// TLE を elapsed に頼らず exit コードだけで確定できる。</span>
+		<span class="kw">return</span> TLE</code></pre>
+    <p>ジャッジは提出コードを、そのまま <code>./solution</code> と裸で走らせるわけではありません。無限ループする提出を永遠に待つわけにいかないので、<strong><code>timeout</code> コマンドで包んで</strong>実行します。イメージとしてはこうです（実際の中身は第05章で作ります）。</p>
+    <pre class="term"><code><span class="ps">$</span> timeout -s TERM 2 ./solution   <span class="cm"># 2秒で終わらなければ SIGTERM を送って打ち切る</span></code></pre>
+    <p><code>timeout 2 ./solution</code> は「<code>./solution</code> を走らせ、2秒経っても終わらなければ打ち切る」という道具です。そして<strong>打ち切ったとき、<code>timeout</code> 自身が終了コード <code>124</code> を返します</strong>。これは GNU coreutils の <code>timeout</code> が定めた専用コードで、「時間切れで対象を殺した」ことを一意に表します。</p>
+    <p>ここが設計の妙です。ジャッジは経過時間（<code>ElapsedMS</code>）も測っていますが、<strong>TLE の確定に時計を使っていません</strong>。時計は「2.0001 秒だった、これは超過か?」といった<strong>境界のブレ</strong>を持ち込みます。ホストの負荷やスケジューリングの揺らぎで、同じ提出が 1.99 秒にも 2.01 秒にもなり得る。それを「秒数の比較」で判定すると、判定がフレーキー（不安定）になります。</p>
+    <p>一方 <code>exit 124</code> は<strong>デジタルな事実</strong>です。「<code>timeout</code> が打ち切ったか、打ち切っていないか」の二択で、間にグレーがない。<strong>時計より終了コードのほうが確実</strong>——だから「時間超過を経過時間に頼らず、exit コードだけで確定できる」とコメントが宣言しているのです。これがこの章の最初の教訓、<strong>「読めるなら、時計より exit code を信じる」</strong>です。</p>
+    <p>コメントの <code>-s TERM</code> は「打ち切るとき、まず SIGTERM（穏やかな終了要求、シグナル15）を送る」という指定です。なぜいきなり SIGKILL で殺さず、まず穏やかに頼むのか——その伏線は次の Step 2 で回収されます。ここでは「<code>timeout</code> が時間切れで発火したら <code>124</code>、それは即 <code>TLE</code>」とだけ押さえてください。</p>
+
+    <h2 class="step" id="step-2"><span class="step-no">Step 2</span>exit 137 の両義性 — 同じコードが MLE にも TLE にもなる</h2>
+    <p>この章のいちばんの山場です。<code>decideCase</code> の中で、<strong>唯一 verdict が固定でない</strong>分岐——同じ <code>exit 137</code> が、文脈によって <code>MLE</code> にも <code>TLE</code> にもなる場所を読みます。</p>
+    <div class="file-tag">internal/judge/judge.go（decideCase より抜粋）</div>
+    <pre><code>	<span class="kw">case</span> c.ExitCode == <span class="st">137</span>:
+		<span class="cm">// SIGKILL(128+9)。時間超過は 124 で捕捉済みなので、ここに来る 137 は</span>
+		<span class="cm">// 原則カーネル OOM killer による停止（＝メモリ超過）とみなす。</span>
+		<span class="cm">// 例外: 提出が SIGTERM を握りつぶし timeout の -k(3s猶予) で KILL された場合も 137。</span>
+		<span class="cm">// その場合 elapsed は必ず制限時間を超えるので、制限超過のときだけ TLE に倒す</span>
+		<span class="cm">// （制限時間内で 137 になったものは真の OOM なので MLE のまま）。</span>
+		<span class="kw">if</span> c.ElapsedMS &gt; p.TimeLimitMS {
+			<span class="kw">return</span> TLE
+		}
+		<span class="kw">return</span> MLE</code></pre>
+    <p>GO メモで確認したとおり、<code>137 = 128 + 9 = SIGKILL</code>。プロセスが「問答無用で殺された」ことを表します。ではジャッジの世界で、誰がプロセスを SIGKILL で殺すのか。犯人は<strong>2人</strong>いて、そこにこの分岐の難しさが凝縮しています。</p>
+
+    <p><strong>犯人その1: カーネルの OOM killer（＝メモリ超過）。</strong> 提出コードが巨大な配列を確保し続けると、コンテナに与えたメモリ上限（例: 256MB）を食い潰します。すると Linux カーネルの <strong>OOM killer</strong>（Out Of Memory killer）——メモリが枯渇したときに、原因のプロセスを問答無用で SIGKILL する仕組み——が発火します。殺されたプロセスの終了コードは <code>137</code>。これが<strong>メモリ超過＝<code>MLE</code></strong> の正体です。要件どおり、MLE 判定は「コンテナが OOM で殺されたか」で行い、これが <code>137</code> として現れます。</p>
+
+    <p><strong>犯人その2: <code>timeout</code> の <code>-k</code> による強制 KILL（＝時間超過）。</strong> ここが厄介です。Step 1 で、<code>timeout</code> はまず SIGTERM（穏やかな終了要求）を送ると言いました。しかし<strong>行儀の悪い提出は SIGTERM を握りつぶせます</strong>。プログラムは SIGTERM を受け取っても「無視する」ハンドラを登録できるので、「終わってくれ」という穏やかな依頼を蹴って走り続けられるのです。これに備えて、実際の <code>timeout</code> 呼び出しの骨子はこうなっています（実物は経過時間とメモリを測る <code>/usr/bin/time</code> のラッパー込みで、フラグ順も少し違います。全文は第05章で <code>loop.sh</code> として読みます）。</p>
+    <pre class="term"><code><span class="ps">$</span> timeout -s TERM -k 3 2 ./solution
+<span class="cm"># 2秒で SIGTERM。それでも死ななければ +3秒後(=5秒時点)に SIGKILL でとどめを刺す</span></code></pre>
+    <p><code>-k 3</code>（kill-after 3秒）は「SIGTERM を送っても3秒以内に死ななければ、SIGKILL でとどめを刺す」という保険です。この SIGKILL で殺された提出も、終了コードは<strong><code>137</code></strong>。つまり<strong>「メモリ超過で OOM killer に殺された」場合も、「時間超過して SIGTERM を握りつぶし SIGKILL でとどめを刺された」場合も、どちらも同じ <code>137</code></strong> になってしまう。exit code だけでは、この2人の犯人を見分けられません。</p>
+
+    <div class="ascii">exit 137 に至る2つの道 — 同じコード、違う原因
+
+  ┌── 犯人1: OOM killer（メモリ超過）─────────────┐
+  │ 巨大配列でコンテナのメモリ上限を突破          │
+  │   → カーネルが SIGKILL → 137                 │
+  │   → elapsed は制限時間内のことが多い          │  → MLE
+  └──────────────────────────────────────────────┘
+
+  ┌── 犯人2: timeout -k の強制 KILL（時間超過）──┐
+  │ 無限ループ + SIGTERM を握りつぶし             │
+  │   → timeout が SIGTERM(2s) → 効かない         │
+  │   → timeout が SIGKILL(2+3=5s) → 137          │
+  │   → elapsed は必ず制限時間を超える            │  → TLE
+  └──────────────────────────────────────────────┘
+
+  見分ける鍵 → elapsed が制限時間を超えているか</div>
+
+    <p>では、どうやって2人を見分けるのか。<strong>ここで初めて経過時間（<code>ElapsedMS</code>）が効きます。</strong> 決め手はこの観察です——<strong>犯人2（時間超過ルート）で <code>137</code> になった提出は、必ず制限時間を超えている</strong>。だって SIGTERM が飛ぶのは制限時間(2秒)の瞬間で、SIGKILL でとどめを刺されるのはそのさらに3秒後(5秒)。どうやっても経過時間は制限時間より長くなります。一方、犯人1（メモリ超過ルート）は、時間とは無関係にメモリが尽きた瞬間に殺されるので、<strong>制限時間内でも起こりえます</strong>。だから分岐はこうなります。</p>
+    <ul>
+      <li><code>c.ElapsedMS &gt; p.TimeLimitMS</code>（制限時間を超えている）→ <strong>犯人2 とみなして <code>TLE</code></strong>。時間超過して SIGTERM を握りつぶした提出です。</li>
+      <li>そうでない（制限時間内で <code>137</code> になった）→ <strong>犯人1 とみなして <code>MLE</code></strong>。時間には余裕があったのにメモリで死んだ＝真の OOM です。</li>
+    </ul>
+    <p>この分岐の美しさは、<strong>「同じ終了コードでも、文脈（経過時間）で verdict が変わる」</strong>ことを、たった1本の <code>if</code> で表現していることです。exit code は verdict の<strong>原材料</strong>であって、verdict そのものではない——<code>137</code> という原材料を、<code>ElapsedMS</code> という文脈で調理して、初めて <code>MLE</code> か <code>TLE</code> かが決まる。この章のタイトル「判定の種類」の一番奥にあるのが、この一手です。</p>
+    <p>そして Step 1 で残した伏線——「なぜ <code>timeout</code> はいきなり SIGKILL せず、まず SIGTERM を送るのか」——もここで回収されます。行儀のいい提出なら SIGTERM で素直に止まり、終了コードは <code>124</code>（Step 1 のルート）で <strong>きれいに TLE 確定</strong>できる。SIGTERM を握りつぶす行儀の悪い提出だけが、この <code>137</code> の両義的な世界に落ちてくる。<code>timeout</code> の「まず穏やかに、効かなければ強制的に」という二段構えが、TLE 判定の精度を支えているのです。</p>
+
+    <div class="box hazard"><div class="box-k">⚠ 落とし穴 — 137 を機械的に MLE にしてはいけない</div>
+      <p><code>137 = SIGKILL = OOM killer = MLE</code>——この連想は<strong>7割正しく、3割危険</strong>です。もし <code>case c.ExitCode == 137: return MLE</code> と機械的に書いてしまうと、<strong>SIGTERM を握りつぶして時間超過した提出が、すべて MLE に化けます</strong>。「メモリは全然使っていないのに MLE と言われた」——提出者はジャッジを疑い、自分のバグ（無限ループ）を見つけられません。<code>137</code> を見たら必ず「これは本当にメモリ由来か? 時間超過が化けたものではないか?」を <code>ElapsedMS</code> で問い直す。<strong>終了コードは容疑者を絞るだけで、有罪判決は文脈が下す</strong>——このひと手間が、信頼される TLE / MLE 判定の分かれ目です。そしてもう一つ——ここで <code>137</code> を「原則 OOM」と仮定できるのは、<strong><code>timeout</code> の仕組みが、行儀のいい時間超過をプロトコルのレベルで <code>124</code> として先に捕まえてくれている</strong>からです。素直に SIGTERM で止まる時間超過は <code>124</code> になって Step 1 で確定するので、この <code>137</code> の枝に落ちてくる時間超過は「SIGTERM を握りつぶした行儀の悪いもの」だけ——だから残りを原則 OOM とみなせる。<code>124</code> と <code>137</code> は排他的な終了コードなので <code>case</code> の並び順が挙動を変えるわけではありません。効いているのは <code>timeout</code> による<strong>時間超過の先取り</strong>のほうです。</p>
+    </div>
+
+    <h2 class="step" id="step-3"><span class="step-no">Step 3</span>node の "heap out of memory" — V8 の自死を MLE と読む</h2>
+    <p>3つ目は、<strong>特定の言語（Node.js）に固有の MLE</strong> です。ここは exit code だけでなく、<strong>標準エラー出力の中身の文字列</strong>まで見て判定します。</p>
+    <div class="file-tag">internal/judge/judge.go（decideCase より抜粋）</div>
+    <pre><code>	<span class="kw">case</span> c.ExitCode != <span class="st">0</span> &amp;&amp; bytes.Contains(c.Stderr, []<span class="ty">byte</span>(<span class="st">"heap out of memory"</span>)):
+		<span class="cm">// node はコンテナ上限より先に V8 ヒープ上限で自死する。</span>
+		<span class="cm">// 正常終了(exit 0)の提出が偶然この文字列を出力しても MLE にしないよう、</span>
+		<span class="cm">// 異常終了を条件に加える。</span>
+		<span class="kw">return</span> MLE</code></pre>
+    <p>Step 2 の <code>137</code> は「カーネルの OOM killer がプロセスを外から殺す」パターンでした。ところが Node.js（JavaScript / TypeScript の実行系）は、それとは<strong>別のメモリ超過の死に方</strong>をします。Node の内側で動く V8 エンジンは、<strong>自分専用のヒープ上限</strong>を持っていて、コンテナのメモリ上限（例: 256MB）に達する<strong>前に</strong>、V8 自身のヒープ上限（デフォルトで数百MB〜)に先に突き当たることがあります。そのとき V8 は OOM killer に殺されるのを待たず、<strong>自分から</strong>致命的エラーを吐いて終了します。その断末魔が、この文字列です。</p>
+    <pre class="term"><code><span class="out">FATAL ERROR: Reached heap limit Allocation failed - JavaScript heap out of memory</span></code></pre>
+    <p>つまり Node のメモリ超過は、<code>137</code>（外から SIGKILL）ではなく、<strong>V8 の自死</strong>——非0の終了コード + <code>"heap out of memory"</code> という決まり文句——として現れます。コンテナの OOM killer より先に V8 が音を上げるので、<code>137</code> の分岐では捕まえきれない。だから「標準エラーにこの文字列があるか」を追加の手がかりにして、Node 特有の MLE を拾います。これも「exit code は原材料の1つにすぎない」ことの好例です——ときには stderr の文字列という別の原材料も混ぜて調理する。</p>
+    <p>この分岐で<strong>いちばん大事なのは、条件が <code>c.ExitCode != 0 &amp;&amp;</code> で始まっていること</strong>です。なぜ「異常終了(非0)であること」をわざわざ AND で足しているのか。それは<strong>誤爆を防ぐため</strong>です。もし条件が「stderr に <code>heap out of memory</code> が含まれる」だけだったら、こんな事故が起きます——<strong>正常に動いて正解を出した提出</strong>が、たまたまデバッグ用に <code>console.error("heap out of memory を検証中")</code> のような<em>文字列</em>を stderr に出していたら、その正解が <code>MLE</code> に化けてしまう。<code>ExitCode != 0</code>（＝本当に異常終了している）を条件に加えることで、「正常終了したのに、たまたまその文字列を含んでいた」提出を<strong>MLE から救い出しています</strong>。</p>
+    <p>ちなみにこの分岐が switch の中で <strong><code>137</code> より前</strong>にあるのにも意味があります。node が V8 自死したとき、後段の処理次第では終了コードが <code>137</code> になる経路もありえますが、その前にこの「stderr に決まり文句」の枝で先に <code>MLE</code> を確定させておけば、<code>137</code> の両義的な判定（Step 2）に迷い込ませずに済みます。特殊で確度の高い証拠（言語固有の断末魔）を先に、一般的で両義的な証拠（<code>137</code>）を後に——ここでも「特殊を先、一般を後」の序列が効いています。</p>
+
+    <div class="gonote"><div class="box-k">GO メモ · bytes.Contains と []byte("...") — 文字列を "含むか" を byte 列で見る</div>
+      <p><code>bytes.Contains(c.Stderr, []byte("heap out of memory"))</code> は「バイト列 <code>c.Stderr</code> の中に、部分バイト列 <code>"heap out of memory"</code> が含まれるか」を <code>bool</code> で返します。<code>strings.Contains</code> の <code>[]byte</code> 版だと思ってください。<br>
+      なぜ <code>string</code> ではなく <code>[]byte</code> で扱うのか。<code>c.Stderr</code> は提出コードが吐いた<strong>生のバイト列</strong>で、フィールドの型が <code>[]byte</code> だからです（第01章で見た「プロセスの出力を捕まえる」の産物）。<code>string(c.Stderr)</code> と変換してから <code>strings.Contains</code> を使うこともできますが、その変換は<strong>バイト列全体をコピー</strong>します。stderr は大きいことがある（提出のクラッシュスタックが延々と出る等）ので、コピーを避けて <code>bytes.Contains</code> で直接見るのは、地味ですが理にかなった選択です。<br>
+      <code>[]byte("heap out of memory")</code> は、探したい文字列リテラルをその場で <code>[]byte</code> に変換しています。これはコンパイル時に決まる定数文字列なので、変換コストは無視できます。</p>
+    </div>
+
+    <h2 class="step" id="step-4"><span class="step-no">Step 4</span>exit 111 と その他非0 — IE と RE の切り分け</h2>
+    <p>残る2つの分岐を、まとめて読みます。switch の<strong>先頭</strong>にある <code>111</code> と、switch の<strong>末尾</strong>にある「その他の非0」です。この2つは、第00章で強調した<strong>「非は誰にあるか」</strong>——提出者かジャッジか——の境界を引いています。</p>
+    <div class="file-tag">internal/judge/judge.go（decideCase より抜粋）</div>
+    <pre><code>	<span class="kw">case</span> c.ExitCode == <span class="st">111</span>:
+		<span class="kw">return</span> IE <span class="cm">// sql シード投入失敗（問題データ側の異常）</span>
+	<span class="cm">// …（124 / heap out of memory / 137 の分岐。Step 1〜3 で解説）</span>
+	<span class="kw">case</span> c.ExitCode != <span class="st">0</span>:
+		<span class="kw">return</span> RE</code></pre>
+
+    <p><strong>exit 111 → IE（ジャッジ側の非）。</strong> <code>111</code> は、このジャッジが<strong>自分で決めた特別な終了コード</strong>です。SQL 問題を採点するとき、提出された SQL を走らせる<em>前に</em>、採点の土台となる初期テーブル（シードデータ）をDBに投入します。その<strong>シード投入に失敗した</strong>ときに、ランナースクリプト（<code>sqlloop.sh</code>）がそのケース行の exit フィールドに <code>111</code> を報告する（<code>___CASE___ &lt;name&gt; 111 0 0</code>）よう決めてあるのです（スクリプト自体は <code>exit 0</code> で終わり、<code>111</code> はあくまで「そのケースの終了コード」として運ばれます）。これは提出された SQL が悪いのではなく、<strong>問題データ側が壊れている</strong>——つまりジャッジ（運営）側の落ち度です。だから <code>WA</code>（提出者のせい）ではなく <code>IE</code>（こちらのせい）に倒します。第00章の <code>IE</code> の定義そのままです。</p>
+    <p>この <code>111</code> が switch の<strong>先頭</strong>にある理由も、いま読めば明らかです。ポイントは、<code>111</code> は「ただの非0」でもあるということ。もし <code>111</code> の判定を後回しにすると、末尾の<strong>一般の非0の受け皿</strong>（<code>case c.ExitCode != 0: return RE</code>）や、<code>c.ExitCode != 0 &amp;&amp; …</code> で始まる <code>heap out of memory</code> 分岐に<strong>先に食われて</strong>、<code>IE</code> にたどり着けなくなります。「ジャッジ側の故障（<code>111</code>）」という最も強い主張を、それらの一般的な非0の解釈より<strong>先に</strong>拾ってやる必要がある。だから <code>111</code> を switch の先頭に置いて、<code>IE</code> を最優先で立てる——「疑わしいときは提出者を疑わない」というこのジャッジの良心です。</p>
+
+    <p><strong>その他の非0 → RE（提出者の非）。</strong> switch の最後の <code>case c.ExitCode != 0: return RE</code> は、<strong>ここまでのどの特殊コードにも当てはまらなかった異常終了</strong>を、すべて <code>RE</code>（実行時エラー）にまとめる受け皿です。ゼロ除算、配列外アクセス、null 参照、panic——提出コードが<strong>自力でクラッシュした</strong>あらゆるケースがここに落ちます。<code>111</code>（ジャッジの非）でも <code>124</code>（時間切れ）でも <code>137</code>（メモリ/時間）でも <code>heap out of memory</code>（node の MLE）でもない、正体不明の異常終了は、<strong>「提出コードが壊れている」＝RE</strong> と判断する。これが妥当なのは、ここまでの分岐で「ジャッジ側の非」と「資源超過」を<strong>すべて先に除外済み</strong>だからです。残ったものは提出コード自身の問題である、と論理的に言い切れる。<strong>switch の順序が「特殊なものから、一般的なものへ」だからこそ、最後の <code>RE</code> が正しく機能する</strong>のです。</p>
+
+    <p>ここまでで switch の全 <code>case</code> を読みました。第00章で「異常を先に潰す」と言った、その「異常」の中身が、<code>111 / 124 / heap out of memory / 137 / その他非0</code> の5枝だったわけです。読む順を実コードの並び（<code>111</code> 先頭）と変えたのは、<strong>一番わかりやすい <code>124</code> から入り、一番難しい <code>137</code> を中核に据えるため</strong>でした。実際のコードでは <code>111</code> と <code>124</code> が先頭に来ますが、<code>111</code> を先頭に置くのは「一般の非0の枝（<code>heap</code> / 末尾の <code>RE</code>）に食われる前に <code>IE</code> を最優先で立てる」ための、れっきとした<strong>実行上の序列</strong>の要請です（<code>124</code> の位置は排他条件どうしなので順序に依存しませんが、読みの都合で先頭近くに置いてあります）。読む順と実装順のこのズレ自体が、「switch の並びには意味がある」ことの証拠になっています。</p>
+
+    <h2 class="step" id="step-5"><span class="step-no">Step 5</span>exit 0 — ここでようやく出力比較</h2>
+    <p>switch のすべての <code>case</code> を潜り抜けたということは、<strong>終了コードが <code>0</code>（正常終了）だった</strong>ことを意味します。ここで初めて、第00章の主役 <code>CompareOutput</code> の出番が来ます。</p>
+    <div class="file-tag">internal/judge/judge.go（decideCase より抜粋）</div>
+    <pre><code>	}
+	<span class="cm">// exit 0: 出力比較</span>
+	<span class="kw">if</span> c.ElapsedMS &gt; p.TimeLimitMS {
+		<span class="kw">return</span> TLE
+	}
+	<span class="kw">if</span> p.Type == <span class="st">"sql"</span> {
+		ok, err := CompareResultSet(string(c.Stdout), tc.Expected, p.SQLOrderMatters)
+		<span class="kw">if</span> err != <span class="kw">nil</span> || !ok {
+			<span class="kw">return</span> WA
+		}
+		<span class="kw">return</span> AC
+	}
+	<span class="kw">if</span> !CompareOutput(string(c.Stdout), tc.Expected) {
+		<span class="kw">return</span> WA
+	}
+	<span class="kw">return</span> AC</code></pre>
+    <p>ただし、比較の前に<strong>もう一つ TLE の関門</strong>があります。<code>if c.ElapsedMS &gt; p.TimeLimitMS</code>。「正常終了（exit 0）はしたのに、経過時間が制限を超えていた」ケースを、ここで <code>TLE</code> に倒します。「正常に終わったのに時間超過?」と不思議に思うかもしれませんが、これは <code>timeout</code> の <code>124</code> で<strong>捕まえきれなかった取りこぼし</strong>の保険です。たとえば制限時間ぎりぎり（1.99秒）で正常終了したが、コンテナ内のオーバーヘッドを含めた実測はわずかに制限を超えていた、といった際どいケース。<strong>Step 1 の <code>exit 124</code>（デジタルな時間切れ）と、ここの <code>ElapsedMS</code> 比較（アナログな時間超過）の二段構えで、TLE を守っている</strong>わけです。exit code で確実に取れるものは exit code で、取りこぼしは時計で拾う——役割分担が効いています。</p>
+    <p>この関門も抜けて、<strong>初めて出力比較</strong>です。ここで問題の種類（<code>p.Type</code>）で枝分かれします。SQL 問題なら <code>CompareResultSet</code>（結果セットの一致比較、第06章）、通常の問題なら第00章で作った <code>CompareOutput</code>。一致すれば <code>AC</code>、しなければ <code>WA</code>。第00章で作った出力比較のロジックが、<strong>この長い分岐の一番奥、「異常が何一つなかったときにだけ」呼ばれる</strong>——その位置関係が、いま exit code の側から見てもはっきり見えます。採点とは「まず正常に走ったことを確かめ、それから出力を比べる」。<code>decideCase</code> はその手続きを、そのままコードの縦の流れにしたものでした。</p>
+
+    <h2 class="step" id="step-6"><span class="step-no">Step 6</span>判定ループ — 打ち切りと、AC を出さない勇気</h2>
+    <p><code>decideCase</code> は「1ケースの verdict」を決めます。しかし1提出は複数ケースを持ちます。それらを束ね、提出全体の verdict を決めるのが <code>JudgeSubmission</code> の<strong>判定ループ</strong>です。第00章で骨格を眺めましたが、この章では<strong>ループの本体と、その後ろにある IE の門番</strong>を、実物のコードで読みます。ここに、この章のもう一つの主題「疑わしいときは AC を出さない」が凝縮しています。</p>
+
+    <div class="file-tag">internal/judge/judge.go（JudgeSubmission・判定ループ部分）</div>
+    <pre><code>	<span class="cm">// ランナーが期待より多くのケースを報告したら偽装の疑い（NF-08）→ IE</span>
+	<span class="kw">if</span> len(outcome.Cases) &gt; len(job.Cases) {
+		<span class="kw">return</span> &amp;<span class="ty">JudgeOutput</span>{Verdict: IE,
+			InternalNote: fmt.Sprintf(<span class="st">"runner reported %d cases, expected %d"</span>, len(outcome.Cases), len(job.Cases))}
+	}
+
+	<span class="cm">// --- 判定 ---</span>
+	out := &amp;<span class="ty">JudgeOutput</span>{Verdict: AC}
+	<span class="kw">for</span> i, tc := <span class="kw">range</span> job.Cases {
+		<span class="kw">var</span> v <span class="ty">Verdict</span>
+		<span class="kw">var</span> timeMS, memKB <span class="ty">int</span>
+		<span class="kw">var</span> actual, stderrStr <span class="ty">string</span>
+
+		<span class="kw">if</span> i &lt; len(outcome.Cases) {
+			c := outcome.Cases[i]
+			<span class="cm">// ランナーが返したケース名が期待順序と一致するか照合（順序ズレ＝IE）</span>
+			<span class="kw">if</span> want := caseName(i + <span class="st">1</span>); c.Name != want {
+				v = IE
+				out.InternalNote = fmt.Sprintf(<span class="st">"case order mismatch: got %q want %q"</span>, c.Name, want)
+			} <span class="kw">else</span> {
+				v = decideCase(c, job.Problem, tc)
+				timeMS, memKB = c.ElapsedMS, c.MaxRSSKB
+				actual = truncateStr(string(c.Stdout), snippetLimit)
+				stderrStr = truncateStr(string(c.Stderr), snippetLimit)
+			}
+		} <span class="kw">else</span> {
+			<span class="cm">// ランナーがこのケースを報告する前にコンテナごと終了した</span>
+			<span class="kw">switch</span> {
+			<span class="kw">case</span> runRes.TimedOut:
+				v = TLE
+				timeMS = job.Problem.TimeLimitMS
+			<span class="kw">case</span> runRes.ExitCode == <span class="st">137</span>:
+				v = MLE
+			<span class="kw">default</span>:
+				v = IE
+				out.InternalNote = fmt.Sprintf(<span class="st">"runner ended early (exit %d, done=%v): %s"</span>,
+					runRes.ExitCode, outcome.Done, truncateStr(string(runRes.Stderr), <span class="st">1024</span>))
+			}
+		}
+
+		<span class="kw">if</span> onCase != <span class="kw">nil</span> {
+			onCase(tc, v, timeMS, memKB, actual, stderrStr)
+		}
+		<span class="cm">// …（実行時間・メモリの最大値を out に記録）</span>
+		<span class="kw">if</span> v != AC {
+			out.Verdict = v
+			<span class="kw">break</span> <span class="cm">// 最初の非 AC で打ち切り（§5.1）</span>
+		}
+	}
+	<span class="cm">// 全ケース AC でも、ランナーが最後まで到達していない／出力が切り詰められた場合は</span>
+	<span class="cm">// 採点結果が不完全なので AC を確定させない（NF-07/08）。</span>
+	<span class="kw">if</span> out.Verdict == AC {
+		<span class="kw">if</span> !outcome.Done {
+			out.Verdict = IE
+			out.InternalNote = <span class="st">"runner did not reach ___DONE___ (incomplete judging)"</span>
+		} <span class="kw">else if</span> runRes.Truncated {
+			out.Verdict = IE
+			out.InternalNote = <span class="st">"run output truncated at host limit"</span>
+		}
+	}
+	<span class="kw">return</span> out</code></pre>
+
+    <p>このループには、この章の主題である<strong>「疑わしいときは AC を出さない」</strong>を体現する仕掛けが、4つ埋め込まれています。順に読みます。</p>
+
+    <p><strong>① 最初の非 AC で打ち切り。</strong> ループの末尾の <code>if v != AC { out.Verdict = v; break }</code>。提出全体の verdict を <code>AC</code> で楽観初期化し、ケースを1つずつ <code>decideCase</code> にかけ、非 AC が出た瞬間にその verdict を採用して <code>break</code> します。10ケース中3番目で <code>WA</code> なら、4番目以降は採点しません。全ケースを <code>AC</code> で走り切ったときだけ、初期値の <code>AC</code> が生き残る——これが MVP 仕様（<code>02_mvp_spec.md</code>）§5.1「最初の非 AC で打ち切り」です（第00章で骨格として見た部分の実物）。</p>
+
+    <p><strong>② ケース数の偽装検知（IE）。</strong> ループの<strong>手前</strong>にある <code>if len(outcome.Cases) &gt; len(job.Cases)</code>。ランナー（コンテナ内で提出コードを回すスクリプト）が、<strong>ジャッジが与えたケース数より多くのケース結果を報告してきたら</strong>、それは偽装の疑いです。10ケースしか渡していないのに「12ケース全部 AC でした」と報告するランナーは、信用できません（提出コードがランナーを乗っ取って偽の成功を報告している可能性すらある）。だから<strong>比較すら始めずに即 <code>IE</code></strong>。「報告が期待と食い違うなら、採点そのものを信用しない」という強い姿勢です。</p>
+
+    <p><strong>③ ケース名の順序照合（IE）。</strong> ループ内の <code>if want := caseName(i + 1); c.Name != want</code>。ジャッジはケースファイルを <code>c000001</code>, <code>c000002</code> …と<strong>ゼロ埋め6桁の固定幅</strong>で名付けています（<code>caseName</code>）。これはシェルの glob 展開（辞書順）と Go 側のループ順（数値順）を一致させるための工夫です。もし i 番目に返ってきた結果の名前が期待する <code>c000001</code> と違ったら、<strong>ケースの順序がズレている</strong>——どの入力に対する結果なのか対応が取れなくなっているので、その提出は <code>IE</code>。「3番目の入力の結果を1番目の期待値と比べてしまう」ような静かな取り違えを、名前の照合で防いでいます。</p>
+
+    <p><strong>④ <code>___DONE___</code> 未到達 / 出力切り詰めの IE 化——この章のクライマックス。</strong> ループを抜けた後の <code>if out.Verdict == AC { ... }</code> の塊が、「AC を出さない勇気」の核心です。ランナーは全ケースを走らせ終えると、最後に <code>___DONE___</code> という<strong>終了マーカー</strong>を出力する約束になっています（この行フレームプロトコルの解釈は第01章で作りました。マーカーを出すランナー側のスクリプトは第05章の <code>loop.sh</code>）。ところが——<strong>全ケースが <code>AC</code> だったのに、この <code>___DONE___</code> が出力に無かったら?</strong></p>
+    <p>それは「全部正解だった」のではなく、<strong>「途中でコンテナごと死んで、採点が最後まで終わっていない」</strong>可能性が高い。たとえば10ケース中3ケースまで <code>AC</code> で流れたところでコンテナが OOM で吹き飛ぶと、報告された3ケースは全部 <code>AC</code>、しかし <code>___DONE___</code> は来ません。このとき<strong>楽観初期化の <code>AC</code> をそのまま返してしまったら、「3ケースしか採点していないのに AC」という最悪の誤判定</strong>になります。それを防ぐのが <code>if !outcome.Done { out.Verdict = IE }</code>。<strong>全 AC に見えても、完走の証（<code>___DONE___</code>）が無ければ AC を取り消して <code>IE</code>（不完全採点）に倒す</strong>。同じく <code>runRes.Truncated</code>（ホスト側の出力上限で結果が切り詰められた）ときも、判定の材料が欠けているので <code>AC</code> を確定させません。</p>
+    <p>これがこのジャッジの<strong>思想の中心</strong>です。<code>IE</code> は「提出者に非はない、こちらが採点しきれなかった」という正直な白旗でした（第00章）。<strong>採点が不完全なまま緑（AC）を出すくらいなら、正直に「採点できませんでした（IE）」と言う</strong>。誤って AC を出せば、提出者は「通った」と信じて次に進んでしまう。それは <code>WA</code> を出すより罪が重い。「疑わしきは AC を出さず」——exit code を Step 1〜5 であれほど細かく解釈してきたのも、突き詰めればこの一点、<strong>「確信が持てないものを AC にしない」</strong>ための執念でした。</p>
+    <p>ちなみに、ループ内の <code>else</code> 節（<code>i &gt;= len(outcome.Cases)</code>、つまりランナーが報告しきれなかったケース）でも同じ思想が働いています。コンテナが早々に死んで結果が欠けたケースは、<code>runRes.TimedOut</code> なら <code>TLE</code>、<code>runRes.ExitCode == 137</code> なら <code>MLE</code>、それ以外は正体不明なので <code>IE</code>。ここでも Step 1〜2 で読んだ exit code の解釈（<code>137 = MLE</code>）が、ケース単位ではなく<strong>コンテナ全体の死因</strong>を読むために再利用されているのが見て取れます。</p>
+
+    <div class="box hazard"><div class="box-k">⚠ 落とし穴 — ___DONE___ 未到達を AC のままにする罠</div>
+      <p>この章で最も見落とされやすい罠です。判定ループは <code>out.Verdict</code> を <code>AC</code> で初期化し、非 AC が出るまで <code>AC</code> のまま。ここで<strong>ループを回し終えたら即 <code>return out</code> してしまう</strong>実装を書くと、「途中でコンテナが死んで、報告されたケースがたまたま全部 AC」という提出が、<strong>堂々と AC で通ってしまいます</strong>。テストでも気づきにくい——だって「全ケース AC」なのだから、緑が出ても不自然に見えない。しかし実際には<strong>採点が完了していない</strong>。<code>outcome.Done</code>（<code>___DONE___</code> に到達したか）と <code>runRes.Truncated</code>（出力が切れていないか）という<strong>「完走の証」を最後に確認し、無ければ AC を取り消す</strong>——この後始末を省くと、ジャッジは「正解でないものを正解と言う」最悪の裏切りをします。<code>WA</code> の誤りはユーザーを怒らせるだけですが、<code>AC</code> の誤りはユーザーを<strong>騙します</strong>。だから「AC は、完走を確認してから初めて確定する」。</p>
+    </div>
+
+    <div class="box do"><div class="box-k">▸ 動かして確認</div>
+      <p>この章の判定ロジックそのものは Docker 実行を通らないと動きませんが、その<strong>原材料</strong>——ランナーの出力（プロトコル）を <code>CaseOutcome</code> に読み解く部分——は、Docker 不要で機械検証できます。判定ループが読む <code>outcome.Cases[i].ExitCode</code> や <code>outcome.Done</code> が、生の出力から正しく取り出せることを確かめます。</p>
+      <pre class="term"><code><span class="ps">$</span> cd backend
+<span class="ps">$</span> go test ./internal/judge/ -run TestParseRunOutput -v
+<span class="out">=== RUN   TestParseRunOutput
+--- PASS: TestParseRunOutput (0.00s)
+=== RUN   TestParseRunOutputIncomplete
+--- PASS: TestParseRunOutputIncomplete (0.00s)
+=== RUN   TestParseRunOutputMalformed
+--- PASS: TestParseRunOutputMalformed (0.00s)
+PASS
+ok      judge/internal/judge    0.009s</span></code></pre>
+      <p><code>TestParseRunOutput</code> は、まさにこの章の主役 <code>exit 137</code> を含むランナー出力を読ませています——<code>___CASE___ c002 137 1.95 261120</code> という行を解釈して、<code>ExitCode = 137</code> / <code>ElapsedMS = 1950</code> / <code>MaxRSSKB = 261120</code> を取り出す。この <code>137</code> と <code>1950</code>（＝経過1.95秒）を <code>decideCase</code> の Step 2 の分岐に食わせると、制限時間次第で <code>MLE</code> か <code>TLE</code> が決まるわけです。<code>TestParseRunOutputIncomplete</code> は Step 6 ④の要——<strong><code>___DONE___</code> の無い出力で <code>res.Done == false</code> になること</strong>——を固定しています。この <code>Done == false</code> こそが、全 AC を <code>IE</code> に倒す引き金でした。<code>TestParseRunOutputMalformed</code> は「CASE 行の exit code が数値でない／フィールド不足」を握りつぶさず <code>error</code> にする（＝後段で IE 化する）ことを守っています。</p>
+    </div>
+
+    <h2 class="step" id="step-7"><span class="step-no">Step 7</span>手を動かす — decideCase に 137 を食わせて確かめる</h2>
+    <p>この章の核心——「同じ <code>137</code> が文脈で <code>MLE</code> にも <code>TLE</code> にもなる」——を、<code>decideCase</code> を直接呼ぶテストを書いて体で確かめます。<code>compare_test.go</code> や <code>protocol_test.go</code> と同じ <code>package judge</code> の中に、次のようなテストを一時的に足してみてください（<code>decideCase</code> は非公開関数ですが、同じパッケージ内のテストからは呼べます）。</p>
+    <div class="file-tag">internal/judge/decide_experiment_test.go（実験用に新規作成）</div>
+    <pre><code><span class="kw">package</span> judge
+
+<span class="kw">import</span> (
+	<span class="st">"testing"</span>
+
+	<span class="st">"judge/internal/store"</span>
+)
+
+<span class="kw">func</span> TestDecide137(t *testing.<span class="ty">T</span>) {
+	p := &amp;store.<span class="ty">Problem</span>{TimeLimitMS: <span class="st">2000</span>} <span class="cm">// 制限時間 2 秒</span>
+	tc := store.<span class="ty">Testcase</span>{}
+
+	<span class="cm">// (A) 137 かつ 制限時間内(1.5秒) → 真の OOM → MLE</span>
+	within := decideCase(CaseOutcome{ExitCode: <span class="st">137</span>, ElapsedMS: <span class="st">1500</span>}, p, tc)
+	<span class="kw">if</span> within != MLE {
+		t.Errorf(<span class="st">"137 within TL: got %s, want MLE"</span>, within)
+	}
+
+	<span class="cm">// (B) 137 かつ 制限時間超過(5秒) → SIGTERM 握りつぶし → TLE</span>
+	over := decideCase(CaseOutcome{ExitCode: <span class="st">137</span>, ElapsedMS: <span class="st">5000</span>}, p, tc)
+	<span class="kw">if</span> over != TLE {
+		t.Errorf(<span class="st">"137 over TL: got %s, want TLE"</span>, over)
+	}
+}</code></pre>
+    <p>この2ケースが、Step 2 の分岐そのものです。(A) は「制限2秒に対し経過1.5秒＝時間内なのに 137」——時間には余裕があったのにメモリで死んだ、真の OOM なので <code>MLE</code>。(B) は「制限2秒に対し経過5秒＝時間超過の 137」——SIGTERM を握りつぶして <code>timeout -k</code> にとどめを刺された、だから <code>TLE</code>。走らせて緑を確認してください。</p>
+    <pre class="term"><code><span class="ps">$</span> go test ./internal/judge/ -run TestDecide137 -v
+<span class="out">=== RUN   TestDecide137
+--- PASS: TestDecide137 (0.00s)
+PASS</span></code></pre>
+    <div class="box do"><div class="box-k">▸ さらに手を動かすなら</div>
+      <p>予想を立ててから走らせ、当たったかを確かめてください。答えはすべて <code>decideCase</code> のコードに書いてあります。</p>
+      <ol>
+        <li><code>decideCase(CaseOutcome{ExitCode: 124}, p, tc)</code> は? — <code>timeout</code> の専用コードなので、経過時間に関係なく <code>TLE</code> のはず。</li>
+        <li><code>decideCase(CaseOutcome{ExitCode: 1}, p, tc)</code> は? — どの特殊コードにも当たらない非0なので <code>RE</code> のはず。<code>exit 2</code> でも <code>139</code>(SIGSEGV) でも同じ <code>RE</code> になることを確かめる。</li>
+        <li><code>decideCase(CaseOutcome{ExitCode: 1, Stderr: []byte("JavaScript heap out of memory")}, p, tc)</code> は? — 非0 かつ 決まり文句あり、なので <code>MLE</code> のはず。次に <code>ExitCode: 0</code> に変えると、<strong>正常終了なので条件 <code>ExitCode != 0</code> が偽になり</strong>、この枝を素通りして出力比較に進む（＝MLE にならない）ことを確認し、Step 3 の「誤爆防止」を体で理解する。</li>
+        <li>（実験）<code>decideCase</code> の <code>137</code> の分岐から <code>if c.ElapsedMS &gt; p.TimeLimitMS</code> を消して <code>return MLE</code> だけにしてみる。上の (B) が<strong>落ちる</strong>（TLE が MLE に化ける）ことを確認し、「137 を機械的に MLE にする罠」を失敗から実感する。確認したら必ず元に戻すこと。</li>
+      </ol>
+    </div>
+
+    <h2>つまずき FAQ</h2>
+    <details class="qa"><summary>なぜ TLE を経過時間の比較ではなく <code>exit 124</code> で判定するの? 時計で測ればいいのでは?</summary>
+      <div class="qa-body"><p>時計は<strong>境界がブレる</strong>からです。ホストの負荷やスケジューリングの揺らぎで、同じ提出が 1.99 秒にも 2.01 秒にもなり、「秒数の比較」だけで判定するとフレーキー（実行のたびに結果が変わる）になります。一方 <code>timeout</code> コマンドが打ち切ったときの <code>exit 124</code> は<strong>「打ち切ったか否か」の二択</strong>で、間にグレーがありません。だから「読めるなら時計より exit code」。ただし exit code で取りこぼす際どいケース（正常終了 exit 0 だが実測はわずかに超過）に備えて、<code>ElapsedMS &gt; TimeLimitMS</code> の比較も<strong>二段目の保険</strong>として持っています。exit code で確実に取り、取りこぼしを時計で拾う——役割分担です。</p></div>
+    </details>
+    <details class="qa"><summary>同じ <code>exit 137</code> なのに、なぜ MLE になったり TLE になったりするの?</summary>
+      <div class="qa-body"><p><code>137 = 128 + 9 = SIGKILL</code>（問答無用で殺された）ですが、<strong>誰が殺したかが2通りある</strong>からです。①カーネルの OOM killer がメモリ枯渇で殺した（＝メモリ超過＝MLE）。②提出が <code>timeout</code> の SIGTERM を握りつぶし、猶予後の SIGKILL でとどめを刺された（＝時間超過＝TLE）。exit code だけでは区別できないので、<strong>経過時間</strong>で見分けます。②なら SIGKILL は制限時間+猶予の後に飛ぶので<strong>必ず制限時間を超えている</strong>。だから <code>ElapsedMS &gt; TimeLimitMS</code> なら TLE、制限時間内で 137 になったなら真の OOM とみなして MLE。「終了コードは容疑者を絞るだけ、有罪判決は文脈（経過時間）が下す」のが要点です。</p></div>
+    </details>
+    <details class="qa"><summary>全ケースが AC だったのに、なぜ <code>IE</code> になることがあるの?</summary>
+      <div class="qa-body"><p><strong>採点が最後まで終わっていない</strong>可能性があるからです。ランナーは全ケースを走らせ終えると <code>___DONE___</code> という終了マーカーを出す約束ですが、途中でコンテナごと死ぬと、それまでに報告されたケースは全部 AC でも <code>___DONE___</code> は来ません。ここで楽観初期化の <code>AC</code> をそのまま返すと「3ケースしか採点していないのに AC」という<strong>最悪の誤判定</strong>になる。だから <code>if out.Verdict == AC &amp;&amp; !outcome.Done</code> のとき AC を取り消して <code>IE</code>（不完全採点）に倒します。「採点しきれなかったなら、正直に IE と言う。確信のない AC は出さない」——このジャッジの思想の中心です。<code>WA</code> の誤りはユーザーを怒らせるだけですが、<code>AC</code> の誤りはユーザーを<strong>騙します</strong>。</p></div>
+    </details>
+
+    <h2>理解度チェック</h2>
+    <p>次の問いに<strong>自分の言葉で</strong>答えられたら、この章は卒業です。</p>
+    <details class="qa"><summary>1. <code>exit 137</code> を「常に MLE」と実装すると、どんな提出が誤判定されるか。正しくはどう分岐するか。</summary>
+      <div class="qa-body"><p><strong>時間超過して <code>timeout</code> の SIGTERM を握りつぶした提出</strong>が誤判定される。それは <code>timeout -k</code> の SIGKILL で殺されて <code>137</code> になるが、原因は時間超過なので本来 <code>TLE</code>。「常に MLE」だとメモリを全く使っていない無限ループが MLE に化け、提出者は自分のバグを見つけられない。正しくは <strong><code>ElapsedMS &gt; TimeLimitMS</code>（制限時間超過）なら <code>TLE</code>、そうでなければ真の OOM とみなして <code>MLE</code></strong>。時間超過ルートの 137 は必ず制限時間を超えるので、経過時間で2つの犯人（OOM killer / timeout の KILL）を見分けられる。</p></div>
+    </details>
+    <details class="qa"><summary>2. Node の MLE 判定 <code>c.ExitCode != 0 &amp;&amp; bytes.Contains(c.Stderr, ...)</code> で、なぜ <code>ExitCode != 0</code> を AND しているか。</summary>
+      <div class="qa-body"><p><strong>誤爆を防ぐため</strong>。Node の V8 はコンテナ上限より先に自分のヒープ上限で自死し、<code>"heap out of memory"</code> を stderr に吐く。しかしこの文字列だけを条件にすると、<strong>正常終了（exit 0）して正解を出した提出</strong>が、たまたまその<em>文字列</em>を stderr に出しただけで <code>MLE</code> に化ける。<code>ExitCode != 0</code>（＝本当に異常終了している）を AND することで、「正常終了したのに偶然その文字列を含んでいた」提出を MLE から救い出している。「exit code は verdict の原材料」で、stderr の文字列と組み合わせて初めて正しく調理できる好例。</p></div>
+    </details>
+    <details class="qa"><summary>3. 判定ループが「疑わしいときは AC を出さない」を体現している箇所を2つ挙げよ。</summary>
+      <div class="qa-body"><p>(1) <strong><code>___DONE___</code> 未到達の IE 化</strong>: 全ケース AC でも <code>!outcome.Done</code>（完走マーカー無し）なら、採点が途中で切れた疑いがあるので AC を取り消して <code>IE</code>（不完全採点）。<code>runRes.Truncated</code>（出力切り詰め）でも同様。(2) <strong>ケース数偽装の検知</strong>: <code>len(outcome.Cases) &gt; len(job.Cases)</code>（与えたより多くのケースを報告）なら、比較すら始めず即 <code>IE</code>。ほかに<strong>ケース名の順序照合</strong>（<code>c.Name != caseName(i+1)</code> なら IE）も同系統。いずれも「採点の前提が崩れているなら、AC を出さず正直に IE」という一貫した姿勢の現れ。</p></div>
+    </details>
+
+    <h2>まとめ — 次の層へ</h2>
+    <p>この章で、提出の運命を決める <code>decideCase</code> の分岐を、<strong>exit code の側から</strong>1つずつ読み解きました。<code>exit 124</code> は <code>timeout</code> の専用コードで TLE を時計に頼らず確定する。<code>exit 137</code>（SIGKILL）は両義的で、経過時間という文脈で MLE と TLE に分かれる。Node の <code>"heap out of memory"</code> は V8 の自死で、異常終了を条件に MLE と読む。<code>exit 111</code> はジャッジ側の非で IE、その他の非0は提出者の RE。そして正常終了（exit 0）で初めて出力比較にたどり着く。<strong>「exit code は verdict の原材料であって、verdict そのものではない」</strong>——文脈で調理して初めて判定になる、というのがこの章の背骨でした。さらに判定ループが「最初の非 AC で打ち切り」つつ、<code>___DONE___</code> 未到達を <code>IE</code> に倒す——<strong>「疑わしいときは AC を出さない」</strong>という思想も見ました。</p>
+    <p>しかし、ここまでの2章（第00〜02章）で<strong>ずっと素通りしてきた前提</strong>があります。<code>decideCase</code> に渡ってくる <code>ExitCode == 137</code> や <code>Stderr</code> の <code>"heap out of memory"</code> ——これらは、提出コードを<strong>実際に走らせて</strong>初めて手に入るものです。しかしその提出コードは、<strong>あなたのマシンを壊そうとするかもしれない他人のコード</strong>です。無限ループでCPUを焼き、メモリを食い尽くし、ファイルを消し、ネットワークの向こうへ何かを送ろうとするかもしれない。次の第03章では、いよいよ<strong>「なぜ他人のコードは危険か」</strong>——なぜ我々がこれから Docker という檻を必要とするのか、その脅威の正体に正面から向き合います。この章で読んだ <code>137</code> や <code>124</code> が、まさにその「檻」の中で生まれる終了コードなのだと、次の章でつながります。</p>
+
+    <div class="chap-foot">
+      <a class="pager" href="01-process.html"><span class="dir">← 前へ</span>第01章 · プロセスと標準入出力</a>
+      <a class="pager next" href="03-threat.html"><span class="dir">次へ →</span>第03章 · なぜ他人のコードは危険か</a>
+    </div>
+  </main>
+</div>
+</body>
+</html>

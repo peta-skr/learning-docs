@@ -1,0 +1,515 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>第02章 動画を受け取る — 動画サービスをつくる</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500;600&family=Source+Serif+4:opsz,wght@8..60,400;8..60,600;8..60,700&family=Noto+Serif+JP:wght@400;600;700&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<div class="shell">
+
+  <aside class="spine">
+    <a class="wordmark" href="index.html">VIDEO-STREAM · from scratch</a>
+    <div class="book-title">動画サービスを<br>つくる</div>
+    <div class="book-sub">Go と ffmpeg で presigned から HLS 配信まで</div>
+
+    <div class="legend"><span>受け取る <b>↓</b></span><span>届ける <b>↑</b></span></div>
+
+    <nav aria-label="目次">
+      <ul class="toc">
+        <li><a class="nav-item" href="index.html"><span class="nav-num">序</span><span class="nav-label">はじめに・準備<span class="nav-tag">Setup</span></span></a></li>
+        <li><a class="nav-item" href="00-setup.html"><span class="nav-num">00</span><span class="nav-label">土台をつくる<span class="nav-tag">Setup</span></span></a></li>
+        <li><a class="nav-item" href="01-auth.html"><span class="nav-num">01</span><span class="nav-label">人を扱う<span class="nav-tag">Auth</span></span></a></li>
+        <li><a class="nav-item current" aria-current="page" href="02-upload.html"><span class="nav-num">02</span><span class="nav-label">動画を受け取る<span class="nav-tag">Upload</span></span></a></li>
+        <li><a class="nav-item" href="03-transcode.html"><span class="nav-num">03</span><span class="nav-label">動画を変換する<span class="nav-tag">Transcode</span></span></a></li>
+        <li><a class="nav-item" href="04-deliver.html"><span class="nav-num">04</span><span class="nav-label">動画を届ける<span class="nav-tag">Deliver</span></span></a></li>
+        <li><a class="nav-item" href="05-social.html"><span class="nav-num">05</span><span class="nav-label">反応をつくる<span class="nav-tag">Social</span></span></a></li>
+        <li><a class="nav-item" href="06-discover.html"><span class="nav-num">06</span><span class="nav-label">見つけてもらう<span class="nav-tag">Discover</span></span></a></li>
+        <li><a class="nav-item" href="07-notify.html"><span class="nav-num">07</span><span class="nav-label">つながりを届ける<span class="nav-tag">Notify</span></span></a></li>
+        <li><a class="nav-item" href="08-web.html"><span class="nav-num">08</span><span class="nav-label">画面をつける<span class="nav-tag">Web</span></span></a></li>
+        <li><a class="nav-item" href="09-beyond.html"><span class="nav-num">09</span><span class="nav-label">仕上げと次の一歩<span class="nav-tag">Beyond</span></span></a></li>
+      </ul>
+    </nav>
+
+    <div class="spine-foot">
+      各章は動画が通る道の一区間。<br>受け取る（下）から届ける（上）へ、<br>1本の動画を最後まで運びきる。
+    </div>
+  </aside>
+
+  <main class="reading">
+    <div class="progress-tag">第02章 / 全10章 · 層: Upload · 読了目安 2〜3時間</div>
+    <div class="eyebrow"><span>Upload</span><span class="depth">— 最初の山場 · 大容量を受け取る</span></div>
+    <h1>動画を受け取る</h1>
+    <p class="lede">ここが本書の<strong>最初の山場</strong>です。動画ファイルは、テキストやログイン情報とはまったく違う性質を持っています ——「大きい」。数百 MB、ときに数 GB。この<strong>巨大なファイルを、受付（API サーバ）を通さずに、ブラウザから保管庫（MinIO）へ直接送りつける</strong>——それが、動画サービスで最初に越えるべき壁です。この章では、その仕組みを支える2つの部品を読み解きます。1つは <code>storage.go</code> の <strong>presigned URL（期限つきの合鍵）</strong>を発行する部分。もう1つは <code>videos.go</code> の<strong>「アップロード申請 → 合鍵発行 → クライアント直 PUT → 完了通知」</strong>という4拍子のフロー。この章を終えたとき、動画は <code>uploading</code> で生まれ、ブラウザが直接 MinIO へ上げ、実物が確認されて <code>uploaded</code> へ進み、変換の注文が注文箱に積まれます。動画が初めて「サービスの中に入る」瞬間です。</p>
+
+    <div class="box goal"><div class="box-k">◈ この章のゴール</div>
+      <p>次の3つを説明でき、手で確認できたら達成です。</p>
+      <ol>
+        <li><strong>なぜ動画本体を API サーバに通さないのか</strong>を、メモリ・帯域・タイムアウトの3点で説明できる。</li>
+        <li><code>storage.go</code> が presigned URL を作るために<strong>2つのクライアント（内部用/ブラウザ用）</strong>を持つ理由と、<code>Region</code> を明示しないと何が壊れるかを説明できる。</li>
+        <li><code>curl</code> で <code>POST /api/uploads</code> を叩いて合鍵を受け取り、その合鍵へ直接 <code>PUT</code> し、<code>POST /api/videos/{id}/complete</code> で <code>status</code> が <code>uploading → uploaded</code> へ進むのを DB で確認できる。</li>
+      </ol>
+    </div>
+
+    <div class="box map"><div class="box-k">☰ この章のステップ</div>
+      <ol>
+        <li><a href="#step-1">なぜ動画本体を受付に通さないのか — 3つの理由</a></li>
+        <li><a href="#step-2">合鍵という発想 — presigned URL とは何か</a></li>
+        <li><a href="#step-3">保管庫を1箇所にまとめる — <code>storage.go</code> の全体像</a></li>
+        <li><a href="#step-4">2つのクライアントを立てる — <code>New</code> と Region の落とし穴</a></li>
+        <li><a href="#step-5">合鍵を発行する — <code>PresignPut</code> と <code>Exists</code></a></li>
+        <li><a href="#step-6">申請を受ける — <code>handleUploadInit</code></a></li>
+        <li><a href="#step-7">ブラウザが直接 PUT する — クライアント側の1拍</a></li>
+        <li><a href="#step-8">完了を受け、実物を確かめ、注文する — <code>handleUploadComplete</code></a></li>
+        <li><a href="#step-9">立ち上げて、動画を受け取ってみる</a></li>
+      </ol>
+    </div>
+
+    <h2>この層が上の層に約束すること</h2>
+    <p>第00章で舞台を組み、第01章で「人」と「チャンネル」を作りました。ここまでで、動画を投稿する<strong>資格を持った誰か</strong>が存在します。第02章の仕事は、その誰かから<strong>動画ファイルという巨大な荷物を受け取り、保管庫に安全に収め、変換の職人へ引き渡すところまで</strong>を実現することです。</p>
+    <p>この層が上の全章に約束するのは次の3つです。</p>
+    <ul>
+      <li><strong>巨大なファイルが、受付を詰まらせずに保管庫へ届く</strong> — 何 GB の動画でも、API サーバのメモリや帯域を1バイトも食わずに MinIO に収まる。受付は「合鍵を渡す」「終わったら確認する」という軽い仕事しかしない。</li>
+      <li><strong>実物が確認された動画だけが、次の工程（変換）へ進む</strong> — 「申請したが上げていない」幽霊動画は <code>uploading</code> のまま止まり、注文箱には積まれない。職人が空振りしない。</li>
+      <li><strong>状態が <code>uploading → uploaded</code> へ、条件つき UPDATE で原子的に進む</strong> — 二重の完了通知や競合があっても、注文が二重に積まれない。ここで初めて <code>job_generation</code>（世代番号）が登場し、第03章の fencing の伏線になる。</li>
+    </ul>
+    <p>逆に、この層が<strong>やらない</strong>ことも明確です。動画を変換すること（第03章）・配信すること（第04章）は一切しません。この章はあくまで「受け取って、収めて、注文票を書く」だけ。荷物を受け取り、倉庫に入れ、次の工程へ回す —— 出荷部門の仕事です。</p>
+
+    <h2 class="step" id="step-1"><span class="step-no">Step 1</span>なぜ動画本体を受付に通さないのか — 3つの理由</h2>
+    <p>コードを読む前に、この章の設計全体を貫く<strong>1つの問い</strong>に答えておきます。素朴に考えれば、動画のアップロードはこう作りたくなります ——「ブラウザが動画ファイルを <code>POST /api/uploads</code> で API サーバに送り、API サーバがそれを MinIO に保存する」。ログイン情報やコメントと同じ発想です。実際、コメントやサムネイル（後述）はそうしています。ではなぜ、動画<strong>本体</strong>だけは、この当たり前の作りを<strong>避ける</strong>のでしょうか。</p>
+
+    <div class="ascii">素朴な設計: 動画も API を経由する（本書は採用しない）
+
+  ブラウザ ══2GBの動画══▶ [API受付] ══2GBの動画══▶ [MinIO保管庫]
+                          ↑ ここで2GBがサーバのメモリ/帯域/時間を食い尽くす
+
+
+  本書の設計: 合鍵を渡し、本体はブラウザ→保管庫を直行
+
+  ブラウザ ─「上げたい」─▶ [API受付] ─合鍵を発行─▶ ブラウザ
+  ブラウザ ══2GBの動画═══════════直行═══════════▶ [MinIO保管庫]
+                          ↑ API受付は本体に一切触れない（合鍵を渡すだけ）
+  ブラウザ ─「上げ終わった」─▶ [API受付] ─実物を確認─▶ 注文箱へ</div>
+
+    <p>答えは3つあります。どれも「動画は大きい」という一点から派生します。</p>
+
+    <p><strong>理由1: メモリ</strong>。もし API サーバが 2GB の動画を受け取るなら、その 2GB をどこかに置かねばなりません。素朴に全部メモリに読み込めば、1本のアップロードでサーバのメモリが 2GB 消えます。同時に10人が上げれば 20GB —— 普通のサーバはそれだけで倒れます。ストリーミングで受け流す手もありますが、それでもバッファやコネクションの管理コストが積み上がり、「受付は身軽に」という第00章の設計思想（変換を別プロセスに逃がしたのと同じ精神）に反します。</p>
+
+    <p><strong>理由2: 帯域（二重通過）</strong>。API 経由だと、2GB の動画は<strong>ネットワークを2回通ります</strong> —— ブラウザ→API で1回、API→MinIO でもう1回。API サーバの帯域を往復ぶん食い、しかも API と MinIO が別マシン（本番のクラウドではまず別）なら、その区間の転送コスト（クラウドの egress 課金）も乗ります。ブラウザから MinIO へ<strong>直行</strong>させれば、動画は1回しか流れず、API サーバの帯域は1バイトも使いません。</p>
+
+    <p><strong>理由3: タイムアウト</strong>。回線が細ければ、2GB のアップロードは数分〜十数分かかります。その間ずっと、API サーバは1本の HTTP リクエストを開いたまま抱え続けることになります。リバースプロキシやロードバランサには「1リクエストは30秒まで」のようなタイムアウトが普通に設定されており、長時間のアップロードは途中で切られがちです。直行なら、時間のかかる転送はブラウザと MinIO の間の話で、API サーバのリクエストは<strong>合鍵を渡す一瞬</strong>で完結します。</p>
+
+    <div class="gonote"><div class="box-k">実装メモ · 「小さいものは通す、大きいものは通さない」の使い分け</div>
+      <p>本書は動画<strong>本体</strong>だけを直行させ、コメント・サムネイル画像（5MB 以下、後述の <code>handlePutThumbnail</code>）・チャンネルアイコンは API 経由で受け取っています。境界は「大きさ」です。数 KB〜数 MB のものは API のメモリでさばいても問題にならず、素朴に通したほうがコードが単純です。一方、動画のように<strong>桁が2〜3つ違う大きさ</strong>のものだけ、直行という別ルートを用意する。すべてを直行にする必要はなく、「重いものだけ特別扱い」が実務的な落としどころです。この判断は、第00章で「重い変換だけを別プロセスに切り出した」のとまったく同じ発想 —— <strong>極端に重いものだけを本流から逃がす</strong> —— です。</p>
+    </div>
+
+    <h2 class="step" id="step-2"><span class="step-no">Step 2</span>合鍵という発想 — presigned URL とは何か</h2>
+    <p>「ブラウザから MinIO へ直行させる」と言いましたが、ここで新しい問題が生まれます。<strong>MinIO は誰でも書き込める公開倉庫ではない</strong>ということです。もし誰でも自由に MinIO へ <code>PUT</code> できたら、悪意ある第三者が勝手にファイルを大量に置いてストレージを埋め尽くせてしまう。かといって、MinIO の管理者パスワード（<code>S3_SECRET_KEY</code>）をブラウザに渡すのは論外です —— ブラウザの JavaScript は誰でも中身を覗けるので、秘密鍵を置いた瞬間に全世界に漏れます。</p>
+    <p>この矛盾（<strong>「ブラウザに直接書かせたい、でも鍵は渡したくない」</strong>）を解くのが <strong>presigned URL</strong> です。presigned URL は、こう説明できます ——</p>
+
+    <div class="box map"><div class="box-k">✦ presigned URL の性質</div>
+      <ol>
+        <li><strong>1つの操作に限定された使い捨ての URL</strong>。「このバケットの、この <code>key</code>（ファイル名）に、<code>PUT</code> でアップロードしてよい」という<strong>1点だけ</strong>を許可する。他のファイルは触れない。</li>
+        <li><strong>期限がある</strong>。本書では30分（<code>presignTTL</code>）。期限を過ぎたら、その URL では二度と書けない。</li>
+        <li><strong>秘密鍵を含まない</strong>。URL の中には「操作内容 + 期限 + それらを秘密鍵で署名した文字列」が入っているだけで、秘密鍵そのものは入っていない。だからブラウザに渡しても安全。</li>
+        <li><strong>署名は API サーバ（秘密鍵を持つ側）が作る</strong>。だから「誰に、どのファイルへの、どんな操作を許すか」は API サーバが完全に制御できる。</li>
+      </ol>
+    </div>
+
+    <p>旧サイトはこれを<strong>「期限つきの合鍵」</strong>と呼んでいました。良い比喩です。ホテルのフロント（API 受付）が、宿泊客（ブラウザ）に「あなたの部屋（この <code>key</code>）だけ・今日いっぱい（30分）開けられる合鍵」を渡す。客はその合鍵で自分の部屋には入れるが、他の部屋やマスターキー（<code>S3_SECRET_KEY</code>）は手にしていない。合鍵を発行できるのはフロントだけ —— マスターキーを持っているのはフロントだからです。</p>
+
+    <p>この「合鍵は API 受付が発行し、本体はブラウザが直接運ぶ」という役割分担が、第00章の落とし穴で予告されていた <strong>「presigned URL を作れるのは api だけ、worker には要らない」</strong> の正体です。合鍵を作るには秘密鍵（マスターキー）が要り、それを使うのは受付の仕事だからです。では、その合鍵を実際に作っている <code>storage.go</code> を読みましょう。</p>
+
+    <h2 class="step" id="step-3"><span class="step-no">Step 3</span>保管庫を1箇所にまとめる — storage.go の全体像</h2>
+    <p><code>internal/storage/storage.go</code> は、保管庫（MinIO）に触るすべての操作を1つのパッケージに閉じ込めたものです。まずファイル冒頭の宣言部を読みます。</p>
+
+    <div class="file-tag">internal/storage/storage.go（冒頭・型宣言）</div>
+    <pre><code><span class="cm">// Package storage は保管庫（S3互換オブジェクトストレージ）を触る処理を一箇所にまとめる。</span>
+<span class="cm">// クラウド移行時はこのパッケージだけ差し替えればよい（移植性の境界）。</span>
+<span class="kw">package</span> storage
+
+<span class="kw">import</span> (
+	<span class="st">"context"</span>
+	<span class="st">"errors"</span>
+	<span class="st">"io"</span>
+	<span class="st">"time"</span>
+
+	<span class="st">"github.com/minio/minio-go/v7"</span>
+	<span class="st">"github.com/minio/minio-go/v7/pkg/credentials"</span>
+
+	<span class="st">"video-service/internal/config"</span>
+)
+
+<span class="kw">type</span> <span class="ty">Storage</span> <span class="kw">struct</span> {
+	internal *minio.<span class="ty">Client</span> <span class="cm">// コンテナ内ネットワークから触るクライアント</span>
+	public   *minio.<span class="ty">Client</span> <span class="cm">// ブラウザ向け presigned URL を作るクライアント（署名にホスト名が含まれるため別建て）</span>
+	Bucket   <span class="ty">string</span>
+}</code></pre>
+
+    <p>まず先頭2行のコメントに注目してください。<strong>「クラウド移行時はこのパッケージだけ差し替えればよい（移植性の境界）」</strong>。これは設計上の重要な意思表明です。保管庫を触るコードが <code>videos.go</code> や <code>transcode.go</code> のあちこちに散らばっていると、MinIO を本番の AWS S3 や Cloudflare R2 へ移すとき、全ファイルを書き換える羽目になります。そうならないよう、<strong>保管庫への操作を <code>storage</code> パッケージ1箇所に集約</strong>し、外の世界には <code>PresignPut</code>・<code>Exists</code>・<code>Get</code> といった<strong>用途で名づけたメソッド</strong>だけを見せる。MinIO 固有の話（<code>minio.Client</code> や CORS など）は、このパッケージの壁の内側に閉じ込める。第09章の「クラウド移行の境界設計」は、この壁があるからこそ成立します。</p>
+
+    <p>次に <code>Storage</code> 構造体。フィールドが3つあります。<code>Bucket</code>（動画を入れるバケツ名 <code>videos</code>）はいいとして、注目は <code>internal</code> と <code>public</code> という<strong>2つの <code>minio.Client</code></strong> です。1つの MinIO につなぐのに、なぜクライアントが2つ要るのか。コメントが答えを予告しています ——「コンテナ内ネットワークから触るクライアント」と「ブラウザ向け presigned URL を作るクライアント（署名にホスト名が含まれるため別建て）」。この<strong>2クライアント構成</strong>が、この章でいちばん理解しておきたい設計です。次のステップで、なぜ2つ必要かを完全に腑に落とします。</p>
+
+    <h2 class="step" id="step-4"><span class="step-no">Step 4</span>2つのクライアントを立てる — New と Region の落とし穴</h2>
+    <p>2つのクライアントを組み立てているのが <code>New</code> です。この短い関数に、本書がリリース前に<strong>実際に踏んだ障害</strong>が2つ埋め込まれています。</p>
+
+    <div class="file-tag">internal/storage/storage.go（New）</div>
+    <pre><code><span class="kw">func</span> New(cfg config.<span class="ty">Config</span>) (*<span class="ty">Storage</span>, <span class="ty">error</span>) {
+	creds := credentials.NewStaticV4(cfg.S3AccessKey, cfg.S3SecretKey, <span class="st">""</span>)
+	<span class="cm">// Region を明示すると、署名前のリージョン問い合わせ（ネットワークアクセス）が要らなくなる。</span>
+	<span class="cm">// public クライアントはブラウザ用のホスト名を持つため、コンテナ内からは疎通できないことがある。</span>
+	in, err := minio.New(cfg.S3Endpoint, &amp;minio.<span class="ty">Options</span>{Creds: creds, Secure: <span class="kw">false</span>, Region: <span class="st">"us-east-1"</span>})
+	<span class="kw">if</span> err != <span class="kw">nil</span> {
+		<span class="kw">return</span> <span class="kw">nil</span>, err
+	}
+	pub, err := minio.New(cfg.S3PublicEndpoint, &amp;minio.<span class="ty">Options</span>{Creds: creds, Secure: <span class="kw">false</span>, Region: <span class="st">"us-east-1"</span>})
+	<span class="kw">if</span> err != <span class="kw">nil</span> {
+		<span class="kw">return</span> <span class="kw">nil</span>, err
+	}
+	<span class="kw">return</span> &amp;<span class="ty">Storage</span>{internal: in, public: pub, Bucket: cfg.S3Bucket}, <span class="kw">nil</span>
+}</code></pre>
+
+    <p>まず <code>creds</code>。<code>credentials.NewStaticV4(...)</code> で、アクセスキーと秘密鍵（<code>S3_ACCESS_KEY</code> / <code>S3_SECRET_KEY</code>）から<strong>署名用の資格情報</strong>を作ります。この資格情報が、presigned URL の署名（合鍵に押す印鑑）を作るのに使われます。両方のクライアントが同じ <code>creds</code> を共有します —— 印鑑は1つ、押す先が2つ、というわけです。</p>
+
+    <p>そして核心。<code>minio.New</code> を<strong>2回</strong>呼び、それぞれ違うエンドポイントを渡しています。</p>
+    <ul>
+      <li><code>in</code>（internal）は <code>cfg.S3Endpoint</code> = <code>minio:9000</code> —— <strong>Docker ネットワーク内から見た MinIO の住所</strong>。API サーバや職人が、コンテナの中から MinIO を直接読み書きするときに使う。</li>
+      <li><code>pub</code>（public）は <code>cfg.S3PublicEndpoint</code> = <code>localhost:9000</code> —— <strong>ブラウザから見た MinIO の住所</strong>。presigned URL を作るときに使う。</li>
+    </ul>
+
+    <p>なぜ住所が2つあるのかは、第00章の <code>config.go</code> で予告されていました。<strong>同じ MinIO なのに、見る場所によって住所が違う</strong>のです。Docker ネットワークの中（API サーバや職人）からは、MinIO はサービス名 <code>minio:9000</code> で見えます。しかし、その名前はブラウザ（あなたのマシンのブラウザ）からは<strong>解決できません</strong> —— <code>minio</code> という名前は Docker 内部の DNS だけが知っている名前だからです。ブラウザから MinIO を触るには、ホストに公開された <code>localhost:9000</code>（第00章で <code>ports: "9000:9000"</code> と開けた口）を使う必要があります。</p>
+
+    <p>ここで<strong>presigned URL の署名の性質</strong>が効いてきます。presigned URL の署名は、<strong>URL のホスト名を含めて計算されます</strong>。つまり「<code>minio:9000</code> への PUT」で署名した URL と「<code>localhost:9000</code> への PUT」で署名した URL は<strong>別物</strong>で、片方の署名をもう片方のホストで使うと<strong>署名が合わずに拒否</strong>されます。だから、ブラウザに渡す合鍵は<strong>最初から <code>localhost:9000</code> のホスト名で署名しておかねばならない</strong>。それを担うのが <code>public</code> クライアントです。<code>public</code> は「ブラウザが実際に叩く住所（<code>localhost:9000</code>）」で署名を作るためだけに存在します。</p>
+
+    <div class="ascii">なぜクライアントが2つ要るのか
+
+  [API受付コンテナ]
+     │
+     ├── internal クライアント（minio:9000 で署名）
+     │      └▶ 自分で MinIO を読み書きする（Exists / Get / Put …）
+     │         コンテナ内 DNS で minio に届く ✓
+     │
+     └── public クライアント（localhost:9000 で署名）
+            └▶ 合鍵(presigned URL)を作る → ブラウザへ渡す
+               ブラウザは localhost:9000 を叩く → 署名が一致 ✓
+
+  もし1つ（internal だけ）で合鍵を作ると…
+     合鍵の中身は "minio:9000 への PUT" で署名される
+       → ブラウザは minio という名前を解決できない ✗
+       → 仮に解決できても localhost で叩けば署名不一致で拒否 ✗</div>
+
+    <div class="box hazard"><div class="box-k">⚠ 落とし穴 — Region を省くと、コンテナ内から localhost:9000 へ問い合わせが飛んで 500 になる</div>
+      <p>この <code>New</code> でいちばん見落としやすいのが <code>Region: "us-east-1"</code> の<strong>明示</strong>です。コメントが警告しています ——「Region を明示すると、署名前のリージョン問い合わせ（ネットワークアクセス）が要らなくなる」。もし <code>Region</code> を省くと、minio-go は署名を作る前に<strong>「このバケットのリージョンは何ですか?」という問い合わせを、そのクライアントのエンドポイントへ実際に送ろうとします</strong>。ここで <code>public</code> クライアントが問題を起こします。<code>public</code> のエンドポイントは <code>localhost:9000</code> —— これは<strong>ブラウザから見た住所</strong>であって、<strong>API コンテナの中から見ると自分自身（コンテナの localhost）</strong>を指し、そこに MinIO はいません。だからリージョン問い合わせが届かず、presigned URL の発行が失敗して <code>500</code> エラーになる。本書はこれを<strong>実際に踏んで</strong>、両クライアントに <code>Region</code> を明示することで直しました。学習用なので固定値 <code>us-east-1</code> で十分です（S3 互換のデフォルトリージョン。MinIO はリージョンを厳密には使わないので、値そのものは何でも整合していればよい）。<strong>「presigned を作るクライアントには、そのエンドポイントへネットワークで問い合わせに行かせない」</strong>——ここが勘所です。</p>
+    </div>
+
+    <div class="gonote"><div class="box-k">実装メモ · Secure: false と学習環境の割り切り</div>
+      <p><code>Secure: false</code> は「HTTPS ではなく HTTP でつなぐ」指定です。本番の S3 互換ストレージは当然 HTTPS（<code>Secure: true</code>）ですが、学習用のローカル MinIO は証明書を用意していないので HTTP で割り切っています。この設定も、クラウドへ移すときに <code>storage</code> パッケージ内で <code>Secure: true</code> に変えるだけで済む —— 「移植性の境界」を <code>storage.go</code> に集約した恩恵です。もう1点、両クライアントとも <code>internal</code> は小文字始まりで<strong>非公開フィールド</strong>（パッケージ外から触れない）にしてあります。外の世界には <code>PresignPut</code> のような用途メソッドだけを見せ、「どちらのクライアントを使うか」の判断は <code>storage</code> の中に隠す。これも境界を守る工夫です。</p>
+    </div>
+
+    <h2 class="step" id="step-5"><span class="step-no">Step 5</span>合鍵を発行する — PresignPut と Exists</h2>
+    <p>2つのクライアントが揃ったので、いよいよ合鍵を発行するメソッド <code>PresignPut</code> を読みます。あわせて、後で完了確認に使う <code>Exists</code> も見ておきます。</p>
+
+    <div class="file-tag">internal/storage/storage.go（PresignPut）</div>
+    <pre><code><span class="cm">// PresignPut は「期限つきの合鍵」を発行する。ブラウザはこのURLへ直接アップロードする。</span>
+<span class="kw">func</span> (s *<span class="ty">Storage</span>) PresignPut(ctx context.<span class="ty">Context</span>, key <span class="ty">string</span>, expiry time.<span class="ty">Duration</span>) (<span class="ty">string</span>, <span class="ty">error</span>) {
+	u, err := s.public.PresignedPutObject(ctx, s.Bucket, key, expiry)
+	<span class="kw">if</span> err != <span class="kw">nil</span> {
+		<span class="kw">return</span> <span class="st">""</span>, err
+	}
+	<span class="kw">return</span> u.String(), <span class="kw">nil</span>
+}</code></pre>
+
+    <p>驚くほど短い。しかしここに、これまで積み上げた話がすべて結実しています。<code>s.public.PresignedPutObject(...)</code> —— <strong>public クライアント</strong>（<code>localhost:9000</code> で署名する側）を使って、「このバケットの、この <code>key</code> へ、<code>expiry</code>（30分）だけ有効な <code>PUT</code> 用の合鍵」を作る。返ってくるのは <code>*url.URL</code> なので、<code>u.String()</code> で文字列にして返します。この文字列が、そのままブラウザへ渡る合鍵です。</p>
+    <p>もし<strong>ここで <code>s.internal</code> を使ってしまったら</strong>、合鍵は <code>minio:9000</code> のホスト名で署名され、ブラウザからは使えない URL になります。<code>s.public</code> を使うこと —— これが Step 4 で2つのクライアントを立てた理由の、実際の使いどころです。<strong>「合鍵を作るときだけ public、それ以外は internal」</strong>という使い分けを覚えておいてください。</p>
+
+    <div class="file-tag">internal/storage/storage.go（Exists）</div>
+    <pre><code><span class="kw">func</span> (s *<span class="ty">Storage</span>) Exists(ctx context.<span class="ty">Context</span>, key <span class="ty">string</span>) (<span class="ty">bool</span>, <span class="ty">error</span>) {
+	_, err := s.internal.StatObject(ctx, s.Bucket, key, minio.<span class="ty">StatObjectOptions</span>{})
+	<span class="kw">if</span> err != <span class="kw">nil</span> {
+		<span class="kw">var</span> resp minio.<span class="ty">ErrorResponse</span>
+		<span class="kw">if</span> errors.As(err, &amp;resp) &amp;&amp; (resp.Code == <span class="st">"NoSuchKey"</span> || resp.StatusCode == <span class="st">404</span>) {
+			<span class="kw">return</span> <span class="kw">false</span>, <span class="kw">nil</span>
+		}
+		<span class="kw">return</span> <span class="kw">false</span>, err
+	}
+	<span class="kw">return</span> <span class="kw">true</span>, <span class="kw">nil</span>
+}</code></pre>
+
+    <p><code>Exists</code> は「そのファイルが本当に保管庫にあるか」を確かめるメソッドです。こちらは <code>s.internal</code>（コンテナ内から <code>minio:9000</code> を叩く側）を使います。合鍵を作るわけではなく、API サーバ自身が MinIO に問い合わせるだけなので、内部用クライアントでよい。<code>StatObject</code> は「オブジェクトのメタ情報（サイズ等）を1件取る」操作で、ファイルがあれば成功、無ければエラーを返します。ここのエラー処理が丁寧です ——「無い」ことと「通信に失敗した」ことを区別しています。<code>errors.As</code> で MinIO のエラー型（<code>ErrorResponse</code>）を取り出し、その中身が <code>NoSuchKey</code>（そんなキーは無い）か <code>404</code> なら、それは<strong>エラーではなく「存在しない（<code>false, nil</code>）」</strong>として返す。それ以外のエラー（MinIO 自体に届かない等）は本物のエラーとしてそのまま返す。この <code>Exists</code> が、Step 8 の完了確認で「幽霊動画を弾く」ために使われます。</p>
+
+    <div class="gonote"><div class="box-k">実装メモ · storage.go の残りのメソッドは後の章で使う</div>
+      <p><code>storage.go</code> には、この章で読んだ <code>New</code> / <code>EnsureBucket</code> / <code>PresignPut</code> / <code>Exists</code> のほかに、<code>Get</code>（配信のためにオブジェクトを開く・第04章）、<code>Put</code>（サムネイル等の小さいファイルを API 経由で置く）、<code>Download</code> / <code>UploadFile</code>（職人がローカルに落として ffmpeg にかけ、成果物を上げ戻す・第03章）、<code>RemovePrefix</code>（動画削除時に <code>hls/&lt;id&gt;/</code> ごと掃除する）があります。すべて <code>s.internal</code> を使う —— つまり合鍵を作る <code>PresignPut</code> だけが <code>s.public</code> を使う特別なメソッドです。それぞれ登場する章で読むので、ここでは「保管庫への操作はすべてこのパッケージに集約されている」ことだけ確認しておけば十分です。<code>EnsureBucket</code>（起動時にバケツを作る）は第00章の <code>main</code> で <code>st.EnsureBucket(ctx)</code> として呼ばれていたものです。</p>
+    </div>
+
+    <h2 class="step" id="step-6"><span class="step-no">Step 6</span>申請を受ける — handleUploadInit</h2>
+    <p>storage 側の道具が揃いました。ここからは <code>videos.go</code> の HTTP ハンドラです。アップロードの4拍子のうち、<strong>第1拍「申請 → 合鍵発行」</strong>を担うのが <code>handleUploadInit</code>（<code>POST /api/uploads</code>）です。少し長いので、まず定数とハンドラの前半（認可・レート制限・入力）から読みます。</p>
+
+    <div class="file-tag">internal/httpapi/videos.go（冒頭の定数）</div>
+    <pre><code><span class="kw">const</span> (
+	presignTTL      = <span class="st">30</span> * time.<span class="ty">Minute</span> <span class="cm">// 合鍵の有効期限</span>
+	uploadRateLimit = <span class="st">20</span>               <span class="cm">// 1時間あたりのアップロード開始回数（NFR-8）</span>
+)
+
+<span class="kw">var</span> extPattern = regexp.MustCompile(<span class="st">`^\.[a-zA-Z0-9]{1,8}$`</span>)</code></pre>
+
+    <p><code>presignTTL</code>（30分）は Step 5 の <code>PresignPut</code> に渡す有効期限。<code>uploadRateLimit</code>（20回/時）は「1人が1時間にアップロードを始められる回数」の上限で、いたずらな大量申請を防ぎます。<code>extPattern</code> は拡張子の形（<code>.mp4</code> のようなドット＋英数字1〜8文字）を検査する正規表現です。ファイル名から拡張子だけを安全に取り出すために使います。</p>
+
+    <div class="file-tag">internal/httpapi/videos.go（handleUploadInit・前半）</div>
+    <pre><code><span class="cm">// handleUploadInit: 動画を「準備中」で記録し、保管庫への期限つきの合鍵を発行する。</span>
+<span class="cm">// 動画本体は受付を通らない（NFR-1）。</span>
+<span class="kw">func</span> (s *<span class="ty">Server</span>) handleUploadInit(w http.<span class="ty">ResponseWriter</span>, r *http.<span class="ty">Request</span>) {
+	uid, ok := s.requireUser(w, r)
+	<span class="kw">if</span> !ok {
+		<span class="kw">return</span>
+	}
+	allowed, err := s.Q.AllowUpload(r.Context(), uid, uploadRateLimit, time.<span class="ty">Hour</span>)
+	<span class="kw">if</span> err == <span class="kw">nil</span> &amp;&amp; !allowed {
+		httpError(w, http.<span class="ty">StatusTooManyRequests</span>, <span class="st">"アップロード回数の上限に達しました。しばらく待ってください"</span>)
+		<span class="kw">return</span>
+	}
+
+	<span class="kw">var</span> req <span class="kw">struct</span> {
+		Filename <span class="ty">string</span> <span class="st">`json:"filename"`</span>
+	}
+	<span class="kw">if</span> err := readJSON(r, &amp;req); err != <span class="kw">nil</span> {
+		httpError(w, http.<span class="ty">StatusBadRequest</span>, <span class="st">"リクエストが不正です"</span>)
+		<span class="kw">return</span>
+	}
+	ext := strings.ToLower(path.Ext(req.Filename))
+	<span class="kw">if</span> !extPattern.MatchString(ext) {
+		ext = <span class="st">".mp4"</span>
+	}
+
+	<span class="kw">var</span> channelID <span class="ty">string</span>
+	<span class="kw">if</span> err := s.DB.QueryRow(r.Context(),
+		<span class="st">`SELECT id FROM channels WHERE user_id = $1`</span>, uid).Scan(&amp;channelID); err != <span class="kw">nil</span> {
+		httpError(w, http.<span class="ty">StatusNotFound</span>, <span class="st">"チャンネルが見つかりません"</span>)
+		<span class="kw">return</span>
+	}</code></pre>
+
+    <p>上から順に、申請を受け付ける前の<strong>4つの門番</strong>です。</p>
+    <ol>
+      <li><code>s.requireUser(w, r)</code> —— <strong>ログイン済みか</strong>（第01章）。誰でも動画を上げられては困るので、まず本人確認。未ログインなら <code>401</code> を返して即終了（<code>if !ok { return }</code>）。</li>
+      <li><code>s.Q.AllowUpload(...)</code> —— <strong>レート制限</strong>。Redis で「この人が直近1時間に何回申請したか」を数え、20回を超えていたら <code>429 Too Many Requests</code>。<code>err == nil &amp;&amp; !allowed</code> の条件に注目 —— Redis 自体がエラーなら（<code>err != nil</code>）制限をスキップして通します。「レート制限の仕組みが壊れたせいで正規のアップロードまで止める」のは本末転倒なので、<strong>制限は fail-open（壊れたら通す）</strong>にしています。</li>
+      <li><code>readJSON(r, &amp;req)</code> —— <strong>入力を読む</strong>。ボディから <code>filename</code> を取り出し、拡張子を検査。変な拡張子や無指定なら <code>.mp4</code> に丸めます。ここで拡張子を保つのは、後で保管庫の <code>key</code> の末尾に付けるため（<code>source.mp4</code> のように）。</li>
+      <li><code>SELECT id FROM channels WHERE user_id = $1</code> —— <strong>チャンネルを引く</strong>。動画は「人」ではなく「チャンネル」にぶら下がる（第01章）ので、そのユーザーのチャンネル ID を取得。無ければ <code>404</code>。</li>
+    </ol>
+
+    <p>4つの門番を通過したら、いよいよ動画レコードを作り、合鍵を発行します。後半です。</p>
+
+    <div class="file-tag">internal/httpapi/videos.go（handleUploadInit・後半）</div>
+    <pre><code>	ctx := r.Context()
+	tx, err := s.DB.Begin(ctx)
+	<span class="kw">if</span> err != <span class="kw">nil</span> {
+		httpError(w, http.<span class="ty">StatusInternalServerError</span>, <span class="st">"開始に失敗しました"</span>)
+		<span class="kw">return</span>
+	}
+	<span class="kw">defer</span> tx.Rollback(ctx)
+
+	<span class="kw">var</span> videoID <span class="ty">string</span>
+	<span class="kw">if</span> err := tx.QueryRow(ctx,
+		<span class="st">`INSERT INTO videos (channel_id, status) VALUES ($1, 'uploading') RETURNING id`</span>,
+		channelID).Scan(&amp;videoID); err != <span class="kw">nil</span> {
+		httpError(w, http.<span class="ty">StatusInternalServerError</span>, <span class="st">"開始に失敗しました"</span>)
+		<span class="kw">return</span>
+	}
+	key := <span class="st">"originals/"</span> + videoID + <span class="st">"/source"</span> + ext
+	<span class="kw">if</span> _, err := tx.Exec(ctx,
+		<span class="st">`UPDATE videos SET original_key = $2 WHERE id = $1`</span>, videoID, key); err != <span class="kw">nil</span> {
+		httpError(w, http.<span class="ty">StatusInternalServerError</span>, <span class="st">"開始に失敗しました"</span>)
+		<span class="kw">return</span>
+	}
+	<span class="kw">if</span> err := tx.Commit(ctx); err != <span class="kw">nil</span> {
+		httpError(w, http.<span class="ty">StatusInternalServerError</span>, <span class="st">"開始に失敗しました"</span>)
+		<span class="kw">return</span>
+	}
+
+	uploadURL, err := s.St.PresignPut(ctx, key, presignTTL)
+	<span class="kw">if</span> err != <span class="kw">nil</span> {
+		httpError(w, http.<span class="ty">StatusInternalServerError</span>, <span class="st">"アップロードURLの発行に失敗しました"</span>)
+		<span class="kw">return</span>
+	}
+	writeJSON(w, http.<span class="ty">StatusCreated</span>, <span class="kw">map</span>[<span class="ty">string</span>]<span class="ty">string</span>{
+		<span class="st">"videoId"</span>:   videoID,
+		<span class="st">"uploadUrl"</span>: uploadURL,
+	})
+}</code></pre>
+
+    <p>ここには<strong>2段階の工夫</strong>があります。</p>
+
+    <p><strong>1つ目: なぜ2つの SQL に分けてトランザクションにするのか。</strong> レコード作成は「<code>INSERT</code> して <code>id</code> を得る」→「その <code>id</code> を使って <code>key</code> を組み立て、<code>UPDATE</code> で書き戻す」という2段階になっています。<code>key</code>（<code>originals/&lt;videoID&gt;/source.mp4</code>）に<strong>動画 ID が含まれる</strong>ので、ID が採番される前には <code>key</code> を確定できない —— だから <code>INSERT ... RETURNING id</code> で ID をもらってから <code>key</code> を作り、<code>UPDATE</code> で <code>original_key</code> に入れる、という順序になります。この2つを <code>tx.Begin</code> / <code>tx.Commit</code> で<strong>1つのトランザクション</strong>に包むのは、「<code>INSERT</code> は成功したが <code>UPDATE</code> で落ちて、<code>original_key</code> が空のままの中途半端なレコードが残る」のを防ぐためです。<code>defer tx.Rollback(ctx)</code> は「もし <code>Commit</code> にたどり着かずにこの関数を抜けたら、全部なかったことにする」という保険。<code>Commit</code> 後の <code>Rollback</code> は無害（何もしない）なので、この defer は「途中で return したときだけ効く」安全網になります。</p>
+
+    <p><strong>2つ目: 合鍵の発行は、トランザクションを閉じた後。</strong> よく見ると、<code>s.St.PresignPut(...)</code> は <code>tx.Commit(ctx)</code> の<strong>後</strong>にあります。合鍵の発行は MinIO への署名操作（DB とは別の相手）なので、DB のトランザクションの中に入れる意味がありません。<strong>「DB の書き込みを確定させてから、外部（MinIO）の操作をする」</strong>——外部呼び出しを DB トランザクションの外に出すのは、トランザクションを長く開きっぱなしにしない定石です。</p>
+
+    <p>そして応答。<code>writeJSON(w, http.StatusCreated, ...)</code> で <strong><code>201 Created</code></strong> とともに、<code>videoId</code>（この動画の ID。第2拍の完了通知で使う）と <code>uploadUrl</code>（合鍵）を返します。この時点で、DB には <code>status = 'uploading'</code> の動画レコードが1つ生まれ、ブラウザの手には30分有効な合鍵が握られました。<strong>まだ動画本体は1バイトも保管庫にありません。</strong>入れるのはブラウザの仕事です。</p>
+
+    <div class="box hazard"><div class="box-k">⚠ 落とし穴 — key に動画 ID を使うのは、名前衝突と推測を同時に防ぐため</div>
+      <p><code>key := "originals/" + videoID + "/source" + ext</code> で、保管庫の置き場をユーザーが送ってきた <code>filename</code> ではなく<strong>動画 ID（UUID）ベース</strong>にしているのは重要です。もし <code>filename</code> をそのまま <code>key</code> にすると、2人が同じ <code>movie.mp4</code> を上げたときに<strong>上書き衝突</strong>が起きるし、他人が <code>key</code> を<strong>推測</strong>して合鍵なしで触れる余地も生まれます。動画 ID（推測しにくい UUID）を挟むことで、置き場は必ず一意になり、かつ推測されにくくなります。ユーザー由来の文字列を、そのままファイルシステムやストレージのパスに使わない —— これはパストラバーサルなどの定番の落とし穴を避ける基本作法でもあります。ちなみに変換後の成果物（<code>hls/&lt;id&gt;/...</code>）や元動画（<code>originals/&lt;id&gt;/...</code>）が同じ <code>&lt;id&gt;/</code> の下に集まるので、削除時に <code>hls/&lt;id&gt;/</code> ごと掃除できる（Step 5 の <code>RemovePrefix</code>）という副産物もあります。</p>
+    </div>
+
+    <h2 class="step" id="step-7"><span class="step-no">Step 7</span>ブラウザが直接 PUT する — クライアント側の1拍</h2>
+    <p>4拍子の<strong>第2拍</strong>は、サーバ側にはコードがありません。ここが直アップロードの核心です —— <strong>合鍵を受け取ったブラウザが、API サーバを介さず、直接 MinIO へ動画を <code>PUT</code> する</strong>。API サーバのコードにこの拍が現れないこと自体が「本体は受付を通らない」の証拠です。参考までに、ブラウザ側（フロントエンド）が何をするかを覗いておきます。完全なコードは第08章で読むので、ここでは骨子だけ。</p>
+
+    <div class="file-tag">frontend/src/api.ts（アップロードの骨子・抜粋）</div>
+    <pre><code>	<span class="kw">const</span> xhr = <span class="kw">new</span> <span class="ty">XMLHttpRequest</span>();
+	xhr.open(<span class="st">"PUT"</span>, uploadUrl);
+	xhr.upload.onprogress = (e) =&gt; {
+	  <span class="kw">if</span> (e.lengthComputable) onProgress(Math.round((e.loaded / e.total) * <span class="st">100</span>));
+	};</code></pre>
+
+    <p>ブラウザは <code>handleUploadInit</code> が返した <code>uploadUrl</code>（合鍵）に対して、<code>XMLHttpRequest</code> で <strong><code>PUT</code></strong> するだけです。宛先は <code>localhost:9000</code>（MinIO）—— API サーバ（<code>localhost:8080</code>）ではありません。<code>xhr.upload.onprogress</code> でアップロードの進捗（何 % 送れたか）を拾えるので、画面に進捗バーを出せます。この転送は、ファイルが 2GB でも、その 2GB は<strong>ブラウザ→MinIO の1本の直行便</strong>で流れ、API サーバはまったく関与しません。Step 1 で述べた「メモリ・帯域・タイムアウト」の3問題が、この直行によって同時に解決されているのが見て取れます。</p>
+
+    <div class="box hazard"><div class="box-k">⚠ 落とし穴 — ここで第00章の CORS 設定が効いてくる</div>
+      <p>ブラウザは <code>localhost:3000</code>（Web 画面）から <code>localhost:9000</code>（MinIO）へ <code>PUT</code> します。<strong>オリジン（ホスト:ポート）が違う</strong>ので、ブラウザの同一オリジンポリシーにより、MinIO 側が「よそから触られてもいいよ」と CORS で明示的に許可していないとブロックされます。第00章の <code>docker-compose.yml</code> で <code>MINIO_API_CORS_ALLOW_ORIGIN: "*"</code> を設定していたのは、まさにこの直アップロードのためでした。あのとき「第02章で腑に落ちる」と予告した1行が、ここで効いています。学習用なので <code>"*"</code>（どこからでも）にしていますが、本番なら自分の Web のオリジンだけを許可します。</p>
+    </div>
+
+    <h2 class="step" id="step-8"><span class="step-no">Step 8</span>完了を受け、実物を確かめ、注文する — handleUploadComplete</h2>
+    <p>4拍子の<strong>第3拍「完了通知」と第4拍「注文」</strong>を、<code>handleUploadComplete</code>（<code>POST /api/videos/{id}/complete</code>）が担います。ブラウザは MinIO への直 PUT が終わったら、API サーバに「上げ終わりました」と伝えます。API サーバはそれを鵜呑みにせず、<strong>実物を確かめてから</strong>変換の注文を出します。この章のもう一つの山場です。</p>
+
+    <div class="file-tag">internal/httpapi/videos.go（handleUploadComplete・全文）</div>
+    <pre><code><span class="cm">// handleUploadComplete: 「上げ終わった」の完了通知。実物を確認してから注文箱へ入れる（NFR-2）。</span>
+<span class="kw">func</span> (s *<span class="ty">Server</span>) handleUploadComplete(w http.<span class="ty">ResponseWriter</span>, r *http.<span class="ty">Request</span>) {
+	v, _, ok := s.getOwnedVideo(w, r)
+	<span class="kw">if</span> !ok {
+		<span class="kw">return</span>
+	}
+	<span class="kw">if</span> v.Status != <span class="st">"uploading"</span> {
+		httpError(w, http.<span class="ty">StatusConflict</span>, <span class="st">"この動画はすでに処理が進んでいます"</span>)
+		<span class="kw">return</span>
+	}
+	exists, err := s.St.Exists(r.Context(), v.OriginalKey)
+	<span class="kw">if</span> err != <span class="kw">nil</span> || !exists {
+		httpError(w, http.<span class="ty">StatusBadRequest</span>, <span class="st">"アップロードされたファイルが確認できません"</span>)
+		<span class="kw">return</span>
+	}
+	<span class="cm">// 注文の世代（fencing token）を上げ、その世代を注文票に載せる</span>
+	<span class="kw">var</span> gen <span class="ty">int</span>
+	err = s.DB.QueryRow(r.Context(),
+		<span class="st">`UPDATE videos SET status = 'uploaded', status_changed_at = now(),
+		        job_generation = job_generation + 1
+		 WHERE id = $1 AND status = 'uploading' RETURNING job_generation`</span>, v.ID).Scan(&amp;gen)
+	<span class="kw">if</span> err != <span class="kw">nil</span> {
+		httpError(w, http.<span class="ty">StatusConflict</span>, <span class="st">"この動画はすでに処理が進んでいます"</span>)
+		<span class="kw">return</span>
+	}
+	<span class="cm">// ここで受付の仕事は終わり。変換は職人に任せる</span>
+	<span class="kw">if</span> err := s.Q.EnqueueTranscode(r.Context(), queue.<span class="ty">TranscodeJob</span>{VideoID: v.ID, Generation: gen}); err != <span class="kw">nil</span> {
+		httpError(w, http.<span class="ty">StatusInternalServerError</span>, <span class="st">"変換の依頼に失敗しました"</span>)
+		<span class="kw">return</span>
+	}
+	writeJSON(w, http.<span class="ty">StatusOK</span>, <span class="kw">map</span>[<span class="ty">string</span>]<span class="ty">string</span>{<span class="st">"status"</span>: <span class="st">"uploaded"</span>})
+}</code></pre>
+
+    <p>このハンドラは4つのステップで、慎重に動画を次の工程へ送り出します。</p>
+
+    <p><strong>① 持ち主本人か（<code>getOwnedVideo</code>）。</strong> <code>s.getOwnedVideo(w, r)</code> は「ログイン済みで、かつこの動画の持ち主本人であること」まで確認する入口です（実装は <code>server.go</code>）。他人の動画の完了を勝手に叩けては困るので、本人確認を最初に済ませます。返り値の <code>v</code> は動画のメタ情報（<code>Status</code> や <code>OriginalKey</code> を含む）です。</p>
+
+    <p><strong>② 状態が <code>uploading</code> か。</strong> <code>if v.Status != "uploading"</code> で、まだ「申請したが完了していない」段階かを確かめます。すでに <code>uploaded</code> 以降に進んでいれば、これは<strong>重複した完了通知</strong>（ブラウザが二度叩いた等）なので <code>409 Conflict</code> で弾く。この事前チェックは親切なエラーメッセージのためのもので、本当の防御は④の条件つき UPDATE がやります（後述）。</p>
+
+    <p><strong>③ 実物が本当に保管庫にあるか（<code>Exists</code>）。</strong> ここが<strong>この章の設計思想の核心</strong>です。<code>s.St.Exists(r.Context(), v.OriginalKey)</code> —— Step 5 で読んだ <code>Exists</code> を使い、<strong>ブラウザの「上げ終わった」という自己申告を鵜呑みにせず、MinIO に実物があるかを API サーバ自身が確認</strong>します。なぜこれが要るのか? 直アップロードでは、動画本体は API サーバを通らずブラウザ→MinIO へ直行します。つまり API サーバは、動画が本当に上がったかを<strong>自分の目では見ていない</strong>。ブラウザが「上げた」と嘘をつく（あるいは PUT が途中で失敗したのに complete だけ叩く）と、実体のない<strong>幽霊動画</strong>が変換に回され、職人が空振りします。それを防ぐために、注文を出す前に必ず実物を確認する。<strong>「直アップロードの引き換えに、完了時の実在確認が必須になる」</strong>——これが直アップロード方式とセットの責任です。無ければ <code>400</code> で弾きます。</p>
+
+    <p><strong>④ 状態を条件つき UPDATE で進め、世代を上げる。</strong> ここに本書全体を貫く<strong>状態遷移の作法</strong>が初めて現れます。よく見ると、②で「<code>uploading</code> か」を確認したのに、UPDATE でも <code>WHERE id = $1 AND status = 'uploading'</code> と<strong>もう一度</strong>状態を条件に入れています。二度手間に見えますが、これは意図的です。②のチェックと④の UPDATE の<strong>間の隙間</strong>に、もう1本の complete リクエストが割り込んで先に <code>uploaded</code> にしてしまう可能性がある（<strong>競合</strong>）。もし「読んでから判定して UPDATE」だと、両方のリクエストが②を通過してしまい、<strong>注文が二重に積まれる</strong>。それを防ぐため、<strong>遷移条件（<code>status = 'uploading'</code>）を UPDATE の WHERE 自体に含め、1文で原子的に遷移させる</strong>。DB は同時に来た2本の UPDATE を順に処理するので、先の1本だけが <code>uploading</code> の行を掴んで <code>uploaded</code> にし、後の1本は「もう <code>uploading</code> ではない」ため<strong>0行更新</strong>になります。0行なら <code>RETURNING</code> が返らず <code>Scan</code> がエラーになるので、<code>409</code> で弾ける。<strong>「状態遷移は、読んでから UPDATE ではなく、条件を WHERE に入れた1文の条件つき UPDATE + 更新行数の判定で行う」</strong>——この作法が、第03章の retry や worker の全書き込みで繰り返し使われる背骨です。</p>
+
+    <p>そして UPDATE の中で、<code>status_changed_at = now()</code>（状態が変わった時刻）と <code>job_generation = job_generation + 1</code>（世代番号を +1）も<strong>同じ1文で</strong>更新しています。<code>status_changed_at</code> は「いつからこの状態か」の記録で、第03章の停滞救済（10分以上 <code>processing</code> なら retry 可）の根拠になります。<code>job_generation</code> は<strong>fencing token（世代番号）</strong>で、この UPDATE で上がった新しい世代を <code>RETURNING</code> で受け取り（<code>gen</code>）、次の注文票に載せます。いまはまだ意味が薄いですが、これが第03章の白眉 —— 「生き返った古い職人（ゾンビ）が新しい成果を上書きするのを防ぐ」—— の起点です。</p>
+
+    <p><strong>最後に注文を積む。</strong> 実在確認と状態遷移を通過して初めて、<code>s.Q.EnqueueTranscode(...)</code> で注文箱（Redis）に変換ジョブを積みます。ジョブには <code>VideoID</code>（どの動画か）と <code>Generation</code>（④で受け取った世代 <code>gen</code>）が載ります。第00章の <code>ascii</code> 図で「受付は注文票を積むだけで即応答」と言った、その注文票がここで生まれます。積んだら受付の仕事は終わり —— <code>200 OK</code> と <code>{"status":"uploaded"}</code> を返して、あとは職人（第03章）に任せます。</p>
+
+    <div class="gonote"><div class="box-k">実装メモ · 4拍子を1枚におさらいする</div>
+      <p>アップロードの全体像を、DB とストレージの状態変化とともに1枚にまとめます。</p>
+      <ol>
+        <li><strong>申請</strong>（<code>POST /api/uploads</code> → <code>handleUploadInit</code>）: DB に <code>videos</code> を <code>status='uploading'</code> で作り、<code>original_key</code> を確定。<strong>ブラウザへ合鍵（presigned URL）を返す</strong>。保管庫はまだ空。</li>
+        <li><strong>直 PUT</strong>（ブラウザ → MinIO、API を経由しない）: 合鍵で動画本体を <code>originals/&lt;id&gt;/source.ext</code> へアップロード。保管庫に実物が入る。DB は変わらない。</li>
+        <li><strong>完了通知＋実在確認</strong>（<code>POST /api/videos/{id}/complete</code> → <code>handleUploadComplete</code>）: <code>Exists</code> で実物を確認し、条件つき UPDATE で <code>uploading → uploaded</code>、世代 +1。</li>
+        <li><strong>注文</strong>: 世代を載せた変換ジョブを Redis に積む。以降は第03章。</li>
+      </ol>
+      <p>受付（API）は 1・3・4 の<strong>一瞬の処理</strong>だけを担い、いちばん重い 2（実データの転送）にはまったく触れていないことが、この一覧から読み取れます。</p>
+    </div>
+
+    <div class="gonote"><div class="box-k">実装メモ · videos.go の他のハンドラは各章で読む</div>
+      <p><code>videos.go</code> には、この章で主役の <code>handleUploadInit</code> / <code>handleUploadComplete</code> のほかにも、<code>handleGetVideo</code>（動画詳細。<code>ready</code> のときだけ <code>mediaUrl</code> を出し、失敗理由は持ち主にだけ見せる。この判定の考え方は第04章、これを叩く視聴ページは第08章）、<code>handleUpdateVideo</code>（タイトルや公開範囲の更新・公開時に新着通知を配る <code>notify.MaybeFanoutNewVideo</code> は第07章）、<code>handleDeleteVideo</code>（削除と保管庫の掃除）、<code>handleRetry</code>（変換のやり直し・第03章の状態遷移の集大成）、<code>handlePutThumbnail</code>（サムネイル差し替え・小さい画像なので API 経由）、<code>handleStudioVideos</code>（自分の動画一覧・変換状況の確認）があります。本章はアップロード系（申請〜complete）に集中し、それ以外は該当する章に譲ります。特に <code>handleRetry</code> は、この章で見た「条件つき UPDATE + 世代 +1」を、より複雑な救済条件（<code>failed</code> はいつでも / <code>uploaded</code> は即時 / <code>processing</code> は10分停滞後のみ）で使う発展形なので、第03章で <code>job_generation</code> の物語とともに読むのが自然です。</p>
+    </div>
+
+    <h2 class="step" id="step-9"><span class="step-no">Step 9</span>立ち上げて、動画を受け取ってみる</h2>
+    <p>部品が揃いました。4拍子を実際に <code>curl</code> でなぞり、動画が <code>uploading → uploaded</code> へ進むのを DB で確認します。第01章でアカウント登録してトークン（<code>$TOKEN</code>）を得ている前提です。</p>
+
+    <div class="box do"><div class="box-k">▸ 動かして確認 — 第1拍: 申請して合鍵をもらう</div>
+      <p><code>POST /api/uploads</code> を叩くと、動画レコードが <code>uploading</code> で生まれ、合鍵（<code>uploadUrl</code>）が返ります。</p>
+      <pre class="term"><code><span class="ps">$</span> curl -s -X POST http://localhost:8080/api/uploads \
+    -H "Authorization: Bearer $TOKEN" \
+    -H "Content-Type: application/json" \
+    -d '{"filename":"sample.mp4"}'
+<span class="out">{"uploadUrl":"http://localhost:9000/videos/originals/8f3a.../source.mp4?X-Amz-Algorithm=AWS4-HMAC-SHA256&amp;X-Amz-Expires=1800&amp;X-Amz-Signature=...","videoId":"8f3a..."}</span></code></pre>
+      <p><code>uploadUrl</code> のホストが <strong><code>localhost:9000</code></strong>（MinIO の公開住所）であること、<code>X-Amz-Expires=1800</code>（30分＝1800秒）と <code>X-Amz-Signature=...</code>（署名）が付いていることに注目してください。これが Step 4〜5 で作った、<code>public</code> クライアントによる合鍵です。</p>
+    </div>
+
+    <div class="box do"><div class="box-k">▸ 動かして確認 — 第2拍: 合鍵へ直接 PUT する</div>
+      <p>返ってきた合鍵（<code>uploadUrl</code>）へ、動画ファイルを直接 <code>PUT</code> します。宛先は <strong>MinIO（9000）で、API サーバ（8080）ではない</strong>ことに注目。<code>-T</code> はファイルをそのまま本文にする指定です。</p>
+      <pre class="term"><code><span class="cm"># $URL に上でもらった uploadUrl を入れる（クエリ全体を含めて）</span>
+<span class="ps">$</span> curl -s -X PUT -T ./sample.mp4 "$URL" -o /dev/null -w "%{http_code}\n"
+<span class="out">200</span></code></pre>
+      <p><code>200</code> が返れば、動画本体は API サーバを1バイトも通らず、MinIO の <code>originals/&lt;id&gt;/source.mp4</code> に収まっています。ブラウザ（curl）から MinIO への直行が成立しました。</p>
+    </div>
+
+    <div class="box do"><div class="box-k">▸ 動かして確認 — 第3・4拍: 完了通知で uploaded に進める</div>
+      <p>第1拍で得た <code>videoId</code> を使って完了を通知します。<code>Exists</code> で実物が確認され、状態が <code>uploaded</code> になり、変換の注文が積まれます。</p>
+      <pre class="term"><code><span class="ps">$</span> curl -s -X POST http://localhost:8080/api/videos/$VIDEO_ID/complete \
+    -H "Authorization: Bearer $TOKEN"
+<span class="out">{"status":"uploaded"}</span>
+
+<span class="cm"># DB で状態と世代を確認する</span>
+<span class="ps">$</span> docker compose exec db psql -U video -d video \
+    -c "SELECT status, job_generation, original_key FROM videos WHERE id='$VIDEO_ID'"
+<span class="out"> status   | job_generation |        original_key
+----------+----------------+------------------------------
+ uploaded |              1 | originals/8f3a.../source.mp4</span></code></pre>
+      <p><code>status</code> が <code>uploaded</code>、<code>job_generation</code> が <code>1</code>（<code>complete</code> で 0→1 に上がった）になっていれば成功です。動画は初めてサービスの中に入り、次の工程（変換）の順番待ちに並びました。</p>
+    </div>
+
+    <div class="box do"><div class="box-k">▸ 動かして確認 — 実物を上げずに complete を叩くと弾かれる</div>
+      <p>直アップロードの実在確認が効いているかを試します。申請だけして PUT を<strong>省き</strong>、いきなり complete を叩くと、<code>Exists</code> が実物なしを検出して弾きます。</p>
+      <pre class="term"><code><span class="cm"># 新しく申請だけして（PUT はしない）、その videoId で complete を叩く</span>
+<span class="ps">$</span> curl -s -X POST http://localhost:8080/api/videos/$GHOST_ID/complete \
+    -H "Authorization: Bearer $TOKEN"
+<span class="out">{"error":"アップロードされたファイルが確認できません"}</span></code></pre>
+      <p>幽霊動画（実体のない申請）が変換に回らず、水際で止められました。「ブラウザの自己申告を鵜呑みにしない」設計が働いています。</p>
+    </div>
+
+    <h2>つまずき FAQ</h2>
+    <details class="qa"><summary>合鍵の発行（<code>PresignPut</code>）で <code>500</code> になる。ログに <code>connection refused</code> や <code>lookup ...</code> が出る</summary>
+      <div class="qa-body"><p>Step 4 の <code>Region</code> 未指定の障害の典型です。<code>Region</code> を明示していないと、minio-go は署名前に「バケットのリージョンは?」という問い合わせを、<code>public</code> クライアントのエンドポイント（<code>localhost:9000</code>）へ実際に送ろうとします。ところが <code>localhost:9000</code> は<strong>ブラウザから見た住所</strong>で、API コンテナの中から見ると「自分自身の localhost」を指し、そこに MinIO はいないので問い合わせが届かず失敗します。両クライアントの <code>minio.New</code> に <code>Region: "us-east-1"</code> を渡して、この問い合わせ自体を不要にすれば直ります。本書が実際に踏んで修正した箇所です。</p></div>
+    </details>
+    <details class="qa"><summary>合鍵への <code>PUT</code> が、ブラウザだと CORS エラーで失敗する（curl だと成功する）</summary>
+      <div class="qa-body"><p>curl はブラウザではないので同一オリジンポリシーの制約を受けず成功しますが、ブラウザは <code>localhost:3000</code>（Web）から <code>localhost:9000</code>（MinIO）への<strong>クロスオリジン</strong>な <code>PUT</code> になるため、MinIO 側の CORS 許可が必要です。第00章の <code>docker-compose.yml</code> の <code>MINIO_API_CORS_ALLOW_ORIGIN: "*"</code> が設定されているか確認してください。これが無い・効いていないと、ブラウザだけがブロックされます。<code>docker compose up</code> をやり直して MinIO に設定が反映されているかも確認を。</p></div>
+    </details>
+    <details class="qa"><summary>なぜ完了通知（complete）が必要なの? PUT が終わったら自動で <code>uploaded</code> にできないの?</summary>
+      <div class="qa-body"><p>直アップロードでは、動画本体はブラウザ→MinIO へ直行し、<strong>API サーバはその PUT を観測していません</strong>。だから「いつ上げ終わったか」を API サーバは自分では知り得ず、ブラウザから「終わった」と教えてもらう必要があります（第3拍の complete）。MinIO のイベント通知（バケットへの書き込みを webhook で API に伝える）を使えば complete を省く設計も可能ですが、本書は仕組みを単純に保つため「ブラウザが通知し、API が <code>Exists</code> で裏を取る」方式にしています。<code>Exists</code> による実在確認があるので、通知を鵜呑みにする危険は避けられています。</p></div>
+    </details>
+
+    <h2>理解度チェック</h2>
+    <p>次の問いに<strong>自分の言葉で</strong>答えられたら、この章は卒業です。</p>
+    <details class="qa"><summary>1. なぜ動画本体を API サーバに通さず、ブラウザから MinIO へ直接アップロードするのか。3つの理由を挙げよ。</summary>
+      <div class="qa-body"><p>すべて「動画は大きい」ことに由来する。(1) <strong>メモリ</strong>: 何 GB もの動画を API サーバが受け取るとメモリを食い尽くし、同時アップロードで倒れる。(2) <strong>帯域</strong>: API 経由だと動画がネットワークを2回通る（ブラウザ→API→MinIO）ため、API の帯域とクラウドの転送コストを二重に食う。直行なら1回で済み API の帯域は使わない。(3) <strong>タイムアウト</strong>: 大容量の転送は数分〜十数分かかり、その間 API が1リクエストを抱え続けると、プロキシ等のタイムアウトで途中で切られる。直行なら API の処理は合鍵を渡す一瞬で終わる。</p></div>
+    </details>
+    <details class="qa"><summary>2. <code>storage.go</code> が <code>internal</code> / <code>public</code> の2つの <code>minio.Client</code> を持つのはなぜか。<code>Region</code> を明示しないと何が起きるか。</summary>
+      <div class="qa-body"><p>同じ MinIO でも、見る場所で住所が違うから。API コンテナの中からは <code>minio:9000</code>、ブラウザからは <code>localhost:9000</code>。presigned URL の署名は<strong>ホスト名を含めて計算される</strong>ので、ブラウザに渡す合鍵は最初から <code>localhost:9000</code> で署名しておく必要がある。それを作るのが <code>public</code> クライアント。一方、API サーバ自身が MinIO を読み書きする（<code>Exists</code> / <code>Get</code> など）のは <code>internal</code> クライアント。<code>Region</code> を省くと、署名前に「バケットのリージョンは?」という問い合わせが <code>public</code> のエンドポイント（<code>localhost:9000</code>）へ飛び、コンテナ内からは届かず 500 になる。両クライアントに <code>Region: "us-east-1"</code> を明示してこの問い合わせを不要にする。</p></div>
+    </details>
+    <details class="qa"><summary>3. <code>handleUploadComplete</code> は、なぜ「実物の確認」と「条件つき UPDATE」の両方を行うのか。単純に「読んで判定して UPDATE」ではダメな理由は?</summary>
+      <div class="qa-body"><p><strong>実物の確認</strong>（<code>Exists</code>）は、動画本体が API を通らない直アップロードでは、API サーバが「本当に上がったか」を自分の目で見ていないから。ブラウザの「上げた」を鵜呑みにすると、実体のない幽霊動画が変換に回り職人が空振りする。だから注文前に MinIO へ実在を問い合わせる。<strong>条件つき UPDATE</strong>（<code>WHERE ... AND status = 'uploading'</code> + <code>RETURNING</code>）は、二重の完了通知など競合に耐えるため。「読んで判定して UPDATE」だと、判定と UPDATE の隙間に別のリクエストが割り込んで、両方が通過し注文が二重に積まれ得る。遷移条件を WHERE に入れて1文で原子的に遷移させれば、先の1本だけが行を掴み、後は0行更新になって弾ける。同時に <code>status_changed_at</code> と <code>job_generation</code> も同じ1文で更新する。</p></div>
+    </details>
+
+    <h2>まとめ — 次の層へ</h2>
+    <p>この章で、動画が初めてサービスの中に入りました。<strong>大容量ファイルを API サーバに通さず、presigned URL（合鍵）でブラウザから MinIO へ直行させる</strong>——メモリ・帯域・タイムアウトの3問題を一挙に解いた、動画サービス最初の山場を越えました。<code>storage.go</code> の2クライアント構成（内部用 <code>internal</code> / ブラウザ用 <code>public</code>、両方 <code>Region</code> 明示必須）で合鍵を安全に発行し、<code>videos.go</code> の4拍子（申請 → 直 PUT → 実在確認つき完了通知 → 注文）で動画を <code>uploading → uploaded</code> へ進め、世代を載せた変換ジョブを注文箱に積みました。そして「状態遷移は条件つき UPDATE + 更新行数の判定で原子的に」という、本書全体を貫く作法の第一歩を踏みました。</p>
+    <p>いま、注文箱（Redis）には <code>{VideoID, Generation}</code> の注文票が1枚積まれ、順番待ちをしています。次の第03章では、この注文票を取り出す<strong>職人（worker）</strong>が主役です。ffmpeg を呼んで動画を複数画質の HLS に変換し、<code>processing → ready / failed</code> の状態を刻む —— そして、いまさりげなく登場した <code>job_generation</code> が、分散した職人と at-least-once なキューが引き起こす競合との戦いの主役になります。本書の白眉が始まります。</p>
+
+    <div class="chap-foot">
+      <a class="pager" href="01-auth.html"><span class="dir">← 前へ</span>第01章 · 人を扱う</a>
+      <a class="pager next" href="03-transcode.html"><span class="dir">次へ →</span>第03章 · 動画を変換する</a>
+    </div>
+  </main>
+</div>
+</body>
+</html>

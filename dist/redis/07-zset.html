@@ -1,0 +1,1011 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>第07章 Sorted Set と skiplist — Redis をつくる</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500;600&family=Source+Serif+4:opsz,wght@8..60,400;8..60,600;8..60,700&family=Noto+Serif+JP:wght@400;600;700&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<div class="shell">
+
+  <aside class="spine">
+    <a class="wordmark" href="index.html">MINI-REDIS · from scratch</a>
+    <div class="book-title">Redis を<br>つくる</div>
+    <div class="book-sub">Go で RESP から Sorted Set まで</div>
+
+    <div class="legend"><span>読む <b>↓</b></span><span>組む <b>↑</b></span></div>
+
+    <nav aria-label="目次">
+      <ul class="toc">
+        <li><a class="nav-item" href="index.html"><span class="nav-num">序</span><span class="nav-label">はじめに・準備<span class="nav-tag">Setup</span></span></a></li>
+        <li><a class="nav-item" href="00-server.html"><span class="nav-num">00</span><span class="nav-label">返事をするサーバ<span class="nav-tag">RESP</span></span></a></li>
+        <li><a class="nav-item" href="01-keyspace.html"><span class="nav-num">01</span><span class="nav-label">キーと値<span class="nav-tag">Store</span></span></a></li>
+        <li><a class="nav-item" href="02-expire.html"><span class="nav-num">02</span><span class="nav-label">有効期限<span class="nav-tag">Expire</span></span></a></li>
+        <li><a class="nav-item" href="03-string.html"><span class="nav-num">03</span><span class="nav-label">数としての文字列<span class="nav-tag">String</span></span></a></li>
+        <li><a class="nav-item" href="04-list.html"><span class="nav-num">04</span><span class="nav-label">List<span class="nav-tag">List</span></span></a></li>
+        <li><a class="nav-item" href="05-hash.html"><span class="nav-num">05</span><span class="nav-label">Hash<span class="nav-tag">Hash</span></span></a></li>
+        <li><a class="nav-item" href="06-set.html"><span class="nav-num">06</span><span class="nav-label">Set とエンコーディング<span class="nav-tag">Set</span></span></a></li>
+        <li><a class="nav-item current" aria-current="page" href="07-zset.html"><span class="nav-num">07</span><span class="nav-label">Sorted Set と skiplist<span class="nav-tag">ZSet</span></span></a></li>
+        <li><a class="nav-item" href="08-pubsub.html"><span class="nav-num">08</span><span class="nav-label">Pub/Sub<span class="nav-tag">PubSub</span></span></a></li>
+        <li><a class="nav-item" href="09-finish.html"><span class="nav-num">09</span><span class="nav-label">仕上げと設計判断<span class="nav-tag">Finish</span></span></a></li>
+      </ul>
+    </nav>
+
+    <div class="spine-foot">
+      各章は一つのデータ型・機能。<br>下（RESP）から上（Sorted Set）へ<br>積み上げて動かしていく。
+    </div>
+  </aside>
+
+  <main class="reading">
+    <div class="progress-tag">第07章 / 全10章 · 層: ZSET · 本書で最も濃い章 · 読了目安 4〜6時間</div>
+    <div class="eyebrow"><span>ZSet</span><span class="depth">— クライマックス</span></div>
+    <h1>Sorted Set と skiplist</h1>
+    <p class="lede">ここまでの6章は、辞書1つ・配列1つで足りる素直な構造ばかりでした。この章は違います。Redis の <strong>Sorted Set</strong>（順序付き集合）は、<strong>2つのデータ構造を同時に、矛盾なく持ち続ける</strong>ことで初めて成り立ちます。片方は <code>member → score</code> を一発で引く辞書、もう片方は <code>score</code> 順に並べて範囲やランクを取れる <strong>skiplist（スキップリスト）</strong>。skiplist は「確率でつくる高速道路」——本書で最も難しく、最も面白い構造です。図を何枚も描きながら、挿入・削除・ランク計算を1行ずつ解きほぐしていきます。腰を据えてどうぞ。</p>
+
+    <div class="box goal"><div class="box-k">◈ この章のゴール</div>
+      <p>次の2つを、自分の目と手で確認できたら達成です。</p>
+      <ol>
+        <li><code>go test -run TestSkiplistAgainstReference -v</code> が PASS する。5000 回のランダム操作の結果が、「ソート済みスライス」という自明な実装と<strong>完全に一致</strong>する — 自作の skiplist が本当に正しく並び・数えていることの証明。</li>
+        <li><code>go test -run 'TestZSetCommands|TestZSetOrdering|TestZRangeByScore|TestZRem' -v</code> が PASS する。<code>ZADD</code> から <code>ZRANK</code>・<code>ZRANGEBYSCORE</code> まで、辞書と skiplist の二重管理が矛盾なく動く。</li>
+      </ol>
+    </div>
+
+    <div class="box map"><div class="box-k">☰ この章のステップ</div>
+      <ol>
+        <li><a href="#step-1">1つの構造では足りない — 逆引きと範囲取得の両立</a></li>
+        <li><a href="#step-2">skiplist とは何か — 確率でつくる高速道路</a></li>
+        <li><a href="#step-3">ノードと構造 — <code>forward</code> と <code>span</code></a></li>
+        <li><a href="#step-4">ランダムレベル生成 — コイン投げで高さを決める</a></li>
+        <li><a href="#step-5">挿入 — <code>update</code> と <code>span</code> の更新</a></li>
+        <li><a href="#step-6">削除 — リンクを外し <code>span</code> を縫い直す</a></li>
+        <li><a href="#step-7">ランク計算 — <code>span</code> を足して順位を数える</a></li>
+        <li><a href="#step-8">二重管理の義務 — <code>ZSet</code> 型と <code>ZADD</code></a></li>
+        <li><a href="#step-9">読み出しコマンド — <code>ZSCORE</code>／<code>ZRANK</code>／<code>ZRANGE</code>／<code>ZRANGEBYSCORE</code>／<code>ZREM</code>／<code>ZCARD</code></a></li>
+      </ol>
+    </div>
+
+    <h2>Sorted Set とは何か — 「順位のある集合」</h2>
+    <p>Sorted Set（ZSet）は、各メンバーに <strong>スコア（浮動小数点数）</strong>が付いた集合です。集合なのでメンバーは重複しませんが、ただの Set と違い、<strong>スコアの昇順に並んでいる</strong>のが本質です。用途を思い浮かべると腑に落ちます。ゲームのリーダーボード（スコア = 得点、上位N人を取り出す）、時系列イベント（スコア = タイムスタンプ、ある期間を切り出す）、優先度キュー（スコア = 優先度）。「集合でありながら、順位と範囲を高速に問える」——これが Sorted Set の売りです。</p>
+    <p>この章で実装するコマンドは次の7つです。</p>
+    <table>
+      <tr><th>コマンド</th><th>意味</th><th>計算量</th></tr>
+      <tr><td><code>ZADD key score member ...</code></td><td>メンバーを追加／スコア更新</td><td>O(log N)</td></tr>
+      <tr><td><code>ZSCORE key member</code></td><td>メンバーのスコアを引く</td><td>O(1)</td></tr>
+      <tr><td><code>ZRANK key member</code></td><td>メンバーの順位（0 始まり）</td><td>O(log N)</td></tr>
+      <tr><td><code>ZRANGE key start stop</code></td><td>順位の範囲でメンバー一覧</td><td>O(log N + M)</td></tr>
+      <tr><td><code>ZRANGEBYSCORE key min max</code></td><td>スコアの範囲でメンバー一覧</td><td>O(log N + M)</td></tr>
+      <tr><td><code>ZREM key member ...</code></td><td>メンバーを削除</td><td>O(log N)</td></tr>
+      <tr><td><code>ZCARD key</code></td><td>要素数</td><td>O(1)</td></tr>
+    </table>
+    <p>計算量の欄を眺めてください。<code>ZSCORE</code>（スコア引き）と <code>ZCARD</code>（要素数）は <strong>O(1)</strong>、一方で <code>ZRANK</code>・<code>ZRANGE</code> は <strong>O(log N)</strong>。この <strong>速さの種類が違う</strong>ことが、この章のすべての出発点です。次のステップで、なぜ1つの構造では両立できないのかを見ます。</p>
+
+    <h2 class="step" id="step-1"><span class="step-no">Step 1</span>1つの構造では足りない — 逆引きと範囲取得の両立</h2>
+    <p>Sorted Set に、たった1つのデータ構造で挑もうとすると、必ず壁にぶつかります。実際に2つの候補で試して、どこで詰まるかを見てみましょう。</p>
+
+    <h3>候補A: 辞書だけ（<code>map[string]float64</code>）</h3>
+    <p><code>member → score</code> の辞書を持てば、<code>ZSCORE</code>（メンバーからスコアを引く）は O(1) で一瞬です。第05章の Hash と同じ構造ですから、実装も楽。<strong>でも順序がない</strong>。<code>ZRANGE key 0 9</code>（スコア下位10件）を答えるには、辞書の全 N 件を取り出してソートするしかなく、毎回 O(N log N)。要素が100万件あるリーダーボードで「上位10人」を出すたびに100万件ソートするのは論外です。</p>
+
+    <h3>候補B: ソート済みスライスだけ（<code>[]zEntry</code>）</h3>
+    <p>では逆に、<code>(score, member)</code> の昇順に並べた配列を持てばどうか。<code>ZRANGE</code>（順位の範囲）はスライスを切るだけで O(M)、<code>ZRANK</code>（順位）は二分探索で O(log N)。範囲・順位はこれで速い。<strong>でも今度は逆引きと更新が遅い</strong>。<code>ZSCORE member</code> は「そのメンバーがどこにいるか」を線形に探すか、別の辞書が要る。さらに致命的なのが <code>ZADD</code> の更新——スコアが変わると並び位置が変わるので、<strong>配列の途中に挿入・削除</strong>が発生し、要素をずるずるずらす O(N) が毎回走ります。</p>
+
+    <div class="ascii">同じ要求に、片方の構造だけでは必ず穴が空く
+
+               ZSCORE       ZRANK / ZRANGE     ZADD(更新)
+  ┌───────────┬────────────┬─────────────────┬────────────┐
+  │ 辞書だけ    │  O(1) ◎    │  O(N log N) ✗   │  O(1) ◎    │
+  │ スライスだけ │  O(N) ✗    │  O(log N) ◎     │  O(N) ✗    │
+  └───────────┴────────────┴─────────────────┴────────────┘
+       ↑ 逆引きは辞書が要る      ↑ 順序は並んだ構造が要る
+
+  → 「逆引き用の辞書」＋「順序用の構造」の 2 本立てにすれば
+     どの列も ◎ にできる。これが本家 Redis の答え。</div>
+
+    <p>表を見れば結論は明らかです。<strong>逆引き（member→score）には辞書が要り、順序（score 順の範囲・ランク）には並んだ構造が要る</strong>。ならば両方持てばいい。本家 Redis の Sorted Set は、まさに <strong>辞書 + 順序構造</strong>の二重管理でできています。この章の <code>ZSet</code> 型も同じ設計です。</p>
+    <p>残る問題は「順序構造」に何を使うかです。ソート済みスライスは更新が O(N) で失格。平衡二分探索木（赤黒木や AVL 木）なら挿入・削除・探索すべて O(log N) で理想的ですが、実装が非常に込み入ります（回転・再バランスのコードは長く、バグりやすい）。そこで Redis が選んだのが <strong>skiplist</strong> です。次のステップで、その正体を明かします。</p>
+
+    <h2 class="step" id="step-2"><span class="step-no">Step 2</span>skiplist とは何か — 確率でつくる高速道路</h2>
+    <p>skiplist（スキップリスト）は、1990 年に William Pugh が発表した確率的データ構造です。出発点は<strong>ただの昇順連結リスト</strong>。連結リストは挿入・削除こそ O(1)（リンクを繋ぎ替えるだけ）ですが、探索が O(N) です — 目的の要素まで1つずつたどるしかないから。</p>
+
+    <div class="ascii">ふつうの昇順連結リスト（探索は O(N)）
+
+  head → [1] → [2] → [3] → [4] → [5] → [6] → [7] → nil
+
+  「6 はどこ?」→ 1,2,3,4,5,6 と 6 回たどる。N が大きいほど遅い。</div>
+
+    <p>ここで Pugh のアイデアです。<strong>一部のノードに「上の階のリンク」を足して、飛ばし読みできる高速道路を作る</strong>。下の絵を見てください。1階（レベル0）は全ノードを繋ぐ普通のリストですが、2階（レベル1）は2つおき、3階（レベル2）は4つおきにリンクが張られています。</p>
+
+    <div class="ascii">skiplist — 上の階ほど間隔が広い「高速道路」
+※これは説明のための理想形。実物はこう整然とはならない（次の節で崩します）
+
+  L2  head ─────────────────→ [4] ───────────────→ nil
+  L1  head ───────→ [2] ────→ [4] ────→ [6] ─────→ nil
+  L0  head → [1] → [2] → [3] → [4] → [5] → [6] → [7] → nil
+
+  「6 はどこ?」を上の階から探す:
+    L2: head→[4]  ([4]の次はnil、6は[4]より後 → 1つ降りる)
+    L1: [4]→[6]   (見つけた!)
+  = たった 2 ホップ。N が増えても log N ホップで届く。</div>
+
+    <p>探索は<strong>いちばん上の階から始め、行き過ぎたら1つ下の階に降りる</strong>のを繰り返します。上の階は間隔が広いので、遠くまで一気に飛べる。目的地の手前まで来たら階段を降りて細かく詰める。これで探索が期待 <strong>O(log N)</strong> になります。二分探索の「半分に絞る」を、リンク構造でやっているイメージです。</p>
+
+    <h3>なぜ「確率」でつくるのか</h3>
+    <p>いま描いた絵は「2つおき・4つおき」ときれいに並んでいますが、本物の skiplist はこの整然さを<strong>維持しません</strong>。維持しようとすると、挿入・削除のたびに全体の階層を組み直す羽目になり、それこそ O(N) になってしまうからです。</p>
+    <p>そこで skiplist は<strong>各ノードの高さをコイン投げで決めます</strong>。ノードを挿入するとき、「表が出たらもう1段高く」を繰り返す。確率 <code>p</code> で1段上がるとすると、高さ1のノードは全体の <code>1-p</code>、高さ2は <code>p(1-p)</code>、高さ3は <code>p²(1-p)</code>……と、上に行くほど指数的に少なくなります。本書は本家と同じ <code>p = 0.25</code> を使うので、およそ <strong>4つに1つが2階へ、16個に1つが3階へ</strong>上がる。<strong>平均すれば</strong>あの「間隔が広がる高速道路」ができあがるのです。</p>
+
+    <div class="ascii">確率で高さを決める（p = 0.25）
+
+  各ノードの高さ = コインを投げ続けて決める
+    高さ1 (どのノードも最低これ)  ~ 75%
+    高さ2以上 (1回表)             ~ 25%
+    高さ3以上 (2回続けて表)       ~ 6.25%
+    高さ4以上                    ~ 1.6%   …
+
+  ある挿入例（* が各ノードの実際の高さ）:
+    L2          *              *
+    L1     *    *         *    *
+    L0  *  *  * *  *  *  *  *  * *
+        きれいな倍々ではないが、平均すれば log N の探索が成り立つ</div>
+
+    <p>ここが skiplist の思想の核心です。<strong>厳密な平衡を保つ代わりに、確率に任せる</strong>。個々の形はでこぼこですが、確率のおかげで「期待 O(log N)」が成り立ち、しかも挿入・削除はローカルなリンク繋ぎ替えだけで済む(全体の再構成が要らない)。木の回転のような難しいバランス調整コードが、まるごと不要になります。<strong>「賢く保つ」代わりに「運に任せて、平均で勝つ」</strong> — これが確率的データ構造の醍醐味です。</p>
+
+    <div class="gonote"><div class="box-k">GO メモ · 確率的データ構造と乱数</div>
+      <p>skiplist のように<strong>乱数で構造を決める</strong>データ構造を確率的データ構造と呼びます。Go では <code>math/rand</code> の <code>rand.Float64()</code>（0〜1 の一様乱数）でコイン投げを実装します。最悪ケース（運悪く全部同じ高さ = ただのリスト）は理論上あり得ますが、確率は天文学的に低く、実用上は常に O(log N) とみなせます。ハッシュテーブルが「ハッシュ関数が均等」を前提に O(1) を謳うのと同じ、<strong>平均計算量に賭ける</strong>設計です。なお本家 Redis は乱数のシードを固定していませんが、本書の実装も同様で、実行のたびに構造の形は変わります(結果の並びは常に正しい)。</p>
+    </div>
+
+    <h2 class="step" id="step-3"><span class="step-no">Step 3</span>ノードと構造 — forward と span</h2>
+    <p>いよいよコードです。作るファイルは <code>zset.go</code>。まず skiplist の骨組み — ノードとリスト本体の型を定義します。</p>
+
+    <div class="file-tag">zset.go</div>
+    <pre><code><span class="kw">package</span> main
+
+<span class="kw">import</span> (
+	<span class="st">"errors"</span>
+	<span class="st">"math"</span>
+	<span class="st">"math/rand"</span>
+	<span class="st">"strconv"</span>
+	<span class="st">"strings"</span>
+)
+
+<span class="cm">// ---- skiplist ----</span>
+<span class="cm">//</span>
+<span class="cm">// Sorted Set の心臓部。(score, member) の昇順に並ぶ連結リストに、</span>
+<span class="cm">// 「高速道路」のような上位レベルのリンクを確率的に重ねたもの。</span>
+<span class="cm">// 探索・挿入・削除・ランク取得が期待 O(log N) になる。</span>
+
+<span class="kw">const</span> (
+	zslMaxLevel = <span class="st">32</span>   <span class="cm">// 本家と同じ</span>
+	zslP        = <span class="st">0.25</span> <span class="cm">// レベルが1つ上がる確率</span>
+)
+
+<span class="kw">type</span> <span class="ty">zslNode</span> <span class="kw">struct</span> {
+	member  <span class="ty">string</span>
+	score   <span class="ty">float64</span>
+	forward []*<span class="ty">zslNode</span> <span class="cm">// forward[i] = レベル i での次ノード</span>
+	span    []<span class="ty">int</span>      <span class="cm">// span[i] = forward[i] までに何ノード進むか（ランク計算用）</span>
+}
+
+<span class="kw">type</span> <span class="ty">skiplist</span> <span class="kw">struct</span> {
+	head   *<span class="ty">zslNode</span>
+	length <span class="ty">int</span>
+	level  <span class="ty">int</span>
+}
+
+<span class="kw">func</span> newSkiplist() *<span class="ty">skiplist</span> {
+	<span class="kw">return</span> &amp;<span class="ty">skiplist</span>{
+		head: &amp;<span class="ty">zslNode</span>{
+			forward: <span class="kw">make</span>([]*<span class="ty">zslNode</span>, zslMaxLevel),
+			span:    <span class="kw">make</span>([]<span class="ty">int</span>, zslMaxLevel),
+		},
+		level: <span class="st">1</span>,
+	}
+}</code></pre>
+
+    <p>2つの定数から。<code>zslMaxLevel = 32</code> はノードが持てる階の上限です。32 段あれば <code>4³²</code>（＝18,446,744,073,709,551,616。およそ <strong>1845 京</strong>、1.8×10<sup>19</sup>）要素まで対応できる計算で、実質無限。<code>zslP = 0.25</code> は Step 2 の「4つに1つが上がる」確率です。本家 Redis と同じ値を採用しています。</p>
+    <p><code>zslNode</code> がノード1個です。<code>member</code> と <code>score</code> は当たり前として、心臓は下の2つのスライスです。</p>
+    <ul>
+      <li><code>forward []*zslNode</code> — <strong>各階の「次のノード」への矢印</strong>。<code>forward[0]</code> は1階（全ノードを繋ぐ最下層）の次、<code>forward[1]</code> は2階の次……。このノードの高さが3なら <code>forward</code> の長さは3です。</li>
+      <li><code>span []int</code> — <strong>各階の矢印が「何ノードぶん飛ぶか」の距離</strong>。<code>span[i]</code> は「<code>forward[i]</code> に到達するまでに最下層で何ノード進むか」。これが後の <code>ZRANK</code>（順位計算）の鍵になります。</li>
+    </ul>
+    <p><code>span</code> の意味は言葉だと掴みにくいので、絵で押さえます。下は「2階の矢印は最下層で3ノードぶんを飛び越えている」= span が3、という状況です。</p>
+
+    <div class="ascii">span = その矢印が最下層で何ノードぶんを飛ぶか
+
+  L1  head ═══════════════════════→ [d]
+              span=3 ↑ (b,c,d の 3 ノードぶんを一気に飛ぶ)
+  L0  head → [a] → [b] → [c] → [d]
+              1     1     1     1     (最下層は必ず span=1、隣へ1歩)
+
+  L1 の矢印 head→[d] は、L0 で見れば a,b,c を飛び越えて d に着く。
+  「飛んだ距離」= 3 を span[1] に覚えておく。
+  → 上の階を飛ぶたびに span を足せば、いま何番目にいるかが分かる。</div>
+
+    <p>最下層（<code>span[0]</code>）は必ず「隣へ1歩」なので span は常に 1 です。上の階の矢印だけが、複数ノードを飛び越えるぶんの距離を持ちます。この「飛んだ距離の合計 = そのノードの順位」という関係が、Step 7 のランク計算の全てです。いまは「span = 飛距離」とだけ覚えてください。</p>
+    <p><code>skiplist</code> 本体は3つのフィールドだけ。<code>head</code> は<strong>番兵ノード</strong>（値を持たない先頭）で、常に <code>zslMaxLevel</code> ぶんの <code>forward</code>／<code>span</code> を持ちます — どの階からでも探索を始められるように。<code>length</code> は要素数（<code>ZCARD</code> 用）、<code>level</code> は<strong>現在いちばん高いノードの高さ</strong>です。<code>newSkiplist</code> は空の skiplist を作り、まだ要素がないので <code>level: 1</code>（最下層だけ)で始めます。</p>
+
+    <div class="gonote"><div class="box-k">GO メモ · []*zslNode という「ポインタのスライス」と番兵 head</div>
+      <p><code>forward []*zslNode</code> は「<code>zslNode</code> へのポインタのスライス」です。各要素 <code>forward[i]</code> は次ノードの<strong>アドレス</strong>を指し、次ノードが無ければ <code>nil</code>。連結リストのリンクをスライスにしたものと思えばよく、添字 <code>i</code> が「何階のリンクか」を表します。<br>
+      <code>head</code> のような<strong>番兵（sentinel）</strong>は、値を持たないダミーの先頭ノードです。番兵があると「先頭への挿入」も「途中への挿入」も同じコードで書けます（先頭でも必ず <code>head.forward[i]</code> の繋ぎ替えになる）。特別扱いの分岐が消えるので、リスト系のコードは番兵を置くのが定石です。</p>
+    </div>
+
+    <h2 class="step" id="step-4"><span class="step-no">Step 4</span>ランダムレベル生成 — コイン投げで高さを決める</h2>
+    <p>新しいノードの高さを決める <code>randomLevel</code> と、順序を定義する <code>zslLess</code> を先に置きます。どちらも数行ですが、skiplist 全体の性格を決める重要な部品です。</p>
+
+    <div class="file-tag">zset.go（つづき）</div>
+    <pre><code><span class="cm">// randomLevel はコイン投げでノードの高さを決める。約 1/4 の確率で1段高くなる。</span>
+<span class="kw">func</span> randomLevel() <span class="ty">int</span> {
+	lvl := <span class="st">1</span>
+	<span class="kw">for</span> lvl &lt; zslMaxLevel &amp;&amp; rand.Float64() &lt; zslP {
+		lvl++
+	}
+	<span class="kw">return</span> lvl
+}
+
+<span class="cm">// zslLess は skiplist 内の順序。スコアが同じならメンバー名の辞書順。</span>
+<span class="kw">func</span> zslLess(aScore <span class="ty">float64</span>, aMember <span class="ty">string</span>, bScore <span class="ty">float64</span>, bMember <span class="ty">string</span>) <span class="ty">bool</span> {
+	<span class="kw">if</span> aScore != bScore {
+		<span class="kw">return</span> aScore &lt; bScore
+	}
+	<span class="kw">return</span> aMember &lt; bMember
+}</code></pre>
+
+    <p><code>randomLevel</code> は Step 2 のコイン投げそのものです。高さは最低 1。そこから <code>rand.Float64() &lt; 0.25</code>（25%）が出るたびに <code>lvl++</code> し、外れるかレベル上限に達したら止めます。表が続くほど高くなる — が、25% を連続で当て続ける必要があるので、高いノードは指数的に稀。この1つの関数が、あの「上の階ほど間隔が広い」構造を確率的に生み出します。</p>
+    <p><code>zslLess</code> は skiplist の<strong>並び順の定義</strong>です。第一キーはスコアの昇順。<strong>スコアが同じときはメンバー名の辞書順</strong>で決着をつけます。これが Sorted Set の重要な約束で、同点でも順序が一意に定まる(<code>ZRANGE</code> の結果が毎回同じになる)。テスト <code>TestZSetOrdering</code> の <code>tie</code> の行(スコア1の <code>aa</code> と <code>bb</code>)がまさにこれを検証しています。以降、skiplist の全操作(探索・挿入・削除・ランク)は、この <code>zslLess</code> を「どちらが前か」の判定に使います。順序の定義を1か所に閉じ込めておくことで、比較のロジックが全操作で一致するのです。</p>
+
+    <div class="box hazard"><div class="box-k">⚠ 落とし穴 — NaN を skiplist に入れてはいけない</div>
+      <p><code>zslLess</code> は <code>aScore &lt; bScore</code> のような比較に依存します。ところが浮動小数点の <strong>NaN（非数）は、あらゆる比較が false</strong> になります（<code>NaN &lt; 1</code> も <code>NaN &gt; 1</code> も <code>NaN == NaN</code> もすべて false）。もし NaN スコアが skiplist に紛れ込むと、「どちらが前か」の判定が壊れ、挿入位置が定まらず、構造が静かに破損します。だから本書は <strong>NaN を skiplist の入口ではなく、さらに手前の <code>parseScore</code> で拒否</strong>します(Step 8 で登場)。テスト <code>TestZSetCommands</code> の <code>ZADD z nan m</code> がエラーになることが、この防波堤の確認です。<code>inf</code>／<code>-inf</code> は比較が正しく効く(無限大は最大／最小として振る舞う)ので、有効なスコアとして通します。</p>
+    </div>
+
+    <h2 class="step" id="step-5"><span class="step-no">Step 5</span>挿入 — update と span の更新</h2>
+    <p>ここが本書で最も難しい関数、<code>insert</code> です。一気に読むと必ず迷子になるので、<strong>3つの段階</strong>に分けて、それぞれ絵とともに追います。全体像はこうです。</p>
+    <ol>
+      <li><strong>探索フェーズ</strong> — 挿入位置を各階で見つけ、「各階の直前ノード（<code>update</code>）」と「そこまでの順位（<code>rank</code>）」を記録する。</li>
+      <li><strong>高さ決めフェーズ</strong> — <code>randomLevel</code> で新ノードの高さを決め、リストの現在の高さを超えるなら差分を初期化する。</li>
+      <li><strong>接続フェーズ</strong> — 新ノードを各階に繋ぎ、<code>span</code>（飛距離）を左右に配り直す。</li>
+    </ol>
+
+    <h3>①探索フェーズ — update と rank を集める</h3>
+    <div class="file-tag">zset.go（insert · 前半）</div>
+    <pre><code><span class="kw">func</span> (sl *<span class="ty">skiplist</span>) insert(member <span class="ty">string</span>, score <span class="ty">float64</span>) {
+	update := <span class="kw">make</span>([]*<span class="ty">zslNode</span>, zslMaxLevel) <span class="cm">// 各レベルで挿入位置の直前ノード</span>
+	rank := <span class="kw">make</span>([]<span class="ty">int</span>, zslMaxLevel)        <span class="cm">// そこまでのランク（先頭からの距離）</span>
+
+	x := sl.head
+	<span class="kw">for</span> i := sl.level - <span class="st">1</span>; i &gt;= <span class="st">0</span>; i-- {
+		<span class="kw">if</span> i == sl.level-<span class="st">1</span> {
+			rank[i] = <span class="st">0</span>
+		} <span class="kw">else</span> {
+			rank[i] = rank[i+<span class="st">1</span>]
+		}
+		<span class="kw">for</span> x.forward[i] != <span class="kw">nil</span> &amp;&amp; zslLess(x.forward[i].score, x.forward[i].member, score, member) {
+			rank[i] += x.span[i]
+			x = x.forward[i]
+		}
+		update[i] = x
+	}</code></pre>
+
+    <p>2つの作業用スライスを用意します。<code>update[i]</code> には「<strong>i 階で、新ノードが入る位置の<em>直前</em>のノード</strong>」を、<code>rank[i]</code> には「<strong>その直前ノードが先頭から何番目か</strong>」を記録していきます。この <code>update</code> と <code>rank</code> が集まれば、あとは機械的に繋げます。</p>
+    <p>ループは<strong>いちばん高い階から降りていく</strong>（<code>i := sl.level-1; i &gt;= 0; i--</code>）。各階で、<code>zslLess</code>(次ノードが新ノードより前か)が成り立つ間だけ右へ進み、進むたびに <code>rank[i] += x.span[i]</code>(飛距離を足す = 順位を数える)。行き過ぎる手前で止まったノードが、その階の <code>update[i]</code> です。</p>
+    <p><code>rank[i] = rank[i+1]</code> の1行が巧妙です。1つ上の階から降りてきたとき、<strong>そこまでに数えた順位を引き継ぐ</strong>。上の階で <code>head</code> から <code>x</code> まで一気に飛んだ距離を、下の階の出発点の順位として受け継ぐわけです。これで各階の <code>rank</code> が正しく積み上がります。絵で追いましょう。</p>
+
+    <div class="ascii">score=3.5, member="X" を挿入したい ── 探索フェーズ
+
+  既存: (a,1) (b,2) (c,3) (d,4) (e,5)   ※(member,score)
+
+  L2  head ══════════════→ [c,3] ═══════════════→ nil
+  L1  head ═══→ [b,2] ═══→ [c,3] ═══→ [d,4] ════→ nil
+  L0  head → [a,1]→[b,2]→[c,3]→[d,4]→[e,5] → nil
+
+  上の階から「3.5 未満の最後」を探す:
+    L2: head→[c,3]  (次[c,3]は3<3.5なので進む/次nil→降りる)  update[2]=[c,3] rank[2]=3
+    L1: [c,3]→[d,4] (次[d,4]は4≧3.5→止まる)                 update[1]=[c,3] rank[1]=3
+    L0: [c,3]→[d,4] (同上→止まる)                            update[0]=[c,3] rank[0]=3
+
+  → 3階すべてで「[c,3] の直後」が挿入位置。rank はどれも 3。</div>
+
+    <p>探索が終わると、<code>update[0..level-1]</code> に「新ノードを繋ぐべき各階の直前ノード」が、<code>rank[0..level-1]</code> に「その位置の順位」が揃います。上の絵では偶然どの階も <code>[c,3]</code> ですが、一般には階ごとに違うノードになります(高いノードほど手前で止まる)。</p>
+
+    <h3>②高さ決めフェーズ — 新しい階を用意する</h3>
+    <div class="file-tag">zset.go（insert · 中盤）</div>
+    <pre><code>	lvl := randomLevel()
+	<span class="kw">if</span> lvl &gt; sl.level {
+		<span class="kw">for</span> i := sl.level; i &lt; lvl; i++ {
+			rank[i] = <span class="st">0</span>
+			update[i] = sl.head
+			update[i].span[i] = sl.length
+		}
+		sl.level = lvl
+	}</code></pre>
+
+    <p>新ノードの高さを <code>randomLevel</code> で決めます。もし <code>lvl</code> が<strong>いまのリストの高さ <code>sl.level</code> を超えた</strong>ら、探索フェーズでは触れなかった新しい階の情報を埋める必要があります。その新しい階では、まだ誰も高いノードがいないので、直前ノードは <code>head</code>、そこまでの順位は 0。そして <code>update[i].span[i] = sl.length</code> — <strong><code>head</code> から <code>nil</code> まで、いまの全要素数ぶんを一気に飛ぶ矢印</strong>を仮に張っておきます(この後の接続フェーズで、新ノードを挟むように正しく分割されます)。最後に <code>sl.level</code> をせり上げます。</p>
+
+    <div class="ascii">lvl=3 で挿入する新ノードが、いまの level=2 を超えた場合
+
+  探索フェーズが触れたのは L0,L1 だけ。新設する L2 は情報が無い。
+  → その階では head が直前、rank=0、head の矢印は全要素を飛ぶ:
+
+  L2(新設) head ══════ span = sl.length ══════→ nil
+                update[2]=head, rank[2]=0
+  L1       head … (探索フェーズで埋め済み)
+  L0       head … (同上)</div>
+
+    <h3>③接続フェーズ — 繋いで span を配り直す</h3>
+    <div class="file-tag">zset.go（insert · 後半・これで全文）</div>
+    <pre><code>	x = &amp;<span class="ty">zslNode</span>{
+		member:  member,
+		score:   score,
+		forward: <span class="kw">make</span>([]*<span class="ty">zslNode</span>, lvl),
+		span:    <span class="kw">make</span>([]<span class="ty">int</span>, lvl),
+	}
+	<span class="kw">for</span> i := <span class="st">0</span>; i &lt; lvl; i++ {
+		x.forward[i] = update[i].forward[i]
+		update[i].forward[i] = x
+		x.span[i] = update[i].span[i] - (rank[<span class="st">0</span>] - rank[i])
+		update[i].span[i] = (rank[<span class="st">0</span>] - rank[i]) + <span class="st">1</span>
+	}
+	<span class="kw">for</span> i := lvl; i &lt; sl.level; i++ {
+		update[i].span[i]++ <span class="cm">// 新ノードをまたぐレベルは距離が1伸びる</span>
+	}
+	sl.length++
+}</code></pre>
+
+    <p>まず新ノード <code>x</code> を <code>lvl</code> 段の高さで作ります。あとは <code>i = 0 .. lvl-1</code> の各階で2つのことをします。</p>
+    <p><strong>(1) リンクの繋ぎ替え</strong>。連結リストの挿入そのものです。<code>x.forward[i] = update[i].forward[i]</code>(新ノードの次 = 直前ノードが指していた先)、<code>update[i].forward[i] = x</code>(直前ノードの次 = 新ノード)。<code>[c] → [d]</code> の間に <code>x</code> を割り込ませて <code>[c] → [x] → [d]</code> にする、あれです。</p>
+    <p><strong>(2) span の配り直し</strong>。ここが insert 最大の難所です。新ノードが割り込むと、<code>update[i]</code> の矢印が指していた飛距離が、<strong>新ノードの前後2本に分割</strong>されます。その分割点を <code>rank</code> で計算するのが次の2行です。</p>
+    <pre><code>x.span[i]         = update[i].span[i] - (rank[<span class="st">0</span>] - rank[i])
+update[i].span[i] = (rank[<span class="st">0</span>] - rank[i]) + <span class="st">1</span></code></pre>
+    <p>鍵は <code>rank[0] - rank[i]</code> です。<code>rank[0]</code> は最下層で数えた「新ノードの<strong>1つ手前</strong>までの順位」= 新ノード自身の位置。<code>rank[i]</code> は i 階の直前ノードの位置。その差 <code>rank[0] - rank[i]</code> は、<strong>i 階の直前ノードから新ノードまでの距離</strong>です。だから:</p>
+    <ul>
+      <li><code>update[i].span[i]</code>（直前ノード → 新ノードの新しい矢印）= その距離 + 1。</li>
+      <li><code>x.span[i]</code>（新ノード → 元の次ノードの矢印）= 元の矢印の飛距離から、手前に使ったぶんを引いた残り。</li>
+    </ul>
+    <p>絵にすると「1本の矢印が新ノードを境に2本へ割れ、飛距離の合計は保存される」のが見えます。</p>
+
+    <div class="ascii">span の分割 ── update[i] の 1 本が、新ノード x を境に 2 本へ
+
+  挿入前（i 階）:
+     [update[i]] ══════ span=S ══════→ [next]
+
+  挿入後（合計は S+1 で保存: 新ノードが1個増えたぶん +1）:
+     [update[i]] ══ a+1 ══→ [ x ] ══ S-a ══→ [next]
+                     ↑                ↑
+              update[i].span[i]    x.span[i]
+
+        a = rank[0] - rank[i]   (i階の直前ノードから x までの距離)
+
+        update[i].span[i] = a + 1    ← x 自身に乗るぶんの +1
+        x.span[i]         = S - a    ← 元の S から手前ぶんを引いた残り
+        ────────────────────────────
+        合計 = (a+1) + (S-a) = S+1   ← 確かに1増えている</div>
+
+    <p>最後のループ <code>for i := lvl; i &lt; sl.level; i++</code> は、<strong>新ノードより高い階の後始末</strong>です。新ノードの高さ <code>lvl</code> より上の階の矢印は、新ノードを繋がないけれど<strong>その上を飛び越える</strong>ことになるので、飛距離が1増えます。だから <code>update[i].span[i]++</code>。これを忘れると、高い矢印の飛距離が実際より1短くなり、<strong>ランク計算が静かにズレます</strong>(この種のバグは、要素が特定の高さのときだけ出るので発見が難しい)。最後に <code>sl.length++</code> で要素数を1増やして完了です。</p>
+
+    <div class="box hazard"><div class="box-k">⚠ 落とし穴 — span の更新漏れは「たまにしか出ない」バグになる</div>
+      <p>insert の span 更新は3系統あります。(a) 新ノードを繋ぐ階の分割(<code>i &lt; lvl</code>)、(b) 新ノードをまたぐ上の階の +1(<code>lvl &lt; i &lt; sl.level</code>)、(c) 新設した階の <code>sl.length</code> 初期化。このどれか1つでも漏らすと、<strong>合計の飛距離が要素数と合わなくなり、<code>ZRANK</code>／<code>nodeAtRank</code> がたまに間違えます</strong>。「たまに」なのが厄介で、乱数で決まる高さが特定パターンのときだけ露見する。だから本書はテストで<strong>5000 回のランダム操作の結果を、ソート済みスライスという自明な実装と全件突き合わせ</strong>ます(<code>TestSkiplistAgainstReference</code>)。span の更新漏れは、この照合で必ず捕まります。skiplist を自作したら、この「自明な実装との差分テスト」は必須だと思ってください。</p>
+    </div>
+
+    <div class="gonote"><div class="box-k">GO メモ · スライスをリンクの束として使う</div>
+      <p>C の連結リストなら <code>node->forward</code> はポインタ配列ですが、Go では <code>make([]*zslNode, lvl)</code> と<strong>高さぶんだけスライスを確保</strong>します。ノードの高さが3なら <code>forward</code>／<code>span</code> は長さ3。高さが要素ごとに違うので、固定長配列ではなくスライスが自然です。<code>update := make([]*zslNode, zslMaxLevel)</code> のような作業用スライスは、関数の頭で<strong>最大高さぶん</strong>確保しておき、実際に使うのは <code>sl.level</code> ぶんだけ、という書き方をします(毎回作り直すコストは小さく、コードが単純になる)。ポインタの繋ぎ替え(<code>x.forward[i] = update[i].forward[i]</code>)は、指す先のアドレスを差し替えているだけで、ノード本体はコピーされません。</p>
+    </div>
+
+    <h2 class="step" id="step-6"><span class="step-no">Step 6</span>削除 — リンクを外し span を縫い直す</h2>
+    <p>削除 <code>delete</code> は挿入の逆再生です。同じく「探索して <code>update</code> を集める → リンクを外す → span を縫い直す」の3段構え。挿入より短いのは、<code>rank</code> を集める必要がない(削除には順位計算が要らない)ぶんです。</p>
+
+    <div class="file-tag">zset.go（delete）</div>
+    <pre><code><span class="kw">func</span> (sl *<span class="ty">skiplist</span>) delete(member <span class="ty">string</span>, score <span class="ty">float64</span>) {
+	update := <span class="kw">make</span>([]*<span class="ty">zslNode</span>, zslMaxLevel)
+	x := sl.head
+	<span class="kw">for</span> i := sl.level - <span class="st">1</span>; i &gt;= <span class="st">0</span>; i-- {
+		<span class="kw">for</span> x.forward[i] != <span class="kw">nil</span> &amp;&amp; zslLess(x.forward[i].score, x.forward[i].member, score, member) {
+			x = x.forward[i]
+		}
+		update[i] = x
+	}
+	x = x.forward[<span class="st">0</span>]
+	<span class="kw">if</span> x == <span class="kw">nil</span> || x.score != score || x.member != member {
+		<span class="kw">return</span>
+	}
+	<span class="kw">for</span> i := <span class="st">0</span>; i &lt; sl.level; i++ {
+		<span class="kw">if</span> update[i].forward[i] == x {
+			update[i].span[i] += x.span[i] - <span class="st">1</span>
+			update[i].forward[i] = x.forward[i]
+		} <span class="kw">else</span> {
+			update[i].span[i]--
+		}
+	}
+	<span class="kw">for</span> sl.level &gt; <span class="st">1</span> &amp;&amp; sl.head.forward[sl.level-<span class="st">1</span>] == <span class="kw">nil</span> {
+		sl.level--
+	}
+	sl.length--
+}</code></pre>
+
+    <p>前半の探索は insert とまったく同じで、各階の直前ノード <code>update[i]</code> を集めます(削除に順位は不要なので <code>rank</code> は省略)。探索が終わったら <code>x = x.forward[0]</code> で<strong>最下層の次ノード = 削除候補</strong>を取り、それが本当に消したいノードか確認します。<code>nil</code> だったり、スコアかメンバーが違えば、目的のものは存在しないので何もせず <code>return</code>(<code>ZREM</code> で存在しないメンバーを消しても安全)。</p>
+    <p>本題は span を縫い直すループです。各階について場合分けします。</p>
+    <ul>
+      <li><strong>その階に削除ノードが繋がっている</strong>(<code>update[i].forward[i] == x</code>): 削除ノードを飛ばして、その先へ矢印を繋ぎ替える。飛距離は <code>x.span[i] - 1</code> を足す — 削除ノードが持っていた飛距離を引き継ぎつつ、消えたノード1個ぶん(-1)を差し引く。</li>
+      <li><strong>その階には繋がっていない</strong>(削除ノードより高い階): その矢印は削除ノードの上を飛び越えているので、飛距離が1縮む。<code>update[i].span[i]--</code>。</li>
+    </ul>
+
+    <div class="ascii">削除 ── x を外し、span を縫い合わせる（合計は保存）
+
+  削除前:
+     [update[i]] ═ a ═→ [ x ] ═ b ═→ [next]
+  削除後（x が繋がっている階）:
+     [update[i]] ══ a + b - 1 ══→ [next]
+        update.span += x.span - 1  ↑ (a と b を合体、消えた1個ぶん -1)
+
+  x より高い階（x を繋いでいない、上を飛ぶだけ）:
+     [update[i]] ═════ span ═════→ [far]   →  span を 1 減らす
+                    (x が消えたので飛び越える数が 1 減る)</div>
+
+    <p>最後に2つの後始末。<code>for sl.level &gt; 1 &amp;&amp; sl.head.forward[sl.level-1] == nil</code> は、<strong>いちばん高い階に誰もいなくなったら level を下げる</strong>処理です。高いノードを消した結果、最上階が <code>head → nil</code> だけになったら、その階は無駄なので <code>sl.level--</code>。これを怠っても正しさは壊れませんが、探索が空の高階を無駄に降りることになる(効率が落ちる)ので下げておきます。そして <code>sl.length--</code>。</p>
+
+    <div class="box hazard"><div class="box-k">⚠ 落とし穴 — 削除で「繋がっている階」と「またぐ階」を取り違えない</div>
+      <p>削除の span 更新は、<code>update[i].forward[i] == x</code> かどうかの分岐が命です。この判定を誤ると、繋がっている階で <code>--</code> してしまったり、またぐ階で飛距離を足してしまったりして、合計がズレます。insert 同様、この手のミスは<strong>特定の高さ配置でしか露見しない</strong>ため、目視レビューでは見抜けません。頼りになるのは差分テスト(<code>TestSkiplistAgainstReference</code> は 5000 回の中で add / update / remove を混ぜて叩く)です。「skiplist は書けたが自信がない」は正常な感覚で、<strong>自明な実装との全件照合が通って初めて信じてよい</strong>と考えてください。</p>
+    </div>
+
+    <h2 class="step" id="step-7"><span class="step-no">Step 7</span>ランク計算 — span を足して順位を数える</h2>
+    <p>skiplist に <code>span</code>(飛距離)を持たせた理由が、ここで回収されます。<code>rank</code>(メンバー → 順位)と <code>nodeAtRank</code>(順位 → ノード)は、どちらも <strong>span を足しながら探索する</strong>だけで、順位を O(log N) で求めます。まず <code>rank</code>。</p>
+
+    <div class="file-tag">zset.go（rank）</div>
+    <pre><code><span class="cm">// rank は 0 始まりの順位を返す。見つからなければ -1。</span>
+<span class="kw">func</span> (sl *<span class="ty">skiplist</span>) rank(member <span class="ty">string</span>, score <span class="ty">float64</span>) <span class="ty">int</span> {
+	x := sl.head
+	r := <span class="st">0</span>
+	<span class="kw">for</span> i := sl.level - <span class="st">1</span>; i &gt;= <span class="st">0</span>; i-- {
+		<span class="kw">for</span> x.forward[i] != <span class="kw">nil</span> &amp;&amp;
+			!zslLess(score, member, x.forward[i].score, x.forward[i].member) {
+			r += x.span[i]
+			x = x.forward[i]
+		}
+		<span class="kw">if</span> x != sl.head &amp;&amp; x.member == member {
+			<span class="kw">return</span> r - <span class="st">1</span>
+		}
+	}
+	<span class="kw">return</span> -<span class="st">1</span>
+}</code></pre>
+
+    <p>探索の形は insert / delete と同じ「上から降りる」ですが、進むたびに <code>r += x.span[i]</code> で<strong>飛距離を積算</strong>していきます。<code>r</code> は「いま <code>head</code> から何ノードぶん進んだか」= 現在位置の順位です。上の階で大きく飛べば <code>r</code> も大きく増える — <strong>飛んだ距離の合計が、そのまま順位になる</strong>。これが span の狙いでした。</p>
+    <p>内側ループの条件 <code>!zslLess(score, member, x.forward[i].score, x.forward[i].member)</code> に注目。「次ノードが目的より前<strong>または等しい</strong>間は進む」という意味です(<code>!(目的 &lt; 次)</code> = 「次 &le; 目的」)。等しいところまで進めるので、目的ノード自身に乗った瞬間に止まります。各階で降りるたびに <code>x.member == member</code> をチェックし、見つかったら <code>r - 1</code> を返す。<strong>-1</strong> するのは、<code>r</code> が「目的ノードを含めた進行数」になっていて、0 始まりの順位に直すため。見つからなければ最後に <code>-1</code>(不在)を返します。</p>
+
+    <div class="ascii">rank("d",4) を数える ── 進むたびに span を足す
+（a〜e を入れて c だけが2段になった、実際に起こりうる形）
+
+  L1  head ═══════(span3)═══════→ [c,3] ═══(span2)═══→ (nil)
+  L0  head →[a,1] →[b,2] →[c,3] →[d,4] →[e,5]
+       span   1      1      1      1      1
+
+  L1: head から次は [c,3]。(3,c) は (4,d) より前 → 進む
+        r += 3  →  r=3          ← head→[c,3] は a,b,c の3ノードぶん
+      次は nil → これ以上進めないので降りる
+      x=[c,3] は member "d" ではない → 次のレベルへ
+  L0: 次は [d,4]。(4,d) は目的と「等しい」 → 進める（!(目的<次) が成立）
+        r += 1  →  r=4
+      次は [e,5]。(5,e) は (4,d) より後 → 進めない
+      x=[d,4] で member 一致 → return r - 1 = 3
+
+  「飛んだ span の合計 = そのノードまでの進行数（1始まり）」。
+  -1 して 0 始まりの順位 3 になる（a,b,c,d と数えて4番目）。</div>
+
+    <div class="box hazard"><div class="box-k">⚠ 落とし穴 — なぜ最後に <code>-1</code> が要るのか</div>
+      <p><code>-1</code> は「なんとなく1ずれるから」ではありません。<strong>内側ループの条件と裏表の関係</strong>です。</p>
+      <p>条件は <code>!zslLess(目的, 次)</code>＝「<strong>次 ≤ 目的</strong> の間は進む」でした。等号が入っているので、<strong>目的ノード自身に乗るところまで進んでしまいます</strong>（上の L0 で <code>[d,4]</code> に乗ったのがそれ）。その結果 <code>r</code> は「head から目的ノードまでの距離」＝<strong>1 始まりの数え方</strong>になります。上の例なら <code>r=4</code>（a,b,c,d と4つぶん進んだ）。</p>
+      <p>ところが <code>ZRANK</code> が返すのは <strong>0 始まり</strong>の順位です（先頭が 0）。だから最後に <code>-1</code> して 3 に直す。<strong>「等号込みで進むから1始まりになる → 0始まりに直すため -1」</strong>——この2つは同じ事実の表と裏で、片方を変えればもう片方も変わります。もし条件を「次 &lt; 目的」（等号なし）にしたら、目的ノードの<strong>手前</strong>で止まるので <code>-1</code> は不要になる代わりに、<code>x.member == member</code> の一致判定ができなくなります。いまの形は「進んで乗って、乗ったことを確認する」ための必然です。</p>
+    </div>
+
+    <p>もう1つ、順位からノードを引く <code>nodeAtRank</code>(<code>ZRANGE key 0 9</code> の起点探しに使う)です。rank の逆で、<strong>span を足した合計が目的の順位に届くまで進む</strong>。</p>
+
+    <div class="file-tag">zset.go（nodeAtRank）</div>
+    <pre><code><span class="cm">// nodeAtRank は 0 始まりの順位 r にあるノードを返す。</span>
+<span class="kw">func</span> (sl *<span class="ty">skiplist</span>) nodeAtRank(r <span class="ty">int</span>) *<span class="ty">zslNode</span> {
+	x := sl.head
+	traversed := <span class="st">0</span>
+	<span class="kw">for</span> i := sl.level - <span class="st">1</span>; i &gt;= <span class="st">0</span>; i-- {
+		<span class="kw">for</span> x.forward[i] != <span class="kw">nil</span> &amp;&amp; traversed+x.span[i] &lt;= r+<span class="st">1</span> {
+			traversed += x.span[i]
+			x = x.forward[i]
+		}
+		<span class="kw">if</span> traversed == r+<span class="st">1</span> {
+			<span class="kw">return</span> x
+		}
+	}
+	<span class="kw">return</span> <span class="kw">nil</span>
+}</code></pre>
+
+    <p><code>traversed</code>(累積の飛距離)が目的順位 <code>r+1</code>(1 始まりに直した値)を<strong>超えない範囲で最大限</strong>進みます。<code>traversed + x.span[i] &lt;= r+1</code> の間だけ飛ぶので、行き過ぎずに目的地の手前まで最短で寄る。ぴったり <code>traversed == r+1</code> になったノードが答え。上の階で大股に近づき、下の階で詰める — skiplist の探索そのものが順位アクセスに化けています。O(log N) で任意の順位のノードに飛べるのが、この関数の値打ちです。</p>
+
+    <div class="box do"><div class="box-k">▸ 動かして確認</div>
+      <p>skiplist 単体の正しさを、いちばん厳しいテストで確かめます。5000 回のランダムな add / update / remove の結果を、ソート済みスライスという自明な実装と<strong>全件照合</strong>し、さらに全メンバーの <code>rank</code> と <code>nodeAtRank</code> まで一致することを見ます。</p>
+      <pre class="term"><code><span class="ps">$</span> go test -run TestSkiplistAgainstReference -v
+<span class="out">=== RUN   TestSkiplistAgainstReference
+--- PASS: TestSkiplistAgainstReference (0.00s)
+PASS</span>
+<span class="ps">$</span> go test -run TestSkiplistRangeByScore -v
+<span class="out">=== RUN   TestSkiplistRangeByScore
+--- PASS: TestSkiplistRangeByScore (0.00s)
+PASS</span></code></pre>
+      <p>この PASS は、insert / delete / rank / nodeAtRank の span 更新が<strong>1件も漏れていない</strong>ことの証明です。skiplist を自作して最初にここが緑になった瞬間は、本書でいちばん報われる場面のひとつです。</p>
+    </div>
+
+    <h2 class="step" id="step-8"><span class="step-no">Step 8</span>二重管理の義務 — ZSet 型と ZADD</h2>
+    <p>skiplist ができました。ここからは Step 1 の結論 — <strong>辞書 + skiplist の二重管理</strong> — を組み上げます。両者を束ねる <code>ZSet</code> 型から。</p>
+
+    <div class="file-tag">zset.go（ZSet 本体）</div>
+    <pre><code><span class="cm">// ---- ZSet 本体: 辞書と skiplist の二重管理 ----</span>
+
+<span class="kw">type</span> <span class="ty">ZSet</span> <span class="kw">struct</span> {
+	dict <span class="kw">map</span>[<span class="ty">string</span>]<span class="ty">float64</span> <span class="cm">// member → score（ZSCORE を O(1) で）</span>
+	zsl  *<span class="ty">skiplist</span>          <span class="cm">// score 順（範囲・ランクを O(log N) で）</span>
+}
+
+<span class="kw">func</span> newZSet() *<span class="ty">ZSet</span> {
+	<span class="kw">return</span> &amp;<span class="ty">ZSet</span>{dict: <span class="kw">make</span>(<span class="kw">map</span>[<span class="ty">string</span>]<span class="ty">float64</span>), zsl: newSkiplist()}
+}
+
+<span class="cm">// Add は追加なら true、スコア更新なら false を返す。</span>
+<span class="kw">func</span> (z *<span class="ty">ZSet</span>) Add(member <span class="ty">string</span>, score <span class="ty">float64</span>) <span class="ty">bool</span> {
+	old, exists := z.dict[member]
+	<span class="kw">if</span> exists {
+		<span class="kw">if</span> old != score {
+			z.zsl.delete(member, old) <span class="cm">// skiplist はスコア込みの並びなので入れ直す</span>
+			z.zsl.insert(member, score)
+			z.dict[member] = score
+		}
+		<span class="kw">return</span> <span class="kw">false</span>
+	}
+	z.dict[member] = score
+	z.zsl.insert(member, score)
+	<span class="kw">return</span> <span class="kw">true</span>
+}
+
+<span class="kw">func</span> (z *<span class="ty">ZSet</span>) Remove(member <span class="ty">string</span>) <span class="ty">bool</span> {
+	score, exists := z.dict[member]
+	<span class="kw">if</span> !exists {
+		<span class="kw">return</span> <span class="kw">false</span>
+	}
+	<span class="kw">delete</span>(z.dict, member)
+	z.zsl.delete(member, score)
+	<span class="kw">return</span> <span class="kw">true</span>
+}</code></pre>
+
+    <p><code>ZSet</code> は狙いどおり2本立てです。<code>dict</code> は <code>member → score</code> の辞書(<code>ZSCORE</code>・<code>ZCARD</code> を O(1) で)、<code>zsl</code> は score 順の skiplist(範囲・ランクを O(log N) で)。同じデータを<strong>2つの見方で同時に保持</strong>します。</p>
+    <p><code>Add</code> にこの章の思想が凝縮されています。<strong>辞書と skiplist は常に一致していなければならない</strong> — これが「二重管理の義務」です。3つの場合を見ます。</p>
+    <ol>
+      <li><strong>新規メンバー</strong>: 辞書に入れ、skiplist にも insert。両方に足す。<code>true</code>(新規追加)を返す。</li>
+      <li><strong>既存メンバー・スコア変更あり</strong>: skiplist は「スコア込みの並び」なので、スコアが変わると<strong>並び位置ごと変わります</strong>。だから古いスコアで <code>delete</code> → 新しいスコアで <code>insert</code> の<strong>入れ直し</strong>が要る。辞書も更新。<code>false</code>(既存)を返す。</li>
+      <li><strong>既存メンバー・スコア同じ</strong>: 何もしない。<code>false</code>。</li>
+    </ol>
+    <p>ポイントは②です。辞書だけなら <code>z.dict[member] = score</code> の1行で済みますが、skiplist は<strong>並びが崩れる</strong>ので単純上書きができない。「消して入れ直す」を怠り、辞書だけ更新して skiplist を放置すると、<strong>辞書は新スコア・skiplist は旧スコア</strong>という食い違いが生まれ、<code>ZSCORE</code> と <code>ZRANGE</code> が矛盾した答えを返します。<code>Remove</code> も同じで、<strong>辞書と skiplist の両方から</strong>消します。<code>Add</code>／<code>Remove</code> が「必ず両方を触る」1か所に閉じ込められているのが、二重管理を破綻させない設計です。</p>
+
+    <div class="box hazard"><div class="box-k">⚠ 落とし穴 — 二重管理の「片方だけ更新」は最悪のバグ</div>
+      <p>二重管理の恐ろしさは、<strong>片方だけ更新しても、その場では動いてしまう</strong>ことです。<code>ZADD</code> で辞書だけ更新し skiplist を忘れても、直後の <code>ZSCORE</code>(辞書を引く)は正しく答えます。バグが顕在化するのは、後で <code>ZRANGE</code> や <code>ZRANK</code>(skiplist を引く)を叩いたとき — <strong>更新した覚えのないコマンドが間違う</strong>ので、原因を辿るのが極めて困難です。防ぐ鉄則は「辞書と skiplist を触る操作は <code>Add</code>／<code>Remove</code> の2メソッドに閉じ込め、他の場所から <code>dict</code> や <code>zsl</code> を直接いじらない」。実際この <code>ZSet</code> では、書き込みは必ずこの2つを通ります。読み出し(<code>ZSCORE</code> が <code>z.dict</code> を直接読むなど)は許しますが、<strong>書き込みの入口は絞る</strong>のが二重管理を守るコツです。</p>
+    </div>
+
+    <p>ここから Store 層です。第01章で作った <code>Store</code> に、ZSet を取り出す小道具と各コマンドのメソッドを足します。まず取得と <code>ZADD</code>。</p>
+
+    <div class="file-tag">zset.go（Store · getZSetLocked と ZAdd）</div>
+    <pre><code><span class="cm">// ---- Store 側 ----</span>
+
+<span class="kw">func</span> (s *<span class="ty">Store</span>) getZSetLocked(key <span class="ty">string</span>, create <span class="ty">bool</span>) (*<span class="ty">ZSet</span>, <span class="ty">error</span>) {
+	v, ok := s.getLocked(key)
+	<span class="kw">if</span> !ok {
+		<span class="kw">if</span> !create {
+			<span class="kw">return</span> <span class="kw">nil</span>, <span class="kw">nil</span>
+		}
+		z := newZSet()
+		s.data[key] = z
+		<span class="kw">return</span> z, <span class="kw">nil</span>
+	}
+	z, isZSet := v.(*<span class="ty">ZSet</span>)
+	<span class="kw">if</span> !isZSet {
+		<span class="kw">return</span> <span class="kw">nil</span>, errWrongType
+	}
+	<span class="kw">return</span> z, <span class="kw">nil</span>
+}
+
+<span class="kw">func</span> (s *<span class="ty">Store</span>) ZAdd(key <span class="ty">string</span>, entries []<span class="ty">zEntry</span>) (<span class="ty">int</span>, <span class="ty">error</span>) {
+	s.mu.Lock()
+	<span class="kw">defer</span> s.mu.Unlock()
+	z, err := s.getZSetLocked(key, <span class="kw">true</span>)
+	<span class="kw">if</span> err != <span class="kw">nil</span> {
+		<span class="kw">return</span> <span class="st">0</span>, err
+	}
+	added := <span class="st">0</span>
+	<span class="kw">for</span> _, e := <span class="kw">range</span> entries {
+		<span class="kw">if</span> z.Add(e.member, e.score) {
+			added++
+		}
+	}
+	<span class="kw">return</span> added, <span class="kw">nil</span>
+}</code></pre>
+
+    <p><code>getZSetLocked</code> は、これまでの章(List / Hash / Set)とまったく同じパターンです。キーを引き、無ければ <code>create</code> フラグ次第で新規作成、値が <code>*ZSet</code> でなければ <code>errWrongType</code>(型違い)を返す。<code>v.(*ZSet)</code> は<strong>型アサーション</strong>で、「この <code>any</code> は本当に <code>*ZSet</code> か?」を確かめます。<code>WRONGTYPE</code> エラー(文字列キーに <code>ZADD</code> を撃つなど)は、この1行が守っています。「Locked」という名前は、<strong>呼び出し側が既に <code>s.mu</code> をロック済み</strong>であることを表す本書の約束です(第01章参照)。</p>
+    <p><code>ZAdd</code> は <code>s.mu.Lock()</code> で全体をロックし、複数の <code>score member</code> ペアを順に <code>z.Add</code>。<code>Add</code> が <code>true</code>(新規)を返した回数を数えて返します — <code>ZADD</code> の戻り値は「新しく追加された数」で、スコア更新はカウントされない(<code>TestZSetCommands</code> の <code>ZADD z 10 a</code> が <code>:0</code> を返すのがこれ)からです。</p>
+
+    <p>コマンドハンドラは <code>cmdZAdd</code>。RESP の引数を解釈し、スコアをパースします。</p>
+
+    <div class="file-tag">zset.go（formatScore / parseScore / cmdZAdd）</div>
+    <pre><code><span class="cm">// formatScore は 1.0 → "1"、1.5 → "1.5" のように最短表記で返す。</span>
+<span class="kw">func</span> formatScore(f <span class="ty">float64</span>) <span class="ty">string</span> {
+	<span class="kw">if</span> math.IsInf(f, <span class="st">1</span>) {
+		<span class="kw">return</span> <span class="st">"inf"</span> <span class="cm">// Go の "+Inf" ではなく本家の表記に合わせる</span>
+	}
+	<span class="kw">if</span> math.IsInf(f, -<span class="st">1</span>) {
+		<span class="kw">return</span> <span class="st">"-inf"</span>
+	}
+	<span class="kw">return</span> strconv.FormatFloat(f, <span class="st">'g'</span>, -<span class="st">1</span>, <span class="st">64</span>)
+}
+
+<span class="kw">func</span> parseScore(s <span class="ty">string</span>) (<span class="ty">float64</span>, <span class="ty">error</span>) {
+	<span class="kw">switch</span> strings.ToLower(s) {
+	<span class="kw">case</span> <span class="st">"inf"</span>, <span class="st">"+inf"</span>:
+		<span class="kw">return</span> math.Inf(<span class="st">1</span>), <span class="kw">nil</span>
+	<span class="kw">case</span> <span class="st">"-inf"</span>:
+		<span class="kw">return</span> math.Inf(-<span class="st">1</span>), <span class="kw">nil</span>
+	}
+	f, err := strconv.ParseFloat(s, <span class="st">64</span>)
+	<span class="kw">if</span> err != <span class="kw">nil</span> {
+		<span class="kw">return</span> <span class="st">0</span>, err
+	}
+	<span class="cm">// NaN は比較がすべて false になり skiplist の順序を壊すので、入口で拒否する（本家と同じ）</span>
+	<span class="kw">if</span> math.IsNaN(f) {
+		<span class="kw">return</span> <span class="st">0</span>, errors.New(<span class="st">"nan is not a valid score"</span>)
+	}
+	<span class="kw">return</span> f, <span class="kw">nil</span>
+}
+
+<span class="kw">func</span> cmdZAdd(s *<span class="ty">Store</span>, args []<span class="ty">string</span>) <span class="ty">string</span> {
+	<span class="kw">if</span> len(args) &lt; <span class="st">4</span> || (len(args)-<span class="st">2</span>)%<span class="st">2</span> != <span class="st">0</span> {
+		<span class="kw">return</span> errorMsg(<span class="st">"ERR wrong number of arguments for 'zadd' command"</span>)
+	}
+	entries := <span class="kw">make</span>([]<span class="ty">zEntry</span>, <span class="st">0</span>, (len(args)-<span class="st">2</span>)/<span class="st">2</span>)
+	<span class="kw">for</span> i := <span class="st">2</span>; i &lt; len(args); i += <span class="st">2</span> {
+		score, err := parseScore(args[i])
+		<span class="kw">if</span> err != <span class="kw">nil</span> {
+			<span class="kw">return</span> errorMsg(<span class="st">"ERR value is not a valid float"</span>)
+		}
+		entries = append(entries, <span class="ty">zEntry</span>{member: args[i+<span class="st">1</span>], score: score})
+	}
+	n, err := s.ZAdd(args[<span class="st">1</span>], entries)
+	<span class="kw">if</span> err != <span class="kw">nil</span> {
+		<span class="kw">return</span> errorMsg(err.Error())
+	}
+	<span class="kw">return</span> integer(n)
+}</code></pre>
+
+    <p><code>formatScore</code> と <code>parseScore</code> は、スコア(<code>float64</code>)と文字列の相互変換です。<code>formatScore</code> は <code>1.0</code> を <code>"1"</code>、<code>1.5</code> を <code>"1.5"</code> と<strong>最短表記</strong>で返します(<code>strconv.FormatFloat</code> の <code>'g'</code>／精度 <code>-1</code>)。無限大は Go 標準の <code>"+Inf"</code> ではなく本家に合わせて <code>"inf"</code>／<code>"-inf"</code>。<code>parseScore</code> は逆で、<code>"inf"</code>／<code>"+inf"</code>／<code>"-inf"</code> を無限大として受け、それ以外は <code>ParseFloat</code>。そして Step 4 の落とし穴で予告した<strong>NaN の門前払い</strong>がここです — <code>math.IsNaN(f)</code> なら即エラー。skiplist に NaN を絶対に入れないための、いちばん外側の防波堤です。</p>
+    <p><code>cmdZAdd</code> は引数チェックがやや細かい。<code>ZADD key score member [score member ...]</code> という形なので、キーを除いた残りが <strong>(score, member) のペア = 偶数個</strong>でなければなりません。<code>len(args) &lt; 4</code>(最低 <code>ZADD key score member</code> の4語)と <code>(len(args)-2)%2 != 0</code>(キーとコマンド名の2語を除いた残りが奇数)で弾きます。あとは2語ずつ <code>parseScore</code> して <code>zEntry</code> を組み、<code>ZAdd</code> に渡すだけ。<code>zEntry</code> は <code>{member, score}</code> のペアを表す構造体で、この章のコマンド間で結果を運ぶ共通の器です。</p>
+
+    <div class="box do"><div class="box-k">▸ 動かして確認</div>
+      <p><code>ZADD</code> まわりのコマンドを丸ごと確かめます。追加・スコア更新(戻り値0)・型変換・NaN 拒否・inf 対応が1本のテストに詰まっています。</p>
+      <pre class="term"><code><span class="ps">$</span> go test -run TestZSetCommands -v
+<span class="out">=== RUN   TestZSetCommands
+--- PASS: TestZSetCommands (0.00s)
+PASS</span></code></pre>
+    </div>
+
+    <h2 class="step" id="step-9"><span class="step-no">Step 9</span>読み出しコマンド — ZSCORE／ZRANK／ZRANGE／ZRANGEBYSCORE／ZREM／ZCARD</h2>
+    <p>土台が揃ったので、残りのコマンドは一気に片付きます。どれも「二重管理のどちらを引くか」を選ぶだけ。<strong>逆引き系(<code>ZSCORE</code>／<code>ZCARD</code>)は辞書、順序系(<code>ZRANK</code>／<code>ZRANGE</code>／<code>ZRANGEBYSCORE</code>)は skiplist</strong>。Step 1 の表がそのままコードになります。</p>
+
+    <h3>ZSCORE / ZRANK / ZCARD — 辞書と skiplist を1回ずつ引く</h3>
+    <div class="file-tag">zset.go（Store · ZScore / ZRank / ZCard）</div>
+    <pre><code><span class="kw">func</span> (s *<span class="ty">Store</span>) ZScore(key, member <span class="ty">string</span>) (<span class="ty">float64</span>, <span class="ty">bool</span>, <span class="ty">error</span>) {
+	s.mu.Lock()
+	<span class="kw">defer</span> s.mu.Unlock()
+	z, err := s.getZSetLocked(key, <span class="kw">false</span>)
+	<span class="kw">if</span> err != <span class="kw">nil</span> || z == <span class="kw">nil</span> {
+		<span class="kw">return</span> <span class="st">0</span>, <span class="kw">false</span>, err
+	}
+	score, ok := z.dict[member]
+	<span class="kw">return</span> score, ok, <span class="kw">nil</span>
+}
+
+<span class="kw">func</span> (s *<span class="ty">Store</span>) ZRank(key, member <span class="ty">string</span>) (<span class="ty">int</span>, <span class="ty">bool</span>, <span class="ty">error</span>) {
+	s.mu.Lock()
+	<span class="kw">defer</span> s.mu.Unlock()
+	z, err := s.getZSetLocked(key, <span class="kw">false</span>)
+	<span class="kw">if</span> err != <span class="kw">nil</span> || z == <span class="kw">nil</span> {
+		<span class="kw">return</span> <span class="st">0</span>, <span class="kw">false</span>, err
+	}
+	score, ok := z.dict[member]
+	<span class="kw">if</span> !ok {
+		<span class="kw">return</span> <span class="st">0</span>, <span class="kw">false</span>, <span class="kw">nil</span>
+	}
+	<span class="kw">return</span> z.zsl.rank(member, score), <span class="kw">true</span>, <span class="kw">nil</span>
+}
+
+<span class="kw">func</span> (s *<span class="ty">Store</span>) ZCard(key <span class="ty">string</span>) (<span class="ty">int</span>, <span class="ty">error</span>) {
+	s.mu.Lock()
+	<span class="kw">defer</span> s.mu.Unlock()
+	z, err := s.getZSetLocked(key, <span class="kw">false</span>)
+	<span class="kw">if</span> err != <span class="kw">nil</span> || z == <span class="kw">nil</span> {
+		<span class="kw">return</span> <span class="st">0</span>, err
+	}
+	<span class="kw">return</span> len(z.dict), <span class="kw">nil</span>
+}</code></pre>
+
+    <p>3つとも同じ骨格です(ロック → キー取得 → 型チェック)。違うのは最後の一手だけ。<code>ZScore</code> は <code>z.dict[member]</code> を引いて終わり — <strong>辞書のおかげで O(1)</strong>。<code>ZCard</code> も <code>len(z.dict)</code> で O(1)。ここに Step 1 で「辞書が要る」と言った理由が結実しています。</p>
+    <p><code>ZRank</code> だけは<strong>両方</strong>使うのが面白い。まず <code>z.dict[member]</code> でメンバーの存在確認とスコア取得(skiplist の <code>rank</code> はスコアも要るので)、次に <code>z.zsl.rank(member, score)</code> で順位を求める。辞書で「あるか」を O(1) で確かめ、skiplist で「何位か」を O(log N) で数える — 二重管理の連携そのものです。存在しないメンバーは <code>ok = false</code> で返し、ハンドラが nil を返します。</p>
+
+    <p>これらのハンドラ(<code>cmdZScore</code>／<code>cmdZRank</code>／<code>cmdZCard</code>)は素直です。</p>
+    <div class="file-tag">zset.go（cmdZScore / cmdZRank / cmdZCard）</div>
+    <pre><code><span class="kw">func</span> cmdZScore(s *<span class="ty">Store</span>, args []<span class="ty">string</span>) <span class="ty">string</span> {
+	<span class="kw">if</span> len(args) != <span class="st">3</span> {
+		<span class="kw">return</span> errorMsg(<span class="st">"ERR wrong number of arguments for 'zscore' command"</span>)
+	}
+	score, ok, err := s.ZScore(args[<span class="st">1</span>], args[<span class="st">2</span>])
+	<span class="kw">if</span> err != <span class="kw">nil</span> {
+		<span class="kw">return</span> errorMsg(err.Error())
+	}
+	<span class="kw">if</span> !ok {
+		<span class="kw">return</span> nullBulk()
+	}
+	<span class="kw">return</span> bulkString(formatScore(score))
+}
+
+<span class="kw">func</span> cmdZRank(s *<span class="ty">Store</span>, args []<span class="ty">string</span>) <span class="ty">string</span> {
+	<span class="kw">if</span> len(args) != <span class="st">3</span> {
+		<span class="kw">return</span> errorMsg(<span class="st">"ERR wrong number of arguments for 'zrank' command"</span>)
+	}
+	r, ok, err := s.ZRank(args[<span class="st">1</span>], args[<span class="st">2</span>])
+	<span class="kw">if</span> err != <span class="kw">nil</span> {
+		<span class="kw">return</span> errorMsg(err.Error())
+	}
+	<span class="kw">if</span> !ok {
+		<span class="kw">return</span> nullBulk()
+	}
+	<span class="kw">return</span> integer(r)
+}
+
+<span class="kw">func</span> cmdZCard(s *<span class="ty">Store</span>, args []<span class="ty">string</span>) <span class="ty">string</span> {
+	<span class="kw">if</span> len(args) != <span class="st">2</span> {
+		<span class="kw">return</span> errorMsg(<span class="st">"ERR wrong number of arguments for 'zcard' command"</span>)
+	}
+	n, err := s.ZCard(args[<span class="st">1</span>])
+	<span class="kw">if</span> err != <span class="kw">nil</span> {
+		<span class="kw">return</span> errorMsg(err.Error())
+	}
+	<span class="kw">return</span> integer(n)
+}</code></pre>
+
+    <p>存在しないメンバーへの <code>ZSCORE</code>／<code>ZRANK</code> は <code>nullBulk()</code>(<code>$-1</code> = nil)を返す — 第00章で見た「値が無い」の表現です。<code>ZSCORE</code> はスコアを <code>formatScore</code> で最短表記の Bulk にして返し、<code>ZRANK</code> は順位を <code>integer</code>(<code>:N</code>)で返します。</p>
+
+    <h3>ZRANGE / ZRANGEBYSCORE — skiplist を範囲で切る</h3>
+    <p>範囲取得は skiplist の独壇場です。まず ZSet 側の2メソッド。</p>
+    <div class="file-tag">zset.go（RangeByRank / RangeByScore）</div>
+    <pre><code><span class="kw">type</span> <span class="ty">zEntry</span> <span class="kw">struct</span> {
+	member <span class="ty">string</span>
+	score  <span class="ty">float64</span>
+}
+
+<span class="kw">func</span> (z *<span class="ty">ZSet</span>) RangeByRank(start, stop <span class="ty">int</span>) []<span class="ty">zEntry</span> {
+	start, stop, ok := normalizeRange(start, stop, z.zsl.length)
+	<span class="kw">if</span> !ok {
+		<span class="kw">return</span> <span class="kw">nil</span>
+	}
+	node := z.zsl.nodeAtRank(start)
+	out := <span class="kw">make</span>([]<span class="ty">zEntry</span>, <span class="st">0</span>, stop-start+<span class="st">1</span>)
+	<span class="kw">for</span> i := start; i &lt;= stop &amp;&amp; node != <span class="kw">nil</span>; i++ {
+		out = append(out, <span class="ty">zEntry</span>{node.member, node.score})
+		node = node.forward[<span class="st">0</span>]
+	}
+	<span class="kw">return</span> out
+}
+
+<span class="kw">func</span> (z *<span class="ty">ZSet</span>) RangeByScore(min, max <span class="ty">float64</span>, minExcl, maxExcl <span class="ty">bool</span>) []<span class="ty">zEntry</span> {
+	<span class="cm">// レベルを降りながら「min 未満の最後のノード」まで進む</span>
+	x := z.zsl.head
+	<span class="kw">for</span> i := z.zsl.level - <span class="st">1</span>; i &gt;= <span class="st">0</span>; i-- {
+		<span class="kw">for</span> x.forward[i] != <span class="kw">nil</span> &amp;&amp; !gteMin(x.forward[i].score, min, minExcl) {
+			x = x.forward[i]
+		}
+	}
+	x = x.forward[<span class="st">0</span>]
+	<span class="kw">var</span> out []<span class="ty">zEntry</span>
+	<span class="kw">for</span> x != <span class="kw">nil</span> &amp;&amp; lteMax(x.score, max, maxExcl) {
+		out = append(out, <span class="ty">zEntry</span>{x.member, x.score})
+		x = x.forward[<span class="st">0</span>]
+	}
+	<span class="kw">return</span> out
+}
+
+<span class="kw">func</span> gteMin(s, min <span class="ty">float64</span>, excl <span class="ty">bool</span>) <span class="ty">bool</span> {
+	<span class="kw">if</span> excl {
+		<span class="kw">return</span> s &gt; min
+	}
+	<span class="kw">return</span> s &gt;= min
+}
+
+<span class="kw">func</span> lteMax(s, max <span class="ty">float64</span>, excl <span class="ty">bool</span>) <span class="ty">bool</span> {
+	<span class="kw">if</span> excl {
+		<span class="kw">return</span> s &lt; max
+	}
+	<span class="kw">return</span> s &lt;= max
+}</code></pre>
+
+    <p><code>RangeByRank</code>(<code>ZRANGE</code>の実体)は「順位 <code>start</code>〜<code>stop</code> のノードを返す」。負のインデックス(<code>-1</code> = 末尾)は <code>normalizeRange</code> で正規化します — これは第04章の List で作った関数の<strong>再利用</strong>で、<code>LRANGE</code> と同じ「Redis 流の範囲指定」を共有しています。起点は <code>nodeAtRank(start)</code> で O(log N) で飛び、あとは <code>forward[0]</code>(最下層の次)を <code>stop</code> まで <strong>M 個たどるだけ</strong>。全体で O(log N + M) です。</p>
+    <p><code>RangeByScore</code>(<code>ZRANGEBYSCORE</code>の実体)は「スコア <code>min</code>〜<code>max</code> のノードを返す」。skiplist の探索で「<strong>min に届く手前の最後のノード</strong>」まで一気に降り(前半のループ)、そこから <code>forward[0]</code> で最下層を進みながら <code>max</code> を超えるまで拾う(後半のループ)。<code>gteMin</code>／<code>lteMax</code> は境界の<strong>開閉</strong>を扱うヘルパーで、<code>excl</code>(排他)なら <code>&gt;</code>／<code>&lt;</code>、そうでなければ <code>&gt;=</code>／<code>&lt;=</code>。<code>ZRANGEBYSCORE z (2 3</code> の <code>(2</code>(2 を含まない)がこれで実装されます。ここでもスコアが skiplist に並んでいるおかげで、範囲の始点を対数時間で見つけられるのが効いています。</p>
+
+    <p>2つのハンドラ。共通の <code>WITHSCORES</code> オプションと、範囲境界のパースがポイントです。</p>
+    <div class="file-tag">zset.go（cmdZRange / parseRangeBound / cmdZRangeByScore / zEntriesReply）</div>
+    <pre><code><span class="kw">func</span> cmdZRange(s *<span class="ty">Store</span>, args []<span class="ty">string</span>) <span class="ty">string</span> {
+	withScores := <span class="kw">false</span>
+	<span class="kw">if</span> len(args) == <span class="st">5</span> &amp;&amp; upper(args[<span class="st">4</span>]) == <span class="st">"WITHSCORES"</span> {
+		withScores = <span class="kw">true</span>
+		args = args[:<span class="st">4</span>]
+	}
+	<span class="kw">if</span> len(args) != <span class="st">4</span> {
+		<span class="kw">return</span> errorMsg(<span class="st">"ERR wrong number of arguments for 'zrange' command"</span>)
+	}
+	start, err1 := strconv.Atoi(args[<span class="st">2</span>])
+	stop, err2 := strconv.Atoi(args[<span class="st">3</span>])
+	<span class="kw">if</span> err1 != <span class="kw">nil</span> || err2 != <span class="kw">nil</span> {
+		<span class="kw">return</span> errorMsg(<span class="st">"ERR value is not an integer or out of range"</span>)
+	}
+	entries, err := s.ZRange(args[<span class="st">1</span>], start, stop)
+	<span class="kw">if</span> err != <span class="kw">nil</span> {
+		<span class="kw">return</span> errorMsg(err.Error())
+	}
+	<span class="kw">return</span> zEntriesReply(entries, withScores)
+}
+
+<span class="cm">// parseRangeBound は "5" "(5" "-inf" "+inf" を（値, 排他フラグ）に読む。</span>
+<span class="kw">func</span> parseRangeBound(s <span class="ty">string</span>) (<span class="ty">float64</span>, <span class="ty">bool</span>, <span class="ty">error</span>) {
+	excl := <span class="kw">false</span>
+	<span class="kw">if</span> strings.HasPrefix(s, <span class="st">"("</span>) {
+		excl = <span class="kw">true</span>
+		s = s[<span class="st">1</span>:]
+	}
+	f, err := parseScore(s)
+	<span class="kw">return</span> f, excl, err
+}
+
+<span class="kw">func</span> cmdZRangeByScore(s *<span class="ty">Store</span>, args []<span class="ty">string</span>) <span class="ty">string</span> {
+	withScores := <span class="kw">false</span>
+	<span class="kw">if</span> len(args) == <span class="st">5</span> &amp;&amp; upper(args[<span class="st">4</span>]) == <span class="st">"WITHSCORES"</span> {
+		withScores = <span class="kw">true</span>
+		args = args[:<span class="st">4</span>]
+	}
+	<span class="kw">if</span> len(args) != <span class="st">4</span> {
+		<span class="kw">return</span> errorMsg(<span class="st">"ERR wrong number of arguments for 'zrangebyscore' command"</span>)
+	}
+	min, minExcl, err1 := parseRangeBound(args[<span class="st">2</span>])
+	max, maxExcl, err2 := parseRangeBound(args[<span class="st">3</span>])
+	<span class="kw">if</span> err1 != <span class="kw">nil</span> || err2 != <span class="kw">nil</span> {
+		<span class="kw">return</span> errorMsg(<span class="st">"ERR min or max is not a float"</span>)
+	}
+	entries, err := s.ZRangeByScore(args[<span class="st">1</span>], min, max, minExcl, maxExcl)
+	<span class="kw">if</span> err != <span class="kw">nil</span> {
+		<span class="kw">return</span> errorMsg(err.Error())
+	}
+	<span class="kw">return</span> zEntriesReply(entries, withScores)
+}
+
+<span class="kw">func</span> zEntriesReply(entries []<span class="ty">zEntry</span>, withScores <span class="ty">bool</span>) <span class="ty">string</span> {
+	items := <span class="kw">make</span>([]<span class="ty">string</span>, <span class="st">0</span>, len(entries)*<span class="st">2</span>)
+	<span class="kw">for</span> _, e := <span class="kw">range</span> entries {
+		items = append(items, e.member)
+		<span class="kw">if</span> withScores {
+			items = append(items, formatScore(e.score))
+		}
+	}
+	<span class="kw">return</span> bulkArray(items)
+}</code></pre>
+
+    <p>両ハンドラの冒頭は同じで、末尾に <code>WITHSCORES</code> が付いていたらフラグを立て、<code>args</code> を4語に詰め直します。<code>cmdZRange</code> は <code>start</code>／<code>stop</code> を整数としてパース、<code>cmdZRangeByScore</code> は <code>parseRangeBound</code> で境界を読みます。<code>parseRangeBound</code> は <code>(</code> 始まり(排他)を検出してから <code>parseScore</code> に渡す小道具 — <code>"(2"</code> なら「2 を含まない」、<code>"-inf"</code>／<code>"+inf"</code> も通ります。</p>
+    <p>共通の <code>zEntriesReply</code> が結果を RESP 配列にします。<code>WITHSCORES</code> なしなら <code>[member, member, ...]</code>、ありなら <code>[member, score, member, score, ...]</code> と<strong>メンバーとスコアを交互に</strong>並べ、全部を <code>bulkArray</code>(第00章)で Bulk String の配列にします。<code>TestZSetOrdering</code> の <code>WITHSCORES</code> 付き期待値 <code>*6\r\n$1\r\na\r\n$1\r\n1\r\n...</code> が、まさにこの交互配置です。</p>
+
+    <h3>ZREM — 削除と「空なら消す」流儀</h3>
+    <div class="file-tag">zset.go（Store · ZRem / RangeBy 系 / cmdZRem）</div>
+    <pre><code><span class="kw">func</span> (s *<span class="ty">Store</span>) ZRem(key <span class="ty">string</span>, members ...<span class="ty">string</span>) (<span class="ty">int</span>, <span class="ty">error</span>) {
+	s.mu.Lock()
+	<span class="kw">defer</span> s.mu.Unlock()
+	z, err := s.getZSetLocked(key, <span class="kw">false</span>)
+	<span class="kw">if</span> err != <span class="kw">nil</span> || z == <span class="kw">nil</span> {
+		<span class="kw">return</span> <span class="st">0</span>, err
+	}
+	n := <span class="st">0</span>
+	<span class="kw">for</span> _, m := <span class="kw">range</span> members {
+		<span class="kw">if</span> z.Remove(m) {
+			n++
+		}
+	}
+	<span class="kw">if</span> len(z.dict) == <span class="st">0</span> {
+		s.removeLocked(key)
+	}
+	<span class="kw">return</span> n, <span class="kw">nil</span>
+}
+
+<span class="kw">func</span> cmdZRem(s *<span class="ty">Store</span>, args []<span class="ty">string</span>) <span class="ty">string</span> {
+	<span class="kw">if</span> len(args) &lt; <span class="st">3</span> {
+		<span class="kw">return</span> errorMsg(<span class="st">"ERR wrong number of arguments for 'zrem' command"</span>)
+	}
+	n, err := s.ZRem(args[<span class="st">1</span>], args[<span class="st">2</span>:]...)
+	<span class="kw">if</span> err != <span class="kw">nil</span> {
+		<span class="kw">return</span> errorMsg(err.Error())
+	}
+	<span class="kw">return</span> integer(n)
+}</code></pre>
+
+    <p><code>ZRem</code> は複数メンバーを順に <code>z.Remove</code>(辞書と skiplist の両方から消す、Step 8 で見た通り)し、消せた数を数えます。存在しないメンバーは <code>Remove</code> が <code>false</code> を返すのでカウントされません(<code>TestZRem</code> の <code>ZREM z a nope</code> が <code>:1</code> を返すのがこれ)。</p>
+    <p>最後の <code>if len(z.dict) == 0 { s.removeLocked(key) }</code> が、本書で何度も出てきた<strong>Redis の流儀</strong>です。要素がゼロになった Sorted Set は、キーごと消える。空のコレクションを残すと <code>EXISTS</code> の挙動が本家とずれる(空 ZSet が存在するかのように見えてしまう)ため、List / Hash / Set と同じく「空になったら削除」を守ります。<code>TestZRem</code> の最後、全メンバーを消したあと <code>EXISTS z</code> が <code>:0</code> を返すのが、この一行の証明です。</p>
+
+    <div class="box do"><div class="box-k">▸ 動かして確認</div>
+      <p>順序系・範囲系・削除をまとめて走らせます。二重管理が全コマンドで矛盾なく働くことの総仕上げです。</p>
+      <pre class="term"><code><span class="ps">$</span> go test -run 'TestZSetOrdering|TestZRangeByScore|TestZRem' -v
+<span class="out">=== RUN   TestZSetOrdering
+--- PASS: TestZSetOrdering (0.00s)
+=== RUN   TestZRangeByScore
+--- PASS: TestZRangeByScore (0.00s)
+=== RUN   TestZRem
+--- PASS: TestZRem (0.00s)
+PASS</span></code></pre>
+      <p>そして最後に、この章のすべてを一度に。skiplist の単体テストからコマンドテストまで、全部緑になれば Sorted Set は完成です。</p>
+      <pre class="term"><code><span class="ps">$</span> go test -run 'Skiplist|ZSet|ZRange|ZRem' -v
+<span class="out">--- PASS: TestSkiplistAgainstReference (0.00s)
+--- PASS: TestSkiplistRangeByScore (0.00s)
+--- PASS: TestZSetCommands (0.00s)
+--- PASS: TestZSetOrdering (0.00s)
+--- PASS: TestZRangeByScore (0.00s)
+--- PASS: TestZRem (0.00s)
+PASS
+ok  	redisclone	0.6s</span></code></pre>
+    </div>
+
+    <p>最後に、これらのコマンドを <code>dispatch</code>(第00章の背骨)へ繋ぎます。<code>command.go</code> の <code>switch</code> に <code>case</code> を8つ足すだけです。</p>
+    <div class="file-tag">command.go（この章で足す case）</div>
+    <pre><code>	<span class="kw">case</span> <span class="st">"ZADD"</span>:
+		<span class="kw">return</span> cmdZAdd(s, args)
+	<span class="kw">case</span> <span class="st">"ZSCORE"</span>:
+		<span class="kw">return</span> cmdZScore(s, args)
+	<span class="kw">case</span> <span class="st">"ZRANK"</span>:
+		<span class="kw">return</span> cmdZRank(s, args)
+	<span class="kw">case</span> <span class="st">"ZRANGE"</span>:
+		<span class="kw">return</span> cmdZRange(s, args)
+	<span class="kw">case</span> <span class="st">"ZRANGEBYSCORE"</span>:
+		<span class="kw">return</span> cmdZRangeByScore(s, args)
+	<span class="kw">case</span> <span class="st">"ZREM"</span>:
+		<span class="kw">return</span> cmdZRem(s, args)
+	<span class="kw">case</span> <span class="st">"ZCARD"</span>:
+		<span class="kw">return</span> cmdZCard(s, args)</code></pre>
+    <p>第00章で「<code>switch</code> は章が進むたびに <code>case</code> が増える背骨」と言った、その最後の枝がここで伸びました。RESP で <code>ZADD</code> が届けば <code>cmdZAdd</code> へ、<code>ZRANGE</code> なら <code>cmdZRange</code> へ。通信層(第00章)から Sorted Set まで、10 章ぶんの積み上げがひと筋に繋がりました。</p>
+
+    <h2>つまずき FAQ</h2>
+    <details class="qa"><summary>skiplist は毎回ランダムなら、同じデータでも実行ごとに形が変わる? 結果は変わらない?</summary>
+      <div class="qa-body"><p><strong>形は変わるが、結果は常に同じ</strong>です。<code>randomLevel</code> のコイン投げは各ノードの<strong>高さ</strong>だけを決めるもので、<strong>並び順</strong>は常に <code>zslLess</code>(score → member 辞書順)で一意に定まります。高さの配置が違っても、<code>ZRANGE</code> や <code>ZRANK</code> の答えは不変。だから <code>TestSkiplistAgainstReference</code> は「ソート済みスライス」という決定的な実装と照合できます。速度(何ホップで届くか)は形に左右されますが、それも確率的に O(log N) に収まります。</p></div>
+    </details>
+    <details class="qa"><summary>なぜ赤黒木ではなく skiplist なのか? 木のほうが速そうだが。</summary>
+      <div class="qa-body"><p>計算量は同じ(挿入・削除・探索・ランクすべて O(log N))です。差は<strong>実装の単純さ</strong>にあります。赤黒木や AVL 木は挿入・削除のたびに回転と再着色でバランスを取り直す必要があり、コードが長く、境界条件でバグりやすい。skiplist は確率に任せるので、バランス調整のコードが<strong>まるごと不要</strong>——本章の insert / delete のように、リンクの繋ぎ替えと span の配り直しだけで書けます。さらに span を持たせると<strong>順位アクセス(<code>ZRANK</code>／<code>nodeAtRank</code>)が自然に O(log N) で乗る</strong>のも大きい。作者 antirez(Salvatore Sanfilippo)が「単純さ」を理由に skiplist を選んだ判断は、自作してみると腑に落ちます。</p></div>
+    </details>
+    <details class="qa"><summary>ZADD でスコアだけ変えると、なぜ skiplist は「消して入れ直す」必要がある?</summary>
+      <div class="qa-body"><p>skiplist は <code>(score, member)</code> の<strong>並びそのもの</strong>だからです。スコアが変わればノードの正しい位置も変わるので、その場で <code>node.score = newScore</code> と書き換えるだけでは、ノードが間違った位置に居座り、前後のリンクと span が壊れます。正しく並べ直すには、古いスコアで <code>delete</code>(正しい旧位置から外す)→ 新しいスコアで <code>insert</code>(正しい新位置へ挿す)しかありません。一方 <code>dict</code>(逆引き辞書)は並びを持たないので <code>z.dict[member] = newScore</code> の上書きで足りる。この非対称が、<code>ZSet.Add</code> の②のコードの理由です。</p></div>
+    </details>
+
+    <h2>理解度チェック</h2>
+    <p>次の問いに<strong>自分の言葉で</strong>答えられたら、この章は卒業です。</p>
+    <details class="qa"><summary>1. なぜ Sorted Set は「辞書」と「skiplist」の2つを持つのか。1つでは何が足りないか。</summary>
+      <div class="qa-body"><p><strong>逆引きと順序を両立できない</strong>から。辞書(<code>member→score</code>)だけだと <code>ZSCORE</code> は O(1) だが、順序が無いので <code>ZRANGE</code>／<code>ZRANK</code> に毎回 O(N log N) のソートが要る。逆にソート済み構造だけだと範囲・順位は速いが、メンバーからの逆引きと更新が遅い(スコア変更で並びが崩れ O(N))。そこで<strong>逆引きは辞書、順序は skiplist</strong> と分業させ、どのコマンドも高速にする。両者を常に一致させる「二重管理の義務」が代償。</p></div>
+    </details>
+    <details class="qa"><summary>2. skiplist の <code>span</code> は何のためにあり、<code>ZRANK</code> はそれをどう使うか。</summary>
+      <div class="qa-body"><p><code>span[i]</code> は「レベル i の矢印が最下層で何ノードぶんを飛ぶか」= <strong>飛距離</strong>。最下層は常に 1、上の階ほど大きい。<code>ZRANK</code>(<code>rank</code>)は上の階から目的ノードへ探索し、<strong>進むたびに <code>span</code> を積算</strong>する。飛んだ距離の合計が、そのノードの先頭からの順位になる。span が無ければ順位を数えるのに全ノードをたどる O(N) になってしまう。span こそが「skiplist で順位を O(log N) で取れる」仕掛け。</p></div>
+    </details>
+    <details class="qa"><summary>3. <code>ZADD</code> でスコアを更新するとき、辞書と skiplist はそれぞれどう変わるか。片方だけ更新すると何が起きるか。</summary>
+      <div class="qa-body"><p><strong>辞書</strong>は <code>z.dict[member] = newScore</code> の上書きで済む(並びを持たないから)。<strong>skiplist</strong> は並びそのものなので、旧スコアで <code>delete</code> → 新スコアで <code>insert</code> の入れ直しが要る。片方だけ更新すると<strong>二重管理が食い違う</strong>: 辞書だけ直すと <code>ZSCORE</code> は正しいが <code>ZRANGE</code>／<code>ZRANK</code> が旧順序のまま間違う。しかも<strong>更新していないコマンドが後で間違う</strong>ので原因追跡が困難。だから書き込みは <code>ZSet.Add</code>／<code>Remove</code> の2メソッドに閉じ込め、必ず両方を触る。</p></div>
+    </details>
+
+    <h2>まとめ — 次の層へ</h2>
+    <p>Sorted Set を完成させました。この章で越えた山は2つ。1つは <strong>skiplist</strong> — 確率でつくる高速道路。コイン投げで高さを決め、span で飛距離を覚え、挿入・削除・ランクをすべて期待 O(log N) でこなす、本書で最も込み入った構造を、図とコードで最後まで解きほぐしました。もう1つは <strong>二重管理の義務</strong> — 辞書と skiplist を常に一致させ続ける規律。「片方だけ更新」という静かなバグを、書き込みを2メソッドに絞ることで封じました。5000 回のランダム操作が自明な実装と1件も違わない、あの PASS が、両方の正しさを保証しています。</p>
+    <p>そして、ここで<strong>データ型の旅は終わり</strong>です。第01章のキースペースから始まり、String・List・Hash・Set・Sorted Set まで——ここまで作ってきたものは、すべて<strong>キースペースの上に載る「値」</strong>でした。クライアントがコマンドを送り、サーバが値を読み書きして返す。その往復の世界です。</p>
+    <p>次の第08章 <strong>Pub/Sub</strong> は、この世界の外側へ出ます。ここまで脇役だった <strong>接続そのものが主役</strong>になる。ある接続が <code>PUBLISH</code> したメッセージが、別の接続へ<strong>非同期に飛んでいく</strong> — 第00章で「後で使う穴」として置いた <code>dispatch</code> の <code>srv</code>／<code>c</code> 引数、<code>client.send</code> の Mutex、切断時の <code>dropClient</code> が、ここでいっせいに意味を持ちます。値ではなく<strong>接続の間を流れるメッセージ</strong>を扱う、これまでとは毛色の違う章です。伏線を回収しに行きましょう。</p>
+
+    <div class="chap-foot">
+      <a class="pager" href="06-set.html"><span class="dir">← 前へ</span>第06章 · Set とエンコーディング</a>
+      <a class="pager next" href="08-pubsub.html"><span class="dir">次へ →</span>第08章 · Pub/Sub</a>
+    </div>
+  </main>
+</div>
+</body>
+</html>

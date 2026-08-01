@@ -1,0 +1,764 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>第00章 土台をつくる — 動画サービスをつくる</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500;600&family=Source+Serif+4:opsz,wght@8..60,400;8..60,600;8..60,700&family=Noto+Serif+JP:wght@400;600;700&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<div class="shell">
+
+  <aside class="spine">
+    <a class="wordmark" href="index.html">VIDEO-STREAM · from scratch</a>
+    <div class="book-title">動画サービスを<br>つくる</div>
+    <div class="book-sub">Go と ffmpeg で presigned から HLS 配信まで</div>
+
+    <div class="legend"><span>受け取る <b>↓</b></span><span>届ける <b>↑</b></span></div>
+
+    <nav aria-label="目次">
+      <ul class="toc">
+        <li><a class="nav-item" href="index.html"><span class="nav-num">序</span><span class="nav-label">はじめに・準備<span class="nav-tag">Setup</span></span></a></li>
+        <li><a class="nav-item current" aria-current="page" href="00-setup.html"><span class="nav-num">00</span><span class="nav-label">土台をつくる<span class="nav-tag">Setup</span></span></a></li>
+        <li><a class="nav-item" href="01-auth.html"><span class="nav-num">01</span><span class="nav-label">人を扱う<span class="nav-tag">Auth</span></span></a></li>
+        <li><a class="nav-item" href="02-upload.html"><span class="nav-num">02</span><span class="nav-label">動画を受け取る<span class="nav-tag">Upload</span></span></a></li>
+        <li><a class="nav-item" href="03-transcode.html"><span class="nav-num">03</span><span class="nav-label">動画を変換する<span class="nav-tag">Transcode</span></span></a></li>
+        <li><a class="nav-item" href="04-deliver.html"><span class="nav-num">04</span><span class="nav-label">動画を届ける<span class="nav-tag">Deliver</span></span></a></li>
+        <li><a class="nav-item" href="05-social.html"><span class="nav-num">05</span><span class="nav-label">反応をつくる<span class="nav-tag">Social</span></span></a></li>
+        <li><a class="nav-item" href="06-discover.html"><span class="nav-num">06</span><span class="nav-label">見つけてもらう<span class="nav-tag">Discover</span></span></a></li>
+        <li><a class="nav-item" href="07-notify.html"><span class="nav-num">07</span><span class="nav-label">つながりを届ける<span class="nav-tag">Notify</span></span></a></li>
+        <li><a class="nav-item" href="08-web.html"><span class="nav-num">08</span><span class="nav-label">画面をつける<span class="nav-tag">Web</span></span></a></li>
+        <li><a class="nav-item" href="09-beyond.html"><span class="nav-num">09</span><span class="nav-label">仕上げと次の一歩<span class="nav-tag">Beyond</span></span></a></li>
+      </ul>
+    </nav>
+
+    <div class="spine-foot">
+      各章は動画が通る道の一区間。<br>受け取る（下）から届ける（上）へ、<br>1本の動画を最後まで運びきる。
+    </div>
+  </aside>
+
+  <main class="reading">
+    <div class="progress-tag">第00章 / 全10章 · 層: Setup · 読了目安 2〜3時間</div>
+    <div class="eyebrow"><span>Setup</span><span class="depth">— 最下層 · 土台</span></div>
+    <h1>土台をつくる</h1>
+    <p class="lede">動画を受け取る前に、動画を運ぶための舞台を組みます。記録係（PostgreSQL）・注文箱（Redis）・保管庫（MinIO）を <code>docker compose</code> で一斉に立ち上げ、その上に<strong>身軽な受付（API）</strong>と<strong>黙々働く職人（Worker）</strong>の2プロセスを起こす。そして、この本のすべての判断の背骨になる<strong>videos.status の状態遷移</strong>を、データベースのスキーマとして刻みます。この章を終えたとき、まだ動画は1本も受け取れませんが、動画を運ぶための登場人物が全員そろい、<code>curl http://localhost:8080/healthz</code> が <code>{"status":"ok"}</code> と返します。</p>
+
+    <div class="box goal"><div class="box-k">◈ この章のゴール</div>
+      <p>次の3つを、自分の目と手で確認できたら達成です。</p>
+      <ol>
+        <li><code>docker compose up --build -d</code> で6つのサービスが起動し、<code>db</code>・<code>redis</code> が <code>Healthy</code> になる。</li>
+        <li><code>curl http://localhost:8080/healthz</code> が <code>{"status":"ok"}</code> を返す（受付が生きている）。</li>
+        <li><code>psql</code> で <code>videos</code> テーブルの <code>status</code> 列の <code>CHECK</code> 制約を見て、状態が <code>uploading / uploaded / processing / ready / failed</code> の5つに限られていることを確認する。</li>
+      </ol>
+    </div>
+
+    <div class="box map"><div class="box-k">☰ この章のステップ</div>
+      <ol>
+        <li><a href="#step-1">6人の登場人物を一斉に起こす — <code>docker-compose.yml</code></a></li>
+        <li><a href="#step-2">なぜ API とワーカーを分けるのか — 2プロセス構成</a></li>
+        <li><a href="#step-3">1つのソースから2つのプログラムを焼く — <code>Dockerfile</code></a></li>
+        <li><a href="#step-4">受付を起動する — <code>cmd/api/main.go</code></a></li>
+        <li><a href="#step-5">職人を起動する — <code>cmd/worker/main.go</code></a></li>
+        <li><a href="#step-6">設定を環境変数から読む — <code>config/config.go</code></a></li>
+        <li><a href="#step-7">DB につなぎ、スキーマを流す — <code>db/db.go</code></a></li>
+        <li><a href="#step-8">背骨を刻む — <code>schema.sql</code> と状態遷移</a></li>
+        <li><a href="#step-9">立ち上げて確認する</a></li>
+      </ol>
+    </div>
+
+    <h2>なぜ「土台」から始めるのか</h2>
+    <p>動画サービスで最初に作るべきものは、アップロード機能でも再生プレイヤーでもありません。<strong>動画を運ぶ登場人物たちを、正しい順で立ち上げ、つなぐこと</strong>です。序章の全体像を思い出してください。動画は「受付 → 保管庫 → 注文箱 → 職人 → 保管庫 → 配信」という道を通ります。この道のどこか1人でも欠けていれば、動画は1バイトも先へ進めません。</p>
+    <p>幸い、この6人（DB・Redis・MinIO・API・Worker・Web）を手で1つずつ起動する必要はありません。<code>docker-compose.yml</code> という1枚の設計図に「誰を、どう起動し、どういう順で待つか」を書いておけば、<code>docker compose up</code> の一言で全員がそろいます。この章は、その設計図を1行ずつ読み解くことから始めます。</p>
+
+    <h2>この層が上の層に約束すること</h2>
+    <p>この章で作る「土台」の層が、上の全章に約束するのは次の3つです。</p>
+    <ul>
+      <li><strong>登場人物が全員、正しい順で立っている</strong> — DB が受付準備できてから API が起動し、変換の職人はいつでもキューを覗ける。起動順の揺れで死なない。</li>
+      <li><strong>受付と職人が別プロセスに分かれている</strong> — 重い変換が受付を塞がない。職人を増やせば変換を並行にできる。</li>
+      <li><strong>DB のスキーマが、状態遷移という背骨を持っている</strong> — 動画は必ず <code>uploading → uploaded → processing → ready / failed</code> の道を辿り、その状態こそが「この動画は今どこにいるか」の唯一の真実になる。</li>
+    </ul>
+    <p>逆に、この層が<strong>やらない</strong>ことも明確です。動画を受け取ること・変換すること・配信することは、一切しません。この章はあくまで「舞台を組む」だけ。役者が芝居を始めるのは第01章からです。</p>
+
+    <h2 class="step" id="step-1"><span class="step-no">Step 1</span>6人の登場人物を一斉に起こす — docker-compose.yml</h2>
+    <p>まず設計図の全体を見ます。<code>src/docker-compose.yml</code> は6つの <code>services</code> を定義しています。長いので、まずは<strong>ミドルウェア3人（db / redis / minio）</strong>から読み、次のステップでアプリ3人（api / worker / web）を読みます。</p>
+
+    <div class="file-tag">docker-compose.yml（前半・ミドルウェア3人）</div>
+    <pre><code><span class="cm"># 動画投稿サービス — 5人の登場人物＋記録係を一発で起動する</span>
+<span class="kw">services</span>:
+  <span class="kw">db</span>: <span class="cm"># 記録係</span>
+    <span class="kw">image</span>: <span class="st">postgres:16-alpine</span>
+    <span class="kw">environment</span>:
+      <span class="kw">POSTGRES_USER</span>: <span class="st">video</span>
+      <span class="kw">POSTGRES_PASSWORD</span>: <span class="st">video</span>
+      <span class="kw">POSTGRES_DB</span>: <span class="st">video</span>
+    <span class="kw">volumes</span>:
+      - <span class="st">db-data:/var/lib/postgresql/data</span>
+    <span class="kw">healthcheck</span>:
+      <span class="kw">test</span>: [<span class="st">"CMD-SHELL"</span>, <span class="st">"pg_isready -U video"</span>]
+      <span class="kw">interval</span>: <span class="st">3s</span>
+      <span class="kw">timeout</span>: <span class="st">3s</span>
+      <span class="kw">retries</span>: <span class="st">20</span>
+
+  <span class="kw">redis</span>: <span class="cm"># 注文箱</span>
+    <span class="kw">image</span>: <span class="st">redis:7-alpine</span>
+    <span class="kw">healthcheck</span>:
+      <span class="kw">test</span>: [<span class="st">"CMD"</span>, <span class="st">"redis-cli"</span>, <span class="st">"ping"</span>]
+      <span class="kw">interval</span>: <span class="st">3s</span>
+      <span class="kw">timeout</span>: <span class="st">3s</span>
+      <span class="kw">retries</span>: <span class="st">20</span>
+
+  <span class="kw">minio</span>: <span class="cm"># 保管庫</span>
+    <span class="kw">image</span>: <span class="st">minio/minio:latest</span>
+    <span class="kw">command</span>: <span class="st">server /data --console-address ":9001"</span>
+    <span class="kw">environment</span>:
+      <span class="kw">MINIO_ROOT_USER</span>: <span class="st">minioadmin</span>
+      <span class="kw">MINIO_ROOT_PASSWORD</span>: <span class="st">minioadmin</span>
+      <span class="kw">MINIO_API_CORS_ALLOW_ORIGIN</span>: <span class="st">"*"</span> <span class="cm"># ブラウザからの直接アップロードを許す</span>
+    <span class="kw">ports</span>:
+      - <span class="st">"9000:9000"</span> <span class="cm"># presigned URL でブラウザが直接触る</span>
+      - <span class="st">"9001:9001"</span> <span class="cm"># 管理コンソール（学習用）</span>
+    <span class="kw">volumes</span>:
+      - <span class="st">minio-data:/data</span>
+    <span class="kw">healthcheck</span>:
+      <span class="kw">test</span>: [<span class="st">"CMD"</span>, <span class="st">"mc"</span>, <span class="st">"ready"</span>, <span class="st">"local"</span>]
+      <span class="kw">interval</span>: <span class="st">5s</span>
+      <span class="kw">timeout</span>: <span class="st">5s</span>
+      <span class="kw">retries</span>: <span class="st">20</span></code></pre>
+
+    <p>3人とも既製のイメージ（<code>image:</code>）をそのまま使います。自分で作るのは後で見るアプリ側だけ。1人ずつ、役割と設計上の勘所を見ていきます。</p>
+    <p><strong>db（記録係 / PostgreSQL 16）</strong>。ユーザー名・パスワード・DB名をすべて <code>video</code> にしています（学習用なので単純に）。注目は <code>volumes</code> の <code>db-data:/var/lib/postgresql/data</code> です。これは<strong>名前付きボリューム</strong>で、コンテナを消してもデータが残る置き場。もしこれが無いと、<code>docker compose down</code> のたびに登録したユーザーも投稿した動画も全部消えます。動画本体は MinIO に、動画の「情報」（誰が・いつ・どの状態か）は PostgreSQL に残ります。</p>
+    <p><strong>redis（注文箱 / Redis 7）</strong>。設定が驚くほど少ないことに気づきます。ポートも <code>volumes</code> も指定していません。Redis は本書では「変換ジョブを積むキュー」「通知の Pub/Sub」「視聴数の一時バッファ」として使いますが、いずれも<strong>消えても致命傷にならないデータ</strong>なので永続化していません（第03章・第07章でこの割り切りの意味を掘り下げます）。他のコンテナからは <code>redis:6379</code> という名前で見えるので、ホストにポートを公開する必要もありません。</p>
+    <p><strong>minio（保管庫 / S3互換ストレージ）</strong>。ここが動画本体の置き場で、本書のいちばんの主役ストレージです。3つの勘所があります。</p>
+    <ul>
+      <li><code>MINIO_API_CORS_ALLOW_ORIGIN: "*"</code> — <strong>ブラウザが MinIO に直接アップロードするのを許す</strong>設定です。第02章の presigned URL 直アップロードで、ブラウザ（<code>localhost:3000</code>）が MinIO（<code>localhost:9000</code>）へ直接 <code>PUT</code> するとき、オリジンが違うので CORS のブロックに引っかかります。それを許可するのがこの1行。「なぜ CORS を開けるのか」は第02章で腑に落ちます。</li>
+      <li><code>ports</code> で <strong>9000 番を外に公開</strong>しています。DB や Redis と違い、MinIO だけは<strong>ブラウザから直接触られる</strong>（presigned URL の宛先になる）ので、ホストの 9000 番に出しておく必要があります。9001 番は学習用の管理コンソール（動画が本当に保存されたか目で見られる）。</li>
+      <li><code>volumes</code> の <code>minio-data:/data</code> — 動画の実体ファイル（元動画・変換後のHLS）の置き場。DB と同じく名前付きボリュームで永続化します。</li>
+    </ul>
+
+    <p>そして3人に共通するのが <code>healthcheck</code> です。これは<strong>「この人はもう仕事を受けられる状態か?」を Docker が定期的に確認する</strong>仕組み。DB なら <code>pg_isready</code>、Redis なら <code>redis-cli ping</code> を <code>interval</code>（3秒）ごとに叩き、成功すればそのコンテナは <code>Healthy</code> になります。この <code>Healthy</code> が、次のステップで見る「起動順の制御」の鍵になります。</p>
+
+    <div class="gonote"><div class="box-k">実装メモ · healthcheck はなぜ要るのか</div>
+      <p>コンテナが「起動した（Started）」ことと「仕事を受けられる（Healthy）」ことは<strong>別物</strong>です。PostgreSQL のプロセスは1秒で立ち上がっても、DB が接続を受け付けられるようになるまでは数秒かかることがあります。もし API がその「まだ準備中」の隙間に接続しようとすると、接続に失敗して落ちます。<code>healthcheck</code> は「本当に準備できたか」を実際にコマンドを打って確かめる仕組みで、<code>test</code> のコマンドが成功を返すまで、そのコンテナは <code>Healthy</code> になりません。次のステップの <code>depends_on ... condition: service_healthy</code> と組み合わせて、「準備できた人から順に起こす」を実現します。</p>
+    </div>
+
+    <h2 class="step" id="step-2"><span class="step-no">Step 2</span>なぜ API とワーカーを分けるのか — 2プロセス構成</h2>
+    <p>設計図の後半、アプリ側3人（api / worker / web）を読みます。ここに本書の設計の背骨 —— <strong>受付（api）と職人（worker）を別プロセスに分ける</strong> —— が現れます。</p>
+
+    <div class="file-tag">docker-compose.yml（後半・アプリ3人）</div>
+    <pre><code>  <span class="kw">api</span>: <span class="cm"># 受付</span>
+    <span class="kw">build</span>:
+      <span class="kw">context</span>: <span class="st">./backend</span>
+      <span class="kw">target</span>: <span class="st">api</span>
+    <span class="kw">environment</span>:
+      <span class="kw">DATABASE_URL</span>: <span class="st">postgres://video:video@db:5432/video?sslmode=disable</span>
+      <span class="kw">REDIS_ADDR</span>: <span class="st">redis:6379</span>
+      <span class="kw">S3_ENDPOINT</span>: <span class="st">minio:9000</span>
+      <span class="kw">S3_PUBLIC_ENDPOINT</span>: <span class="st">localhost:9000</span> <span class="cm"># ブラウザから見た保管庫の場所</span>
+      <span class="kw">S3_ACCESS_KEY</span>: <span class="st">minioadmin</span>
+      <span class="kw">S3_SECRET_KEY</span>: <span class="st">minioadmin</span>
+      <span class="kw">S3_BUCKET</span>: <span class="st">videos</span>
+      <span class="kw">JWT_SECRET</span>: <span class="st">dev-secret-change-me</span>
+    <span class="kw">ports</span>:
+      - <span class="st">"8080:8080"</span>
+    <span class="kw">depends_on</span>:
+      <span class="kw">db</span>:
+        <span class="kw">condition</span>: <span class="st">service_healthy</span>
+      <span class="kw">redis</span>:
+        <span class="kw">condition</span>: <span class="st">service_healthy</span>
+      <span class="kw">minio</span>:
+        <span class="kw">condition</span>: <span class="st">service_started</span>
+
+  <span class="kw">worker</span>: <span class="cm"># 職人（増やすなら: docker compose up --scale worker=2）</span>
+    <span class="kw">build</span>:
+      <span class="kw">context</span>: <span class="st">./backend</span>
+      <span class="kw">target</span>: <span class="st">worker</span>
+    <span class="kw">environment</span>:
+      <span class="kw">DATABASE_URL</span>: <span class="st">postgres://video:video@db:5432/video?sslmode=disable</span>
+      <span class="kw">REDIS_ADDR</span>: <span class="st">redis:6379</span>
+      <span class="kw">S3_ENDPOINT</span>: <span class="st">minio:9000</span>
+      <span class="kw">S3_ACCESS_KEY</span>: <span class="st">minioadmin</span>
+      <span class="kw">S3_SECRET_KEY</span>: <span class="st">minioadmin</span>
+      <span class="kw">S3_BUCKET</span>: <span class="st">videos</span>
+    <span class="kw">depends_on</span>:
+      <span class="kw">db</span>:
+        <span class="kw">condition</span>: <span class="st">service_healthy</span>
+      <span class="kw">redis</span>:
+        <span class="kw">condition</span>: <span class="st">service_healthy</span>
+      <span class="kw">minio</span>:
+        <span class="kw">condition</span>: <span class="st">service_started</span>
+
+  <span class="kw">web</span>: <span class="cm"># 画面</span>
+    <span class="kw">build</span>:
+      <span class="kw">context</span>: <span class="st">./frontend</span>
+    <span class="kw">ports</span>:
+      - <span class="st">"3000:80"</span>
+    <span class="kw">depends_on</span>:
+      - <span class="st">api</span>
+
+<span class="kw">volumes</span>:
+  <span class="kw">db-data</span>:
+  <span class="kw">minio-data</span>:</code></pre>
+
+    <p>まず <code>api</code> と <code>worker</code> の共通点から。両方とも <code>build.context: ./backend</code> で<strong>同じ backend ディレクトリからビルド</strong>されています。違うのは <code>target</code> だけ —— <code>api</code> は <code>target: api</code>、<code>worker</code> は <code>target: worker</code>。これは Dockerfile のマルチステージビルド（Step 3）で「同じソースから2つの別のプログラムを焼く」ことを指しています。ソースは1つ、実行ファイルは2つ。</p>
+
+    <p><strong>ここが本書で最も大事な設計判断です。</strong>なぜ受付と職人を分けるのか。答えは序章のテーマそのもの —— <strong>変換は分単位かかるから</strong>です。もし受付が変換も担当したら、1本の動画を変換している数分間、受付は他の依頼（別の人のログイン、別の動画の再生要求）を1つも捌けません。受付の窓口が「今、奥で3分かかる作業をしているので、しばらくお待ちください」と閉まってしまう。</p>
+
+    <div class="ascii">悪い設計: 受付が変換もやる（1プロセス）
+
+  依頼A(投稿) ──▶ [受付] ══3分の変換══▶ 応答A
+  依頼B(ログイン) ──▶ [受付] …………………待たされる…………………▶ 応答B
+                          ↑ Aの変換が終わるまでBは1文字も返せない
+
+
+  良い設計: 受付は注文票を積むだけ、職人が裏で変換（2プロセス）
+
+  依頼A(投稿) ──▶ [受付] ─注文票を積む─▶ 即・応答A（0.01秒）
+                            │
+                            ▼ 注文箱(Redis)
+                            │
+  依頼B(ログイン) ──▶ [受付] ─即・応答B    │取り出す
+                                          ▼
+                                    [職人] ══3分の変換══▶ 完了をDBに記録
+                                     ↑ 受付とは無関係に、裏で黙々と</div>
+
+    <p>だから受付（api）は「重い作業をしない」を徹底します。動画本体すら受け取らず（第02章の presigned 直アップロード）、変換の依頼が来たら<strong>注文票を Redis に積むだけ</strong>で即座に応答を返す（第03章）。実際の変換は、注文箱を覗いている職人（worker）が引き受ける。受付は身軽なまま依頼を受け続けられ、職人は受付を気にせず黙々と変換できる。この分離が、序章で挙げた「投稿ボタンを押した瞬間に応答が返る」体験を支えています。</p>
+
+    <p>さらに、分けておくと<strong>職人だけを増やせる</strong>という副産物があります。<code>worker</code> のコメントにある <code>docker compose up --scale worker=2</code> を打つと、職人が2人になり、変換を並行して処理できます。受付を増やさずに変換能力だけを増やせるのは、2つが別プロセスだからです。</p>
+
+    <p>次に <code>depends_on</code> と <code>condition</code>。ここで Step 1 の <code>healthcheck</code> が効いてきます。<code>api</code> は「<code>db</code> と <code>redis</code> が <code>Healthy</code> になり、<code>minio</code> が <code>Started</code> したら起動する」と宣言しています。DB と Redis は接続してすぐ使うので「準備完了（Healthy）」を待ちますが、MinIO は起動直後に叩かないので「プロセスが立った（Started）」で十分、という違いです。この宣言のおかげで、「DB がまだ準備中なのに API が接続しようとして落ちる」という起動順の事故が防げます。</p>
+
+    <div class="box hazard"><div class="box-k">⚠ 落とし穴 — worker に S3_PUBLIC_ENDPOINT が無いのは意図的</div>
+      <p>よく見ると、<code>api</code> には <code>S3_PUBLIC_ENDPOINT: localhost:9000</code> があるのに、<code>worker</code> には<strong>ありません</strong>。書き忘れではありません。<code>S3_PUBLIC_ENDPOINT</code> は「ブラウザから見た保管庫の場所」で、<strong>presigned URL（ブラウザに渡す合鍵）を作るときだけ必要</strong>です。合鍵を発行するのは受付（api）の仕事なので api には要る。一方、職人（worker）はコンテナ内から <code>S3_ENDPOINT: minio:9000</code> で保管庫を直接読み書きするだけで、ブラウザに渡す URL は作りません。だから <code>S3_PUBLIC_ENDPOINT</code> は不要。この「内部用エンドポイントとブラウザ用エンドポイントは別」という presigned の核心は、第02章で <code>storage.go</code> を読むときに完全に理解できます。いまは「api と worker で環境変数が微妙に違うのには理由がある」とだけ覚えておいてください。</p>
+    </div>
+
+    <h2 class="step" id="step-3"><span class="step-no">Step 3</span>1つのソースから2つのプログラムを焼く — Dockerfile</h2>
+    <p>Step 2 で「同じ backend から <code>target: api</code> と <code>target: worker</code> の2つを焼く」と言いました。その正体が <code>backend/Dockerfile</code> の<strong>マルチステージビルド</strong>です。</p>
+
+    <div class="file-tag">backend/Dockerfile</div>
+    <pre><code><span class="cm"># API と Worker を同じソースからビルドする（マルチステージ）</span>
+<span class="kw">FROM</span> <span class="st">golang:1.25-alpine</span> <span class="kw">AS</span> <span class="ty">build</span>
+<span class="kw">WORKDIR</span> <span class="st">/app</span>
+<span class="kw">COPY</span> <span class="st">go.mod go.sum ./</span>
+<span class="kw">RUN</span> <span class="st">go mod download</span>
+<span class="kw">COPY</span> <span class="st">. .</span>
+<span class="kw">RUN</span> <span class="st">CGO_ENABLED=0 go build -o /bin/api ./cmd/api</span> \
+ &amp;&amp; <span class="st">CGO_ENABLED=0 go build -o /bin/worker ./cmd/worker</span>
+
+<span class="cm"># 受付（API）: 軽い。重い作業をしないので ffmpeg も持たない</span>
+<span class="kw">FROM</span> <span class="st">alpine:3.20</span> <span class="kw">AS</span> <span class="ty">api</span>
+<span class="kw">COPY</span> <span class="st">--from=build /bin/api /usr/local/bin/api</span>
+<span class="kw">EXPOSE</span> <span class="st">8080</span>
+<span class="kw">ENTRYPOINT</span> [<span class="st">"api"</span>]
+
+<span class="cm"># 職人（Worker）: 変換のために ffmpeg を持つ</span>
+<span class="kw">FROM</span> <span class="st">alpine:3.20</span> <span class="kw">AS</span> <span class="ty">worker</span>
+<span class="kw">RUN</span> <span class="st">apk add --no-cache ffmpeg</span>
+<span class="kw">COPY</span> <span class="st">--from=build /bin/worker /usr/local/bin/worker</span>
+<span class="kw">ENTRYPOINT</span> [<span class="st">"worker"</span>]</code></pre>
+
+    <p>3つの <code>FROM</code>（ステージ）があります。上から追います。</p>
+    <p><strong>build ステージ</strong>（<code>FROM golang:1.25-alpine AS build</code>）は、Go のコンパイラが入った重いイメージの中で、ソースから2つの実行ファイルをコンパイルします。<code>go build -o /bin/api ./cmd/api</code> で受付を、<code>go build -o /bin/worker ./cmd/worker</code> で職人を。<code>cmd/api</code> と <code>cmd/worker</code> という<strong>2つの入口（main パッケージ）</strong>があり、それぞれから別の実行ファイルが焼けます。ここで両方まとめて作っておくのがミソです。</p>
+    <p><strong>api ステージ</strong>と <strong>worker ステージ</strong>は、どちらも軽量な <code>alpine:3.20</code> から始まり、build ステージで焼いた実行ファイルを <code>COPY --from=build</code> で1つだけ持ってきます。Go のコンパイラは実行には要らないので捨てる —— だから最終イメージは小さく済みます。</p>
+    <p>そして<strong>この Dockerfile に「API とワーカーを分ける理由」がもう一つ物理的に現れています</strong>。<code>worker</code> ステージだけが <code>RUN apk add --no-cache ffmpeg</code> で ffmpeg を入れています。api ステージには ffmpeg がありません。序章の落とし穴で触れた通り、受付は「重い作業をしない」ので変換ツールを持たず軽く保ち、職人だけが ffmpeg を背負う。この非対称が、<code>docker-compose.yml</code> の <code>target: api</code> / <code>target: worker</code> で使い分けられるわけです。</p>
+
+    <div class="gonote"><div class="box-k">実装メモ · CGO_ENABLED=0 と静的リンク</div>
+      <p><code>CGO_ENABLED=0</code> は「C のライブラリに依存しない、完全に自己完結した実行ファイルを作る」指定です。これがないと、ビルドした環境の C ライブラリ（glibc など）に依存してしまい、別の軽量イメージ（alpine は glibc ではなく musl を使う）に持っていくと「ライブラリが無い」で動かないことがあります。<code>CGO_ENABLED=0</code> で静的リンクしておけば、実行ファイル1つを別のイメージにコピーするだけで動く —— マルチステージビルドと相性が良い定番の設定です。第01章で bcrypt を使いますが、Go の bcrypt 実装は純 Go なので、これでも問題なく動きます。</p>
+    </div>
+
+    <h2 class="step" id="step-4"><span class="step-no">Step 4</span>受付を起動する — cmd/api/main.go</h2>
+    <p>設計図が読めたので、いよいよ Go のコードへ。まず受付の入口、<code>cmd/api/main.go</code> です。これが <code>docker-compose.yml</code> の <code>api</code> サービスが起動する実行ファイルの中身。短いですが、受付が立ち上がるまでの手順が全部詰まっています。</p>
+
+    <div class="file-tag">cmd/api/main.go（全文）</div>
+    <pre><code><span class="cm">// 受付（API）サーバー。依頼を受け、記録し、指示を出す。重い作業はしない。</span>
+<span class="kw">package</span> main
+
+<span class="kw">import</span> (
+	<span class="st">"context"</span>
+	<span class="st">"log"</span>
+	<span class="st">"net/http"</span>
+
+	<span class="st">"video-service/internal/config"</span>
+	<span class="st">"video-service/internal/db"</span>
+	<span class="st">"video-service/internal/httpapi"</span>
+	<span class="st">"video-service/internal/queue"</span>
+	<span class="st">"video-service/internal/storage"</span>
+)
+
+<span class="kw">func</span> main() {
+	cfg := config.Load()
+	ctx := context.Background()
+
+	pool, err := db.Connect(ctx, cfg.DatabaseURL)
+	<span class="kw">if</span> err != <span class="kw">nil</span> {
+		log.Fatalf(<span class="st">"db: %v"</span>, err)
+	}
+	<span class="kw">defer</span> pool.Close()
+	<span class="kw">if</span> err := db.Migrate(ctx, pool); err != <span class="kw">nil</span> {
+		log.Fatalf(<span class="st">"migrate: %v"</span>, err)
+	}
+
+	st, err := storage.New(cfg)
+	<span class="kw">if</span> err != <span class="kw">nil</span> {
+		log.Fatalf(<span class="st">"storage: %v"</span>, err)
+	}
+	<span class="kw">if</span> err := st.EnsureBucket(ctx); err != <span class="kw">nil</span> {
+		log.Fatalf(<span class="st">"bucket: %v"</span>, err)
+	}
+
+	q := queue.New(cfg.RedisAddr)
+
+	s := &amp;httpapi.Server{DB: pool, St: st, Q: q, Cfg: cfg}
+	<span class="kw">go</span> s.FlushViewsLoop(ctx)
+
+	log.Printf(<span class="st">"api listening on :%s"</span>, cfg.Port)
+	<span class="kw">if</span> err := http.ListenAndServe(<span class="st">":"</span>+cfg.Port, s.Routes()); err != <span class="kw">nil</span> {
+		log.Fatal(err)
+	}
+}</code></pre>
+
+    <p><code>main</code> は上から順に「受付が仕事を始めるのに必要なものを、1つずつ揃えて手渡す」だけの手続きです。序章の登場人物が、ここでコードとして接続されます。</p>
+    <ol>
+      <li><code>config.Load()</code> —— 環境変数から設定を読む（Step 6）。DB の URL や Redis のアドレスなど、<code>docker-compose.yml</code> の <code>environment:</code> で渡した値がここに入ります。</li>
+      <li><code>db.Connect(...)</code> と <code>db.Migrate(...)</code> —— 記録係（PostgreSQL）につなぎ、スキーマを流す（Step 7・8）。</li>
+      <li><code>storage.New(cfg)</code> と <code>st.EnsureBucket(ctx)</code> —— 保管庫（MinIO）につなぎ、動画を入れるバケツ（<code>videos</code>）が無ければ作る。詳細は第02章。</li>
+      <li><code>queue.New(cfg.RedisAddr)</code> —— 注文箱（Redis）につなぐ。詳細は第03章。</li>
+      <li><code>&amp;httpapi.Server{...}</code> —— 揃えた4つ（DB・保管庫・注文箱・設定）を1つの <code>Server</code> にまとめる。以降の全ハンドラは、この <code>Server</code> 経由でこれらを使います。</li>
+      <li><code>http.ListenAndServe(":"+cfg.Port, s.Routes())</code> —— 8080 番で待ち受け開始。<code>s.Routes()</code> が全 API のルーティング表（第01章以降で <code>case</code> ならぬハンドラが増えていく本書の背骨）を返します。</li>
+    </ol>
+
+    <p>1つだけ、いま素通りしてよい行があります。<code>go s.FlushViewsLoop(ctx)</code> です。<code>go</code> は「別の軽量スレッド（goroutine）で走らせて、自分はすぐ次へ進む」という Go の並行実行の記法。<code>FlushViewsLoop</code> は「Redis に一時的に溜めた視聴数を、定期的に DB へ書き戻す」バックグラウンド処理で、第05章・第06章で扱います。いまは「受付は待ち受けと並行して、裏で1つループを回している」とだけ頭の隅に置いてください。</p>
+
+    <div class="gonote"><div class="box-k">実装メモ · log.Fatalf と「起動に失敗したら即死」</div>
+      <p><code>log.Fatalf</code> は、メッセージを出力してから<strong>プログラムを即座に終了させる</strong>関数です（内部で <code>os.Exit(1)</code> を呼ぶ）。DB につなげない・バケツを作れないといった<strong>起動時の致命的な失敗</strong>では、中途半端に生き残るより、はっきり死んで Docker に再起動させた方が安全です。逆に、リクエスト処理中のエラー（第01章以降）は <code>log.Fatalf</code> ではなく、そのリクエストにだけエラー応答を返して<strong>サーバは生かし続ける</strong>——「起動失敗は即死、リクエスト失敗は継続」という使い分けが、堅牢なサーバの基本です。<code>defer pool.Close()</code> の <code>defer</code> は「この関数を抜けるとき（どんな理由でも）必ず実行する」予約で、ここでは DB 接続の後始末を保証しています。</p>
+    </div>
+
+    <h2 class="step" id="step-5"><span class="step-no">Step 5</span>職人を起動する — cmd/worker/main.go</h2>
+    <p>受付の相棒、職人の入口 <code>cmd/worker/main.go</code> です。<code>api</code> と見比べると、2プロセス構成の意味が立体的に見えてきます。</p>
+
+    <div class="file-tag">cmd/worker/main.go（全文）</div>
+    <pre><code><span class="cm">// 職人（Worker）。注文箱から変換の注文を取り出し、黙々とこなす。</span>
+<span class="kw">package</span> main
+
+<span class="kw">import</span> (
+	<span class="st">"context"</span>
+	<span class="st">"errors"</span>
+	<span class="st">"log"</span>
+	<span class="st">"time"</span>
+
+	<span class="st">"video-service/internal/config"</span>
+	<span class="st">"video-service/internal/db"</span>
+	<span class="st">"video-service/internal/queue"</span>
+	<span class="st">"video-service/internal/storage"</span>
+	<span class="st">"video-service/internal/transcode"</span>
+)
+
+<span class="kw">func</span> main() {
+	cfg := config.Load()
+	ctx := context.Background()
+
+	pool, err := db.Connect(ctx, cfg.DatabaseURL)
+	<span class="kw">if</span> err != <span class="kw">nil</span> {
+		log.Fatalf(<span class="st">"db: %v"</span>, err)
+	}
+	<span class="kw">defer</span> pool.Close()
+
+	st, err := storage.New(cfg)
+	<span class="kw">if</span> err != <span class="kw">nil</span> {
+		log.Fatalf(<span class="st">"storage: %v"</span>, err)
+	}
+	<span class="kw">if</span> err := st.EnsureBucket(ctx); err != <span class="kw">nil</span> {
+		log.Fatalf(<span class="st">"bucket: %v"</span>, err)
+	}
+
+	q := queue.New(cfg.RedisAddr)
+	deps := transcode.Deps{DB: pool, St: st, Q: q}
+
+	log.Println(<span class="st">"worker started, waiting for jobs"</span>)
+	<span class="kw">for</span> {
+		job, err := q.DequeueTranscode(ctx)
+		<span class="kw">if</span> errors.Is(err, queue.ErrEmpty) {
+			<span class="kw">continue</span>
+		}
+		<span class="kw">if</span> err != <span class="kw">nil</span> {
+			log.Printf(<span class="st">"dequeue: %v"</span>, err)
+			time.Sleep(<span class="st">2</span> * time.Second)
+			<span class="kw">continue</span>
+		}
+		transcode.Process(ctx, deps, job)
+	}
+}</code></pre>
+
+    <p>前半（設定を読み、DB・保管庫・注文箱につなぐ）は受付とほぼ同じです。<strong>違いは2つ</strong>あり、そこに職人の性格が出ています。</p>
+    <p>1つ目。職人は <code>db.Migrate</code> を<strong>呼びません</strong>。スキーマを流す（=DBの構造を作る）のは受付の役目1回きりで十分。職人は既にあるテーブルを読み書きするだけです。もし両方がマイグレーションしても壊れはしません（スキーマは冪等 —— 後述）が、役割としては受付に任せます。</p>
+    <p>2つ目。そして本質的な違い。受付は <code>http.ListenAndServe</code> で「<strong>依頼が来るのを待つ</strong>」サーバですが、職人は <code>for { ... }</code> の<strong>無限ループ</strong>で「<strong>注文箱を覗きに行く</strong>」働き手です。ループの中身はこうです ——</p>
+    <ul>
+      <li><code>q.DequeueTranscode(ctx)</code> で注文箱（Redis）から変換ジョブを1つ取り出そうとする。</li>
+      <li>注文箱が空（<code>queue.ErrEmpty</code>）なら、何もせず <code>continue</code> でループの先頭へ戻り、また覗きに行く。</li>
+      <li>取り出せたら <code>transcode.Process(...)</code> で ffmpeg を呼んで変換する（第03章の主役）。この処理が<strong>数分かかっても、受付はまったく影響を受けません</strong>。別プロセスだからです。</li>
+    </ul>
+    <p>この「受付は待ち受ける / 職人は覗きに行く」という対照が、2プロセス構成の実装上の姿です。受付が忙しくても職人は変換を続けられるし、変換に時間がかかっても受付は依頼を受け続けられる。<code>deps := transcode.Deps{...}</code> は、職人が変換に使う道具（DB・保管庫・注文箱）を1つにまとめたもので、<code>transcode.Process</code> に手渡します。</p>
+
+    <div class="box hazard"><div class="box-k">⚠ 落とし穴 — 注文箱が空のときの continue と、この単純キューの割り切り</div>
+      <p><code>q.DequeueTranscode</code> は、注文箱が空のとき<strong>最大5秒そこで待って</strong>から「空だよ（<code>ErrEmpty</code>）」を返す実装です（中身は第03章 Step 2 で読みます）。だから <code>continue</code> のループは「1秒に何万回も空か空かと聞き続ける」ビジーループにはならず、<strong>空のあいだ職人は静かに寝ています</strong>。注文が積まれた瞬間に目を覚まして取り出すので、反応も速い。<strong>ここは割り切りではなく、きちんと作ってある部分</strong>です。</p>
+      <p>割り切りなのは別のところ、「<strong>職人が変換の途中でクラッシュすると、そのジョブは失われる</strong>」ことです。Redis の単純なリストから<strong>取り出した時点で注文票は消える</strong>ので、処理中に職人が死ぬと注文が宙に浮きます（動画は <code>processing</code> のまま止まる）。本格的なジョブキューは「処理中」の控えを別に持って、一定時間で自動的に戻す仕組み（可視性タイムアウト・デッドレターキュー）を備えています。本書はそこまでは作らず、<strong>持ち主が自分でやり直せる</strong>形で救済します。この救済（Studio からの retry と、<code>job_generation</code> による世代管理）は第03章の核心テーマです。いまは「職人は覗いて、あれば処理し、無ければまた覗く」の骨格だけ掴めば十分です。</p>
+    </div>
+
+    <h2 class="step" id="step-6"><span class="step-no">Step 6</span>設定を環境変数から読む — config/config.go</h2>
+    <p>受付も職人も、起動して最初に <code>config.Load()</code> を呼びました。その中身、<code>internal/config/config.go</code> です。<code>docker-compose.yml</code> の <code>environment:</code> で渡した値が、ここで Go の構造体に変わります。</p>
+
+    <div class="file-tag">internal/config/config.go（全文）</div>
+    <pre><code><span class="kw">package</span> config
+
+<span class="kw">import</span> <span class="st">"os"</span>
+
+<span class="kw">type</span> <span class="ty">Config</span> <span class="kw">struct</span> {
+	Port             <span class="ty">string</span>
+	DatabaseURL      <span class="ty">string</span>
+	RedisAddr        <span class="ty">string</span>
+	S3Endpoint       <span class="ty">string</span> <span class="cm">// API/Worker から見たストレージの場所（コンテナ内）</span>
+	S3PublicEndpoint <span class="ty">string</span> <span class="cm">// ブラウザから見たストレージの場所（presigned URL 用）</span>
+	S3AccessKey      <span class="ty">string</span>
+	S3SecretKey      <span class="ty">string</span>
+	S3Bucket         <span class="ty">string</span>
+	JWTSecret        <span class="ty">string</span>
+}
+
+<span class="kw">func</span> env(key, def <span class="ty">string</span>) <span class="ty">string</span> {
+	<span class="kw">if</span> v := os.Getenv(key); v != <span class="st">""</span> {
+		<span class="kw">return</span> v
+	}
+	<span class="kw">return</span> def
+}
+
+<span class="kw">func</span> Load() <span class="ty">Config</span> {
+	<span class="kw">return</span> <span class="ty">Config</span>{
+		Port:             env(<span class="st">"PORT"</span>, <span class="st">"8080"</span>),
+		DatabaseURL:      env(<span class="st">"DATABASE_URL"</span>, <span class="st">"postgres://video:video@localhost:5432/video?sslmode=disable"</span>),
+		RedisAddr:        env(<span class="st">"REDIS_ADDR"</span>, <span class="st">"localhost:6379"</span>),
+		S3Endpoint:       env(<span class="st">"S3_ENDPOINT"</span>, <span class="st">"localhost:9000"</span>),
+		S3PublicEndpoint: env(<span class="st">"S3_PUBLIC_ENDPOINT"</span>, <span class="st">"localhost:9000"</span>),
+		S3AccessKey:      env(<span class="st">"S3_ACCESS_KEY"</span>, <span class="st">"minioadmin"</span>),
+		S3SecretKey:      env(<span class="st">"S3_SECRET_KEY"</span>, <span class="st">"minioadmin"</span>),
+		S3Bucket:         env(<span class="st">"S3_BUCKET"</span>, <span class="st">"videos"</span>),
+		JWTSecret:        env(<span class="st">"JWT_SECRET"</span>, <span class="st">"dev-secret-change-me"</span>),
+	}
+}</code></pre>
+
+    <p><code>Config</code> 構造体は、アプリが必要とする設定の一覧です。フィールドを眺めるだけで、このアプリが何につなぐかが分かります —— DB（<code>DatabaseURL</code>）、Redis（<code>RedisAddr</code>）、MinIO（<code>S3*</code>）、そして JWT の署名鍵（<code>JWTSecret</code>、第01章）。</p>
+    <p>読み取りの仕組みは <code>env</code> ヘルパー1つだけ。<code>env("PORT", "8080")</code> は「環境変数 <code>PORT</code> があればその値、無ければ <code>"8080"</code>」を返します。つまり<strong>環境変数で上書きでき、無ければ既定値で動く</strong>。この既定値がよくできていて、すべて <code>localhost:...</code> になっています。Docker の外（自分のマシンで <code>go run</code>）で動かしたときは <code>localhost</code> の各ポートを見に行き、Docker の中では <code>docker-compose.yml</code> が渡す <code>db:5432</code> や <code>minio:9000</code>（サービス名でのアクセス）で上書きされる。1つのコードが、両方の環境で動きます。</p>
+
+    <p>ここで <code>S3Endpoint</code> と <code>S3PublicEndpoint</code> の2つが分かれている理由を、コメントが予告しています —— 「API/Worker から見たストレージの場所（コンテナ内）」と「ブラウザから見たストレージの場所（presigned URL 用）」。Docker ネットワークの中からは MinIO は <code>minio:9000</code> ですが、ブラウザから見たら <code>localhost:9000</code> です。同じ MinIO なのに、<strong>見る場所によって住所が違う</strong>。この2つの住所を presigned URL でどう使い分けるかが、第02章のいちばんの勘所になります。いまは「設定に2つのエンドポイントがあり、それには深い理由がある」とだけ。</p>
+
+    <div class="gonote"><div class="box-k">実装メモ · 設定を「環境変数 + 既定値」にする理由</div>
+      <p>DB のパスワードや接続先をコードに直書きせず、環境変数から読むのは <strong>12-Factor App</strong> と呼ばれる定番の作法です。利点は2つ。第一に、<strong>秘密（パスワード・署名鍵）をソースコードに残さない</strong>（本書は学習用なので既定値に平文で置いていますが、本番なら環境変数やシークレット管理で注入します）。第二に、<strong>同じコードを環境ごとに設定だけ変えて動かせる</strong>（ローカルは <code>localhost</code>、Docker はサービス名、本番はクラウドのエンドポイント）。<code>env</code> ヘルパーの「無ければ既定値」パターンは、設定漏れでいきなり落ちるのを防ぎつつ、上書きの自由を残す折衷案です。</p>
+    </div>
+
+    <h2 class="step" id="step-7"><span class="step-no">Step 7</span>DB につなぎ、スキーマを流す — db/db.go</h2>
+    <p>受付の <code>main</code> が呼んだ <code>db.Connect</code> と <code>db.Migrate</code> の中身、<code>internal/db/db.go</code> です。短いのに、起動順の揺れに耐える工夫と、スキーマを流す仕組みが両方入っています。</p>
+
+    <div class="file-tag">internal/db/db.go（全文）</div>
+    <pre><code><span class="kw">package</span> db
+
+<span class="kw">import</span> (
+	<span class="st">"context"</span>
+	_ <span class="st">"embed"</span>
+	<span class="st">"fmt"</span>
+	<span class="st">"time"</span>
+
+	<span class="st">"github.com/jackc/pgx/v5/pgxpool"</span>
+)
+
+<span class="cm">//go:embed schema.sql</span>
+<span class="kw">var</span> schema <span class="ty">string</span>
+
+<span class="cm">// Connect はDBへ接続する。コンテナ起動順の揺れに備えてリトライする。</span>
+<span class="kw">func</span> Connect(ctx context.<span class="ty">Context</span>, url <span class="ty">string</span>) (*pgxpool.<span class="ty">Pool</span>, <span class="ty">error</span>) {
+	<span class="kw">var</span> lastErr <span class="ty">error</span>
+	<span class="kw">for</span> i := <span class="st">0</span>; i &lt; <span class="st">30</span>; i++ {
+		pool, err := pgxpool.New(ctx, url)
+		<span class="kw">if</span> err == <span class="kw">nil</span> {
+			<span class="kw">if</span> err = pool.Ping(ctx); err == <span class="kw">nil</span> {
+				<span class="kw">return</span> pool, <span class="kw">nil</span>
+			}
+			pool.Close()
+		}
+		lastErr = err
+		time.Sleep(time.Second)
+	}
+	<span class="kw">return</span> <span class="kw">nil</span>, fmt.Errorf(<span class="st">"db connect: %w"</span>, lastErr)
+}
+
+<span class="kw">func</span> Migrate(ctx context.<span class="ty">Context</span>, pool *pgxpool.<span class="ty">Pool</span>) <span class="ty">error</span> {
+	_, err := pool.Exec(ctx, schema)
+	<span class="kw">return</span> err
+}</code></pre>
+
+    <p>まず一番上の <code>//go:embed schema.sql</code> という不思議な行。これは Go の<strong>埋め込み（embed）</strong>ディレクティブで、「<code>schema.sql</code> ファイルの中身を、この <code>schema</code> という文字列変数に、ビルド時に丸ごと埋め込め」という指示です。おかげで実行ファイルは <code>schema.sql</code> を単体で持ち歩く必要がなく、SQL がバイナリの中に同梱されます。<code>Migrate</code> はその文字列を <code>pool.Exec</code> でそのまま実行するだけ。「スキーマファイルを読んで DB に流す」が、たった2行で書けています。</p>
+
+    <p><code>Connect</code> の <code>for i := 0; i &lt; 30; i++</code> のリトライループが、地味ですが重要です。<code>docker-compose.yml</code> の <code>healthcheck</code> + <code>depends_on</code> で起動順は制御していますが、それでも「接続を張った瞬間、DB がほんの一瞬だけ準備中」という隙間が残ることがあります。だから <code>pgxpool.New</code> で接続を作り、<code>pool.Ping</code> で本当に応答するか確かめ、ダメなら1秒待って最大30回やり直す。30秒粘っても繋がらなければ、最後のエラーを <code>%w</code> で包んで返します（<code>main</code> 側で <code>log.Fatalf</code> により即死）。<strong>「起動順は宣言で制御しつつ、それでも残る揺れはコードのリトライで吸収する」</strong>—— 分散したコンテナ群を確実に立ち上げる、二重の備えです。</p>
+
+    <div class="gonote"><div class="box-k">実装メモ · pgxpool と「接続プール」</div>
+      <p><code>pgxpool.Pool</code> は PostgreSQL 用ドライバ pgx の<strong>接続プール</strong>です。DB 接続を作るのは意外とコストが高いので、あらかじめ複数の接続を用意しておいて使い回します。受付は同時に何本ものリクエストを捌く（Go は接続ごとに goroutine を割り当てる）ので、それぞれが必要なときにプールから接続を借り、終わったら返す。<code>pool.Ping(ctx)</code> は「プールから1本借りて、実際に DB に到達できるか確かめる」動作で、接続文字列が正しくても DB がまだ応答しないケースを検出できます。<code>context.Context</code>（<code>ctx</code>）は「この処理の締め切りやキャンセルを伝える」Go の定番の第一引数で、DB 操作にはほぼ必ず付いて回ります。</p>
+    </div>
+
+    <h2 class="step" id="step-8"><span class="step-no">Step 8</span>背骨を刻む — schema.sql と状態遷移</h2>
+    <p>この章の —— いや、本書全体の —— 背骨がここにあります。<code>internal/db/schema.sql</code>。全11テーブルのうち、<strong>状態遷移を持つ <code>videos</code> テーブル</strong>が本書の主役です。まずスキーマの冒頭と、人・チャンネルの土台テーブルから。</p>
+
+    <div class="file-tag">internal/db/schema.sql（冒頭・users / channels）</div>
+    <pre><code><span class="cm">-- 動画投稿サービス スキーマ（冪等: 何度流しても安全）</span>
+<span class="kw">CREATE EXTENSION IF NOT EXISTS</span> pg_trgm;
+
+<span class="kw">CREATE TABLE IF NOT EXISTS</span> users (
+  id            <span class="ty">UUID</span> <span class="kw">PRIMARY KEY DEFAULT</span> gen_random_uuid(),
+  email         <span class="ty">TEXT</span> <span class="kw">UNIQUE NOT NULL</span>,
+  password_hash <span class="ty">TEXT</span> <span class="kw">NOT NULL</span>,
+  created_at    <span class="ty">TIMESTAMPTZ</span> <span class="kw">NOT NULL DEFAULT</span> now()
+);
+
+<span class="kw">CREATE TABLE IF NOT EXISTS</span> channels (
+  id          <span class="ty">UUID</span> <span class="kw">PRIMARY KEY DEFAULT</span> gen_random_uuid(),
+  user_id     <span class="ty">UUID</span> <span class="kw">UNIQUE NOT NULL REFERENCES</span> users(id) <span class="kw">ON DELETE CASCADE</span>,
+  name        <span class="ty">TEXT</span> <span class="kw">NOT NULL</span>,
+  description <span class="ty">TEXT</span> <span class="kw">NOT NULL DEFAULT</span> <span class="st">''</span>,
+  icon_key    <span class="ty">TEXT</span> <span class="kw">NOT NULL DEFAULT</span> <span class="st">''</span>,
+  banner_key  <span class="ty">TEXT</span> <span class="kw">NOT NULL DEFAULT</span> <span class="st">''</span>,
+  created_at  <span class="ty">TIMESTAMPTZ</span> <span class="kw">NOT NULL DEFAULT</span> now()
+);</code></pre>
+
+    <p>まず冒頭の <code>-- 冪等: 何度流しても安全</code> というコメント。<strong>冪等（べきとう / idempotent）</strong>とは「何度実行しても結果が同じ」という性質です。すべての <code>CREATE</code> に <code>IF NOT EXISTS</code> が付いているので、このスキーマは既にテーブルがあっても<strong>エラーにならず素通り</strong>します。だから <code>main</code> が起動のたびに <code>Migrate</code> を呼んでも安全。これが Step 7 で「マイグレーションは受付が毎回呼んでも壊れない」と言えた理由です。</p>
+    <p><code>CREATE EXTENSION pg_trgm</code> は、あいまい検索（部分一致）のための PostgreSQL 拡張で、第06章の動画検索で効いてきます。<code>users</code>（アカウント）と <code>channels</code>（投稿者の顔）はシンプルで、第01章の主役です。<code>id</code> が <code>UUID</code>（推測しにくいランダムなID）なこと、<code>ON DELETE CASCADE</code>（ユーザーを消したらそのチャンネルも自動で消える）あたりは第01章で扱います。ここでは通過して、いよいよ主役へ。</p>
+
+    <div class="file-tag">internal/db/schema.sql（videos テーブル）</div>
+    <pre><code><span class="cm">-- 状態遷移: uploading -> uploaded -> processing -> ready / failed</span>
+<span class="kw">CREATE TABLE IF NOT EXISTS</span> videos (
+  id            <span class="ty">UUID</span> <span class="kw">PRIMARY KEY DEFAULT</span> gen_random_uuid(),
+  channel_id    <span class="ty">UUID</span> <span class="kw">NOT NULL REFERENCES</span> channels(id) <span class="kw">ON DELETE CASCADE</span>,
+  title         <span class="ty">TEXT</span> <span class="kw">NOT NULL DEFAULT</span> <span class="st">'(無題)'</span>,
+  description   <span class="ty">TEXT</span> <span class="kw">NOT NULL DEFAULT</span> <span class="st">''</span>,
+  visibility    <span class="ty">TEXT</span> <span class="kw">NOT NULL DEFAULT</span> <span class="st">'private'</span>
+                <span class="kw">CHECK</span> (visibility <span class="kw">IN</span> (<span class="st">'public'</span>,<span class="st">'unlisted'</span>,<span class="st">'private'</span>)),
+  status        <span class="ty">TEXT</span> <span class="kw">NOT NULL DEFAULT</span> <span class="st">'uploading'</span>
+                <span class="kw">CHECK</span> (status <span class="kw">IN</span> (<span class="st">'uploading'</span>,<span class="st">'uploaded'</span>,<span class="st">'processing'</span>,<span class="st">'ready'</span>,<span class="st">'failed'</span>)),
+  original_key  <span class="ty">TEXT</span> <span class="kw">NOT NULL DEFAULT</span> <span class="st">''</span>,
+  thumbnail_key <span class="ty">TEXT</span> <span class="kw">NOT NULL DEFAULT</span> <span class="st">''</span>,
+  duration_sec  <span class="ty">INT</span> <span class="kw">NOT NULL DEFAULT</span> <span class="st">0</span>,
+  view_count    <span class="ty">BIGINT</span> <span class="kw">NOT NULL DEFAULT</span> <span class="st">0</span>,
+  error_message <span class="ty">TEXT</span> <span class="kw">NOT NULL DEFAULT</span> <span class="st">''</span>,
+  attempts      <span class="ty">INT</span> <span class="kw">NOT NULL DEFAULT</span> <span class="st">0</span>,
+  created_at    <span class="ty">TIMESTAMPTZ</span> <span class="kw">NOT NULL DEFAULT</span> now(),
+  published_at  <span class="ty">TIMESTAMPTZ</span>,
+  notified_at   <span class="ty">TIMESTAMPTZ</span>, <span class="cm">-- 登録者への新着通知を配った時刻（二重配布の防止）</span>
+  <span class="cm">-- 状態が最後に変わった時刻。職人が倒れて注文が消えても、</span>
+  <span class="cm">-- 「長く止まったままの動画」を持ち主がやり直せるようにするための手がかり</span>
+  status_changed_at <span class="ty">TIMESTAMPTZ</span> <span class="kw">NOT NULL DEFAULT</span> now(),
+  <span class="cm">-- 変換注文の世代番号（fencing token）。注文を出すたびに +1 し、注文票にも載せる。</span>
+  <span class="cm">-- 職人は自分の注文の世代が現在の世代と一致するときだけ書き込める。</span>
+  <span class="cm">-- これにより、停滞リトライ後に生き返った古い職人（ゾンビ）は何も書けない</span>
+  job_generation <span class="ty">INT</span> <span class="kw">NOT NULL DEFAULT</span> <span class="st">0</span>,
+  <span class="cm">-- 視聴可能な成果物の置き場（例: hls/&lt;id&gt;/g2-&lt;128bit乱数hex&gt;/）。職人は実行ごとに</span>
+  <span class="cm">-- 一意な場所へ書き、ready の宣言と同時にここへ記録する。ゾンビや二重配送された注文が</span>
+  <span class="cm">-- どこへ何を書いても、配信には影響しない（ストレージ側の fencing）</span>
+  media_prefix <span class="ty">TEXT</span> <span class="kw">NOT NULL DEFAULT</span> <span class="st">''</span>
+);</code></pre>
+
+    <p>コメントを含めて一字一句、実物どおりです。この <code>videos</code> テーブルこそが本書の背骨なので、丁寧に読みます。中心は <code>status</code> 列です。</p>
+
+    <div class="ascii">videos.status の状態遷移 — 動画の一生
+
+  ┌────────────┐  ②complete   ┌────────────┐  ④ワーカーがclaim ┌──────────────┐
+  │ uploading  │─────────────▶│  uploaded  │──────────────────▶│  processing  │
+  └────────────┘  (実物を確認)  └────────────┘  (注文をdequeue)  └──────┬───────┘
+   ①申請で誕生                                                          │
+   presigned発行                                          ⑤変換成功 │  ⑤変換失敗
+                                                                ▼      ▼
+                                                        ┌─────────┐ ┌────────┐
+                                                        │  ready  │ │ failed │
+                                                        └─────────┘ └────────┘
+                                                        配信できる   理由を記録
+   ★ ready でない動画は絶対に配信しない（第04章 media.go）</div>
+
+    <p>この5つの状態が、本書の各章にそのまま対応します。動画は <code>POST /api/uploads</code> の申請で <code>uploading</code> として生まれ（第02章）、ブラウザが直アップロードして <code>complete</code> を叩くと実物を確認して <code>uploaded</code> になり（第02章）、職人が注文を取り出すと <code>processing</code> になり（第03章）、ffmpeg の変換が終われば <code>ready</code>、失敗すれば理由つきで <code>failed</code>（第03章）。そして <strong><code>ready</code> の動画だけが配信される</strong>（第04章）。「この動画は今どこにいるか」を、DB の <code>status</code> 列<strong>ただ一つ</strong>が握っています。これが「DB の状態こそ唯一の真実」の意味です。</p>
+
+    <p><code>CHECK (status IN (...))</code> という制約に注目してください。これは<strong>データベースが物理的に「この5つ以外の状態を認めない」</strong>ことを保証する仕掛けです。もしコードのバグで <code>status</code> に <code>"done"</code> のような未定義の値を書こうとしても、DB が拒否します。状態遷移という背骨を、アプリのコードだけでなく DB の制約でも二重に守る。同じ発想が <code>visibility</code>（<code>public / unlisted / private</code>）にもあります。</p>
+
+    <p>そして、単純な状態遷移では足りず、後の章で実際にバグを踏んで足された4つの列があります。コメントがその物語を語っています。</p>
+    <ul>
+      <li><code>status_changed_at</code> —— 状態が最後に変わった時刻。職人が変換の途中でクラッシュして注文が宙に浮いたとき、「もう10分も <code>processing</code> のまま止まっている」と気づいて<strong>持ち主がやり直せる</strong>ための手がかり。だから status を更新する SQL では、必ずこの時刻も揃えて更新します（第03章）。</li>
+      <li><code>job_generation</code> —— 変換注文の<strong>世代番号（fencing token）</strong>。やり直すたびに +1 され、職人の書き込みは全部「自分の世代が現在の世代と一致するときだけ」に制限されます。これが無いと、停滞リトライ後に生き返った<strong>古い職人（ゾンビ）</strong>が、新しい世代の成果を上書きしてしまう。第03章の白眉です。</li>
+      <li><code>media_prefix</code> —— 視聴可能な成果物の置き場。職人は実行ごとに一意な場所（<code>hls/&lt;id&gt;/g2-&lt;乱数&gt;/</code>）へ書き、<code>ready</code> 宣言と同時にここへ確定する。ゾンビや二重配送された注文がどこへ書こうと、配信はこの列が指す場所からしか行わない —— <strong>ストレージ側の fencing</strong>。</li>
+      <li><code>notified_at</code> —— 登録者への新着通知を配った時刻。「視聴可能かつ公開」が初めて揃った瞬間に一度だけ通知を配り、この時刻で<strong>二重配布を防ぐ</strong>（第07章）。</li>
+    </ul>
+    <p>いまはこの4列の詳細を追う必要はありません。<strong>「単純な状態遷移から始めて、分散した職人と at-least-once なキューが引き起こす競合に対処するため、世代・時刻・置き場という3つの防具が後から足された」</strong>という物語の存在だけ、頭に入れておいてください。第03章でこの物語を最初から体験します。</p>
+
+    <p>残りのテーブルは、動画に「反応」「つながり」「発見」を足すためのものです。全文を載せます（この章で作るのは箱だけで、使うのは各章です）。</p>
+
+    <div class="file-tag">internal/db/schema.sql（videos の索引と残りのテーブル）</div>
+    <pre><code><span class="kw">ALTER TABLE</span> videos <span class="kw">ADD COLUMN IF NOT EXISTS</span> notified_at <span class="ty">TIMESTAMPTZ</span>;
+<span class="kw">ALTER TABLE</span> videos <span class="kw">ADD COLUMN IF NOT EXISTS</span> status_changed_at <span class="ty">TIMESTAMPTZ</span> <span class="kw">NOT NULL DEFAULT</span> now();
+<span class="kw">ALTER TABLE</span> videos <span class="kw">ADD COLUMN IF NOT EXISTS</span> job_generation <span class="ty">INT</span> <span class="kw">NOT NULL DEFAULT</span> <span class="st">0</span>;
+<span class="kw">ALTER TABLE</span> videos <span class="kw">ADD COLUMN IF NOT EXISTS</span> media_prefix <span class="ty">TEXT</span> <span class="kw">NOT NULL DEFAULT</span> <span class="st">''</span>;
+<span class="kw">CREATE INDEX IF NOT EXISTS</span> idx_videos_channel <span class="kw">ON</span> videos (channel_id, created_at <span class="kw">DESC</span>);
+<span class="kw">CREATE INDEX IF NOT EXISTS</span> idx_videos_public  <span class="kw">ON</span> videos (published_at <span class="kw">DESC</span>)
+  <span class="kw">WHERE</span> status = <span class="st">'ready'</span> <span class="kw">AND</span> visibility = <span class="st">'public'</span>;
+<span class="kw">CREATE INDEX IF NOT EXISTS</span> idx_videos_title_trgm <span class="kw">ON</span> videos <span class="kw">USING</span> gin (title gin_trgm_ops);
+
+<span class="cm">-- いいね/低評価: 同じ人×同じ動画は一つだけ（重複防止は主キーで担保）</span>
+<span class="kw">CREATE TABLE IF NOT EXISTS</span> reactions (
+  user_id  <span class="ty">UUID</span> <span class="kw">NOT NULL REFERENCES</span> users(id) <span class="kw">ON DELETE CASCADE</span>,
+  video_id <span class="ty">UUID</span> <span class="kw">NOT NULL REFERENCES</span> videos(id) <span class="kw">ON DELETE CASCADE</span>,
+  value    <span class="ty">SMALLINT</span> <span class="kw">NOT NULL CHECK</span> (value <span class="kw">IN</span> (<span class="st">1</span>, <span class="st">-1</span>)),
+  <span class="kw">PRIMARY KEY</span> (user_id, video_id)
+);
+
+<span class="cm">-- コメント: parent_id で返信（木構造）を表現</span>
+<span class="kw">CREATE TABLE IF NOT EXISTS</span> comments (
+  id         <span class="ty">UUID</span> <span class="kw">PRIMARY KEY DEFAULT</span> gen_random_uuid(),
+  video_id   <span class="ty">UUID</span> <span class="kw">NOT NULL REFERENCES</span> videos(id) <span class="kw">ON DELETE CASCADE</span>,
+  user_id    <span class="ty">UUID</span> <span class="kw">NOT NULL REFERENCES</span> users(id) <span class="kw">ON DELETE CASCADE</span>,
+  parent_id  <span class="ty">UUID</span> <span class="kw">REFERENCES</span> comments(id) <span class="kw">ON DELETE CASCADE</span>,
+  body       <span class="ty">TEXT</span> <span class="kw">NOT NULL</span>,
+  created_at <span class="ty">TIMESTAMPTZ</span> <span class="kw">NOT NULL DEFAULT</span> now()
+);
+<span class="kw">CREATE INDEX IF NOT EXISTS</span> idx_comments_video <span class="kw">ON</span> comments (video_id, created_at);
+
+<span class="kw">CREATE TABLE IF NOT EXISTS</span> subscriptions (
+  user_id    <span class="ty">UUID</span> <span class="kw">NOT NULL REFERENCES</span> users(id) <span class="kw">ON DELETE CASCADE</span>,
+  channel_id <span class="ty">UUID</span> <span class="kw">NOT NULL REFERENCES</span> channels(id) <span class="kw">ON DELETE CASCADE</span>,
+  created_at <span class="ty">TIMESTAMPTZ</span> <span class="kw">NOT NULL DEFAULT</span> now(),
+  <span class="kw">PRIMARY KEY</span> (user_id, channel_id)
+);
+<span class="kw">CREATE INDEX IF NOT EXISTS</span> idx_subs_channel <span class="kw">ON</span> subscriptions (channel_id);
+
+<span class="cm">-- 続きから再生 + 視聴履歴を兼ねる</span>
+<span class="kw">CREATE TABLE IF NOT EXISTS</span> watch_progress (
+  user_id      <span class="ty">UUID</span> <span class="kw">NOT NULL REFERENCES</span> users(id) <span class="kw">ON DELETE CASCADE</span>,
+  video_id     <span class="ty">UUID</span> <span class="kw">NOT NULL REFERENCES</span> videos(id) <span class="kw">ON DELETE CASCADE</span>,
+  position_sec <span class="ty">REAL</span> <span class="kw">NOT NULL DEFAULT</span> <span class="st">0</span>,
+  updated_at   <span class="ty">TIMESTAMPTZ</span> <span class="kw">NOT NULL DEFAULT</span> now(),
+  <span class="kw">PRIMARY KEY</span> (user_id, video_id)
+);
+<span class="kw">CREATE INDEX IF NOT EXISTS</span> idx_progress_user <span class="kw">ON</span> watch_progress (user_id, updated_at <span class="kw">DESC</span>);
+
+<span class="cm">-- トレンド計算用の視聴イベント（時間減衰スコアの元データ）</span>
+<span class="kw">CREATE TABLE IF NOT EXISTS</span> view_events (
+  id         <span class="ty">BIGSERIAL</span> <span class="kw">PRIMARY KEY</span>,
+  video_id   <span class="ty">UUID</span> <span class="kw">NOT NULL REFERENCES</span> videos(id) <span class="kw">ON DELETE CASCADE</span>,
+  user_id    <span class="ty">UUID</span> <span class="kw">REFERENCES</span> users(id) <span class="kw">ON DELETE SET NULL</span>,
+  created_at <span class="ty">TIMESTAMPTZ</span> <span class="kw">NOT NULL DEFAULT</span> now()
+);
+<span class="kw">CREATE INDEX IF NOT EXISTS</span> idx_view_events_video <span class="kw">ON</span> view_events (video_id, created_at <span class="kw">DESC</span>);
+<span class="kw">CREATE INDEX IF NOT EXISTS</span> idx_view_events_time  <span class="kw">ON</span> view_events (created_at <span class="kw">DESC</span>);
+
+<span class="kw">CREATE TABLE IF NOT EXISTS</span> notifications (
+  id         <span class="ty">UUID</span> <span class="kw">PRIMARY KEY DEFAULT</span> gen_random_uuid(),
+  user_id    <span class="ty">UUID</span> <span class="kw">NOT NULL REFERENCES</span> users(id) <span class="kw">ON DELETE CASCADE</span>,
+  type       <span class="ty">TEXT</span> <span class="kw">NOT NULL</span>, <span class="cm">-- new_video / comment / reply</span>
+  title      <span class="ty">TEXT</span> <span class="kw">NOT NULL</span>,
+  body       <span class="ty">TEXT</span> <span class="kw">NOT NULL DEFAULT</span> <span class="st">''</span>,
+  video_id   <span class="ty">UUID</span> <span class="kw">REFERENCES</span> videos(id) <span class="kw">ON DELETE CASCADE</span>,
+  read       <span class="ty">BOOLEAN</span> <span class="kw">NOT NULL DEFAULT</span> <span class="kw">false</span>,
+  created_at <span class="ty">TIMESTAMPTZ</span> <span class="kw">NOT NULL DEFAULT</span> now()
+);
+<span class="kw">CREATE INDEX IF NOT EXISTS</span> idx_notifications_user <span class="kw">ON</span> notifications (user_id, created_at <span class="kw">DESC</span>);</code></pre>
+
+    <p>1つだけ設計の勘所を拾っておきます。冒頭の4本の <code>ALTER TABLE ... ADD COLUMN IF NOT EXISTS</code> は、<code>videos</code> の定義に<strong>すでに含まれている</strong>4列を、あらためて足し直しています。矛盾しているように見えますが、これも<strong>冪等マイグレーションの工夫</strong>です。もし<strong>古い <code>videos</code> テーブルが既に存在する</strong>環境（4列が足される前のバージョンで一度起動した DB）でこのスキーマを流すと、<code>CREATE TABLE IF NOT EXISTS</code> は「もうあるから」と素通りしてしまい、新しい4列が追加されません。そこで <code>ALTER TABLE ADD COLUMN IF NOT EXISTS</code> を別途書いておくことで、<strong>新規の DB でも既存の DB でも、必ず4列がそろう</strong>ことを保証しています。これがマイグレーションを「何度流しても、どんな状態からでも安全」にする実践的なテクニックです。</p>
+    <p>索引（<code>CREATE INDEX</code>）は、各章の検索を速くするための下準備です。特に <code>idx_videos_public</code> の <code>WHERE status = 'ready' AND visibility = 'public'</code>（<strong>部分索引</strong>）は「公開かつ視聴可能な動画だけ」を高速に引くためのもので、第06章のトレンド・一覧で効きます。<code>idx_videos_title_trgm</code> の <code>gin (title gin_trgm_ops)</code> は、冒頭の <code>pg_trgm</code> 拡張を使ったあいまい検索用（第06章）。それぞれ「どの章で効くか」だけ意識しておけば十分です。</p>
+
+    <h2 class="step" id="step-9"><span class="step-no">Step 9</span>立ち上げて確認する</h2>
+    <p>部品が出そろいました。土台を実際に立ち上げ、ゴールの3つを確認します。</p>
+
+    <div class="box do"><div class="box-k">▸ 動かして確認 — スタックを起動する</div>
+      <p><code>src/</code> で1つのコマンドを打つと、6つのサービスがビルド・起動されます。初回はビルドに数分。</p>
+      <pre class="term"><code><span class="ps">$</span> cd src
+<span class="ps">$</span> docker compose up --build -d
+<span class="out">[+] Running 6/6
+ ✔ Container src-db-1      Healthy
+ ✔ Container src-redis-1   Healthy
+ ✔ Container src-minio-1   Started
+ ✔ Container src-api-1     Started
+ ✔ Container src-worker-1  Started
+ ✔ Container src-web-1     Started</span>
+
+<span class="cm"># ログで、受付と職人がそれぞれ起動したことを確認</span>
+<span class="ps">$</span> docker compose logs api | grep listening
+<span class="out">src-api-1  | 2026/07/16 12:00:03 api listening on :8080</span>
+<span class="ps">$</span> docker compose logs worker | grep started
+<span class="out">src-worker-1  | 2026/07/16 12:00:03 worker started, waiting for jobs</span></code></pre>
+      <p><code>db</code> と <code>redis</code> が <code>Healthy</code>、<code>api</code> と <code>worker</code> がそれぞれ「listening」「waiting for jobs」と出れば、2プロセス構成が生きています。</p>
+    </div>
+
+    <div class="box do"><div class="box-k">▸ 動かして確認 — 受付が生きているか</div>
+      <p>受付のヘルスチェックを叩きます。これが返れば、受付は「設定を読み・DB につなぎ・スキーマを流し・保管庫と注文箱につなぐ」の全工程を通過したということです。</p>
+      <pre class="term"><code><span class="ps">$</span> curl http://localhost:8080/healthz
+<span class="out">{"status":"ok"}</span></code></pre>
+    </div>
+
+    <div class="box do"><div class="box-k">▸ 動かして確認 — 背骨（状態遷移）を DB で見る</div>
+      <p>この章のクライマックス。<code>psql</code> で DB に入り、<code>videos.status</code> の <code>CHECK</code> 制約を見ます。状態が5つに限られていることを、データベース自身の口から確認します。</p>
+      <pre class="term"><code><span class="ps">$</span> docker compose exec db psql -U video -d video
+
+<span class="cm"># videos テーブルの定義を表示（status と visibility の CHECK に注目）</span>
+<span class="ps">video=#</span> \d videos
+<span class="out">              Table "public.videos"
+   Column   |  Type  |  ...
+------------+--------+-----
+ status     | text   | not null default 'uploading'
+ ...
+Check constraints:
+    "videos_status_check" CHECK (status = ANY (ARRAY['uploading',
+        'uploaded', 'processing', 'ready', 'failed']))
+    "videos_visibility_check" CHECK (visibility = ANY (ARRAY['public',
+        'unlisted', 'private']))</span></code></pre>
+      <p>DB が「この5つ以外の状態は物理的に受け付けない」と宣言しているのが見えます。まだ動画は1本もありませんが、動画が辿る道は、もうデータベースに刻まれています。</p>
+    </div>
+
+    <div class="box do"><div class="box-k">▸ 動かして確認 — 注文箱と保管庫も覗く（任意）</div>
+      <p>余力があれば、他の登場人物も生きているか確認します。</p>
+      <pre class="term"><code><span class="cm"># 注文箱（Redis）に ping</span>
+<span class="ps">$</span> docker compose exec redis redis-cli ping
+<span class="out">PONG</span>
+
+<span class="cm"># 保管庫（MinIO）の管理コンソールをブラウザで開く</span>
+<span class="cm">#   http://localhost:9001  （ユーザー: minioadmin / パスワード: minioadmin）</span>
+<span class="cm">#   起動時に videos バケツが作られている（EnsureBucket）</span></code></pre>
+      <p>Redis が <code>PONG</code> を返し、MinIO のコンソールに <code>videos</code> バケツが見えれば、動画を運ぶ舞台は完成です。</p>
+    </div>
+
+    <h2>つまずき FAQ</h2>
+    <details class="qa"><summary><code>docker compose up</code> で <code>api</code> がすぐ落ちる／再起動を繰り返す</summary>
+      <div class="qa-body"><p>多くは「DB の準備が間に合っていない」か「ビルドは通ったが接続情報が違う」です。まず <code>docker compose logs api</code> を見てください。<code>db: db connect: ...</code> で死んでいれば DB 接続の問題です。本書の <code>db.Connect</code> は30回リトライするので通常は繋がりますが、それでもダメなら <code>docker compose ps</code> で <code>db</code> が <code>Healthy</code> か確認します。<code>db</code> が Healthy にならない場合は、既存の <code>db-data</code> ボリュームが壊れていることがあるので、<code>docker compose down -v</code>（データも消す）してから <code>up --build</code> し直すと直ることが多いです。</p></div>
+    </details>
+    <details class="qa"><summary>なぜ <code>worker</code> だけ <code>db.Migrate</code> を呼ばないの? 呼んだら壊れる?</summary>
+      <div class="qa-body"><p>壊れません。スキーマは <code>IF NOT EXISTS</code> だらけの<strong>冪等</strong>な SQL なので、api と worker が両方流しても結果は同じです。それでも worker で呼ばないのは<strong>役割分担</strong>のため。「DB の構造を用意する」のは受付の起動時1回で十分で、職人は既にあるテーブルを読み書きするだけ、という設計を明示しています。もし両方が同時にマイグレーションを走らせても、PostgreSQL 側でロックされて順に実行されるだけで、データは壊れません。</p></div>
+    </details>
+    <details class="qa"><summary>API とワーカーを分けず、1つのプロセスで両方やってはいけないの?</summary>
+      <div class="qa-body"><p>動きはしますが、序章と Step 2 で見た通り「重い変換が受付を塞ぐ」問題が出ます。変換中は他のリクエスト（ログイン・再生・コメント）がすべて待たされる。Go の goroutine で同一プロセス内に変換を逃がす手もありますが、それでも同じマシンの CPU を変換が食い尽くすと受付の応答が遅れます。<strong>プロセスを分ける</strong>と、(1) 変換の CPU 消費が受付に影響しにくくなり、(2) 職人だけを別マシン・別コンテナに増やせる（<code>--scale worker=2</code>）という2つの利点が得られます。動画のように「一部の処理だけが極端に重い」システムでは、重い部分を別プロセス（別のスケール単位）に切り出すのが定石です。</p></div>
+    </details>
+
+    <h2>理解度チェック</h2>
+    <p>次の問いに<strong>自分の言葉で</strong>答えられたら、この章は卒業です。</p>
+    <details class="qa"><summary>1. なぜ受付（API）と職人（Worker）を別プロセスに分けるのか。分けると何ができるようになるか。</summary>
+      <div class="qa-body"><p>変換は<strong>分単位かかる重い処理</strong>だから。もし受付が変換も担当すると、変換中は他の依頼（ログイン・再生など）を捌けず、窓口が閉まってしまう。分けることで、(1) 受付は変換に影響されず依頼を受け続けられ（投稿ボタンを押した瞬間に応答が返る）、(2) 職人だけを増やして変換を並行化できる（<code>docker compose up --scale worker=2</code>）。実装上は、受付は <code>http.ListenAndServe</code> で依頼を待ち受け、職人は <code>for</code> ループで注文箱を覗きに行く、という対照的な形になる。</p></div>
+    </details>
+    <details class="qa"><summary>2. <code>videos.status</code> の5つの状態を順に挙げ、それぞれがどの章の処理で切り替わるか。「DBの状態こそ唯一の真実」とはどういう意味か。</summary>
+      <div class="qa-body"><p><code>uploading</code>（申請で誕生・第02章）→ <code>uploaded</code>（直アップロード後の complete・第02章）→ <code>processing</code>（職人が注文を取り出す・第03章）→ <code>ready</code>（変換成功・第03章）または <code>failed</code>（変換失敗・第03章）。「DBの状態こそ唯一の真実」とは、「この動画は今どこにいるか（見られるか）」を <code>status</code> 列ただ一つが握っており、<strong><code>ready</code> でない動画は絶対に配信しない</strong>（第04章）ということ。<code>CHECK</code> 制約により、この5つ以外の状態は DB が物理的に拒否する。</p></div>
+    </details>
+    <details class="qa"><summary>3. スキーマが「冪等」であるとはどういうことか。<code>db.Migrate</code> を起動のたびに呼んでも安全なのはなぜか。</summary>
+      <div class="qa-body"><p>冪等とは「何度実行しても結果が同じ」という性質。<code>schema.sql</code> は全ての <code>CREATE</code> に <code>IF NOT EXISTS</code> が付いているので、既にテーブルがあってもエラーにならず素通りする。だから <code>main</code> が起動のたびに <code>Migrate</code> を呼んでも、既存のデータを壊さず安全。さらに、既存テーブルに新しい列を確実に足すため、末尾に <code>ALTER TABLE ... ADD COLUMN IF NOT EXISTS</code> を併記して「新規DBでも既存DBでも必ず同じ構造になる」ことを保証している。</p></div>
+    </details>
+
+    <h2>まとめ — 次の層へ</h2>
+    <p>この章で、動画を運ぶ舞台ができました。<code>docker compose</code> の1コマンドで6人の登場人物が正しい順に立ち上がり、受付（api）と職人（worker）は別プロセスに分かれ、DB には <code>uploading → uploaded → processing → ready / failed</code> という背骨が刻まれた。まだ動画は1本も受け取れませんが、<strong>受け取るための土台</strong>は、もう手の中にあります。</p>
+    <p>次の第01章では、この土台の上に最初の役者 —— <strong>人（アカウント）とチャンネル</strong> —— を乗せます。<code>users</code>・<code>channels</code> テーブルが実体を持ち、bcrypt でパスワードを守り、JWT で「ログイン状態が一定時間保たれる」を実現します。動画を投稿する「誰か」を、まず作るところから。</p>
+
+    <div class="chap-foot">
+      <a class="pager" href="index.html"><span class="dir">← 前へ</span>序章 · はじめに・準備</a>
+      <a class="pager next" href="01-auth.html"><span class="dir">次へ →</span>第01章 · 人を扱う</a>
+    </div>
+  </main>
+</div>
+</body>
+</html>

@@ -1,0 +1,367 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>第09章 さらに先へ（発展） — Twitter をつくる</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500;600&family=Source+Serif+4:opsz,wght@8..60,400;8..60,600;8..60,700&family=Noto+Serif+JP:wght@400;600;700&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<div class="shell">
+
+  <aside class="spine">
+    <a class="wordmark" href="index.html">CHIRP · from scratch</a>
+    <div class="book-title">Twitter を<br>つくる</div>
+    <div class="book-sub">Go + PostgreSQL + React で認証からタイムラインまで</div>
+
+    <div class="legend"><span>読む <b>↓</b></span><span>組む <b>↑</b></span></div>
+
+    <nav aria-label="目次">
+      <ul class="toc">
+        <li><a class="nav-item" href="index.html"><span class="nav-num">序</span><span class="nav-label">はじめに・準備<span class="nav-tag">Setup</span></span></a></li>
+        <li><a class="nav-item" href="00-setup.html"><span class="nav-num">00</span><span class="nav-label">土台をつくる<span class="nav-tag">Setup</span></span></a></li>
+        <li><a class="nav-item" href="01-auth.html"><span class="nav-num">01</span><span class="nav-label">ユーザーという存在（認証）<span class="nav-tag">Auth</span></span></a></li>
+        <li><a class="nav-item" href="02-post.html"><span class="nav-num">02</span><span class="nav-label">投稿する<span class="nav-tag">Post</span></span></a></li>
+        <li><a class="nav-item" href="03-follow.html"><span class="nav-num">03</span><span class="nav-label">つながる（フォロー）<span class="nav-tag">Follow</span></span></a></li>
+        <li><a class="nav-item" href="04-timeline.html"><span class="nav-num">04</span><span class="nav-label">タイムラインという難問<span class="nav-tag">Timeline</span></span></a></li>
+        <li><a class="nav-item" href="05-reply.html"><span class="nav-num">05</span><span class="nav-label">会話する（リプライ）<span class="nav-tag">Reply</span></span></a></li>
+        <li><a class="nav-item" href="06-like.html"><span class="nav-num">06</span><span class="nav-label">反応する（いいね）<span class="nav-tag">Like</span></span></a></li>
+        <li><a class="nav-item" href="07-perf.html"><span class="nav-num">07</span><span class="nav-label">速くする（N+1と索引）<span class="nav-tag">Perf</span></span></a></li>
+        <li><a class="nav-item" href="08-web.html"><span class="nav-num">08</span><span class="nav-label">画面をつける（React）<span class="nav-tag">Web</span></span></a></li>
+        <li><a class="nav-item current" aria-current="page" href="09-beyond.html"><span class="nav-num">09</span><span class="nav-label">さらに先へ（発展）<span class="nav-tag">Beyond</span></span></a></li>
+      </ul>
+    </nav>
+
+    <div class="spine-foot">
+      各章は SNS の一つの機能。<br>下（土台）から上（画面）へ<br>積み上げて動かしていく。
+    </div>
+  </aside>
+
+  <main class="reading">
+    <div class="progress-tag">第09章 / 全10章 · 層: Beyond · 読了目安 2〜2.5時間</div>
+    <div class="eyebrow"><span>Beyond</span><span class="depth">— 最終章・総括</span></div>
+    <h1>さらに先へ（発展）</h1>
+    <p class="lede">ここまでで、動く SNS ができました。登録し、投稿し、フォローし、タイムラインを引き、リプライし、いいねし、それを速くし、画面から触れる——Chirp は最小限ながら、SNS の骨格をひととおり備えています。ここから先は、<strong>「もし本気で運用するなら」の地図</strong>です。この章では手を動かしません。代わりに、本書が<strong>あえて選ばなかった道</strong>を2つ深く掘り（タイムラインを配る方式へ、ID を推測できなくする）、まだ載っていない機能を「今のスキーマにどう足すか」で素描し、最後に第00章から積み上げてきた10章を振り返って、通底する設計原則を言葉にします。作り終えた今だからこそ見える景色があります。</p>
+
+    <div class="box goal"><div class="box-k">◈ この章のゴール</div>
+      <p>この章は<strong>手を動かす章ではありません</strong>。コードを書き足さず、これまで作ったものを<strong>設計の目で読み直す</strong>章です。次の 2 つができたら達成です。</p>
+      <ol>
+        <li>本書が選ばなかった発展の設計判断——<strong>タイムラインを配る方式（fan-out on write）</strong>と<strong>推測できない ID</strong>——を、なぜ本書は採らなかったか・いつ切り替えるべきかまで含めて<strong>自分の言葉で</strong>説明できる。</li>
+        <li>第00〜08章で積み上げた層を振り返り、それらを貫く設計原則（層の分離 / 多層防御 / 冪等性 / キーセット / 集合で考える / DTO で公開を絞る）を言語化できる。</li>
+      </ol>
+    </div>
+
+    <div class="box map"><div class="box-k">☰ この章の節</div>
+      <ol>
+        <li><a href="#s1">本書が選ばなかった道 — 設計の分かれ道</a></li>
+        <li><a href="#s2">タイムラインを配る方式へ — fan-out on write</a></li>
+        <li><a href="#s3">ID を推測できなくする — 連番の代償</a></li>
+        <li><a href="#s4">まだ載っていない機能たち — 現スキーマへの追加案</a></li>
+        <li><a href="#s5">10章の総括 — 積み上げたもの</a></li>
+      </ol>
+    </div>
+
+    <h2 id="s1">本書が選ばなかった道 — 設計の分かれ道</h2>
+    <p>設計とは「選ぶこと」です。そして選んだ道の価値は、<strong>選ばなかった道</strong>と対にして初めて見えてきます。本書は各章で、いくつもの分かれ道で<strong>あえて単純な方</strong>を選んできました。それは手抜きではなく、<strong>学習の一歩目として正しい重心</strong>を選んだということです。まずは、その選択を一覧で振り返ります。どれも「本書の選択が唯一の正解」ではなく、「この規模・この目的では、こちらが最初の一手として理にかなう」というトレードオフの結果です。</p>
+
+    <table>
+      <thead>
+        <tr><th>分かれ道</th><th>本書が選んだ道</th><th>選ばなかった道（発展）</th></tr>
+      </thead>
+      <tbody>
+        <tr>
+          <td>タイムラインの組み方</td>
+          <td>読み取り時に集める（fan-out on read）。<code>ListTimeline</code> が毎回フォロイーの投稿を <code>JOIN</code> 相当で引く</td>
+          <td>書き込み時に配る（fan-out on write）。投稿のたびに各フォロワーの受信箱へ複製 →§2</td>
+        </tr>
+        <tr>
+          <td>ID の振り方</td>
+          <td><code>BIGSERIAL</code> の連番。単純で、並び順の鍵にもなる</td>
+          <td>UUID / ULID / Snowflake 風。推測できず、件数も漏れない →§3</td>
+        </tr>
+        <tr>
+          <td>ページ送り</td>
+          <td>キーセット（<code>beforeID *int64</code>。「最後に見た投稿ID」より古いものを引く）</td>
+          <td>オフセット（<code>OFFSET n</code>）。書きやすいが件数が増えると遅く、ズレる</td>
+        </tr>
+        <tr>
+          <td>リプライの深さ</td>
+          <td>1階層まで（<code>reply_to_id</code> の自己参照。API層で入れ子を拒否）</td>
+          <td>無限ネストのスレッド（木構造。再帰クエリ or 経路列）</td>
+        </tr>
+        <tr>
+          <td>認証トークンの置き場</td>
+          <td>HttpOnly / SameSite=Lax Cookie（XSS でも盗まれない）</td>
+          <td>localStorage（JS から読めて便利だが XSS に弱い）/ サーバ側セッション</td>
+        </tr>
+        <tr>
+          <td>スキーマ適用</td>
+          <td>起動時に <code>IF NOT EXISTS</code> で冪等適用（<code>store.New</code>）</td>
+          <td>マイグレーション専用ツール（up/down・破壊的変更に対応）</td>
+        </tr>
+      </tbody>
+    </table>
+
+    <p>この表の1行1行が、本書のどこかの章の「なぜこうするか」でした。キーセット・リプライ1階層・HttpOnly Cookie・冪等スキーマは、それぞれ第04・05・01・00章で「選んだ理由」まで語りました。この最終章では、まだ深く語っていない<strong>上の2行——タイムラインの方式と ID の振り方</strong>——に光を当てます。この2つは、<strong>「小さいうちは本書の選択で正しく、大きくなると選ばなかった道が効いてくる」</strong>という、スケールと設計の関係がもっとも鮮やかに現れる題材だからです。</p>
+
+    <div class="gonote"><div class="box-k">GO メモ · 「単純さ」は最初に払うべきコストではない</div>
+      <p>設計を学び始めると、つい「最初から本格的な方式（fan-out on write、UUID、マイグレーションツール）で組みたい」と思いがちです。しかしそれらは<strong>複雑さという先払いのコスト</strong>を伴います。本書が単純な方を選んだのは、<strong>複雑さは「必要になってから」払う</strong>のが個人開発の鉄則だからです。フォロワーが数百万人いない段階で fan-out on write を組むのは、渋滞のない道に立体交差を作るようなもの。<strong>まず単純に作って動かし、痛みが出た所だけ複雑さを足す</strong>——この順序を守ると、複雑さが「なぜ必要か」を体で理解した上で導入できます。以下の2節は、その「痛みが出たら、こう足す」の地図です。</p>
+    </div>
+
+    <h2 id="s2">タイムラインを配る方式へ — fan-out on write</h2>
+    <p>第04章「タイムラインという難問」で、本書はホームタイムラインを<strong>読み取り時に集める</strong>方式で組みました。実装は <code>store.ListTimeline</code> です。もう一度その心臓を見ておきます。</p>
+
+    <div class="file-tag">src/backend/internal/store/posts.go（第04章で作った ListTimeline）</div>
+    <pre><code><span class="cm">// ListTimeline は「自分＋フォロイー」の投稿を新しい順に引く（fan-out on read）。</span>
+<span class="kw">func</span> (s *<span class="ty">Store</span>) ListTimeline(ctx context.<span class="ty">Context</span>, userID <span class="ty">int64</span>, beforeID *<span class="ty">int64</span>, limit <span class="ty">int</span>) ([]<span class="ty">Post</span>, <span class="ty">error</span>) {
+	rows, err := s.pool.Query(ctx, postSelect+<span class="st">`
+		WHERE (p.user_id = $1 OR p.user_id IN (SELECT followee_id FROM follows WHERE follower_id = $1))
+		  AND p.reply_to_id IS NULL
+		  AND ($2::bigint IS NULL OR p.id &lt; $2)
+		ORDER BY p.id DESC LIMIT $3`</span>,
+		userID, beforeID, limit)
+	<span class="cm">// ... 走査して []Post に詰める</span>
+}</code></pre>
+
+    <p>この1本のクエリが、タイムラインの本質を凝縮しています。「<strong>自分か、自分がフォローしている誰かの投稿</strong>」（<code>user_id = $1 OR user_id IN (SELECT followee_id ...)</code>）で、<strong>リプライを除き</strong>（<code>reply_to_id IS NULL</code>）、<strong>最後に見た投稿より古いものを</strong>（<code>$2::bigint IS NULL OR p.id &lt; $2</code>＝キーセット）、<strong>新しい順に</strong>（<code>ORDER BY p.id DESC</code>）取ってくる。タイムラインを<strong>読むそのときに、その場で組み立てる</strong>——これが fan-out on read です。</p>
+
+    <h3>read 方式の利点と、その限界</h3>
+    <p>この方式は、小さいサービスで<strong>圧倒的に正しい</strong>選択です。理由は3つ。<strong>(1) 書き込みが軽い</strong> — 投稿は <code>posts</code> に1行 <code>INSERT</code> するだけ。誰のタイムラインにも触りません。<strong>(2) 一貫性が自明</strong> — タイムラインは実体を持たず、読むたびに最新のフォロー関係と投稿から計算されるので、フォロー解除やユーザー削除が<strong>即座に反映</strong>されます（第04章の受け入れ条件「フォロー解除したら以降現れない」がタダで満たされる）。<strong>(3) 保存領域を食わない</strong> — タイムラインを<strong>どこにも保存しない</strong>ので、投稿1件はあくまで1行のままです。</p>
+    <p>しかし、この方式には<strong>ユーザーとフォローが増えると効いてくる限界</strong>があります。ホームを開くたびに、DB は「あなたのフォロイー全員を調べ、その全員の投稿を時系列でマージし、上位20件を選ぶ」という<strong>合流と並べ替え</strong>を毎回やり直します。フォロイーが数千人になり、その全員が高頻度で投稿し、しかも<strong>大勢が同時にホームを開く</strong>と、この「読むたびの再計算」が DB の負荷の中心になります。読み取りが<strong>桁違いに多い</strong>SNS では、この「毎回組み直すコスト × 膨大な読み取り回数」が積み上がるのです。</p>
+
+    <h3>もう一つの道 — 書き込み時に配る（fan-out on write）</h3>
+    <p>そこで発想を裏返します。「<strong>読むときに集める</strong>」のをやめ、「<strong>書くときに配っておく</strong>」。投稿が生まれた瞬間に、その投稿を<strong>フォロワー全員の「受信箱（タイムライン・キャッシュ）」へあらかじめ複製</strong>しておくのです。すると、ホームを開くときは<strong>自分の受信箱を素直に読むだけ</strong>——マージも並べ替えも要りません。読み取りが軽くなる代わりに、<strong>書き込みが重くなる</strong>。負荷を「読む側」から「書く側」へ移す、という取引です。両者の形を図で並べます。</p>
+
+    <div class="ascii">fan-out on READ（本書 / ListTimeline）        fan-out on WRITE（発展）
+
+投稿するとき:                               投稿するとき:
+  posts に 1 行 INSERT だけ  ……軽い          posts に INSERT
+                                            ＋ フォロワー全員の受信箱へ複製  ……重い
+   ┌─ alice ─┐                                ┌─ alice が投稿 ─┐
+   │ INSERT  │                                │  INSERT posts  │
+   └─────────┘                                └───────┬────────┘
+                                             ┌────────┼────────┐
+ホームを開くとき:                             ▼        ▼        ▼
+  フォロイー全員を調べ、                     bob の   carol の  dave の
+  投稿をマージして新しい順に並べ替え          受信箱    受信箱    受信箱
+   ┌──────────────────────────┐             （投稿ID を1件ずつ push）
+   │ WHERE user_id IN (…) …    │  ……重い
+   │ ORDER BY id DESC LIMIT 20 │             ホームを開くとき:
+   └──────────────────────────┘               自分の受信箱を読むだけ  ……軽い
+                                               ┌───────────────────┐
+読み: 重い / 書き: 軽い / 保存: 少             │ SELECT … WHERE      │
+一貫性: 常に最新（フォロー解除も即反映）        │  owner_id = me      │
+                                               └───────────────────┘
+                                             読み: 軽い / 書き: 重い / 保存: 多
+                                             一貫性: 配布時点のスナップショット</div>
+
+    <p>fan-out on write を素朴に足すなら、スキーマにはこんな「受信箱」テーブルが1枚増えます。<strong>実コードではなく、これから作るなら</strong>のスケッチとして読んでください。</p>
+
+    <div class="file-tag">スケッチ（実装ではない） — 受信箱テーブルの一案</div>
+    <pre><code><span class="cm">-- スケッチ: 各ユーザーの「配られてきた投稿」を溜める受信箱</span>
+<span class="cm">-- owner_id のタイムラインに、post_id が author_id から配られた、の意味</span>
+<span class="kw">CREATE TABLE</span> timeline_entries (
+    owner_id   <span class="ty">BIGINT</span> <span class="kw">NOT NULL REFERENCES</span> users(id) <span class="kw">ON DELETE CASCADE</span>,
+    post_id    <span class="ty">BIGINT</span> <span class="kw">NOT NULL REFERENCES</span> posts(id) <span class="kw">ON DELETE CASCADE</span>,
+    author_id  <span class="ty">BIGINT</span> <span class="kw">NOT NULL</span>,
+    <span class="kw">PRIMARY KEY</span> (owner_id, post_id)
+);
+<span class="cm">-- スケッチ: 自分の受信箱を新しい順に引くための索引（キーセットは post_id で）</span>
+<span class="kw">CREATE INDEX</span> idx_timeline_owner <span class="kw">ON</span> timeline_entries (owner_id, post_id <span class="kw">DESC</span>);</code></pre>
+
+    <p>そして投稿ハンドラは、<code>posts</code> に <code>INSERT</code> したあと、<strong>投稿者のフォロワー全員ぶん</strong> <code>timeline_entries</code> に行を挿す、という後処理を負います。ホームを引くのは <code>SELECT ... FROM timeline_entries WHERE owner_id = $1 AND post_id &lt; $2 ORDER BY post_id DESC LIMIT $3</code>——第04章の <code>ListTimeline</code> にあった <code>IN (SELECT followee_id ...)</code> の<strong>合流が消える</strong>のが勘所です。読みは自分の受信箱を一直線に舐めるだけになります。</p>
+
+    <h3>fan-out on write の代償 — 有名人問題</h3>
+    <p>だが、この方式には有名な弱点があります。<strong>フォロワーが極端に多いユーザー</strong>——いわゆる有名人——が投稿すると、その1投稿を<strong>数百万件の受信箱へ複製</strong>しなければなりません。「配る（fan-out）」のコストが、フォロワー数に比例して爆発する。これを<strong>有名人問題（celebrity problem / hot-user problem）</strong>と呼びます。フォロワー1000万人のアカウントが1回つぶやくたびに、1000万行の書き込みが走る——投稿が「軽い1行 INSERT」だったはずが、<strong>とんでもなく重い一括配布</strong>になってしまう。</p>
+    <p>さらに、この方式は<strong>一貫性の面倒</strong>も抱えます。fan-out on read では、フォロー解除もユーザー削除も「次に読むとき計算し直す」だけで即反映されました。fan-out on write では、タイムラインが<strong>実体として保存されている</strong>ぶん、それらの変更を<strong>受信箱の側にも反映する後始末</strong>が要ります（フォロー解除したら、その人の過去投稿を自分の受信箱から抜くのか? 抜かないのか?——設計判断が増える）。第04章では「フォロー解除で即消える」がタダでしたが、配る方式ではそれが<strong>自分で守るべき仕様</strong>に変わります。</p>
+
+    <div class="box hazard"><div class="box-k">⚠ 配る方式は「一貫性の担保」を自分で背負う</div>
+      <p>fan-out on read の隠れた美点は、<strong>タイムラインが「導出データ」で、実体を持たない</strong>ことです。実体がなければ、フォロー関係や投稿の変更と<strong>ズレようがない</strong>。fan-out on write はタイムラインを<strong>実体化（materialize）</strong>して速度を買う代わりに、「元データが変わったら、複製した側も直す」という<strong>整合性の宿題</strong>を背負います。投稿削除・フォロー解除・ブロック・非公開化——元の変更のたびに受信箱を追随させる処理が要る。速さと引き換えに、<strong>正しさを保つ責任が増える</strong>。これがキャッシュ全般の宿命であり、「読み取り最適化は、書き込みと一貫性のコストで買う」という設計の等価交換です。</p>
+    </div>
+
+    <h3>現実解 — ハイブリッド</h3>
+    <p>では大規模 SNS はどちらを選ぶのか。答えは<strong>「両方を使い分ける（ハイブリッド）」</strong>です。発想はこうです——<strong>普通のユーザーは fan-out on write で配る。有名人だけは fan-out on read で読み時に混ぜる</strong>。あなたのホームを組むとき、システムは「あなたの受信箱（普通のフォロイーぶん、配布済み）」を読み、そこに「あなたがフォローしている<strong>有名人</strong>の最新投稿（配らず、読み時に取得）」を<strong>マージ</strong>して返す。有名人の投稿は配布しないので<strong>書き込み爆発が起きず</strong>、普通のフォロイーぶんは配布済みなので<strong>読みは軽い</strong>。両方式の良いとこ取りです。</p>
+    <p>この「有名人だけ別扱い」という判断は、<strong>まさに本書が第04章で選ばなかった複雑さ</strong>そのものです。Chirp の規模——学習用・少人数——では、有名人問題は起きません。フォロイーが数十人、同時利用者が数人なら、<code>ListTimeline</code> の1本のクエリは<strong>一瞬で返り、正しく、保存も食わない</strong>。だから本書は迷わず fan-out on read を選びました。<strong>いつ切り替えるべきか</strong>——それは「read 方式の <code>ListTimeline</code> が、実測で目に見えて遅くなり始めたとき」であって、その前ではありません。方式の切り替えは、<strong>痛みが出てから</strong>の一手です。</p>
+
+    <div class="gonote"><div class="box-k">GO メモ · 「配る」は非同期でよい — 投稿の応答を待たせない</div>
+      <p>fan-out on write を実装するとき、素朴に「投稿ハンドラの中で、フォロワー全員に配り終えてから 201 を返す」と書くと、フォロワーが多い投稿ほど<strong>ユーザーが待たされます</strong>。現実の設計では、配布は<strong>非同期</strong>にします——投稿は <code>posts</code> に INSERT したら即座に応答を返し、「配る」仕事はキュー（ジョブキュー / メッセージブローカー）に積んで<strong>裏で処理</strong>する。Go なら goroutine やワーカープールが素直な入り口です。こうすると「投稿の体感速度」と「配布のコスト」を切り離せる。ただし非同期は「配り終わる前にホームを開くと、まだ届いていない」という<strong>結果整合性</strong>を招くので、そこも設計判断が要ります。単純な read 方式にこの悩みが<strong>一切ない</strong>ことを、改めて噛みしめてください。</p>
+    </div>
+
+    <h2 id="s3">ID を推測できなくする — 連番の代償</h2>
+    <p>次の分かれ道は、<strong>ID の振り方</strong>です。第00章のスキーマを思い出してください。すべてのテーブルの主キーは <code>BIGSERIAL</code> でした。</p>
+
+    <div class="file-tag">src/backend/internal/store/schema.sql（第00章で決めた主キー）</div>
+    <pre><code><span class="kw">CREATE TABLE IF NOT EXISTS</span> users (
+    id  <span class="ty">BIGSERIAL</span> <span class="kw">PRIMARY KEY</span>,   <span class="cm">-- 1, 2, 3, ... と自動で増える</span>
+    ...
+);
+<span class="kw">CREATE TABLE IF NOT EXISTS</span> posts (
+    id  <span class="ty">BIGSERIAL</span> <span class="kw">PRIMARY KEY</span>,   <span class="cm">-- こちらも連番</span>
+    ...
+);</code></pre>
+
+    <p><code>BIGSERIAL</code> は「行を追加するたびに 1, 2, 3... と自動で1つずつ増える 64bit 整数」でした。本書はこれを<strong>2つの役目</strong>で使い倒してきました。<strong>(1) 一意な識別子</strong>として、そして<strong>(2) 並び順・ページ送りの鍵</strong>として——第04章のキーセットページネーション（<code>p.id &lt; $2</code>）が「<strong>ID が時間順に単調増加する</strong>」ことに<strong>寄りかかっている</strong>のを思い出してください。連番は「新しいものほど ID が大きい」を保証するので、<code>ORDER BY id DESC</code> がそのまま「新しい順」になり、<code>created_at</code> のクロック逆転（WSL2 等）を避けて<strong>並び順の信頼できる鍵</strong>になれました。連番は、この本の随所で<strong>効いていた</strong>のです。</p>
+
+    <h3>連番の代償 — 「読める」ことの2つの漏れ</h3>
+    <p>しかし連番には、公開サービスとしては見過ごせない代償があります。<strong>ID が推測できてしまう</strong>のです。漏れは2種類あります。</p>
+    <p><strong>漏れ①: 件数が漏れる（enumeration / 情報漏洩）。</strong> あなたが登録したとき、URL やレスポンスに <code>id: 1024</code> と出たとします。すると<strong>「このサービスにはおよそ1024人が登録済み」</strong>という情報が、あなた1人の ID から読み取れてしまう。今日 <code>id: 1024</code>、1週間後に別アカウントを作って <code>id: 1090</code> なら、<strong>この1週間で66人増えた</strong>と分かる。連番は<strong>総量と成長率という経営情報を、外から観測可能</strong>にしてしまうのです。投稿 ID も同じで、<code>post/1</code> から <code>post/50000</code> まであれば「累計5万投稿」が漏れます。</p>
+    <p><strong>漏れ②: URL を +1 で辿れる（IDOR の温床）。</strong> あなたの投稿が <code>/posts/42</code> なら、<code>/posts/41</code>・<code>/posts/43</code> を試すのは<strong>誰でも思いつく</strong>。連番は<strong>「隣」を機械的に生成できる</strong>ので、攻撃者は 1 から順に総当たりで全リソースを舐められます。ここで<strong>認可（本人チェック）が甘い</strong>と、他人の非公開データが芋づる式に見える——これを <strong>IDOR（Insecure Direct Object Reference）</strong>と言います。</p>
+
+    <div class="box hazard"><div class="box-k">⚠ 誤解しないで — 「推測不能な ID」は認可の代わりにならない</div>
+      <p>ここは絶対に取り違えてはいけません。<strong>ID を推測不能にすることは、認可（アクセス制御）の代替ではありません</strong>。本書は第01章で <code>requireAuth</code> と本人チェックの骨格を作り、「削除できるのは書いた本人だけ」を<strong>サーバ側で判定</strong>しました。これが本丸の防御です。推測不能な ID は、その上に<strong>足す</strong>もう一枚——「URL を総当たりされにくくする」「件数を漏らさない」という<strong>深さの追加</strong>であって、認可の代わりに置くものではない。「ID が当てられないから安全」は、<strong>鍵をかけずに表札を隠しただけ</strong>の危うい発想です。多層防御（第00章の <code>CHECK</code> 制約、第01章の認証・認可）の上に<strong>重ねて</strong>初めて意味を持ちます。順序を間違えないでください。</p>
+    </div>
+
+    <h3>対策の三択 — UUID / ULID / Snowflake 風</h3>
+    <p>推測を防ぐ ID には、代表的に3つの選択肢があります。それぞれ<strong>「推測されにくさ」と「時間順に並ぶか」のトレードオフ</strong>が違うので、対で理解します。</p>
+
+    <table>
+      <thead>
+        <tr><th>方式</th><th>形</th><th>時間順に並ぶ?</th><th>向き / 代償</th></tr>
+      </thead>
+      <tbody>
+        <tr>
+          <td><strong>UUID v4</strong></td>
+          <td><code>f47ac10b-58cc-4372-a567-0e02b2c3d479</code>（乱数128bit）</td>
+          <td><strong>並ばない</strong>（完全な乱数）</td>
+          <td>推測はほぼ不可能。ただし<strong>キーセットの鍵に使えない</strong>ので並び順用の列（<code>created_at</code> や連番）が別に要る。索引も乱数ゆえ肥大しやすい</td>
+        </tr>
+        <tr>
+          <td><strong>ULID</strong></td>
+          <td><code>01ARZ3NDEKTSV4RRFFQ69G5FAV</code>（先頭に時刻＋末尾に乱数）</td>
+          <td><strong>おおむね並ぶ</strong>（生成時刻順）</td>
+          <td>推測されにくく、かつ<strong>時間順にソート可能</strong>。連番の「並び順の鍵」の役目を<strong>維持したまま</strong>推測不能にできる、SNS 向きの折衷</td>
+        </tr>
+        <tr>
+          <td><strong>Snowflake 風</strong></td>
+          <td>64bit 整数（時刻＋マシンID＋連番を詰めたビット列）</td>
+          <td><strong>並ぶ</strong>（上位ビットが時刻）</td>
+          <td>整数のまま時間順・分散生成できる。ただし<strong>時刻が上位に見えるので「いつ作られたか」は漏れ</strong>、隣接 ID の推測は乱数式より容易。採番の仕組み（時計・機器ID）を自前で持つ手間がある</td>
+        </tr>
+      </tbody>
+    </table>
+
+    <p>この表から、SNS で「連番をやめるなら」の第一候補が見えてきます。UUID v4 は推測不能さは最強ですが、<strong>本書がさんざん頼ってきた「ID が時間順に並ぶ」性質を失う</strong>——キーセットページネーション（<code>p.id &lt; $2</code>）が成り立たなくなり、並び順用の列を別に用意して索引も張り直す必要があります。一方 <strong>ULID</strong> は「先頭に時刻、末尾に乱数」という構造ゆえ、<strong>推測されにくさと時間順ソートを両立</strong>します。第04章のキーセット方式を<strong>ほぼそのまま活かせる</strong>ので、Chirp を「連番のまま拡張」から「推測不能なまま拡張」へ移すなら、ULID がもっとも痛みの少ない道です。</p>
+
+    <div class="file-tag">スケッチ（実装ではない） — もし ID を差し替えるなら</div>
+    <pre><code><span class="cm">-- スケッチ: BIGSERIAL をやめ、アプリ側で生成した ULID/UUID を主キーにする一案</span>
+<span class="cm">-- 連番の「自動採番」は消え、生成はアプリの責務になる</span>
+<span class="kw">CREATE TABLE</span> posts (
+    id          <span class="ty">TEXT</span>        <span class="kw">PRIMARY KEY</span>,   <span class="cm">-- ULID 文字列（例: 01ARZ3ND... 時間順にソート可）</span>
+    user_id     <span class="ty">TEXT</span>        <span class="kw">NOT NULL REFERENCES</span> users(id),
+    body        <span class="ty">TEXT</span>        <span class="kw">NOT NULL CHECK</span> (char_length(body) <span class="kw">BETWEEN</span> <span class="st">1</span> <span class="kw">AND</span> <span class="st">280</span>),
+    created_at  <span class="ty">TIMESTAMPTZ</span> <span class="kw">NOT NULL DEFAULT</span> now()
+);
+<span class="cm">-- キーセットは ULID の辞書順＝時間順を利用（第04章の p.id &lt; $2 がそのまま活きる）</span>
+<span class="cm">-- ORDER BY id DESC が「新しい順」であり続ける</span></code></pre>
+
+    <p>もう一つ、<strong>連番を残したまま推測を防ぐ</strong>という現実的な折衷もあります。内部の主キーは <code>BIGSERIAL</code> のまま（DB 内部では速く・小さく・時間順の連番の利点を享受）、<strong>外に見せる URL やAPIには別の「公開用トークン」</strong>（UUID / ULID / ランダム短縮ID）を持たせて、そちらで参照させる。<code>posts</code> に <code>public_id TEXT UNIQUE</code> を1列足し、URL は <code>/posts/{public_id}</code> にする。<strong>内部識別子（連番）と公開識別子（推測不能）を分離</strong>する設計です。これなら第04章のキーセットは内部 ID のまま維持でき、外向きには件数も隣も漏れない。「全部を UUID にする」より段階的で、既存コードへの影響も小さい——<strong>本書のスキーマに一番足しやすい</strong>拡張です。</p>
+
+    <div class="box hazard"><div class="box-k">⚠ なぜ本書は最初から連番にしたのか — 学習の単純さ</div>
+      <p>本書が <code>BIGSERIAL</code> を選んだのは、<strong>学習の単純さ</strong>のためです。連番は「1, 2, 3 と増える」だけなので、スキーマを見た瞬間に理解でき、キーセットページネーション（第04章）の「ID が時間順に並ぶ」も<strong>説明抜きで直感的</strong>に成り立ちます。<code>curl</code> でのテストも <code>/posts/1</code> と打てば済む。もし最初から ULID にしていたら、「なぜ ID が長い文字列なのか」「なぜアプリで生成するのか」「辞書順がなぜ時間順なのか」という<strong>本筋でない説明</strong>が随所に割り込み、認証・タイムライン・N+1 という<strong>中核テーマ</strong>の学びが薄まったでしょう。<strong>推測可能性の対策は、中核を理解し終えた「発展」に置くのが正しい重心</strong>——それが本書が連番を選び、この最終章に回した理由です。CLAUDE.md の設計判断メモにも「IDの推測可能性は学習スコープ外、発展課題」と明記してあります。</p>
+    </div>
+
+    <h2 id="s4">まだ載っていない機能たち — 現スキーマへの追加案</h2>
+    <p>要件定義の §7 には、MVP のスコープ外として<strong>5つの発展機能</strong>が挙がっています——リポスト、通知、検索/ハッシュタグ/トレンド、メディア添付、DM。どれも「不要」ではなく「MVP 完成後に、明確な目的をもって足す」候補でした。ここでは各機能を、<strong>今の4テーブル（users / posts / follows / likes）にどう足すか</strong>という一点に絞って素描します。作り終えたスキーマを土台に「次の一歩」を構想する練習です。すべて<strong>これから作るなら</strong>の設計スケッチで、実コードではありません。</p>
+
+    <h3>リポスト（リツイート）</h3>
+    <p>リポストは「他人の投稿を、自分のフォロワーに再放送する」機能です。素直な足し方は<strong>いいねと同じ「関係テーブル」</strong>——<code>reposts (user_id, post_id, created_at)</code> を1枚足し、主キーを <code>(user_id, post_id)</code> にすれば、<code>likes</code> でやったのと同じく<strong>二重リポストを DB が防ぎ</strong>、取り消しは行の削除、リポスト数は <code>post_id</code> で数えるだけ。第06章・07章の <code>likes</code> の設計が<strong>そっくり再利用</strong>できます。難所は<strong>タイムラインへの混ぜ方</strong>です。<code>ListTimeline</code> は今 <code>posts</code> だけを見ていますが、リポストを混ぜるには「フォロイーが<strong>投稿した</strong>もの」に加えて「フォロイーが<strong>リポストした</strong>もの」も合流させ、<strong>リポストした時刻</strong>で並べる必要がある——第04章のクエリに <code>reposts</code> との <code>UNION</code> 相当が増えます。引用リポスト（コメント付き）はさらに別で、<strong>「本文＋参照先 post_id」を持つ新しい投稿</strong>なので、<code>posts</code> に <code>quoted_post_id BIGINT REFERENCES posts(id)</code> を1列足す形になります（<code>reply_to_id</code> の兄弟のような自己参照）。</p>
+
+    <h3>通知（フォロー・いいね・リプライ）</h3>
+    <p>通知は「あなたに向けた出来事」を溜めて見せる機能です。<code>notifications (id BIGSERIAL, recipient_id, actor_id, type, target_post_id, read_at, created_at)</code> という<strong>1枚のテーブル</strong>が骨格になります——「誰に（recipient）」「誰が（actor）」「何をした（type: follow / like / reply）」「どの投稿に（target）」。いいね・フォロー・リプライの各ハンドラが、成功時に<strong>通知を1行 INSERT する後処理</strong>を負う。未読管理は <code>read_at</code> が <code>NULL</code> かで表現し、「未読数」は <code>WHERE recipient_id = $1 AND read_at IS NULL</code> を数えるだけ。ここで<strong>第2節の教訓</strong>が効きます——通知も本質は「配る」処理なので、大量フォロワーへの一斉通知は<strong>非同期</strong>に寄せるのが定石で、fan-out on write の有名人問題と<strong>同じ構造の悩み</strong>が顔を出します。</p>
+
+    <h3>検索・ハッシュタグ・トレンド</h3>
+    <p>3つは難易度が段違いです。<strong>ハッシュタグ</strong>が一番素直で、投稿本文から <code>#tag</code> を抽出して <code>post_tags (post_id, tag)</code> に展開すれば、「あるタグの投稿一覧」は <code>WHERE tag = $1</code> で引けます。<strong>全文検索</strong>は本文を <code>LIKE '%...%'</code> で舐めると（第07章で学んだとおり）<strong>索引が効かず件数に比例して遅く</strong>なるので、PostgreSQL の全文検索（<code>tsvector</code> + GIN 索引）や専用エンジンを持ち込む領域に入ります。<strong>トレンド</strong>が最難で、「直近N時間で急増したタグ」という<strong>時間窓の集計</strong>——単なる総数ではなく<strong>変化率</strong>を測る必要があり、集計を定期的に回して結果を別テーブルにキャッシュする（＝また materialize の話）設計になります。「検索」とひとくくりにせず、<strong>この3つは別の難しさ</strong>だと見抜けることが、この節の収穫です。</p>
+
+    <h3>メディア添付（画像アップロード）</h3>
+    <p>画像は「バイト列そのものを DB に入れない」のが鉄則です。第00章で <code>go:embed</code> の話をしたように、<strong>DB は構造化データの置き場</strong>で、大きなバイナリはオブジェクトストレージ（S3 互換 / Cloudflare R2 等）に置き、<strong>DB には URL（場所への参照）だけ</strong>を持たせます。スキーマ的には <code>post_media (post_id, url, width, height, ord)</code> を1枚足す形（1投稿に複数枚なので <code>ord</code> で順序）。フローは「クライアントが画像をストレージへアップロード → 得た URL を投稿 API に添えて送信 → <code>post_media</code> に記録」。ここでの学びは<strong>「DB に何を置き、何を置かないか」の線引き</strong>で、画像・動画のような<strong>大きく・構造化されていない</strong>データは DB の外に出す、という判断です。</p>
+
+    <h3>ダイレクトメッセージ（DM）</h3>
+    <p>DM は、これまでの「公開前提」の設計と<strong>最も異質</strong>です。投稿・いいね・フォローはすべて<strong>公開</strong>——誰が見てもよい情報でした。DM は<strong>2者間の非公開</strong>で、<code>conversations</code>（会話）と <code>messages (conversation_id, sender_id, body, created_at)</code> の2枚が骨格になりますが、本丸は<strong>認可</strong>です。「その会話の参加者だけがメッセージを読める」を<strong>厳密に</strong>守らねばならず、第01章で作った本人チェックの発想を<strong>「参加者チェック」へ拡張</strong>する必要があります。第3節の IDOR がここで牙を剥く——<code>/messages/{id}</code> を +1 で辿られたとき、参加者でなければ <code>403</code> で撥ねる認可が甘いと、<strong>他人の私信が漏れる</strong>。DM は「新機能」というより「<strong>認可を一段深くする</strong>訓練」だと捉えるのが正確です。</p>
+
+    <div class="gonote"><div class="box-k">GO メモ · どの発展も「既存の型」の組み替えでできている</div>
+      <p>5つの発展を並べて見えるのは、<strong>どれも本書で作った型の再利用</strong>だということです。リポストは <code>likes</code> と同じ<strong>関係テーブル</strong>。通知は「配る」＝<strong>fan-out</strong> の再演。ハッシュタグは <code>post_tags</code> という<strong>多対多</strong>（follows と同じ形)。メディアは <code>go:embed</code> で触れた<strong>「参照だけ持つ」</strong>の応用。DM は第01章の<strong>認可</strong>の深掘り。<strong>まったく新しい概念はほとんど出てこない</strong>——8章ぶんの土台があれば、発展は「既知の部品の組み替え」として構想できる。これこそ、基礎を1枚ずつ積んだご褒美です。次に何を足すにせよ、「これは <code>likes</code> の形か? follows の形か? fan-out の形か?」と問えば、設計の入り口が見えます。</p>
+    </div>
+
+    <h2 id="s5">10章の総括 — 積み上げたもの</h2>
+    <p>最終節です。第00章から、私たちは<strong>一番下の層から順に</strong>積み上げてきました。振り返ると、各章は「SNS の一機能」であると同時に、<strong>Web アプリ開発の一つの中核テーマ</strong>でした。まず、積んだ層を下から見上げます。</p>
+
+    <div class="ascii">画面をつける（React）        08 ── SPA / 単一バイナリ / go:embed
+速くする（N+1と索引）        07 ── 集合で考える / 61回→4回 / 索引
+反応する（いいね）           06 ── 関係テーブル / 冪等な toggle
+会話する（リプライ）         05 ── 自己参照 / 1階層の割り切り
+タイムラインという難問       04 ── fan-out on read / キーセット
+つながる（フォロー）         03 ── 多対多 / 二重防止 / 自己フォロー禁止
+投稿する                    02 ── 280字 CHECK / 本人が書く
+ユーザーという存在（認証）    01 ── bcrypt / JWT / HttpOnly / 多層防御
+土台をつくる                00 ── スキーマ / 冪等マイグレーション / 接続プール
+────────────────────────────────────────────────────────────
+                          下の層が固まっていたから、上が建った</div>
+
+    <p>この積み木を貫いて、<strong>章をまたいで何度も現れた設計原則</strong>があります。個々の機能を忘れても、この原則さえ手に残れば、あなたは次のアプリを設計できます。6つ、名前を付けて振り返ります。</p>
+
+    <h3>① 層の分離 — store / api / frontend</h3>
+    <p>Chirp は最初から<strong>3つの層</strong>に割れていました。<code>internal/store</code>（DB に触る）、<code>internal/api</code>（HTTP を捌く）、<code>frontend</code>（画面）。DB アクセスは<strong>すべて <code>store</code> に閉じ込め</strong>、<code>api</code> は SQL を1行も書かず、<code>store</code> の関数（<code>CreateUser</code>・<code>ListTimeline</code>・<code>GetPostMeta</code>…）を呼ぶだけでした。この分離のおかげで、「認証の話（api/middleware）」と「テーブルの話（store）」が混ざらず、各章を<strong>独立して読み書きテスト</strong>できた。層を分けるとは、<strong>変更の影響範囲を閉じ込める</strong>ことです。SQL の書き方や索引を変えるなら <code>store</code> と <code>schema.sql</code> だけを、Cookie の設定を変えるなら <code>api</code> だけを触ればいい。逆に、<strong>層をまたぐ「契約」を変える変更は全層に波及します</strong>——ID を連番から ULID（文字列）に変えるなら、<code>store</code> と <code>schema.sql</code> に加えて、<code>int64</code> を前提にした DTO・パス解析（<code>strconv.ParseInt</code>）・カーソル、さらにフロントの型（<code>number</code>）や URL 解析まで直すことになる。何が層の中に閉じていて、何が層をまたぐ契約なのかを見分けることが、この原則の使いどころです。</p>
+
+    <h3>② 多層防御 — 一つの守りに頼らない</h3>
+    <p>同じ制約を<strong>何重にも</strong>置いてきました。280文字の上限は、<strong>DB の <code>CHECK</code></strong>（第00章）と<strong>Go の検証</strong>（第02章）と<strong>フロントの入力制限</strong>（第08章）の<strong>三重</strong>。認証は <code>requireAuth</code> の関門＋本人チェックの二枚（第3節で見た推測不能 ID は、いまの Chirp にはまだ無い、その上にさらに足せる発展の一枚）。ログイン失敗は<strong>汎用メッセージ＋ダミー照合</strong>の二枚(第01章)。「アプリの検証をすり抜けても DB が最後の砦」——<strong>どの一枚が破れても、次の一枚が残る</strong>。セキュリティも妥当性も、単一の防御線ではなく<strong>深さ</strong>で守るのが Chirp の一貫した姿勢でした。</p>
+
+    <h3>③ 冪等性 — 何度やっても同じ結果</h3>
+    <p>「同じ操作を繰り返しても、結果が変わらない」——冪等性は Chirp の随所を支えました。第00章の <code>schema.sql</code> は <code>IF NOT EXISTS</code> で<strong>何度起動しても壊れず</strong>、だから <code>store.New</code> は毎回スキーマを流すだけでよかった。いいね（第06章）は、二重いいねを主キー <code>(user_id, post_id)</code> が<strong>1件に畳み</strong>、フォロー（第03章）も同じ。冪等性があると、<strong>「1回だけ確実に」を気にせず、雑に何度も呼べる</strong>——リトライにも、同時実行にも強くなる。堅牢さの隠れた土台です。</p>
+
+    <h3>④ キーセット — 件数が増えても遅くならないページ送り</h3>
+    <p>第04章で、ページ送りを <code>OFFSET</code> ではなく<strong>キーセット</strong>（<code>beforeID</code>＝「最後に見た投稿ID」より古いものを引く）で組みました。<code>OFFSET 10000</code> は「1万件を数えて捨てる」ので件数に比例して遅くなり、読み込み中に新規投稿が入ると<strong>ズレて重複・欠落</strong>する。キーセットは <code>WHERE id &lt; $2 ORDER BY id DESC LIMIT n</code> で<strong>常に索引の先頭から一定件数</strong>を取るので、何ページ目でも速く、新規投稿が割り込んでも<strong>ズレない</strong>（要件 FR-9 の「重複や欠落なく」がこれで満たされた）。これは連番 ID が時間順に並ぶ性質に支えられており、第3節で「ID を変えるなら ULID」と言ったのは、この鍵を失わないためでした。</p>
+
+    <h3>⑤ 集合で考える — N+1 を避ける</h3>
+    <p>第07章の核心です。20件の投稿の「いいね数・いいね有無・リプライ数」を、<strong>1件ずつループで問い合わせる</strong>と <code>1 + 20×3 = 61</code> 回のクエリ（N+1問題）。これを <code>GetPostMeta</code> が <code>WHERE post_id = ANY($1)</code> で<strong>20件まとめて</strong>問い合わせ、<strong>本体1回＋メタ3回＝4回</strong>に畳みました。発想は「1件ずつ手続き的に」ではなく「<strong>集合をひとかたまりで</strong>」。DB は<strong>集合演算が得意</strong>で、往復回数こそがコスト——この「ループを集合に置き換える」目は、DB を使うあらゆる場面で効きます。第2節の fan-out も「1人ずつ」でなく「フォロワー集合へ一括」で考えるのと同じ筋です。</p>
+
+    <h3>⑥ DTO で公開を絞る — 出していい形に変換する</h3>
+    <p>第01章で、ユーザー情報を返すとき <code>toUserJSON</code> を通しました。DB の <code>User</code> には <code>password_hash</code> が<strong>あるのに</strong>、レスポンスの JSON には<strong>出さない</strong>——<code>toUserJSON</code> という<strong>公開用の形（DTO）</strong>に詰め替えることで、「内部で持つデータ」と「外に見せるデータ」を<strong>意図的に分けた</strong>。うっかり構造体をそのまま返して機密が漏れる、を防ぐ設計です。第3節の「内部 ID と公開 ID を分ける」も、この<strong>「内と外を分ける」</strong>思想の延長にあります。<strong>持っていることと、見せることは、別</strong>——これはデータ設計の一貫した規律でした。</p>
+
+    <div class="box do"><div class="box-k">▸ 立ち止まって — この6つで、次のアプリが設計できる</div>
+      <p>層の分離・多層防御・冪等性・キーセット・集合で考える・DTO で公開を絞る。この6つは <strong>Chirp に固有ではありません</strong>。ブログでも、EC でも、社内ツールでも、DB とサーバと画面があるアプリなら<strong>そのまま効く</strong>汎用の原則です。あなたは Twitter のクローンを作ったのではなく、<strong>この6つを手を動かして体で覚えた</strong>——それが本書の本当の成果物です。機能は忘れても、原則は残ります。</p>
+    </div>
+
+    <h2>つまずき FAQ</h2>
+    <details class="qa"><summary>いつ fan-out on read から fan-out on write に切り替えるべき?</summary>
+      <div class="qa-body"><p><strong>「切り替えたくなってから」</strong>が答えです。より具体的には、fan-out on read の <code>ListTimeline</code> が<strong>実測で目に見えて遅くなり</strong>、その遅さが「フォロイーが多い・投稿頻度が高い・大勢が同時にホームを開く」という<strong>読み取り負荷</strong>に起因すると確認できたとき。Chirp の規模（学習用・少人数）では、その日は来ません。先回りして配る方式を組むのは、渋滞のない道に立体交差を作るようなもので、<strong>複雑さと一貫性の宿題（フォロー解除の追随・有名人問題・非同期配布の結果整合性）を、対価もなく先払い</strong>することになります。しかも切り替えは全か無かではなく、<strong>ハイブリッド</strong>（普通のユーザーは配り、有名人は読み時に混ぜる）が現実解。まず read 方式で作り、痛みを測り、痛い所だけ配る方式に寄せる——この順序が正しい。</p></div>
+    </details>
+    <details class="qa"><summary>なぜ最初から UUID にしなかったの? 連番は危ないのでは?</summary>
+      <div class="qa-body"><p><strong>学習の単純さ</strong>を優先したからです。連番（<code>BIGSERIAL</code>）は「1, 2, 3 と増える」だけで、スキーマも <code>curl</code> テスト（<code>/posts/1</code>）も直感的。そして第04章のキーセットページネーションが「<strong>ID が時間順に並ぶ</strong>」に寄りかかっており、連番はそれを説明抜きで満たしました。最初から UUID にすると「なぜ長い文字列か」「なぜ時間順に並ばないのか」という本筋でない説明が割り込み、認証・タイムライン・N+1 という<strong>中核テーマ</strong>の学びが薄まります。連番の代償（件数が漏れる・URL を +1 で辿れる）は<strong>実在する</strong>ので、公開運用するなら対策すべき——ただしそれは<strong>認可（本人チェック）という本丸の上に足す一枚</strong>であって、認可の代わりではない。段階的に足すなら、内部は連番のまま<strong>公開用トークン（UUID/ULID）を1列</strong>加えるのが、本書のスキーマに一番なじむ。</p></div>
+    </details>
+    <details class="qa"><summary>リポストは <code>posts</code> にどう足すのが素直?</summary>
+      <div class="qa-body"><p>2種類を分けて考えます。<strong>ただのリポスト（再放送）</strong>は、投稿の複製ではなく<strong>関係</strong>——<code>likes</code> と同じ形の <code>reposts (user_id, post_id, created_at)</code> を1枚足し、主キー <code>(user_id, post_id)</code> で<strong>二重リポストを DB が防ぐ</strong>。取り消しは行の削除、リポスト数は <code>post_id</code> で数える。第06章の <code>likes</code> がそっくり再利用できます。難所はタイムラインで、<code>ListTimeline</code> に「フォロイーがリポストしたもの」を<strong>リポスト時刻で</strong>合流させる必要があります。一方<strong>引用リポスト（コメント付き）</strong>は、それ自体が<strong>本文を持つ新しい投稿</strong>なので、<code>posts</code> に <code>quoted_post_id BIGINT REFERENCES posts(id)</code> を1列足す——<code>reply_to_id</code> の兄弟のような自己参照になります。「関係か、新しい投稿か」で足す場所が変わる、が勘所です。</p></div>
+    </details>
+
+    <h2>理解度チェック</h2>
+    <p>本書全体を横断する問いです。<strong>自分の言葉で</strong>答えられたら、Chirp を「使える」だけでなく「作れる／語れる」ものにできています。</p>
+    <details class="qa"><summary>1. fan-out on read（本書）と fan-out on write は、それぞれ何を軽くし何を重くするか。有名人問題とは何で、現実解は何か。</summary>
+      <div class="qa-body"><p><strong>read 方式（<code>ListTimeline</code>）</strong>は、投稿を <code>posts</code> に1行 INSERT するだけ（<strong>書きが軽い</strong>）、タイムラインは実体を持たず読むたびに計算する（<strong>読みが重い・保存は少・一貫性は常に最新</strong>でフォロー解除も即反映）。<strong>write 方式</strong>は、投稿時に全フォロワーの受信箱へ複製する（<strong>書きが重い・保存が多</strong>）、ホームは自分の受信箱を読むだけ（<strong>読みが軽い</strong>）が、元データの変更を受信箱に追随させる<strong>一貫性の宿題</strong>を負う。<strong>有名人問題</strong>は、フォロワーが極端に多いユーザーの1投稿が数百万件の受信箱への複製を招き、<strong>配布コストが爆発</strong>すること。<strong>現実解はハイブリッド</strong>——普通のユーザーは配り、有名人は配らず読み時に混ぜる。Chirp の規模では read 方式が正しく、切り替えは<strong>実測で遅くなってから</strong>。</p></div>
+    </details>
+    <details class="qa"><summary>2. 連番 ID（<code>BIGSERIAL</code>）の2つの代償は何か。推測不能 ID は認可の代わりになるか。ULID が SNS 向きなのはなぜか。</summary>
+      <div class="qa-body"><p>代償は<strong>①件数が漏れる</strong>（<code>id: 1024</code> から登録者数や成長率が観測できる）と<strong>②URL を +1 で辿れる</strong>（連番は「隣」を機械生成でき、認可が甘いと IDOR で芋づる式に漏れる）。<strong>推測不能 ID は認可の代わりにならない</strong>——本丸は第01章の <code>requireAuth</code>＋本人チェックで、推測不能 ID はその上に足す「総当たりされにくさ・件数を漏らさない」という<strong>深さの一枚</strong>。鍵をかけずに表札を隠すだけでは危険。<strong>ULID が SNS 向き</strong>なのは、「先頭に時刻＋末尾に乱数」の構造ゆえ<strong>推測されにくさと時間順ソートを両立</strong>し、第04章のキーセット（<code>id &lt; $2</code>）が<strong>ほぼそのまま活きる</strong>から。UUID v4 は時間順に並ばずキーセットの鍵を失う。</p></div>
+    </details>
+    <details class="qa"><summary>3. 本書を貫く設計原則を3つ挙げ、それぞれ Chirp のどこで効いたかを言え。</summary>
+      <div class="qa-body"><p>例（6つのうち3つ）: <strong>多層防御</strong>——280字上限を DB の <code>CHECK</code>（00章）＋Go 検証（02章）＋フロント制限（08章）で三重に守り、どれが破れても次が残る。<strong>集合で考える（N+1回避）</strong>——20件のメタ情報を1件ずつ引く61回を、<code>GetPostMeta</code> の <code>ANY($1)</code> で4回に畳んだ（07章）。往復回数こそがコストで、DB は集合演算が得意。<strong>層の分離</strong>——DB アクセスを <code>store</code> に閉じ込め、<code>api</code> は SQL を書かず <code>store</code> の関数を呼ぶだけ（全章）。おかげで各機能を独立に読み書きテストでき、SQL や索引の変更は <code>store</code> と <code>schema.sql</code> に閉じる（ただし ID の型のような層をまたぐ契約の変更は、DTO やフロントの型まで波及する）。（他に冪等性・キーセット・DTO で公開を絞る、も可。）</p></div>
+    </details>
+
+    <h2>おわりに</h2>
+    <p>序章で、リチャード・ファインマンの黒板に残された言葉を引きました。</p>
+    <blockquote>作れないものは、理解していない。
+      <cite>What I cannot create, I do not understand. — Richard Feynman</cite>
+    </blockquote>
+    <p>Twitter を「使ったことがある」人は無数にいます。しかし、<strong>認証はどう身元を毎回確かめるのか</strong>、<strong>タイムラインはどう組み立てられるのか</strong>、<strong>なぜ ID が連番だと件数が漏れるのか</strong>——これらを<strong>説明できる</strong>人は、ぐっと減ります。そして<strong>実際に作れる</strong>人は、さらに少ない。あなたは今、その少ない側にいます。空の PostgreSQL から始めて、bcrypt でパスワードを守り、JWT を HttpOnly Cookie にしまい、キーセットでタイムラインを引き、N+1 を4回に畳み、React の画面から触れるところまで——<strong>一枚ずつ、自分の手で積み上げた</strong>。この最終章で「選ばなかった道」まで語れるのは、<strong>選んだ道を作り切ったから</strong>です。地図を読めるのは、その土地を歩いた者だけ。</p>
+    <p>「使えること」と「作れること」は、別の能力です。使うだけなら、内部は魔法の箱のままでいい。しかし作った今、Chirp の中に魔法は一つもありません。すべてが「なぜそうするか」を持った<strong>設計判断の積み重ね</strong>で、その一つ一つをあなたは自分の言葉で語れる。<strong>作れた、ということは、理解した、ということです。</strong></p>
+    <p>では、次の一歩を。この本の続きは、<strong>あなた自身の機能</strong>です。§4 で素描したどれか——<code>likes</code> の形を再利用する<strong>リポスト</strong>、fan-out を再演する<strong>通知</strong>、多対多の<strong>ハッシュタグ</strong>、認可を深める<strong>DM</strong>——を、この6つの原則を武器に、自分の手で足してみてください。もう「まったく新しい概念」はほとんど出てきません。8章ぶんの土台の上に、あなたが選んだ一機能を建てる。そのとき、この本は本当にあなたのものになります。</p>
+    <p>ここまで積み上げてくれて、ありがとうございました。空だった4つのテーブルは、もう「あなたが理解した SNS」になりました。<strong>さあ、次は何を作りますか。</strong></p>
+
+    <div class="chap-foot">
+      <a class="pager" href="08-web.html"><span class="dir">← 前へ</span>第08章 · 画面をつける（React）</a>
+      <a class="pager next" href="index.html"><span class="dir">↑ 序章へ</span>はじめに・準備へ戻る</a>
+    </div>
+  </main>
+</div>
+</body>
+</html>

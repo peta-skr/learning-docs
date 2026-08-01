@@ -1,0 +1,229 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>ディスクからつくるデータベース — はじめに・準備</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500;600&family=Source+Serif+4:opsz,wght@8..60,400;8..60,600;8..60,700&family=Noto+Serif+JP:wght@400;600;700&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<div class="shell">
+
+  <aside class="spine">
+    <a class="wordmark" href="index.html">MINIDB · from scratch</a>
+    <div class="book-title">ディスクから<br>つくるデータベース</div>
+    <div class="book-sub">Go で B+Tree から SQL まで</div>
+
+    <div class="legend"><span>読む <b>↓</b></span><span>組む <b>↑</b></span></div>
+
+    <nav aria-label="目次">
+      <ul class="toc">
+        <li><a class="nav-item current" aria-current="page" href="index.html"><span class="nav-num">序</span><span class="nav-label">はじめに・準備<span class="nav-tag">Setup</span></span></a></li>
+        <li><a class="nav-item" href="00-disk.html"><span class="nav-num">00</span><span class="nav-label">ディスクとページ<span class="nav-tag">Disk</span></span></a></li>
+        <li><a class="nav-item" href="01-page.html"><span class="nav-num">01</span><span class="nav-label">ページの中身<span class="nav-tag">Page</span></span></a></li>
+        <li><a class="nav-item" href="02-buffer.html"><span class="nav-num">02</span><span class="nav-label">バッファプール<span class="nav-tag">Buffer</span></span></a></li>
+        <li><a class="nav-item" href="03-btree.html"><span class="nav-num">03</span><span class="nav-label">B+Tree 索引<span class="nav-tag">Index</span></span></a></li>
+        <li><a class="nav-item" href="04-catalog.html"><span class="nav-num">04</span><span class="nav-label">表とカタログ<span class="nav-tag">Catalog</span></span></a></li>
+        <li><a class="nav-item" href="05-sql.html"><span class="nav-num">05</span><span class="nav-label">SQL を実行する<span class="nav-tag">Query</span></span></a></li>
+        <li><a class="nav-item" href="06-wal.html"><span class="nav-num">06</span><span class="nav-label">壊れない仕組み<span class="nav-tag">WAL</span></span></a></li>
+        <li><a class="nav-item" href="07-txn.html"><span class="nav-num">07</span><span class="nav-label">索引とトランザクション<span class="nav-tag">Txn</span></span></a></li>
+      </ul>
+    </nav>
+
+    <div class="spine-foot">
+      各章は一つの層。<br>下（ディスク）から上（SQL）へ<br>積み上げて動かしていく。
+    </div>
+  </aside>
+
+  <main class="reading">
+    <div class="eyebrow"><span>序章</span><span class="depth">— はじめに・準備</span></div>
+    <h1>データベースは、魔法ではない</h1>
+    <p class="lede"><code>SELECT * FROM users WHERE id = 1</code> と打つと、一瞬で行が返ってくる。あの一行の裏で何が起きているのか — それを、動くコードを一歩ずつ追いながら解き明かしていく本です。</p>
+
+    <p>データベースを「使う」ことはできても、「中で何が起きているか」を説明できる人は多くありません。バッファキャッシュ、B+Tree、WAL、トランザクション。言葉は知っていても、実際に動くものを一度も作ったことがなければ、それはまだ理解ではなく暗記です。</p>
+
+    <p>この本の方針はひとつです。<strong>作って理解する。</strong> 既存のデータベースや KV ライブラリは使いません。ディスク上のバイト列という一番低いところから始めて、その上に少しずつ層を積み上げ、最後には文字列の SQL を受け取って結果を返す、小さいけれど本物の RDBMS を Go で組み上げます。全体でも約 3,600 行（テスト込みで約 5,000 行）。ひとりの人間が全部を読み切れる大きさです。</p>
+
+    <blockquote>
+      作れないものを、私は理解していない。
+      <cite>Richard Feynman</cite>
+    </blockquote>
+
+    <h2>この本の読み方</h2>
+    <p>章は、そのままデータベースの<strong>層（レイヤ）</strong>に対応しています。左の目次を見てください。一番下が「ディスク」、一番上が「SQL」。<strong>組むときは下から上へ</strong>。土台のない家は建たないのと同じで、ディスクの読み書きができないうちに SQL は動きません。</p>
+
+    <div class="ascii">minidb の全体像 — 8つの層（章）
+
+  ┌──────────────────────────────────────────────┐
+  │ 07 トランザクション   BEGIN / COMMIT / ROLLBACK │ ← 第07章
+  ├──────────────────────────────────────────────┤
+  │ 05 SQL 実行          字句解析→構文解析→実行     │ ← 第05章
+  ├──────────────────────────────────────────────┤
+  │ 04 表とカタログ       CREATE TABLE / 行の形     │ ← 第04章
+  ├──────────────┬───────────────────────────────┤
+  │ 03 B+Tree 索引│ 06 WAL（クラッシュ回復）        │ ← 第03章 / 第06章
+  ├──────────────┴───────────────────────────────┤
+  │ 02 バッファプール     ページのメモリキャッシュ    │ ← 第02章
+  ├──────────────────────────────────────────────┤
+  │ 01 スロット化ページ   1ページに複数レコード       │ ← 第01章
+  ├──────────────────────────────────────────────┤
+  │ 00 ディスクマネージャ  ファイル = 4KBページの並び │ ← 第00章
+  └──────────────────────────────────────────────┘
+                    ▼
+              1個のファイル (mydata.db)</div>
+
+    <p>各章は<strong>ステップ</strong>に分かれています。1ステップ = 「コードを1かたまり書いて（読んで）、動かして、確認する」の単位です。ステップごとに次のものが必ずあります。</p>
+
+    <ul>
+      <li><strong>コードの全文</strong> — 断片ではなく、その時点で必要なコードすべてを載せます。本書のコードはリポジトリの <code>src/</code> にある完成版と一致しています。</li>
+      <li><strong>コードの解説</strong> — 初見でつまずきやすい行は、取り出して説明します。</li>
+      <li><strong>動かして確認</strong> — 実際に打つコマンドと、出るはずの出力。「読んだだけ」で先に進まないための関所です。</li>
+    </ul>
+
+    <p>章末には<strong>つまずき FAQ</strong> と<strong>理解度チェック</strong>があります。理解度チェックの問いに自分の言葉で答えられたら、その章は卒業です。</p>
+
+    <div class="box map"><div class="box-k">☰ 進め方は2通り</div>
+      <ol>
+        <li><strong>読む派</strong> — <code>src/</code> の完成コードをエディタで開き、本書を横に置いて読み進め、各ステップの「動かして確認」を実行する。<em>初心者にはこちらをおすすめします。</em></li>
+        <li><strong>写経派</strong> — 空の Go モジュールを自分で作り、本書のコードを手で打ちながら組み上げる。時間はかかりますが、いちばん力がつきます。動かなくなったら <code>src/</code> と差分を見比べれば復帰できます。</li>
+      </ol>
+    </div>
+
+    <h2>前提と、かかる時間</h2>
+    <p>必要なのは <strong>Go の基礎文法</strong>（変数・関数・構造体・スライス・<code>if err != nil</code>）と<strong>ターミナル操作</strong>だけです。データベース内部の予備知識はまったく要りません。むしろ「知らない」状態から作った方が、一つひとつの概念が腑に落ちます。</p>
+    <p>Go の中でも本書で多用する少し低レベルな道具（バイト列の操作、ファイル I/O、インターフェース）は、この序章の「Go の予備知識」でまとめて解説し、各章でも初出のたびに <strong>GO メモ</strong>というボックスで補足します。分からない文法が出てきたら、まずそこを見てください。</p>
+    <p>読了目安は、読む派で <strong>1章あたり2〜4時間、全体で20〜30時間</strong>。1日1ステップでも1〜2ヶ月で完走できます。急がないこと。1章飛ばすと次の章は必ず分からなくなる構成なので、<strong>順番に、確認コマンドを全部通しながら</strong>進んでください。</p>
+
+    <h2>環境構築</h2>
+    <p>やることは3つだけです。Go を入れ、コードを手元に置き、テストが通ることを確かめます。</p>
+
+    <h3>1. Go をインストールする</h3>
+    <p><a href="https://go.dev/dl/" target="_blank" rel="noopener">go.dev/dl</a> から自分の OS 用のインストーラを入れて、ターミナルで確認します。本書のコード（<code>src/go.mod</code>）は <strong>Go 1.26 以上</strong>を要求するので、それより古い場合は入れ直してください。</p>
+    <pre class="term"><code><span class="ps">$</span> go version
+<span class="out">go version go1.26.1 windows/amd64</span></code></pre>
+
+    <h3>2. コードを手元に置く</h3>
+    <p>本書のコード一式はリポジトリの <code>src/</code> ディレクトリです。以後、<strong>本書のコマンドはすべて <code>src/</code> の中で実行します</strong>。</p>
+    <div class="ascii">src/
+├── go.mod                 ← Go モジュール定義（module minidb）
+├── db.go                  ← 全層を束ねる公開 API（Open / Exec / Close）
+├── e2e_test.go            ← 全体を通しで検証するテスト
+├── internal/storage/      ← 第00-01章: ディスクとページ
+├── internal/buffer/       ← 第02章: バッファプール
+├── internal/btree/        ← 第03章: B+Tree 索引
+├── internal/catalog/      ← 第04章: 表とカタログ
+├── internal/sql/          ← 第05章: SQL の解釈と実行
+├── internal/wal/          ← 第06章: WAL とクラッシュ回復
+├── internal/txn/          ← 第07章: トランザクション
+└── cmd/minidb-repl/       ← 対話シェル</div>
+
+    <div class="gonote"><div class="box-k">GO メモ · internal ディレクトリ</div>
+      <p>Go では <code>internal/</code> 配下のパッケージは、そのモジュールの中からしか import できません。「DB の内部部品なので外からは触らせない」という設計意図を、言語機能で表現しています。</p>
+    </div>
+
+    <h3>3. テストが通ることを確かめる</h3>
+    <pre class="term"><code><span class="ps">$</span> cd src
+<span class="ps">$</span> go test ./...
+<span class="out">ok      minidb  2.508s
+?       minidb/cmd/minidb-repl  [no test files]
+ok      minidb/internal/btree   1.582s
+ok      minidb/internal/buffer  2.274s
+ok      minidb/internal/catalog 1.405s
+?       minidb/internal/sql     [no test files]
+ok      minidb/internal/storage 1.484s
+ok      minidb/internal/txn     1.403s
+ok      minidb/internal/wal     1.570s</span></code></pre>
+    <p><code>?</code> は「そのパッケージにはテストファイルが無い」という意味で、問題ではありません。<code>FAIL</code> の行が1つも無ければ準備完了です。このテスト群は、各章の「完了の合図」を機械的に検収するものでもあります。</p>
+
+    <h3>おまけ: 完成品を先に触ってみる</h3>
+    <p>これから作るものの完成形を、先に5分だけ触っておきましょう。ゴールを知ってから登る山は、迷いません。</p>
+    <pre class="term"><code><span class="ps">$</span> go run ./cmd/minidb-repl mydata.db
+<span class="out">minidb — 単一ファイル組み込み RDBMS（.exit で終了 / .stats で統計）</span>
+<span class="ps">minidb&gt;</span> CREATE TABLE users (id INT, name TEXT, age INT)
+<span class="out">OK（0 行）</span>
+<span class="ps">minidb&gt;</span> INSERT INTO users VALUES (1, 'alice', 30)
+<span class="out">OK（1 行）</span>
+<span class="ps">minidb&gt;</span> INSERT INTO users VALUES (2, 'bob', 25)
+<span class="out">OK（1 行）</span>
+<span class="ps">minidb&gt;</span> SELECT name FROM users WHERE age &gt; 28
+<span class="out">| name  |
+| ----- |
+| alice |
+（1 行 / plan: seqscan(users)）</span>
+<span class="ps">minidb&gt;</span> .exit</code></pre>
+    <p>終了したら、カレントディレクトリに <code>mydata.db</code> というファイルができているはずです。<strong>この1個のファイルの中に、いま作った表も行も全部入っています。</strong>隣に <code>mydata.db.wal</code> という空のファイル（正常終了後は0バイト）もできますが、これは第06章の主役（ログ）なので今は気にしなくてOKです。この本はこれから8章かけて、このファイルの中身を1バイト単位で説明できるようになるまで潜っていきます。</p>
+
+    <h2>Go の予備知識 — 本書で使う道具箱</h2>
+    <p>DB の実装は「バイト列とファイル」の世界です。Web アプリの Go ではあまり出てこない道具を使うので、最初にまとめて顔合わせしておきます。<strong>いま全部を覚える必要はありません。</strong>各章で出てきたときに、ここへ戻って確認できれば十分です。</p>
+
+    <h3>バイトとバイト列</h3>
+    <table>
+      <tr><th>書き方</th><th>意味</th></tr>
+      <tr><td><code>byte</code></td><td>1バイト（0〜255 の整数。<code>uint8</code> の別名）</td></tr>
+      <tr><td><code>[]byte</code></td><td>バイトの<strong>スライス</strong>。長さは実行時に変わる</td></tr>
+      <tr><td><code>[4096]byte</code></td><td>バイトの<strong>配列</strong>。長さ4096で固定。値としてコピーされる</td></tr>
+      <tr><td><code>p[10:20]</code></td><td>スライス式。10〜19バイト目を<strong>指す窓</strong>を作る（コピーではない！ 窓に書くと元も変わる）</td></tr>
+    </table>
+    <p>本書では「1ページ = <code>[4096]byte</code>」のような固定長配列が主役です。スライス <code>p[10:20]</code> が<strong>コピーではなく同じメモリへの参照</strong>であることは、第01章以降で何度も効いてくるので、ここだけは覚えておいてください。</p>
+
+    <h3>数値をバイト列に焼き込む — encoding/binary</h3>
+    <p>数値 <code>1000</code> をファイルに書くには、バイト列に変換する必要があります。ここでは<strong>ビッグエンディアン</strong>（大きい桁を先に置く方式）で示します。実装では層ごとに使い分けていて（ページ内の管理値などは並びの都合でリトルエンディアン、B+Tree のキーは大小順を保つためにビッグエンディアン）、その理由は第01章の GO メモで説明します。</p>
+    <pre><code><span class="cm">// uint32 の 1000 を、4バイトに焼き込む / 読み戻す</span>
+buf := <span class="kw">make</span>([]<span class="kw">byte</span>, <span class="st">4</span>)
+binary.BigEndian.PutUint32(buf, <span class="st">1000</span>)  <span class="cm">// buf = [0x00 0x00 0x03 0xE8]</span>
+n := binary.BigEndian.Uint32(buf)      <span class="cm">// n = 1000</span></code></pre>
+    <p>1000 = 3×256 + 232 = <code>0x03E8</code> なので、4バイトに埋めると <code>00 00 03 E8</code>。この「手計算でバイト列を追える」感覚が、本書の全章で武器になります。</p>
+
+    <h3>ファイル I/O — os.File の3つのメソッド</h3>
+    <table>
+      <tr><th>メソッド</th><th>何をするか</th></tr>
+      <tr><td><code>f.ReadAt(buf, off)</code></td><td>ファイルの <code>off</code> バイト目から <code>len(buf)</code> バイト読む。<strong>位置を明示する</strong>ので、どこを読むかが常に計算で決まる</td></tr>
+      <tr><td><code>f.WriteAt(buf, off)</code></td><td>同じく、位置を明示して書く</td></tr>
+      <tr><td><code>f.Sync()</code></td><td>OS に溜まった書き込みを<strong>物理ディスクまで</strong>届けさせる（= fsync）。第00章と第06章の主役</td></tr>
+    </table>
+    <p>普段よく見る <code>f.Read</code> / <code>f.Write</code>（現在位置から順に読み書き）は、本書ではログファイル（第06章）でしか使いません。DB 本体は「ページ番号 × ページサイズ = 位置」と計算して <code>ReadAt</code> / <code>WriteAt</code> で狙い撃ちします。</p>
+
+    <h3>インターフェース — 「同じ顔」で差し替える</h3>
+    <p>本書の設計の背骨は、たった3メソッドのインターフェースです（第02章で登場）。</p>
+    <pre><code><span class="kw">type</span> <span class="ty">Store</span> <span class="kw">interface</span> {
+    Read(id <span class="ty">PageID</span>, fn <span class="kw">func</span>(p *<span class="ty">Page</span>) <span class="ty">error</span>) <span class="ty">error</span>
+    Write(id <span class="ty">PageID</span>, fn <span class="kw">func</span>(p *<span class="ty">Page</span>) <span class="ty">error</span>) <span class="ty">error</span>
+    Allocate(fn <span class="kw">func</span>(id <span class="ty">PageID</span>, p *<span class="ty">Page</span>) <span class="ty">error</span>) (<span class="ty">PageID</span>, <span class="ty">error</span>)
+}</code></pre>
+    <p>Go のインターフェースは「このメソッドを持っていれば誰でも代わりになれる」という約束です。生のディスクも、キャッシュ（第02章）も、トランザクション（第07章）も、全部この <code>Store</code> の顔をしています。だから上の層（B+Tree や表）は、相手が誰かを知らずに動く。この一点が、本書のコードが約3,600行で済んでいる最大の理由です。</p>
+
+    <h3>テストの読み方・動かし方</h3>
+    <p>本書では「動かして確認」のほとんどが <code>go test</code> です。よく使う形を並べておきます。</p>
+    <pre class="term"><code><span class="cm"># パッケージのテストを全部、名前を表示しながら実行</span>
+<span class="ps">$</span> go test ./internal/storage -v
+
+<span class="cm"># 名前が TestPersist で始まるテストだけ実行</span>
+<span class="ps">$</span> go test ./internal/storage -run TestPersist -v
+
+<span class="cm"># 全パッケージまとめて（本書の総合検収）</span>
+<span class="ps">$</span> go test ./...</code></pre>
+    <div class="gonote"><div class="box-k">GO メモ · テストファイル</div>
+      <p><code>xxx_test.go</code> というファイル名の中の <code>func TestXxx(t *testing.T)</code> が自動でテストとして実行されます。<code>t.Fatalf(...)</code> が呼ばれるとそのテストは失敗（FAIL）。本書のテストは「章の完了条件」を書き下したものなので、<strong>テスト自体も教材</strong>です。ぜひ読んでください。</p>
+    </div>
+
+    <h2>この本の約束ごと</h2>
+    <ul>
+      <li>コードブロックの上のラベル（例: <code>internal/storage/disk.go</code>）は、そのコードが <code>src/</code> のどのファイルにあるかを示します。</li>
+      <li>紙面の都合で一部を省くときは、必ず <code>// …（後のステップで）</code> のように省略を明示します。黙って削ることはしません。</li>
+      <li><strong>GO メモ</strong> = Go の文法・標準ライブラリの補足。<strong>⚠ 落とし穴</strong> = 実際にバグになりやすい箇所。<strong>▸ 動かして確認</strong> = 実行するコマンドと期待される出力です。</li>
+    </ul>
+
+    <p class="hero-rule">それでは、一番下の層から。</p>
+    <p>最初の章で作るのは「ファイルを 4KB ごとの区画に切って、番号で読み書きする」だけの小さな部品です。地味に見えますが、データベースが<strong>再起動してもデータを覚えている</strong>という最初の魔法は、この章で解けます。</p>
+
+    <div class="chap-foot">
+      <span></span>
+      <a class="pager next" href="00-disk.html"><span class="dir">次へ →</span>第00章 · ディスクとページ</a>
+    </div>
+  </main>
+</div>
+</body>
+</html>

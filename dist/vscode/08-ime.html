@@ -1,0 +1,475 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>第08章 日本語を打つ — ゼロから作るテキストエディタ</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500;600&family=Source+Serif+4:opsz,wght@8..60,400;8..60,600;8..60,700&family=Noto+Serif+JP:wght@400;600;700&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<div class="shell">
+
+  <aside class="spine">
+    <a class="wordmark" href="index.html">MINT EDITOR · from scratch</a>
+    <div class="book-title">ゼロから作る<br>テキストエディタ</div>
+    <div class="book-sub">TypeScript と Canvas で mint editor を組む</div>
+
+    <div class="legend"><span>読む <b>↓</b></span><span>組む <b>↑</b></span></div>
+
+    <nav aria-label="目次">
+      <ul class="toc">
+        <li><a class="nav-item" href="index.html"><span class="nav-num">序</span><span class="nav-label">はじめに・準備<span class="nav-tag">Setup</span></span></a></li>
+        <li><a class="nav-item" href="00-overview.html"><span class="nav-num">00</span><span class="nav-label">文字を打てる箱の正体<span class="nav-tag">Overview</span></span></a></li>
+        <li><a class="nav-item" href="01-buffer.html"><span class="nav-num">01</span><span class="nav-label">テキストを持つ<span class="nav-tag">Buffer</span></span></a></li>
+        <li><a class="nav-item" href="02-document.html"><span class="nav-num">02</span><span class="nav-label">行とカーソル<span class="nav-tag">Doc</span></span></a></li>
+        <li><a class="nav-item" href="03-history.html"><span class="nav-num">03</span><span class="nav-label">編集と取り消し<span class="nav-tag">Undo</span></span></a></li>
+        <li><a class="nav-item" href="04-view.html"><span class="nav-num">04</span><span class="nav-label">画面に描く<span class="nav-tag">Canvas</span></span></a></li>
+        <li><a class="nav-item" href="05-input.html"><span class="nav-num">05</span><span class="nav-label">入力を受ける<span class="nav-tag">Input</span></span></a></li>
+        <li><a class="nav-item" href="06-search.html"><span class="nav-num">06</span><span class="nav-label">複数カーソルと検索<span class="nav-tag">Multi</span></span></a></li>
+        <li><a class="nav-item" href="07-highlight.html"><span class="nav-num">07</span><span class="nav-label">色をつける<span class="nav-tag">Syntax</span></span></a></li>
+        <li><a class="nav-item current" aria-current="page" href="08-ime.html"><span class="nav-num">08</span><span class="nav-label">日本語を打つ<span class="nav-tag">IME</span></span></a></li>
+        <li><a class="nav-item" href="09-assemble.html"><span class="nav-num">09</span><span class="nav-label">開いて保存する・組み立て<span class="nav-tag">Assemble</span></span></a></li>
+      </ul>
+    </nav>
+
+    <div class="spine-foot">
+      各章は一つの部品・機能。<br>下（バッファ）から上（UI）へ<br>積み上げて動かしていく。
+    </div>
+  </aside>
+
+  <main class="reading">
+    <div class="progress-tag">第08章 / 全10章 · 層: IME · 読了目安 1.5〜2時間</div>
+    <div class="eyebrow"><span>IME</span><span class="depth">— 未確定文字列と隠し textarea</span></div>
+    <h1>日本語を打つ</h1>
+    <p class="lede">序章で触った完成品には、こんな一節がありました —— 「IME をオンにして<strong>にほんご</strong>と打ち、変換候補が<strong>カーソルの真下</strong>に出て、確定すると<strong>1回の編集</strong>として入る」。当たり前のようで、実は英数字の入力とはまったく違う仕組みが要ります。日本語は<strong>打った瞬間には確定していない</strong>からです。「にほんご」と打っている間、その4文字は<strong>まだ文書に入っていません</strong>。変換候補を選んで Enter を押したその瞬間に、初めて「日本語」という確定文字列が1つの編集として文書に流れ込む。この章では、その<strong>変換中（未確定）</strong>という宙づりの状態を、<code>editor/input.ts</code> の <code>composition</code> イベント3兄弟で捌きます。主役は隠れた <code>&lt;textarea&gt;</code> と、それを追いかけるカーソルです。</p>
+
+    <div class="box goal"><div class="box-k">◈ この章のゴール</div>
+      <p>この章は<strong>ブラウザで手を動かして</strong>確かめるのが主眼です。次の 2 つを、自分の目で見られたら達成です。</p>
+      <ol>
+        <li><code>src</code> で <code>npm run dev</code> し、IME で「にほんご」と打つ。変換候補の窓が<strong>カーソルの真下</strong>に出て、確定した瞬間に「日本語」がまとめて1回で入り、<code>Ctrl+Z</code> で<strong>一括で</strong>消えることを確認する。</li>
+        <li><code>compositionstart → compositionupdate → compositionend</code> の3イベントが、それぞれ「変換の開始・更新・確定」に対応し、確定までは<strong>文書を一切触らない</strong>（view が見た目だけ描く）ことを、コードを読んで自分の言葉で説明できる。</li>
+      </ol>
+    </div>
+
+    <div class="box map"><div class="box-k">☰ この章のステップ</div>
+      <ol>
+        <li><a href="#step-1">なぜ日本語には「隠し textarea」が要るのか</a></li>
+        <li><a href="#step-2">隠し textarea をどこに置くか（<code>main.ts</code> / CSS）</a></li>
+        <li><a href="#step-3">「変換中」を型で持つ — <code>CompositionState</code></a></li>
+        <li><a href="#step-4">InputHandler の骨格 — composition を配線する</a></li>
+        <li><a href="#step-5">カーソルの真下に候補窓を出す — 追従の仕掛け</a></li>
+        <li><a href="#step-6">変換のはじまり — <code>compositionstart</code></a></li>
+        <li><a href="#step-7">変換の途中 — <code>compositionupdate</code></a></li>
+        <li><a href="#step-8">変換の確定 — <code>compositionend</code> と「1 edit」</a></li>
+        <li><a href="#step-9">未確定文字列は view が見た目だけ描く</a></li>
+      </ol>
+    </div>
+
+    <h2>なぜ IME だけ特別扱いが要るのか</h2>
+    <p>第05章で、キーボードとマウスを編集コマンドへつなぐ <code>InputHandler</code> を作りました。英数字なら話は単純です。<code>a</code> キーを叩けば <code>a</code> が1文字、文書に入る。打鍵と文字が1対1で対応します。ところが日本語はそういきません。「にほんご」という4文字を出すために、あなたは <code>n i h o n g o</code> と<strong>7回</strong>キーを叩き、スペースで変換し、候補を選び、Enter で確定します。この一連の操作の<strong>途中</strong>——ローマ字が「にほんご」に化け、変換候補が浮かんでいる状態——で打たれた文字は、<strong>まだどれも確定していません</strong>。</p>
+    <p>この「まだ確定していない、変換中の文字列」を <strong>未確定文字列（preedit / composition string）</strong>と呼びます。ブラウザはこの未確定文字列の一生を、専用のイベント <code>compositionstart</code> / <code>compositionupdate</code> / <code>compositionend</code> で教えてくれます。本書の設計方針は、<code>CLAUDE.md</code> に一行で書かれているとおりです —— <strong>「未確定文字列は文書に入れない。ビューが見た目だけ差し込む。確定で 1 edit」</strong>。この章は、その一行を実際のコードで解きほぐす作業です。</p>
+
+    <div class="ascii">「にほんご」を打って確定するまでの流れ
+
+  キー入力       n i h o n g o  [変換]        [Enter]
+                 │                            │
+  ブラウザ  compositionstart …update…update  compositionend(data="日本語")
+                 │                            │
+  mint editor    │   view.composition に      │   editor.insertText("日本語")
+  がやること      │   未確定文字列を持たせ      │   ＝ ここで初めて
+                 │   view が「見た目だけ」描く  │   文書に 1 edit 入る
+                 ▼                            ▼
+  文書(Document) 変化なし ── 変化なし ── 変化なし ─▶ 「日本語」が挿入される
+                (変換中は Undo 履歴も汚れない)</div>
+
+    <p>図の一番下の行が肝です。<strong>変換中、文書（<code>Document</code>）は一度も変わりません。</strong> だから Undo 履歴も汚れない。変換を何度やり直しても、文書に残るのは「確定した1回」だけ。この章の全コードは、この一本の筋を守るためにあります。担当ファイルは <code>editor/input.ts</code>。第05章で骨格を見たクラスの、<strong>IME 担当パート</strong>を今回は主役に据えます。IME 以外のキー処理（矢印・Ctrl コマンド・編集キー）は第05章で扱ったので、この章では <code>// …（第05章）</code> と省略を明示して先へ進みます。</p>
+
+    <h2 class="step" id="step-1"><span class="step-no">Step 1</span>なぜ日本語には「隠し textarea」が要るのか</h2>
+    <p>本書のエディタは、文字を1枚の <code>&lt;canvas&gt;</code> に<strong>絵として描いて</strong>います（第04章）。ここで根本的な問題が起きます。<strong><code>&lt;canvas&gt;</code> は入力を受け取れない</strong>のです。<code>&lt;input&gt;</code> や <code>&lt;textarea&gt;</code> のようなフォーム要素だけが、キーボードのフォーカスを持ち、IME の変換窓を呼び出せます。ただの絵である canvas には、IME を差し向ける先がありません。</p>
+    <p>そこで本書は、昔ながらの——そして VSCode や CodeMirror も使う——常套手段を採ります。<strong>透明な <code>&lt;textarea&gt;</code> を1枚、画面のカーソル位置に忍ばせておき、そこに常にフォーカスを当てておく</strong>のです。ユーザーには見えませんが、キーも IME もすべてこの隠し textarea が受け取ります。<code>InputHandler</code> はその textarea へのイベントを横取りして、editor のコマンドに翻訳する。この方針は、<code>input.ts</code> の先頭コメントにそのまま書いてあります。</p>
+
+    <div class="file-tag">editor/input.ts</div>
+    <pre><code><span class="kw">import</span> <span class="kw">type</span> { <span class="ty">Editor</span> } <span class="kw">from</span> <span class="st">"./editor"</span>;
+<span class="kw">import</span> <span class="kw">type</span> { <span class="ty">EditorView</span> } <span class="kw">from</span> <span class="st">"./view"</span>;
+
+<span class="cm">/**
+ * InputHandler — キーボード・IME・マウスを editor のコマンドへつなぐ。
+ *
+ * Canvas は入力を受け取れないので、画面上のカーソル位置に追従する
+ * 「透明な textarea」に常にフォーカスを当てておき、そこへの入力を横取りする。
+ *
+ * 日本語入力（IME）の要点:
+ * - 変換中の文字列はまだ文書に入れない。composition イベントで受け取り、
+ *   view が「見た目だけ」カーソル位置に描く。
+ * - compositionend で初めて、確定文字列を1つの編集として挿入する。
+ * - 変換中はすべてのキーコマンドを IME に譲る（keydown を無視する）。
+ */</span></code></pre>
+
+    <p>このコメントに、この章のすべてが凝縮されています。「透明な textarea」「変換中は文書に入れない」「view が見た目だけ描く」「compositionend で1つの編集」「変換中は keydown を無視」——5つの約束。以降のステップは、この5つを1つずつコードにしていく作業です。まず1つ目、その透明な textarea を<strong>どこに置くか</strong>から始めます。実はここに、本書屈指の厄介な落とし穴が潜んでいます。</p>
+
+    <div class="gonote"><div class="box-k">TS メモ · import type とは</div>
+      <p>先頭の <code>import type { Editor }</code> の <code>type</code> は、「これは<strong>型としてしか使わない</strong>インポートだ」とコンパイラに宣言するものです。実行時の JavaScript には <code>Editor</code> の型情報は残らない（消える）ので、この行はビルド後には完全に消滅します。値としては使わず、<code>: Editor</code> のように型注釈でだけ使うクラスを取り込むときにこう書くと、循環参照やバンドルの肥大を避けられます。<code>input.ts</code> は <code>Editor</code> と <code>EditorView</code> の<strong>形</strong>だけを借りて、実物はコンストラクタで受け取ります。</p>
+    </div>
+
+    <h2 class="step" id="step-2"><span class="step-no">Step 2</span>隠し textarea をどこに置くか</h2>
+    <p>透明な textarea は、DOM のどこに置いてもいい——わけではありません。<strong>置き場所を間違えると、変換候補の窓が画面のあらぬ場所へ飛びます。</strong> まず HTML の骨格を見ます。組み立ての本体は第09章の <code>main.ts</code> ですが、textarea の配置だけ先に確認しておきます。</p>
+
+    <div class="file-tag">src/main.ts（DOM 構築・該当箇所のみ／全文は第09章）</div>
+    <pre><code>  <span class="st">&lt;div class="editor-shell"&gt;</span>
+    <span class="st">&lt;div id="scroller"&gt;</span>
+      <span class="st">&lt;div id="sizer"&gt;&lt;/div&gt;</span>
+      <span class="st">&lt;canvas id="editor-canvas"&gt;&lt;/canvas&gt;</span>
+    <span class="st">&lt;/div&gt;</span>
+    <span class="cm">&lt;!-- スクロールしない座標系（shell 直下）に置く。scroller 内に置くと
+         コンテンツと一緒にスクロールし、viewport 座標の指定と二重にずれる --&gt;</span>
+    <span class="st">&lt;textarea id="hidden-input" autocorrect="off" autocapitalize="off" spellcheck="false"&gt;&lt;/textarea&gt;</span>
+  <span class="st">&lt;/div&gt;</span></code></pre>
+
+    <p>階層に注目してください。スクロールする本体は <code>#scroller</code> で、その中に <code>#sizer</code>（文書の実寸を確保する下敷き）と <code>&lt;canvas&gt;</code> が入っています。ところが <code>&lt;textarea id="hidden-input"&gt;</code> は <strong><code>#scroller</code> の<em>外側</em></strong>、<code>.editor-shell</code> の直下に置かれています。この「一段外」がすべてです。コメントが警告しているとおり —— <strong>scroller の中に置くと、スクロールと一緒に textarea も動いてしまい、座標が二重にずれる</strong>のです。</p>
+    <p>続いて、この textarea を「透明」にする CSS です。</p>
+
+    <div class="file-tag">src/style.css（該当箇所）</div>
+    <pre><code><span class="ty">.editor-shell</span> {
+  position: relative;         <span class="cm">/* 追従の基準になる座標系 */</span>
+  flex: <span class="st">1</span>;
+  min-height: <span class="st">0</span>;
+}
+
+<span class="cm">/* 透明な入力受け口。IME 候補窓の位置決めのためカーソルに追従する。
+   スクロールしない .editor-shell 直下に置く（scroller 内だと二重にずれる） */</span>
+<span class="ty">#hidden-input</span> {
+  position: absolute;
+  pointer-events: none;
+  width: <span class="st">2px</span>;
+  height: <span class="st">20px</span>;
+  padding: <span class="st">0</span>;
+  border: none;
+  outline: none;
+  background: transparent;
+  color: transparent;
+  caret-color: transparent;
+  resize: none;
+  overflow: hidden;
+  ime-mode: active;
+  z-index: <span class="st">1</span>;
+}</code></pre>
+
+    <p>ひとつずつ見ます。<code>position: absolute</code> は、後で <code>style.left</code> / <code>style.top</code> を書き換えてカーソルへ追従させるための土台です。基準になる座標系は、祖先で <code>position: relative</code>（または absolute）を持つ最も近い要素——ここでは <code>.editor-shell</code>——です。上の CSS で <code>.editor-shell</code> にわざわざ <code>position: relative</code> を付けているのはこのためで、<strong>これが無いと textarea はページ全体を基準に飛んでいきます</strong>。<code>pointer-events: none</code> はマウス操作を透過させ、クリックが下の canvas に届くようにします。<code>width: 2px; height: 20px</code> という極小サイズと、<code>background</code>・<code>color</code>・<code>caret-color</code> をすべて <code>transparent</code> にすることで、textarea は<strong>あるのに見えない</strong>存在になります。<code>ime-mode: active</code> は「この欄では IME をオンに」というヒント（対応ブラウザのみ）。<code>z-index: 1</code> で canvas の上に重ねます。</p>
+
+    <div class="box hazard"><div class="box-k">⚠ 落とし穴 — 隠し textarea は scroller の「外」に置く</div>
+      <p>これは本書が実際に踏んだ罠です。IME 用の隠し textarea を、うっかり <strong>スクロールする <code>#scroller</code> の<em>中</em></strong>に置くと、こうなります。textarea の位置を <code>style.top</code> でセットしても、<code>#scroller</code> が下へスクロールすると textarea も<strong>コンテンツと一緒に上へ流れて</strong>いきます。ところが変換候補の窓は、ブラウザが textarea の<strong>viewport（画面）上の実座標</strong>を見て出します。つまり「JS が指定した位置」と「スクロールでずれた実位置」の<strong>二重のズレ</strong>が生じ、候補窓がカーソルから離れる——ひどいときは画面外へ飛びます。<br>
+      対策は単純で、<strong>スクロールしない座標系</strong>（<code>.editor-shell</code> 直下）に textarea を置くこと。こうすれば textarea の位置は「viewport から見た canvas 上のカーソル位置」と一致し、候補窓はいつでもカーソルの真下に出ます。Step 5 の追従コードが <code>view.scroller.clientWidth</code> のような<strong>スクロールを含まない</strong>値だけで座標を決めているのも、この一貫性のためです。</p>
+    </div>
+
+    <h2 class="step" id="step-3"><span class="step-no">Step 3</span>「変換中」を型で持つ — CompositionState</h2>
+    <p>コードに入る前に、この章でずっと使う<strong>状態</strong>を1つ定義します。「いま変換中か」「未確定文字列は何か」「その中でカーソルはどこか」——この3つを1つのオブジェクトにまとめた型が <code>CompositionState</code> です。定義は view 側（<code>editor/view.ts</code>）にありますが、この状態こそが input と view をつなぐ<strong>約束</strong>なので、ここで見ておきます。</p>
+
+    <div class="file-tag">editor/view.ts（CompositionState の定義・抜粋／全文は第04章）</div>
+    <pre><code><span class="kw">export interface</span> <span class="ty">CompositionState</span> {
+  active: <span class="ty">boolean</span>;
+  <span class="cm">/** IME の未確定文字列 */</span>
+  text: <span class="ty">string</span>;
+  <span class="cm">/** 未確定文字列内のカーソル位置 */</span>
+  caret: <span class="ty">number</span>;
+}</code></pre>
+
+    <p>3つのフィールドの意味はそのまま読めます。</p>
+    <ul>
+      <li><code>active: boolean</code> — いま変換中か。<code>true</code> なら未確定文字列が宙に浮いている状態、<code>false</code> なら平常時。</li>
+      <li><code>text: string</code> — 未確定文字列そのもの。「にほんご」と打っている途中なら <code>"にほんご"</code>、変換候補を選べば <code>"日本語"</code>。この文字列は<strong>文書には入っていません</strong>。あくまで「いま宙に浮いている見た目」です。</li>
+      <li><code>caret: number</code> — 未確定文字列<strong>の中</strong>でのカーソル位置。長い文を打って一部だけ変換中のとき、未確定文字列内のどこにキャレットがあるかを表します。</li>
+    </ul>
+    <p><code>EditorView</code> はこの状態を1つ持っています。<code>input.ts</code> が composition イベントを受けるたびにこの <code>view.composition</code> を書き換え、<code>view</code> は次の描画でその中身を<strong>見た目だけ</strong>カーソル位置に差し込む。つまり <code>CompositionState</code> は、<strong>「文書には入れないが画面には出したい未確定文字列」を受け渡す唯一の通り道</strong>です。文書（<code>Document</code>）にはこの情報は一切流れ込みません。ここが設計の分水嶺です。</p>
+
+    <div class="gonote"><div class="box-k">TS メモ · なぜ状態を view 側に置くのか</div>
+      <p><code>CompositionState</code> を <code>input.ts</code> ではなく <code>view.ts</code> に定義しているのは、「この状態を<strong>使って絵を描く</strong>のが view だから」です。input は状態を<strong>書き込む</strong>側、view は<strong>読んで描く</strong>側。所有者を「最後に使う人」に寄せておくと、依存の向きが素直になります（input が view を知っていればよく、view は input を知らなくてよい）。実際 <code>input.ts</code> は <code>this.view.composition = { ... }</code> と代入するだけで、描画のことは何も知りません。関心の分離です。</p>
+    </div>
+
+    <h2 class="step" id="step-4"><span class="step-no">Step 4</span>InputHandler の骨格 — composition を配線する</h2>
+    <p>いよいよ <code>InputHandler</code> 本体です。まずクラスのフィールドと、コンストラクタでのイベント配線を見ます。この章に関係するフィールドは <code>textarea</code> と <code>compositionReplacedSelection</code> の2つですが、全体像のためフィールド宣言をそのまま載せます。</p>
+
+    <div class="file-tag">editor/input.ts（クラス宣言とフィールド）</div>
+    <pre><code><span class="kw">export class</span> <span class="ty">InputHandler</span> {
+  <span class="kw">private</span> editor: <span class="ty">Editor</span>;
+  <span class="kw">private</span> view: <span class="ty">EditorView</span>;
+  <span class="kw">private</span> textarea: <span class="ty">HTMLTextAreaElement</span>;
+  <span class="cm">/** ドラッグ選択中の anchor。null なら非ドラッグ */</span>
+  <span class="kw">private</span> dragAnchor: <span class="ty">number</span> | <span class="ty">null</span> = <span class="kw">null</span>;
+  <span class="cm">/** 変換開始時に選択範囲を削除したか（確定挿入を同じ Undo グループにするため） */</span>
+  <span class="kw">private</span> compositionReplacedSelection = <span class="kw">false</span>;
+
+  <span class="cm">/** Ctrl+O / Ctrl+S を main に委ねるためのフック */</span>
+  onRequestOpen: (() => <span class="ty">void</span>) | <span class="ty">null</span> = <span class="kw">null</span>;
+  onRequestSave: (() => <span class="ty">void</span>) | <span class="ty">null</span> = <span class="kw">null</span>;
+  onRequestFind: ((withReplace: <span class="ty">boolean</span>) => <span class="ty">void</span>) | <span class="ty">null</span> = <span class="kw">null</span>;
+  onEscape: (() => <span class="ty">boolean</span>) | <span class="ty">null</span> = <span class="kw">null</span>;</code></pre>
+
+    <p>この章の主役は <code>compositionReplacedSelection</code> という <code>boolean</code> フラグです。コメントに「変換開始時に選択範囲を削除したか」とあります。これは「選択している文字を、日本語入力で<strong>上書き</strong>したとき」——たとえば <code>"hello"</code> を選択したまま IME で「にほんご」と打って確定する場面——で効いてきます。この一連（選択の削除＋確定文字の挿入）を <strong>Undo 1回で戻せる</strong>ようにするための旗です。使い方は Step 6・Step 8 で回収します。いまは「変換にまつわる小さな記憶が1つある」とだけ覚えておいてください。</p>
+    <p>続いてコンストラクタ。ここで textarea のあらゆるイベントを <code>InputHandler</code> のメソッドに配線します。</p>
+
+    <div class="file-tag">editor/input.ts（コンストラクタ・全文）</div>
+    <pre><code>  <span class="kw">constructor</span>(editor: <span class="ty">Editor</span>, view: <span class="ty">EditorView</span>, textarea: <span class="ty">HTMLTextAreaElement</span>) {
+    <span class="kw">this</span>.editor = editor;
+    <span class="kw">this</span>.view = view;
+    <span class="kw">this</span>.textarea = textarea;
+
+    <span class="cm">// カーソルに textarea を追従させる（IME 候補窓がカーソル近くに出る）</span>
+    view.onCursorViewportPos = (x, y) => {
+      <span class="kw">const</span> maxX = view.scroller.clientWidth - <span class="st">20</span>;
+      <span class="kw">const</span> maxY = view.scroller.clientHeight - <span class="st">20</span>;
+      textarea.style.left = <span class="st">`${</span><span class="ty">Math</span><span class="st">.max(0, </span><span class="ty">Math</span><span class="st">.min(x, maxX))}px`</span>;
+      textarea.style.top = <span class="st">`${</span><span class="ty">Math</span><span class="st">.max(0, </span><span class="ty">Math</span><span class="st">.min(y, maxY))}px`</span>;
+    };
+
+    textarea.addEventListener(<span class="st">"keydown"</span>, (e) => <span class="kw">this</span>.onKeyDown(e));
+    textarea.addEventListener(<span class="st">"input"</span>, () => <span class="kw">this</span>.onInput());
+    textarea.addEventListener(<span class="st">"compositionstart"</span>, () => <span class="kw">this</span>.onCompositionStart());
+    textarea.addEventListener(<span class="st">"compositionupdate"</span>, (e) => <span class="kw">this</span>.onCompositionUpdate(e));
+    textarea.addEventListener(<span class="st">"compositionend"</span>, (e) => <span class="kw">this</span>.onCompositionEnd(e));
+
+    textarea.addEventListener(<span class="st">"copy"</span>, (e) => <span class="kw">this</span>.onCopy(e, <span class="kw">false</span>));
+    textarea.addEventListener(<span class="st">"cut"</span>, (e) => <span class="kw">this</span>.onCopy(e, <span class="kw">true</span>));
+    textarea.addEventListener(<span class="st">"paste"</span>, (e) => <span class="kw">this</span>.onPaste(e));
+
+    textarea.addEventListener(<span class="st">"focus"</span>, () => {
+      view.focused = <span class="kw">true</span>;
+      view.restartBlink();
+      view.scheduleRender();
+    });
+    textarea.addEventListener(<span class="st">"blur"</span>, () => {
+      view.focused = <span class="kw">false</span>;
+      view.scheduleRender();
+    });
+
+    <span class="kw">const</span> canvas = view.canvas;
+    canvas.addEventListener(<span class="st">"mousedown"</span>, (e) => <span class="kw">this</span>.onMouseDown(e));
+    <span class="kw">window</span>.addEventListener(<span class="st">"mousemove"</span>, (e) => <span class="kw">this</span>.onMouseMove(e));
+    <span class="kw">window</span>.addEventListener(<span class="st">"mouseup"</span>, () => (<span class="kw">this</span>.dragAnchor = <span class="kw">null</span>));
+  }</code></pre>
+
+    <p>配線されているイベントのうち、この章の主役は真ん中の<strong>3行</strong>です。</p>
+    <pre><code>textarea.addEventListener(<span class="st">"compositionstart"</span>, () => <span class="kw">this</span>.onCompositionStart());
+textarea.addEventListener(<span class="st">"compositionupdate"</span>, (e) => <span class="kw">this</span>.onCompositionUpdate(e));
+textarea.addEventListener(<span class="st">"compositionend"</span>, (e) => <span class="kw">this</span>.onCompositionEnd(e));</code></pre>
+    <p>ブラウザは、IME による変換の<strong>始まり・途中・終わり</strong>を、この3つのイベントで律儀に通知してくれます。<code>compositionstart</code> は「変換が始まった」、<code>compositionupdate</code> は「未確定文字列が更新された（"に" → "にほ" → "にほんご" → "日本語"…）」、<code>compositionend</code> は「確定した（あるいは取り消した）」。私たちがやるのは、この3つに対応する3つのハンドラを正しく書くことだけです。Step 6〜8 で1つずつ実装します。</p>
+    <p>その1つ上、<code>view.onCursorViewportPos = (x, y) => { ... }</code> のブロックは、Step 5 で扱う<strong>カーソル追従</strong>の心臓です。そして先頭の <code>"keydown"</code> と <code>"input"</code> の配線が、IME と通常入力の<strong>すみ分け</strong>を担います（Step 9 で回収）。<code>copy</code>/<code>cut</code>/<code>paste</code> と <code>mouse*</code> 系は第05章・第06章の担当なので、この章では立ち入りません。</p>
+
+    <div class="box do"><div class="box-k">▸ この章はブラウザで確かめる</div>
+      <p>IME の挙動は Node のテストでは検証できません（変換窓はブラウザと OS の IME が出すものだからです）。この章の確認は、開発サーバを立てて<strong>実際に日本語を打つ</strong>のが唯一の道です。まず起動しておきましょう。</p>
+      <pre class="term"><code><span class="ps">$</span> cd src
+<span class="ps">$</span> npm run dev
+<span class="out">  VITE v5.4.x  ready in 320 ms
+  ➜  Local:   http://localhost:5173/</span></code></pre>
+      <p>表示された URL をブラウザで開き、エディタ部分をクリックしてカーソルを置きます。IME をオンにして <code>nihongo</code> と打ち、スペースで変換してみてください。以降のステップで「いま何が起きているか」を1つずつ突き合わせます。<br>
+      <strong>Windows での注意:</strong> プロジェクトの絶対パスに日本語（全角）が含まれると Vite が <code>exit 0xC0000409</code> で落ちることがあります（序章の落とし穴）。その場合はコードを <code>C:\work\mint\</code> のような英語だけのパスにコピーしてから <code>npm run dev</code> してください。</p>
+    </div>
+
+    <h2 class="step" id="step-5"><span class="step-no">Step 5</span>カーソルの真下に候補窓を出す — 追従の仕掛け</h2>
+    <p>序章で「変換候補が<strong>カーソルの真下</strong>に出る」と約束しました。その約束を果たすのが、Step 4 のコンストラクタにあった次のブロックです。</p>
+
+    <div class="file-tag">editor/input.ts（コンストラクタ内・追従コールバック）</div>
+    <pre><code>    <span class="cm">// カーソルに textarea を追従させる（IME 候補窓がカーソル近くに出る）</span>
+    view.onCursorViewportPos = (x, y) => {
+      <span class="kw">const</span> maxX = view.scroller.clientWidth - <span class="st">20</span>;
+      <span class="kw">const</span> maxY = view.scroller.clientHeight - <span class="st">20</span>;
+      textarea.style.left = <span class="st">`${</span><span class="ty">Math</span><span class="st">.max(0, </span><span class="ty">Math</span><span class="st">.min(x, maxX))}px`</span>;
+      textarea.style.top = <span class="st">`${</span><span class="ty">Math</span><span class="st">.max(0, </span><span class="ty">Math</span><span class="st">.min(y, maxY))}px`</span>;
+    };</code></pre>
+
+    <p>変換候補の窓は、ブラウザが「フォーカスされている textarea の位置」に出します。だから <strong>textarea をカーソルの真下に動かしておけば、候補窓もそこに出る</strong>——というのが基本的な発想です。<code>onCursorViewportPos</code> は view が「プライマリカーソルの画面上の座標 <code>(x, y)</code>」を計算するたびに呼ぶコールバックで、input 側はそれを受けて textarea の <code>left</code> / <code>top</code> を書き換えます。</p>
+    <p><code>Math.max(0, Math.min(x, maxX))</code> の二段のクランプは、カーソルが画面の端すぎる位置にあっても textarea を<strong>エディタの内側に留める</strong>ための安全弁です。<code>Math.min(x, maxX)</code> で右端・下端をはみ出さないよう抑え（<code>maxX = clientWidth - 20</code>）、<code>Math.max(0, ...)</code> で左端・上端の 0 より内に戻す。これで候補窓が画面外へ吹き飛ぶのを防ぎます。ここで <code>view.scroller.clientWidth</code> という<strong>スクロール量を含まない</strong>寸法を使っているのが、Step 2 の「二重ズレを起こさない」設計と一貫しています。</p>
+    <p>では、この <code>(x, y)</code> は誰が計算して渡すのか。描画側（<code>view.ts</code>）です。毎フレームの描画の最後に、プライマリカーソルの位置から画面座標を出して、このコールバックを呼びます。</p>
+
+    <div class="file-tag">editor/view.ts（描画の末尾・抜粋／全文は第04章）</div>
+    <pre><code>    <span class="cm">// 隠し textarea をプライマリカーソルへ追従させる（IME 候補窓の位置決め）</span>
+    <span class="kw">if</span> (<span class="kw">this</span>.onCursorViewportPos) {
+      <span class="kw">const</span> head = <span class="kw">this</span>.editor.selections[<span class="kw">this</span>.editor.selections.length - <span class="st">1</span>].head;
+      <span class="kw">const</span> pos = doc.toPosition(head);
+      <span class="kw">const</span> x = gutterW - scrollLeft + <span class="kw">this</span>.metrics.xForColumn(doc.getLine(pos.line), pos.column);
+      <span class="kw">this</span>.onCursorViewportPos(x, yOf(pos.line));
+    }</code></pre>
+
+    <p>読み解きます。<code>selections[selections.length - 1]</code> は<strong>プライマリカーソル</strong>（複数カーソルのうち最後＝主役）で、その <code>head</code>（カーソル本体のオフセット）を取り出します。<code>doc.toPosition(head)</code> でオフセットを <code>(line, column)</code> に変換し（第02章の <code>Document</code>）、<code>xForColumn</code> で「その行のその桁までの<strong>ピクセル幅</strong>」を測って（第04章の <code>metrics</code>）、ガター幅 <code>gutterW</code> と横スクロール量 <code>scrollLeft</code> を足し引きして画面 x 座標を出す。縦は <code>yOf(pos.line)</code>。こうして得た <code>(x, y)</code> が、そのまま textarea の位置になります。カーソルが動けば毎フレームこの計算が走り、textarea は影のようにカーソルへ貼りつく——だから候補窓は<strong>いつでもカーソルの真下</strong>に出るのです。序章の約束が、ここで回収されました。</p>
+
+    <div class="gonote"><div class="box-k">TS メモ · コールバックで層の向きを保つ</div>
+      <p><code>view.onCursorViewportPos = (x, y) => { ... }</code> は、<strong>コールバック注入</strong>という手筋です。view は「カーソルの画面座標が決まったら誰かに知らせたい」だけで、<strong>誰に</strong>知らせるか（＝ textarea を動かすこと）は知りません。input 側が関数を差し込むことで初めて、両者がつながります。こうすると view は input に依存せず（view.ts は input.ts を <code>import</code> しない）、依存が一方向に保たれます。「下の層（view）はイベントを<strong>発火</strong>するだけ、上の層（input）が<strong>反応</strong>を決める」——GUI で頻出する、疎結合のための定石です。</p>
+    </div>
+
+    <h2 class="step" id="step-6"><span class="step-no">Step 6</span>変換のはじまり — compositionstart</h2>
+    <p>ここから composition イベント3兄弟の実装です。最初は <code>compositionstart</code> —— ユーザーが IME で最初の1文字を打ち込み、変換が始まった瞬間に呼ばれます。</p>
+
+    <div class="file-tag">editor/input.ts（onCompositionStart・全文）</div>
+    <pre><code>  <span class="kw">private</span> onCompositionStart(): <span class="ty">void</span> {
+    <span class="cm">// 選択がある状態で変換を始めたら、まず選択を消す（上書き動作）。
+    // このとき旗を立てておき、確定時の挿入を同じ Undo グループに結合する
+    // （「選択を日本語で置き換える」が Undo 1回で戻るように）。</span>
+    <span class="kw">this</span>.compositionReplacedSelection = <span class="kw">false</span>;
+    <span class="kw">if</span> (<span class="kw">this</span>.editor.selections.some((s) => s.anchor !== s.head)) {
+      <span class="kw">this</span>.editor.replaceSelections(() => <span class="st">""</span>, <span class="st">"other"</span>);
+      <span class="kw">this</span>.compositionReplacedSelection = <span class="kw">true</span>;
+    }
+    <span class="kw">this</span>.view.composition = { active: <span class="kw">true</span>, text: <span class="st">""</span>, caret: <span class="st">0</span> };
+    <span class="kw">this</span>.view.scheduleRender();
+  }</code></pre>
+
+    <p>やっていることは2つです。<strong>選択の始末</strong>と、<strong>変換モードへの切り替え</strong>。</p>
+    <p>まず選択の始末。<code>this.editor.selections.some((s) => s.anchor !== s.head)</code> は「幅を持った選択が1つでもあるか?」の判定です（<code>anchor !== head</code> なら、ただのカーソルではなく範囲選択。第00章の <code>SelRange</code> を思い出してください）。もし選択があれば、それは「この選択を日本語で<strong>上書きしたい</strong>」という意図です。<code>replaceSelections(() =&gt; "", "other")</code> で選択範囲を<strong>空文字に置き換えて先に消し</strong>、その事実を <code>compositionReplacedSelection = true</code> で記録します。この旗が、Step 8 の確定挿入で「削除と挿入を1つの Undo グループに結合する」ために使われます。選択がなければ（ふつうにカーソルがあるだけなら）何もしません。</p>
+    <p>次が本題。<code>this.view.composition = { active: true, text: "", caret: 0 }</code> で、view に「<strong>いまから変換中だ</strong>」と宣言します。未確定文字列 <code>text</code> はまだ空、<code>caret</code> も 0。この瞬間から、view は「変換中モード」で描画を始めます（Step 9）。そして <code>scheduleRender()</code> で再描画を予約。<strong>ここで一度も文書（Document）を触っていない</strong>ことに注目してください。選択を消した場合を除けば、<code>compositionstart</code> は文書に指一本触れません。変換はまだ「宙に浮いた見た目」の話でしかないのです。</p>
+
+    <div class="box hazard"><div class="box-k">⚠ 落とし穴 — 未確定文字列を文書に入れると Undo が汚れる</div>
+      <p>もし素朴に「変換中の文字も、打たれたそばから文書に挿入していく」設計にすると、どうなるでしょう。「にほんご」と打つ間に <code>"に"</code> → <code>"にほ"</code> → <code>"にほん"</code> → <code>"にほんご"</code> → <code>"日本語"</code> と、文書が<strong>5回も書き換わり</strong>ます。Undo 履歴はこの中間状態でびっしり埋まり、<code>Ctrl+Z</code> を押すと変換の途中経過を1つずつ逆再生する羽目になります。ユーザーが期待するのは「日本語」がスッと1回で消えることなのに、です。<br>
+      本書はこれを<strong>設計で断ち切ります</strong>。変換中は文書に一切書き込まず、未確定文字列は <code>view.composition</code> に持たせて<strong>見た目だけ</strong>描く。文書が変わるのは <code>compositionend</code> の1回きり（Step 8）。だから Undo 履歴には「日本語を挿入した」という<strong>1エントリ</strong>しか残りません。この章の設計全体が、この落とし穴を避けるためにあると言っても過言ではありません。</p>
+    </div>
+
+    <h2 class="step" id="step-7"><span class="step-no">Step 7</span>変換の途中 — compositionupdate</h2>
+    <p>変換が始まったあと、ユーザーが文字を打ち足したり、スペースで変換候補を切り替えたりするたびに <code>compositionupdate</code> が呼ばれます。「未確定文字列が更新された」という通知です。</p>
+
+    <div class="file-tag">editor/input.ts（onCompositionUpdate・全文）</div>
+    <pre><code>  <span class="kw">private</span> onCompositionUpdate(e: <span class="ty">CompositionEvent</span>): <span class="ty">void</span> {
+    <span class="kw">const</span> text = e.data ?? <span class="st">""</span>;
+    <span class="cm">// 未確定文字列内のカーソル位置は textarea の selectionStart から拾う
+    // （イベント時点ではまだ更新されていないことがあるので次のフレームで）</span>
+    <span class="kw">this</span>.view.composition = { active: <span class="kw">true</span>, text, caret: text.length };
+    <span class="kw">requestAnimationFrame</span>(() => {
+      <span class="kw">if</span> (<span class="kw">this</span>.view.composition.active) {
+        <span class="kw">this</span>.view.composition.caret = <span class="ty">Math</span>.min(<span class="kw">this</span>.textarea.selectionStart, <span class="kw">this</span>.view.composition.text.length);
+        <span class="kw">this</span>.view.scheduleRender();
+      }
+    });
+    <span class="kw">this</span>.view.scheduleRender();
+  }</code></pre>
+
+    <p><code>e.data</code> が、ブラウザが渡してくる<strong>いまの未確定文字列</strong>です。「にほ」まで打っていれば <code>"にほ"</code>、変換して候補が「日本語」なら <code>"日本語"</code>。<code>e.data ?? ""</code> は「<code>data</code> が <code>null</code> や <code>undefined</code> なら空文字にする」ガードです（<code>??</code> は null 合体演算子）。</p>
+    <p>受け取った <code>text</code> で <code>this.view.composition</code> を丸ごと差し替えます。<code>caret: text.length</code> でとりあえず「未確定文字列の末尾」にキャレットを置いておきます。多くの場合これで正しい——変換中のキャレットは末尾にあるからです。</p>
+    <p>問題は、キャレットが末尾<strong>以外</strong>にある場合です。長い文を打って途中の文節だけ変換しているようなとき、キャレットは未確定文字列の中ほどにあります。その正確な位置は textarea の <code>selectionStart</code>（textarea 内のキャレット位置）から拾えるのですが、コメントにあるとおり <strong>compositionupdate の発火時点では <code>selectionStart</code> がまだ更新されていないことがある</strong>。そこで <code>requestAnimationFrame</code> で<strong>次の描画フレームまで待って</strong>から読みにいきます。次フレームなら selectionStart は最新になっている、という寸法です。</p>
+    <p>その際、<code>Math.min(this.textarea.selectionStart, this.view.composition.text.length)</code> で<strong>未確定文字列の長さを超えないよう</strong>クランプします（selectionStart が想定外に大きくても、未確定文字列の外を指さないように）。また <code>rAF</code> の中で <code>if (this.view.composition.active)</code> を確かめているのは、<strong>待っている間に変換が終わって(confirm/cancel)しまう</strong>可能性があるからです。もう変換中でなければ、古い情報でキャレットを動かしても意味がないので何もしません。最後に、rAF を待たずとも即座に一度 <code>scheduleRender()</code> しておくことで、未確定文字列の更新自体は遅延なく画面へ反映されます（キャレット位置だけが1フレーム遅れて微修正される）。</p>
+
+    <div class="gonote"><div class="box-k">TS メモ · requestAnimationFrame と「次フレームまで待つ」</div>
+      <p><code>requestAnimationFrame(fn)</code> は「次に画面を描き直す直前に <code>fn</code> を1回呼んで」とブラウザに頼む API です。<code>setTimeout(fn, 0)</code> に似ていますが、描画のタイミングに同期する点が違います。ここで rAF を使うのは、「イベント発火時点ではまだ確定していない値（<code>selectionStart</code>）を、ブラウザが状態を整えた<strong>次の瞬間</strong>に読む」ためのテクニックです。DOM の状態が<strong>イベントの後で</strong>更新されるケースはブラウザ実装でよくあり、rAF で1フレーム遅らせるのは定番の回避策です。<code>if (...active)</code> の再確認も、「非同期で待つ間に世界が変わりうる」ことへの備え。非同期処理では<strong>「待っている間に前提が崩れていないか」を必ず確かめる</strong>、が鉄則です。</p>
+    </div>
+
+    <h2 class="step" id="step-8"><span class="step-no">Step 8</span>変換の確定 — compositionend と「1 edit」</h2>
+    <p>いよいよクライマックス、<code>compositionend</code> です。ユーザーが Enter で候補を確定した（あるいは Esc で変換を取り消した）瞬間に呼ばれます。<strong>ここが、この章で唯一 文書を触る場所</strong>です。</p>
+
+    <div class="file-tag">editor/input.ts（onCompositionEnd・全文）</div>
+    <pre><code>  <span class="kw">private</span> onCompositionEnd(e: <span class="ty">CompositionEvent</span>): <span class="ty">void</span> {
+    <span class="kw">this</span>.view.composition = { active: <span class="kw">false</span>, text: <span class="st">""</span>, caret: <span class="st">0</span> };
+    <span class="kw">this</span>.textarea.value = <span class="st">""</span>;
+    <span class="kw">const</span> text = e.data ?? <span class="st">""</span>;
+    <span class="kw">if</span> (text.length &gt; <span class="st">0</span>) {
+      <span class="cm">// 確定文字列を「1つの編集」として挿入する（Undo も1回で戻る）</span>
+      <span class="kw">this</span>.editor.insertText(text, <span class="kw">this</span>.compositionReplacedSelection);
+    } <span class="kw">else</span> {
+      <span class="kw">this</span>.view.scheduleRender();
+    }
+    <span class="kw">this</span>.compositionReplacedSelection = <span class="kw">false</span>;
+  }</code></pre>
+
+    <p>順番に。まず <code>this.view.composition = { active: false, text: "", caret: 0 }</code> で<strong>変換モードを解除</strong>します。これで view は「未確定文字列の見た目差し込み」をやめ、平常の描画に戻ります。次に <code>this.textarea.value = ""</code> で、隠し textarea に溜まった文字を<strong>掃除</strong>します。これを怠ると、確定した文字が textarea に残り、直後の <code>input</code> イベントで<strong>二重に挿入</strong>されてしまいます（Step 9 の <code>onInput</code> と合わせて理解してください）。</p>
+    <p>そして核心の一行です。</p>
+    <pre><code>    <span class="kw">this</span>.editor.insertText(text, <span class="kw">this</span>.compositionReplacedSelection);</code></pre>
+    <p><code>e.data</code>（＝確定した文字列「日本語」）を、<code>editor.insertText</code> で<strong>1回の編集</strong>として文書に挿入します。これが「確定で 1 edit」の実体です。変換中に何十回 <code>compositionupdate</code> が飛んでいようと、文書に触るのはこの1回だけ。だから Undo 履歴には「日本語を挿入した」というエントリが<strong>1つ</strong>だけ積まれ、<code>Ctrl+Z</code> 一発で「日本語」がまるごと消えます。</p>
+    <p>第2引数の <code>this.compositionReplacedSelection</code> が、Step 6 で立てた旗の回収です。<code>true</code> のとき——つまり「変換開始時に選択を消していた」とき——この挿入を<strong>直前の削除と同じ Undo グループに結合</strong>せよ、という指示になります。<code>insertText</code> の第2引数は「前の編集にくっつけるか（joinPrevious）」のフラグで、第03章の履歴（<code>history.ts</code>）の <code>groupId</code> 方式がこれを受け取ります。結果、「<code>hello</code> を選択して日本語で上書き」は、<strong>削除＋挿入がまとめて Undo 1回で戻る</strong>——ユーザーの直感どおりになります。処理し終えたら旗を <code>false</code> に倒して次の変換に備えます。</p>
+    <p>最後に <code>else</code> 節。<code>text.length === 0</code>、つまり<strong>変換を取り消した</strong>（何も確定しなかった）ケースです。挿入するものがないので文書は触らず、<code>scheduleRender()</code> だけして未確定文字列が消えた画面を描き直します。文書は <code>compositionstart</code> 前と<strong>完全に同じ</strong>——変換を始めてやめただけでは、履歴に何の傷もつきません。</p>
+
+    <div class="box do"><div class="box-k">▸ 「1 edit・1 Undo」を目で確かめる</div>
+      <p>Step 4 で立てた <code>npm run dev</code> のブラウザに戻ります。次の順で確かめてください。</p>
+      <ol>
+        <li>エディタをクリックし、IME で <code>nihongo</code> と打ち、スペースで「日本語」に変換して <strong>Enter で確定</strong>する。→「日本語」が入る。</li>
+        <li>変換窓が、打っている間ずっと<strong>カーソルの真下</strong>に出ていたことを確認する（Step 5）。</li>
+        <li><code>Ctrl+Z</code> を<strong>1回だけ</strong>押す。→「日本語」が<strong>3文字まとめて</strong>一度に消える（1文字ずつではない）。これが「確定で 1 edit」の証拠です。</li>
+        <li>今度は英単語 <code>hello</code> を打ち、それを選択（<code>Shift</code>+←など）してから、IME で <code>nihongo</code> と打って確定する。→ 選択が「日本語」で<strong>上書き</strong>される。</li>
+        <li>そこで <code>Ctrl+Z</code> を<strong>1回</strong>押す。→「日本語」が消えて <code>hello</code> が<strong>戻る</strong>（削除と挿入が同じ Undo グループ。Step 6・8 の <code>compositionReplacedSelection</code> の効果）。</li>
+      </ol>
+      <p>③と⑤が1回の <code>Ctrl+Z</code> で戻れば、この章の設計は正しく効いています。もし1文字ずつ・2段階で戻るなら、未確定文字列がどこかで文書に漏れています。</p>
+    </div>
+
+    <h2 class="step" id="step-9"><span class="step-no">Step 9</span>未確定文字列は view が見た目だけ描く</h2>
+    <p>ここまでで「文書には入れない」を徹底しました。では、変換中の「にほんご」は<strong>どうやって画面に見えている</strong>のでしょう。答えは <strong>view が、文書とは無関係に、その行へ未確定文字列を差し込んで描いている</strong>から。文書の実体は変わっていないのに、画面上だけ未確定文字列が浮かんで見える——この「見た目だけの差し込み」を担うのが <code>view.ts</code> の <code>renderComposingLine</code> です。該当箇所を引用します（描画の全文は第04章）。</p>
+
+    <div class="file-tag">editor/view.ts（renderComposingLine・抜粋／全文は第04章）</div>
+    <pre><code>  <span class="cm">/** IME 変換中の行: rawText に未確定文字列を差し込み、無地＋下線で描く */</span>
+  <span class="kw">private</span> renderComposingLine(
+    ctx: <span class="ty">CanvasRenderingContext2D</span>,
+    rawText: <span class="ty">string</span>,
+    pre: { column: <span class="ty">number</span>; caret: <span class="ty">number</span> }[],
+    contentX: <span class="ty">number</span>,
+    baselineY: <span class="ty">number</span>,
+    topY: <span class="ty">number</span>,
+  ): <span class="ty">void</span> {
+    <span class="kw">const</span> sorted = [...pre].sort((a, b) => a.column - b.column);
+    <span class="kw">let</span> display = rawText;
+    <span class="kw">const</span> compText = <span class="kw">this</span>.composition.text;
+    <span class="cm">// 後ろから差し込めば手前の桁がずれない</span>
+    <span class="kw">for</span> (<span class="kw">let</span> i = sorted.length - <span class="st">1</span>; i &gt;= <span class="st">0</span>; i--) {
+      display = display.slice(<span class="st">0</span>, sorted[i].column) + compText + display.slice(sorted[i].column);
+    }
+    <span class="cm">// …（無地の本文描画と未確定部分の下線は第04章）</span>
+  }</code></pre>
+
+    <p><code>rawText</code> は文書上の「その行の本当のテキスト」。<code>compText</code>（＝<code>this.composition.text</code>）が未確定文字列。<code>display = ... + compText + ...</code> で、本文のカーソル位置に未確定文字列を<strong>文字列として差し込んだ表示用の行</strong>を作り、それを canvas に描いています。文書（<code>Document</code>）はこの間ずっと <code>rawText</code> のまま——差し込みは <code>display</code> という<strong>その場限りのローカル変数</strong>の中でしか起きていません。描き終われば消える、まさに「見た目だけ」の差し込みです。未確定部分には下線が引かれ（第04章）、ユーザーには「変換中」と分かります。</p>
+    <p>（<code>pre</code> が配列なのは、複数カーソルで同時に IME 変換する場合に、1行へ複数箇所差し込むためです。<code>for</code> ループを<strong>後ろから</strong>回して差し込んでいるのは、手前に差し込むと後ろの桁番号がずれてしまうのを防ぐため——第00章の半開区間の話と同じ「編集は後ろから」の定石です。複数カーソル同時 IME の細部は本書の範囲外ですが、仕組みは同じです。）</p>
+    <p>最後に、IME と<strong>通常入力のすみ分け</strong>を締めておきます。隠し textarea は英数字も IME も同じ口で受けるので、「いま変換中か」で処理を振り分ける必要があります。これを担うのが <code>onKeyDown</code> の先頭ガードと <code>onInput</code> の先頭ガードです。</p>
+
+    <div class="file-tag">editor/input.ts（onKeyDown 冒頭 と onInput・全文）</div>
+    <pre><code>  <span class="kw">private</span> onKeyDown(e: <span class="ty">KeyboardEvent</span>): <span class="ty">void</span> {
+    <span class="cm">// IME 変換中はすべて IME に譲る（229 は古いブラウザの合図）</span>
+    <span class="kw">if</span> (e.isComposing || e.keyCode === <span class="st">229</span>) <span class="kw">return</span>;
+
+    <span class="cm">// …（Ctrl コマンド・矢印・編集キーの処理は第05章）</span>
+  }
+
+  <span class="cm">/** IME を介さない通常入力。textarea に落ちた文字を吸い上げて挿入する */</span>
+  <span class="kw">private</span> onInput(): <span class="ty">void</span> {
+    <span class="kw">if</span> (<span class="kw">this</span>.view.composition.active) <span class="kw">return</span>;
+    <span class="kw">const</span> value = <span class="kw">this</span>.textarea.value;
+    <span class="kw">if</span> (value.length === <span class="st">0</span>) <span class="kw">return</span>;
+    <span class="kw">this</span>.textarea.value = <span class="st">""</span>;
+    <span class="kw">this</span>.editor.insertText(value);
+  }</code></pre>
+
+    <p><code>onKeyDown</code> の冒頭 <code>if (e.isComposing || e.keyCode === 229) return;</code> が、コメントの5つ目の約束「<strong>変換中はすべてのキーコマンドを IME に譲る</strong>」の実装です。変換中に打つスペースは「変換候補の切り替え」であって「空白の挿入」ではないし、Enter は「確定」であって「改行」ではありません。<code>e.isComposing</code> が <code>true</code>（変換中）なら、<code>onKeyDown</code> は何もせず即 <code>return</code> して、キーの解釈を丸ごと IME に委ねます。<code>keyCode === 229</code> は、<code>isComposing</code> をまだ実装していない古いブラウザが「これは IME 用のキーだ」と知らせる伝統的な合図で、後方互換のために併記しています。</p>
+    <p><code>onInput</code> は「IME を<strong>介さない</strong>通常入力」——英数字を打ったときに textarea へ落ちた文字を吸い上げて挿入する担当です。ここでも冒頭で <code>if (this.view.composition.active) return;</code> とガードしているのが要です。変換中は <code>input</code> イベントも飛んできますが、それは未確定文字列の更新にすぎず、確定文字ではありません。ここで拾って挿入してしまうと、<strong>未確定文字列が文書に漏れて二重入力</strong>になります。だから「変換中の <code>input</code> は無視」。確定文字は <code>onInput</code> ではなく <code>onCompositionEnd</code> が入れる——この分業を、2つのガードが守っています。<code>compositionend</code> で <code>textarea.value = ""</code> と掃除していたのも、この分業の一部でした。</p>
+
+    <div class="box hazard"><div class="box-k">⚠ 落とし穴 — isComposing を見ないと Enter で二重に事故る</div>
+      <p><code>onKeyDown</code> のガードを外すと、変換確定の Enter が悲惨なことになります。IME で「日本語」を変換して Enter を押すと、多くのブラウザは<strong>「確定」の Enter と「改行」の keydown を両方</strong>発火させます。<code>e.isComposing</code> を見ずに Enter を処理すると、<code>onCompositionEnd</code> で「日本語」を挿入した直後に <code>ed.insertNewline()</code> が走り、<strong>確定と同時に改行が入る</strong>——狙っていないところで行が割れます。<code>if (e.isComposing) return</code> の一行が、この古典的な IME バグを封じています。IME を扱うコードで最初に書くべきガードだと覚えておいてください。</p>
+    </div>
+
+    <h2>つまずき FAQ</h2>
+    <details class="qa"><summary>未確定文字列を文書に入れず「見た目だけ」描くのは、実装が面倒なだけでは? 素直に入れて確定時に整えては?</summary>
+      <div class="qa-body"><p>逆に面倒が増えます。素直に「打つそばから文書へ入れる」と、①変換のたびに文書を書き換えるので Undo 履歴が中間状態で汚れ（Step 6 の落とし穴）、②変換を取り消したときに「入れた文字をどこまで消すか」を自前で追跡する必要があり、③複数カーソルや選択上書きとの整合も自分で取らねばなりません。本書の方式は、変換中は文書に<strong>一切触らない</strong>ので、これらの問題が<strong>そもそも発生しません</strong>。文書が変わるのは <code>compositionend</code> の1回だけ。見た目は view が <code>display</code> というローカル変数の中で差し込むだけで、状態管理が要らない。「面倒を増やす実装」ではなく「面倒を消す実装」です。</p></div>
+    </details>
+    <details class="qa"><summary>隠し textarea を <code>#scroller</code> の中に入れてしまうと、具体的に何が起きるの?</summary>
+      <div class="qa-body"><p>変換候補の窓がカーソルからずれ、スクロールするほどズレが拡大します。仕組みはこうです。追従コード（Step 5）は「viewport 上のカーソル座標」を textarea の <code>top</code>/<code>left</code> にセットします。ところが textarea が <code>#scroller</code> の中にあると、<code>#scroller</code> を下へスクロールした分だけ textarea も一緒に上へ流れる。すると「JS が指定した論理位置」と「スクロールでずれた実位置」が<strong>二重にずれ</strong>、ブラウザはその実位置に候補窓を出すので、カーソルから離れた——最悪は画面外の——場所に窓が飛びます。対策は <code>.editor-shell</code> 直下（スクロールしない座標系）に置くこと。<code>CLAUDE.md</code> にも記録された、本書が実際に踏んだ罠です。</p></div>
+    </details>
+    <details class="qa"><summary><code>compositionupdate</code> でわざわざ <code>requestAnimationFrame</code> を挟むのはなぜ? 直接 <code>selectionStart</code> を読めばいいのでは?</summary>
+      <div class="qa-body"><p>compositionupdate が発火した<strong>その瞬間</strong>には、textarea の <code>selectionStart</code>（キャレット位置）がまだ古いままのことがあるからです。ブラウザによっては DOM の選択状態の更新がイベントの<strong>後</strong>にずれ込みます。そこで <code>requestAnimationFrame</code> で「次の描画フレームの直前」まで1フレーム待ってから読むと、値が最新になっています。ただし待っている間に変換が終わる可能性があるので、rAF のコールバック内で <code>if (this.view.composition.active)</code> と再確認し、<code>Math.min(..., text.length)</code> で範囲外を防いでいます。「非同期で値を読むときは、待った先で前提が崩れていないか確かめる」——この定石の実例です。なお未確定文字列そのものは rAF を待たず即 <code>scheduleRender()</code> で反映され、キャレット位置だけが1フレーム遅れて微修正されます。</p></div>
+    </details>
+
+    <h2>理解度チェック</h2>
+    <p>次の問いに<strong>自分の言葉で</strong>答えられたら、この章は卒業です。</p>
+    <details class="qa"><summary>1. <code>compositionstart</code> / <code>compositionupdate</code> / <code>compositionend</code> の3イベントは、それぞれ何を担当し、<strong>文書（Document）</strong>を変えるのはどれか。</summary>
+      <div class="qa-body"><p><code>compositionstart</code>＝変換の開始（必要なら選択を消し、<code>view.composition.active</code> を <code>true</code> に）。<code>compositionupdate</code>＝未確定文字列の更新（<code>view.composition.text</code> と <code>caret</code> を更新）。<code>compositionend</code>＝変換の確定（または取消）。<strong>文書を変えるのは <code>compositionend</code> だけ</strong>で、確定文字列を <code>editor.insertText</code> で1回だけ挿入する。start と update は <code>view.composition</code>（見た目の状態）しか触らず、文書は不変。だから Undo 履歴には確定の1エントリしか残らない。</p></div>
+    </details>
+    <details class="qa"><summary>2. 「未確定文字列は文書に入れず、view が見た目だけ描く」という設計は、どんな利益をもたらすか。2つ挙げよ。</summary>
+      <div class="qa-body"><p>(1) <strong>Undo 履歴が汚れない</strong>: 変換の中間状態（"に"→"にほ"→…）で文書を書き換えないので、履歴には「確定文字を挿入した」1エントリだけが残り、<code>Ctrl+Z</code> 一発で確定文字列がまるごと戻る。(2) <strong>変換取消がタダで正しくなる</strong>: 変換を途中でやめても文書は一度も変わっていないので、取り消しのための後始末が要らず、文書は開始前と完全一致する。加えて状態管理が <code>view.composition</code> の1オブジェクトに閉じ、複数カーソル・選択上書きとの整合も取りやすい。</p></div>
+    </details>
+    <details class="qa"><summary>3. 隠し textarea を <code>#scroller</code> の中ではなく <code>.editor-shell</code> 直下に置くのはなぜか。<code>onKeyDown</code> の <code>if (e.isComposing) return</code> は何を防ぐか。</summary>
+      <div class="qa-body"><p><strong>置き場所</strong>: textarea を <code>#scroller</code> 内に置くと、スクロールで textarea がコンテンツと一緒に流れ、「JS が指定した位置」と「実位置」が二重にずれて変換候補窓がカーソルから離れる（画面外へ飛ぶ）。スクロールしない <code>.editor-shell</code> 直下に置けば、textarea の位置が viewport 上のカーソル位置と一致し、候補窓が常にカーソル真下に出る。<strong><code>isComposing</code> ガード</strong>: 変換中のキー（確定の Enter、変換の Space など）を IME に譲るためのもの。これがないと、確定の Enter に反応して <code>insertNewline()</code> が走り、確定と同時に意図しない改行が入るなどの二重処理事故が起きる。</p></div>
+    </details>
+
+    <h2>まとめ — 次の層へ</h2>
+    <p>この章で、mint editor はついに<strong>日本語を打てる</strong>ようになりました。手に入れたのは、たった1枚の透明な <code>&lt;textarea&gt;</code> と、<code>composition</code> イベント3兄弟の捌き方です。要点を畳んでおきます。<strong>canvas は入力を受けられない</strong>から、カーソルに追従する隠し textarea へ IME を導く。<strong>変換中は文書に触らない</strong>——未確定文字列は <code>view.composition</code> に持たせ、view が <code>display</code> の中で見た目だけ差し込む。<strong>確定で 1 edit</strong>——<code>compositionend</code> の <code>insertText</code> だけが文書を変え、選択上書きは <code>compositionReplacedSelection</code> の旗で Undo 1回に結合する。そして <code>isComposing</code> ガードで、変換中のキーはすべて IME に譲る。序章で見た「変換候補がカーソルの真下に出て、確定で1回の編集として入る」手触りの正体は、この5つの約束でした。</p>
+    <p>残るは最後の1章です。第09章では、ここまで<strong>下から積み上げてきた全部品</strong>——バッファ（01）、行とカーソル（02）、Undo（03）、描画（04）、入力（05）、複数カーソル・検索（06）、ハイライト（07）、そして今章の IME（08）——を1つの司令塔で束ね、<strong>ファイルを開いて保存する</strong>入出力をつけ、ブラウザで動く1本のアプリ「mint editor」に<strong>組み立て</strong>ます。この章で置いた隠し textarea も、第09章の <code>main.ts</code> が <code>.editor-shell</code> 直下に配置し、<code>InputHandler</code> に手渡します。部品はもう全部そろいました。最後は、それらが1つのエディタとして息を合わせる瞬間です。</p>
+
+    <div class="chap-foot">
+      <a class="pager" href="07-highlight.html"><span class="dir">← 前へ</span>第07章 · 色をつける</a>
+      <a class="pager next" href="09-assemble.html"><span class="dir">次へ →</span>第09章 · 開いて保存する・組み立て</a>
+    </div>
+  </main>
+</div>
+</body>
+</html>

@@ -1,0 +1,1014 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>第08章 画面をつける（React） — Twitter をつくる</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500;600&family=Source+Serif+4:opsz,wght@8..60,400;8..60,600;8..60,700&family=Noto+Serif+JP:wght@400;600;700&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<div class="shell">
+
+  <aside class="spine">
+    <a class="wordmark" href="index.html">CHIRP · from scratch</a>
+    <div class="book-title">Twitter を<br>つくる</div>
+    <div class="book-sub">Go + PostgreSQL + React で認証からタイムラインまで</div>
+
+    <div class="legend"><span>読む <b>↓</b></span><span>組む <b>↑</b></span></div>
+
+    <nav aria-label="目次">
+      <ul class="toc">
+        <li><a class="nav-item" href="index.html"><span class="nav-num">序</span><span class="nav-label">はじめに・準備<span class="nav-tag">Setup</span></span></a></li>
+        <li><a class="nav-item" href="00-setup.html"><span class="nav-num">00</span><span class="nav-label">土台をつくる<span class="nav-tag">Setup</span></span></a></li>
+        <li><a class="nav-item" href="01-auth.html"><span class="nav-num">01</span><span class="nav-label">ユーザーという存在（認証）<span class="nav-tag">Auth</span></span></a></li>
+        <li><a class="nav-item" href="02-post.html"><span class="nav-num">02</span><span class="nav-label">投稿する<span class="nav-tag">Post</span></span></a></li>
+        <li><a class="nav-item" href="03-follow.html"><span class="nav-num">03</span><span class="nav-label">つながる（フォロー）<span class="nav-tag">Follow</span></span></a></li>
+        <li><a class="nav-item" href="04-timeline.html"><span class="nav-num">04</span><span class="nav-label">タイムラインという難問<span class="nav-tag">Timeline</span></span></a></li>
+        <li><a class="nav-item" href="05-reply.html"><span class="nav-num">05</span><span class="nav-label">会話する（リプライ）<span class="nav-tag">Reply</span></span></a></li>
+        <li><a class="nav-item" href="06-like.html"><span class="nav-num">06</span><span class="nav-label">反応する（いいね）<span class="nav-tag">Like</span></span></a></li>
+        <li><a class="nav-item" href="07-perf.html"><span class="nav-num">07</span><span class="nav-label">速くする（N+1と索引）<span class="nav-tag">Perf</span></span></a></li>
+        <li><a class="nav-item current" aria-current="page" href="08-web.html"><span class="nav-num">08</span><span class="nav-label">画面をつける（React）<span class="nav-tag">Web</span></span></a></li>
+        <li><a class="nav-item" href="09-beyond.html"><span class="nav-num">09</span><span class="nav-label">さらに先へ（発展）<span class="nav-tag">Beyond</span></span></a></li>
+      </ul>
+    </nav>
+
+    <div class="spine-foot">
+      各章は SNS の一つの機能。<br>下（土台）から上（画面）へ<br>積み上げて動かしていく。
+    </div>
+  </aside>
+
+  <main class="reading">
+    <div class="progress-tag">第08章 / 全10章 · 層: Web · 読了目安 2.5〜3時間</div>
+    <div class="eyebrow"><span>Web</span><span class="depth">— API を画面にする</span></div>
+    <h1>画面をつける（React）</h1>
+    <p class="lede">第00章から第07章まで、私たちは<strong>JSON を返すサーバ</strong>を積み上げてきました。登録もログインも投稿もフォローもタイムラインも、すべて <code>curl</code> で叩ける API として完成しています。しかし人間は <code>curl</code> を打ちません。この章では、その API に<strong>ブラウザで触れる画面</strong>をかぶせます。React で書くフロントは、突き詰めれば<strong>「API を叩いて、返ってきた状態を <code>useState</code> に入れ、それを描く」</strong>の反復です。<strong>APIクライアント</strong>（fetch のラッパ）、<strong>認証コンテキスト</strong>（起動時にログイン状態を復元）、<strong>ルーティング</strong>（ログイン必須ページの守り）、<strong>投稿フィード</strong>（カーソルで「もっと見る」）、<strong>投稿カード</strong>（React の自動エスケープと楽観的更新）を組み、最後に <code>//go:embed</code> でフロントのビルド成果物を Go バイナリに埋め込んで、<strong>API も画面も1つの実行ファイル</strong>で配ります。第00章で置いた <code>frontend_dist.FS()</code> の伏線を、ここで回収します。</p>
+
+    <div class="box goal"><div class="box-k">◈ この章のゴール</div>
+      <p>次の 2 つを、自分の目と手で確認できたら達成です。</p>
+      <ol>
+        <li>ブラウザで <strong>登録 → ログイン → 投稿 → フォロー → タイムライン → いいね</strong>の一連が動く。ページを再読み込みしてもログイン状態が保たれ、他人の投稿に <code>&lt;script&gt;</code> を書いても<strong>そのまま文字として表示される</strong>（実行されない）。</li>
+        <li><code>cd frontend &amp;&amp; npm run build</code> の成果物を <code>backend/frontend_dist/</code> に置いて <code>go build</code> すると、<strong>単一バイナリ</strong>ができ、それを起動して <code>http://localhost:8080</code> を開くと画面が出る。API も画面も、この1ファイルが配っている。</li>
+      </ol>
+    </div>
+
+    <div class="box map"><div class="box-k">☰ この章のステップ</div>
+      <ol>
+        <li><a href="#step-1">API を、人が触れる画面にする — フロントの全体像</a></li>
+        <li><a href="#step-2">サーバの返す形を型にする — <code>api/types.ts</code></a></li>
+        <li><a href="#step-3">fetch を1か所に包む — <code>api/client.ts</code></a></li>
+        <li><a href="#step-4">ログイン状態を全画面で共有する — <code>auth.tsx</code></a></li>
+        <li><a href="#step-5">ルーティングと「ログイン必須の守り」 — <code>App.tsx</code> / <code>main.tsx</code></a></li>
+        <li><a href="#step-6">フィード — カーソルと「世代番号」 — <code>PostFeed.tsx</code></a></li>
+        <li><a href="#step-7">カード — 自動エスケープと楽観的更新 — <code>PostCard.tsx</code></a></li>
+        <li><a href="#step-8">投稿フォームと各ページ — <code>Composer.tsx</code> ほか</a></li>
+        <li><a href="#step-9">1バイナリにまとめる — <code>go:embed</code> と SPA フォールバック</a></li>
+        <li><a href="#step-10">動かして確認する — ビルドと配信</a></li>
+      </ol>
+    </div>
+
+    <h2 class="step" id="step-1"><span class="step-no">Step 1</span>API を、人が触れる画面にする — フロントの全体像</h2>
+    <p>これまでの7章で作ったのは、<strong>URL を叩くと JSON が返るサーバ</strong>でした。<code>POST /api/auth/login</code> でログインし、<code>GET /api/timeline</code> でタイムラインの配列を受け取る。動作は完成していますが、使えるのは <code>curl</code> やプログラムだけです。普通の人がブラウザで登録し、文字を打って投稿し、ハートを押していいねする——その<strong>画面</strong>を、この章で作ります。</p>
+    <p>難しく考える必要はありません。React のフロントは、どのページも<strong>同じ1つの型</strong>の繰り返しでできています。</p>
+    <div class="box map"><div class="box-k">☰ フロントの基本サイクル（全ページ共通）</div>
+      <ol>
+        <li><strong>API を叩く</strong> — <code>api/client.ts</code> の関数を呼ぶ（<code>fetch</code> のラッパ）。</li>
+        <li><strong>状態に入れる</strong> — 返ってきたデータを <code>useState</code> にしまう。</li>
+        <li><strong>描く</strong> — その状態を JSX で画面に反映する。</li>
+        <li><strong>操作したら再び API を叩く</strong> — いいね・フォロー・投稿で 1 に戻る。</li>
+      </ol>
+    </div>
+    <p>この章で作るファイルは <code>src/frontend/src/</code> の下に並びます。役割で分けると次のとおりです。</p>
+    <div class="box map"><div class="box-k">☰ この章のファイルと役割</div>
+      <ul>
+        <li><code>api/types.ts</code> — サーバが返す JSON の形（TypeScript の型）。Go の DTO と1対1（Step 2）</li>
+        <li><code>api/client.ts</code> — <code>fetch</code> を1か所に包み、各 API を関数にする（Step 3）</li>
+        <li><code>auth.tsx</code> — ログイン状態を全画面で共有する Context（Step 4）</li>
+        <li><code>App.tsx</code> / <code>main.tsx</code> — ルーティングと「ログイン必須ページの守り」（Step 5）</li>
+        <li><code>components/PostFeed.tsx</code> — 「もっと見る」式の投稿フィード（Step 6）</li>
+        <li><code>components/PostCard.tsx</code> — 投稿1件の表示・いいね・削除（Step 7）</li>
+        <li><code>components/Composer.tsx</code> と各 <code>pages/*</code> — 投稿フォームと画面（Step 8）</li>
+        <li><code>backend/frontend_dist/embed.go</code> — ビルド成果物をバイナリに埋め込む（Step 9）</li>
+      </ul>
+    </div>
+
+    <p>ブラウザとサーバの関係を1枚にすると、こうです。ブラウザで動く React が <code>/api/...</code> を叩き、Go がそれに JSON で答える。その往復のたびに、<strong>身分証（HttpOnly Cookie）が自動で添う</strong>のがポイントです。</p>
+    <pre class="ascii"><code>   ┌──────────────────────────┐         ┌──────────────────────────┐
+   │   ブラウザ（React SPA）    │         │      Go サーバ (:8080)     │
+   │                          │         │                          │
+   │  useState / useEffect    │         │   http.ServeMux          │
+   │        │                 │         │        │                 │
+   │   api/client.ts          │  fetch  │   /api/...  ハンドラ      │
+   │   request&lt;T&gt;() ──────────┼────────▶│   → JSON を返す          │
+   │        │                 │  ◀──────┼──── { posts: [...] }     │
+   │        │  Cookie: session │  (毎回) │        │                 │
+   │        ▼                 │  自動添付│        ▼                 │
+   │   画面に描画              │         │   PostgreSQL             │
+   └──────────────────────────┘         └──────────────────────────┘
+        同一オリジンなので HttpOnly Cookie は毎回自動添付（credentials:'same-origin' は既定値の明示）</code></pre>
+    <p>そして「どの URL でどの画面が出て、どの API を叩くか」の対応は次の表になります。この章で作る <code>App.tsx</code> のルート定義と、各ページが呼ぶ API が、そのまま並んでいます。</p>
+    <table>
+      <thead><tr><th>URL（ルート）</th><th>画面（コンポーネント）</th><th>主に叩く API</th></tr></thead>
+      <tbody>
+        <tr><td><code>/</code>（要ログイン）</td><td><code>Home</code></td><td><code>GET /api/timeline</code>, <code>POST /api/posts</code></td></tr>
+        <tr><td><code>/login</code></td><td><code>Login</code></td><td><code>POST /api/auth/login</code></td></tr>
+        <tr><td><code>/signup</code></td><td><code>Signup</code></td><td><code>POST /api/auth/signup</code></td></tr>
+        <tr><td><code>/users/:username</code></td><td><code>Profile</code></td><td><code>GET /api/users/{username}</code>, <code>.../posts</code>, <code>.../follow</code></td></tr>
+        <tr><td><code>/users/:username/followers</code></td><td><code>FollowList</code></td><td><code>GET /api/users/{username}/followers</code></td></tr>
+        <tr><td><code>/users/:username/following</code></td><td><code>FollowList</code></td><td><code>GET /api/users/{username}/following</code></td></tr>
+        <tr><td><code>/posts/:id</code></td><td><code>PostDetail</code></td><td><code>GET /api/posts/{id}</code>, <code>.../replies</code></td></tr>
+      </tbody>
+    </table>
+
+    <div class="gonote"><div class="box-k">React メモ · この章で使う React の4つの道具</div>
+      <p>フロントを読む前に、繰り返し出てくる React の道具を先に押さえます。<strong><code>useState</code></strong> は「画面に紐づく状態」を持つ仕組みで、<code>const [x, setX] = useState(初期値)</code> と書き、<code>setX</code> を呼ぶと画面が再描画されます。<strong><code>useEffect</code></strong> は「描画のあとに副作用（API 呼び出しなど）を走らせる」仕組みで、第2引数の依存配列が変わったときだけ再実行されます。<strong>Context</strong>（<code>createContext</code> / <code>useContext</code>）は「どの階層のコンポーネントからでも触れる共有状態」で、Chirp ではログインユーザーの共有に使います。<strong><code>useRef</code></strong> は「再描画を起こさずに値を持ち回る箱」で、この章では<strong>飛行中リクエストの世代管理</strong>に使います。この4つが分かれば、Chirp のフロントはすべて読めます。</p>
+    </div>
+
+    <h2 class="step" id="step-2"><span class="step-no">Step 2</span>サーバの返す形を型にする — api/types.ts</h2>
+    <p>最初に用意するのは、<strong>サーバが返す JSON の「形」</strong>です。<code>GET /api/timeline</code> が返す1件の投稿は、どんなキーを持っていて、それぞれ何型か。これを TypeScript の <code>interface</code> として書いておくと、以後フロント全体で「投稿には <code>like_count</code> がある」「<code>author</code> は <code>id</code> と <code>username</code> と <code>display_name</code> を持つ」といったことを、エディタが補完し、間違いを型エラーで教えてくれます。この型は、これまで各章で Go 側が返してきた DTO（<code>toPostJSON</code> などが作る形）と<strong>1対1に対応</strong>します。</p>
+
+    <div class="file-tag">src/frontend/src/api/types.ts</div>
+    <pre><code><span class="cm">// バックエンドAPIのレスポンス型（Go側の DTO と1対1対応）</span>
+
+<span class="kw">export</span> <span class="kw">interface</span> <span class="ty">User</span> {
+  id: <span class="ty">number</span>
+  username: <span class="ty">string</span>
+  display_name: <span class="ty">string</span>
+  bio: <span class="ty">string</span>
+  created_at: <span class="ty">string</span>
+}
+
+<span class="kw">export</span> <span class="kw">interface</span> <span class="ty">Profile</span> <span class="kw">extends</span> <span class="ty">User</span> {
+  posts_count: <span class="ty">number</span>
+  followers_count: <span class="ty">number</span>
+  following_count: <span class="ty">number</span>
+  is_following: <span class="ty">boolean</span>
+  is_me: <span class="ty">boolean</span>
+}
+
+<span class="kw">export</span> <span class="kw">interface</span> <span class="ty">Post</span> {
+  id: <span class="ty">number</span>
+  body: <span class="ty">string</span>
+  reply_to_id?: <span class="ty">number</span>
+  created_at: <span class="ty">string</span>
+  author: <span class="ty">Pick</span>&lt;<span class="ty">User</span>, <span class="st">'id'</span> | <span class="st">'username'</span> | <span class="st">'display_name'</span>&gt;
+  like_count: <span class="ty">number</span>
+  liked_by_me: <span class="ty">boolean</span>
+  reply_count: <span class="ty">number</span>
+}
+
+<span class="kw">export</span> <span class="kw">interface</span> <span class="ty">PostPage</span> {
+  posts: <span class="ty">Post</span>[]
+  next_cursor?: <span class="ty">number</span>
+}
+
+<span class="kw">export</span> <span class="kw">interface</span> <span class="ty">ApiErrorBody</span> {
+  error: { code: <span class="ty">string</span>; message: <span class="ty">string</span> }
+}</code></pre>
+
+    <p>1つずつ読みます。<code>User</code> は最小限の公開プロフィール（<code>password_hash</code> や <code>email</code> は入りません — サーバの DTO が公開用に絞っているからです）。<code>Profile extends User</code> の <strong><code>extends</code></strong> は「<code>User</code> の全フィールドを引き継いだ上で、さらに足す」という意味で、プロフィール画面用に投稿数・フォロワー数や <code>is_following</code>（自分がフォロー中か）・<code>is_me</code>（自分自身か）を追加しています。</p>
+    <p><code>Post</code> で注目すべきは2か所です。<code>reply_to_id?: number</code> の<strong>末尾の <code>?</code></strong> は「あってもなくてもよい（省略可能）」の印で、通常の投稿にはこのキーが無く、リプライのときだけ入ります（第05章の <code>NULL</code> 許容がフロントの <code>?</code> に対応します）。もう1つ、<code>author: Pick&lt;User, 'id' | 'username' | 'display_name'&gt;</code> の <strong><code>Pick</code></strong> は「<code>User</code> の中からこの3つのキーだけを取り出した型」を作るユーティリティです。投稿に埋め込む著者情報は <code>bio</code> や <code>created_at</code> まで要らないので、必要な3つに絞っています。<code>PostPage</code> は「投稿の配列 <code>posts</code> と、次ページの目印 <code>next_cursor</code>」——第04章のキーセットカーソルが、フロント側でこの形として現れます。<code>next_cursor</code> が省略可能（<code>?</code>）なのは、<strong>もう続きが無いページでは付かない</strong>からで、これが Step 6 の「もっと見る」ボタンの出し分けに直結します。</p>
+
+    <div class="gonote"><div class="box-k">React メモ · 型は「実行時」には消える</div>
+      <p>TypeScript の <code>interface</code> や型注釈は、<strong>ビルド時のチェックにだけ使われ、実行される JavaScript には残りません</strong>。つまり <code>types.ts</code> は「サーバが約束どおりの形を返す」ことを保証するものではなく、あくまで<strong>フロントを書く自分のためのガードレール</strong>です。だから <code>client.ts</code> では、返ってきた JSON を <code>as T</code>（型アサーション）で「この型のはず」と宣言して受け取ります。サーバとフロントで形がずれると実行時に壊れるので、<strong>Go の DTO を変えたらこの <code>types.ts</code> も揃える</strong>のが、この2つを1対1に保つ運用の勘所です。</p>
+    </div>
+
+    <h2 class="step" id="step-3"><span class="step-no">Step 3</span>fetch を1か所に包む — api/client.ts</h2>
+    <p>型ができたので、次は<strong>実際に API を叩く関数たち</strong>です。ブラウザには <code>fetch</code> という HTTP を投げる標準機能がありますが、それを画面のあちこちで直に呼ぶと、「Cookie を添える設定」「エラーの整形」「JSON の読み取り」を毎回書くことになります。そこで <code>client.ts</code> に<strong>1つのラッパ <code>request&lt;T&gt;</code></strong> を作り、共通の作法をそこへ閉じ込めます。各 API は、このラッパを呼ぶ薄い関数として並べます。</p>
+
+    <div class="file-tag">src/frontend/src/api/client.ts</div>
+    <pre><code><span class="kw">import</span> <span class="kw">type</span> { <span class="ty">ApiErrorBody</span>, <span class="ty">Post</span>, <span class="ty">PostPage</span>, <span class="ty">Profile</span>, <span class="ty">User</span> } <span class="kw">from</span> <span class="st">'./types'</span>
+
+<span class="kw">export</span> <span class="kw">class</span> <span class="ty">ApiError</span> <span class="kw">extends</span> <span class="ty">Error</span> {
+  code: <span class="ty">string</span>
+  status: <span class="ty">number</span>
+  <span class="kw">constructor</span>(status: <span class="ty">number</span>, code: <span class="ty">string</span>, message: <span class="ty">string</span>) {
+    <span class="kw">super</span>(message)
+    <span class="kw">this</span>.code = code
+    <span class="kw">this</span>.status = status
+  }
+}
+
+<span class="kw">async</span> <span class="kw">function</span> request&lt;<span class="ty">T</span>&gt;(path: <span class="ty">string</span>, init?: <span class="ty">RequestInit</span>): <span class="ty">Promise</span>&lt;<span class="ty">T</span>&gt; {
+  <span class="kw">const</span> res = <span class="kw">await</span> fetch(path, {
+    credentials: <span class="st">'same-origin'</span>, <span class="cm">// 身分証（HttpOnly Cookie）を毎回添える</span>
+    headers: init?.body ? { <span class="st">'Content-Type'</span>: <span class="st">'application/json'</span> } : <span class="kw">undefined</span>,
+    ...init,
+  })
+  <span class="kw">if</span> (res.status === <span class="st">204</span>) <span class="kw">return</span> <span class="kw">undefined</span> <span class="kw">as</span> <span class="ty">T</span>
+  <span class="kw">const</span> data = <span class="kw">await</span> res.json().catch(() =&gt; <span class="kw">null</span>)
+  <span class="kw">if</span> (!res.ok) {
+    <span class="kw">const</span> err = data <span class="kw">as</span> <span class="ty">ApiErrorBody</span> | <span class="kw">null</span>
+    <span class="kw">throw</span> <span class="kw">new</span> <span class="ty">ApiError</span>(
+      res.status,
+      err?.error.code ?? <span class="st">'unknown'</span>,
+      err?.error.message ?? <span class="st">'通信に失敗しました。時間をおいて再度お試しください。'</span>,
+    )
+  }
+  <span class="kw">return</span> data <span class="kw">as</span> <span class="ty">T</span>
+}
+
+<span class="cm">// --- 認証 ---</span>
+<span class="kw">export</span> <span class="kw">const</span> signup = (body: {
+  username: <span class="ty">string</span>
+  display_name: <span class="ty">string</span>
+  email: <span class="ty">string</span>
+  password: <span class="ty">string</span>
+}) =&gt; request&lt;<span class="ty">User</span>&gt;(<span class="st">'/api/auth/signup'</span>, { method: <span class="st">'POST'</span>, body: <span class="ty">JSON</span>.stringify(body) })
+
+<span class="kw">export</span> <span class="kw">const</span> login = (identifier: <span class="ty">string</span>, password: <span class="ty">string</span>) =&gt;
+  request&lt;<span class="ty">User</span>&gt;(<span class="st">'/api/auth/login'</span>, {
+    method: <span class="st">'POST'</span>,
+    body: <span class="ty">JSON</span>.stringify({ identifier, password }),
+  })
+
+<span class="kw">export</span> <span class="kw">const</span> logout = () =&gt; request&lt;<span class="ty">void</span>&gt;(<span class="st">'/api/auth/logout'</span>, { method: <span class="st">'POST'</span> })
+<span class="kw">export</span> <span class="kw">const</span> me = () =&gt; request&lt;<span class="ty">User</span>&gt;(<span class="st">'/api/auth/me'</span>)
+
+<span class="cm">// --- タイムライン・投稿 ---</span>
+<span class="kw">const</span> page = (cursor?: <span class="ty">number</span>) =&gt; (cursor ? <span class="st">`?cursor=${cursor}`</span> : <span class="st">''</span>)
+
+<span class="kw">export</span> <span class="kw">const</span> timeline = (cursor?: <span class="ty">number</span>) =&gt; request&lt;<span class="ty">PostPage</span>&gt;(<span class="st">`/api/timeline${page(cursor)}`</span>)
+
+<span class="kw">export</span> <span class="kw">const</span> createPost = (body: <span class="ty">string</span>, replyToId?: <span class="ty">number</span>) =&gt;
+  request&lt;<span class="ty">Post</span>&gt;(<span class="st">'/api/posts'</span>, {
+    method: <span class="st">'POST'</span>,
+    body: <span class="ty">JSON</span>.stringify({ body, reply_to_id: replyToId }),
+  })
+
+<span class="kw">export</span> <span class="kw">const</span> getPost = (id: <span class="ty">number</span>) =&gt; request&lt;<span class="ty">Post</span>&gt;(<span class="st">`/api/posts/${id}`</span>)
+<span class="kw">export</span> <span class="kw">const</span> deletePost = (id: <span class="ty">number</span>) =&gt; request&lt;<span class="ty">void</span>&gt;(<span class="st">`/api/posts/${id}`</span>, { method: <span class="st">'DELETE'</span> })
+<span class="kw">export</span> <span class="kw">const</span> listReplies = (id: <span class="ty">number</span>, cursor?: <span class="ty">number</span>) =&gt;
+  request&lt;<span class="ty">PostPage</span>&gt;(<span class="st">`/api/posts/${id}/replies${page(cursor)}`</span>)
+<span class="kw">export</span> <span class="kw">const</span> like = (id: <span class="ty">number</span>) =&gt; request&lt;<span class="ty">void</span>&gt;(<span class="st">`/api/posts/${id}/like`</span>, { method: <span class="st">'POST'</span> })
+<span class="kw">export</span> <span class="kw">const</span> unlike = (id: <span class="ty">number</span>) =&gt; request&lt;<span class="ty">void</span>&gt;(<span class="st">`/api/posts/${id}/like`</span>, { method: <span class="st">'DELETE'</span> })
+
+<span class="cm">// --- ユーザー ---</span>
+<span class="kw">export</span> <span class="kw">const</span> getProfile = (username: <span class="ty">string</span>) =&gt; request&lt;<span class="ty">Profile</span>&gt;(<span class="st">`/api/users/${username}`</span>)
+<span class="kw">export</span> <span class="kw">const</span> updateProfile = (display_name: <span class="ty">string</span>, bio: <span class="ty">string</span>) =&gt;
+  request&lt;<span class="ty">User</span>&gt;(<span class="st">'/api/users/me'</span>, {
+    method: <span class="st">'PATCH'</span>,
+    body: <span class="ty">JSON</span>.stringify({ display_name, bio }),
+  })
+<span class="kw">export</span> <span class="kw">const</span> listUserPosts = (username: <span class="ty">string</span>, cursor?: <span class="ty">number</span>) =&gt;
+  request&lt;<span class="ty">PostPage</span>&gt;(<span class="st">`/api/users/${username}/posts${page(cursor)}`</span>)
+<span class="kw">export</span> <span class="kw">const</span> follow = (username: <span class="ty">string</span>) =&gt;
+  request&lt;<span class="ty">void</span>&gt;(<span class="st">`/api/users/${username}/follow`</span>, { method: <span class="st">'POST'</span> })
+<span class="kw">export</span> <span class="kw">const</span> unfollow = (username: <span class="ty">string</span>) =&gt;
+  request&lt;<span class="ty">void</span>&gt;(<span class="st">`/api/users/${username}/follow`</span>, { method: <span class="st">'DELETE'</span> })
+<span class="cm">// フォロー一覧も投稿と同じIDキーセットカーソル（follows.id）</span>
+<span class="kw">export</span> <span class="kw">interface</span> <span class="ty">UserPage</span> {
+  users: <span class="ty">User</span>[]
+  next_cursor?: <span class="ty">number</span>
+}
+
+<span class="kw">export</span> <span class="kw">const</span> listFollowers = (username: <span class="ty">string</span>, cursor?: <span class="ty">number</span>) =&gt;
+  request&lt;<span class="ty">UserPage</span>&gt;(<span class="st">`/api/users/${username}/followers${page(cursor)}`</span>)
+<span class="kw">export</span> <span class="kw">const</span> listFollowing = (username: <span class="ty">string</span>, cursor?: <span class="ty">number</span>) =&gt;
+  request&lt;<span class="ty">UserPage</span>&gt;(<span class="st">`/api/users/${username}/following${page(cursor)}`</span>)</code></pre>
+
+    <p>この長いファイルも、頭の <code>request&lt;T&gt;</code> さえ読めれば、残りは全部その薄い呼び出しです。核心の3行を取り出します。</p>
+    <pre><code>  <span class="kw">const</span> res = <span class="kw">await</span> fetch(path, {
+    credentials: <span class="st">'same-origin'</span>, <span class="cm">// 身分証（HttpOnly Cookie）を毎回添える</span>
+    headers: init?.body ? { <span class="st">'Content-Type'</span>: <span class="st">'application/json'</span> } : <span class="kw">undefined</span>,
+    ...init,
+  })</code></pre>
+    <p>最重要は <strong><code>credentials: 'same-origin'</code></strong> です。第01章で、ログイン証は <strong>HttpOnly Cookie</strong> にしまうと決めました。HttpOnly なので JavaScript からは<strong>読めません</strong>。ではどうやってリクエストに添えるのか——答えは「ブラウザに自動で添えさせる」です。<code>credentials: 'same-origin'</code> は「同じオリジン（Chirp は API も画面も同じ <code>localhost:8080</code>）へのリクエストには、Cookie を付けて送る」という指定です。実はこの <code>same-origin</code> は <code>fetch</code> の<strong>既定値</strong>でもあり、省略しても同一オリジンには Cookie が付きます。それでも<strong>あえて明示する</strong>のは、「このアプリは Cookie で認証している」という意図をコードにはっきり残すためです。逆に、もし API を<strong>別オリジン</strong>に置く構成に変えるなら、ここは <code>'include'</code> にしないと Cookie は送られません（既定の <code>same-origin</code> はクロスオリジンには付けないからです）。いずれにせよ、この一語が「HttpOnly Cookie をブラウザに自動で添えさせ、<strong>フロント全体のログイン状態を成立させる</strong>」役割を担っています。第00章で API とフロントを<strong>同一オリジン（1バイナリ）</strong>にした設計が、ここで <code>same-origin</code> という素直な指定に結実します。</p>
+    <p><code>headers</code> の行は「<strong>ボディがあるときだけ</strong> <code>Content-Type: application/json</code> を付ける」。<code>init?.body ? {...} : undefined</code> という三項演算子で、<code>GET</code> のようにボディの無いリクエストには余計なヘッダを付けません。末尾の <code>...init</code> は<strong>スプレッド構文</strong>で、呼び出し側が渡した <code>method</code> や <code>body</code> を後ろから重ねて上書きします。</p>
+    <pre><code>  <span class="kw">if</span> (res.status === <span class="st">204</span>) <span class="kw">return</span> <span class="kw">undefined</span> <span class="kw">as</span> <span class="ty">T</span>
+  <span class="kw">const</span> data = <span class="kw">await</span> res.json().catch(() =&gt; <span class="kw">null</span>)</code></pre>
+    <p>次は<strong>レスポンスの読み取り</strong>。<code>204 No Content</code>（本文なし）は、ログアウト・削除・いいねなど「成功したが返す中身が無い」ときにサーバが返すステータスです。本文が無いので <code>res.json()</code> を呼ぶと壊れます。だから <code>204</code> なら即座に <code>undefined as T</code> で返す。第06章・05章で <code>DELETE</code> 系が <code>204</code> を返していたのが、フロントのこの一行と噛み合います。続く <code>res.json().catch(() =&gt; null)</code> は、本文が JSON でない（あるいは空の）異常時でも例外で止まらず、<code>null</code> に畳んで先へ進めるための保険です。</p>
+    <pre><code>  <span class="kw">if</span> (!res.ok) {
+    <span class="kw">const</span> err = data <span class="kw">as</span> <span class="ty">ApiErrorBody</span> | <span class="kw">null</span>
+    <span class="kw">throw</span> <span class="kw">new</span> <span class="ty">ApiError</span>(
+      res.status,
+      err?.error.code ?? <span class="st">'unknown'</span>,
+      err?.error.message ?? <span class="st">'通信に失敗しました。時間をおいて再度お試しください。'</span>,
+    )
+  }
+  <span class="kw">return</span> data <span class="kw">as</span> <span class="ty">T</span></code></pre>
+    <p>最後は<strong>エラー整形</strong>。<code>res.ok</code> は「ステータスが 200 番台か」を表す真偽値です。そうでなければ、サーバが返したエラー本文（第01章以降ずっと <code>{ error: { code, message } }</code> の形で統一してきたもの）から <code>code</code> と <code>message</code> を取り出し、<code>ApiError</code> を <code>throw</code> します。<code>err?.error.code ?? 'unknown'</code> の <code>?.</code> は「<code>err</code> が <code>null</code> なら手前で止める（オプショナルチェイニング）」、<code>??</code> は「左が <code>null</code>/<code>undefined</code> なら右を使う（null 合体）」。つまり「サーバがちゃんとエラー本文をくれたらそれを、くれなければ既定のメッセージを」使います。冒頭で <code>ApiError extends Error</code> と<strong>専用のエラー型</strong>を定義しておいたおかげで、画面側は <code>catch (e) { e instanceof Error ? e.message : ... }</code> のように<strong>サーバが用意した日本語メッセージをそのまま表示</strong>できます。<code>throw</code> しなかった正常時は、最後の <code>return data as T</code> で「この型のはず」と宣言して返します。</p>
+
+    <div class="gonote"><div class="box-k">React メモ · なぜ fetch を1か所に包むのか</div>
+      <p>もし各ページで <code>fetch</code> を直に呼んだら、<code>credentials</code> の指定、<code>204</code> の分岐、エラー本文の取り出し、日本語メッセージのフォールバック——この<strong>同じ定型を何十か所にも書く</strong>ことになります。1か所でも書き忘れれば、そのページだけ Cookie が付かずログインが切れたり、エラーで白画面になったりする。<code>request&lt;T&gt;</code> という<strong>1つの通り道</strong>に集約したことで、「Cookie を添える」「エラーを整形する」といった横断的な作法を<strong>全 API に一律で効かせられる</strong>。以降の <code>signup</code> や <code>timeline</code> が数行で書けているのは、面倒を全部この関数が引き受けているからです。</p>
+    </div>
+
+    <h2 class="step" id="step-4"><span class="step-no">Step 4</span>ログイン状態を全画面で共有する — auth.tsx</h2>
+    <p>API を叩く道具ができました。次に必要なのは、<strong>「今ログインしているのは誰か」を、どの画面からでも参照できるようにする</strong>ことです。ヘッダーには自分のユーザー名を出したい、投稿カードでは「これは自分の投稿か」で削除ボタンを出し分けたい、ログイン必須ページはガードしたい——これらはバラバラの画面で「ログインユーザー」を必要とします。毎回 <code>api.me()</code> を叩くのは無駄なので、React の <strong>Context</strong> で<strong>一度取得して全画面で共有</strong>します。</p>
+
+    <div class="file-tag">src/frontend/src/auth.tsx</div>
+    <pre><code><span class="kw">import</span> { createContext, useContext, useEffect, useState, <span class="kw">type</span> <span class="ty">ReactNode</span> } <span class="kw">from</span> <span class="st">'react'</span>
+<span class="kw">import</span> * <span class="kw">as</span> api <span class="kw">from</span> <span class="st">'./api/client'</span>
+<span class="kw">import</span> <span class="kw">type</span> { <span class="ty">User</span> } <span class="kw">from</span> <span class="st">'./api/types'</span>
+
+<span class="kw">interface</span> <span class="ty">AuthState</span> {
+  user: <span class="ty">User</span> | <span class="kw">null</span>
+  loading: <span class="ty">boolean</span>
+  setUser: (u: <span class="ty">User</span> | <span class="kw">null</span>) =&gt; <span class="ty">void</span>
+}
+
+<span class="kw">const</span> <span class="ty">AuthContext</span> = createContext&lt;<span class="ty">AuthState</span>&gt;({ user: <span class="kw">null</span>, loading: <span class="kw">true</span>, setUser: () =&gt; {} })
+
+<span class="cm">// 起動時に一度だけ /api/auth/me でログイン状態を復元する</span>
+<span class="kw">export</span> <span class="kw">function</span> <span class="ty">AuthProvider</span>({ children }: { children: <span class="ty">ReactNode</span> }) {
+  <span class="kw">const</span> [user, setUser] = useState&lt;<span class="ty">User</span> | <span class="kw">null</span>&gt;(<span class="kw">null</span>)
+  <span class="kw">const</span> [loading, setLoading] = useState(<span class="kw">true</span>)
+
+  useEffect(() =&gt; {
+    api
+      .me()
+      .then(setUser)
+      .catch(() =&gt; setUser(<span class="kw">null</span>))
+      .finally(() =&gt; setLoading(<span class="kw">false</span>))
+  }, [])
+
+  <span class="kw">return</span> &lt;<span class="ty">AuthContext.Provider</span> value={{ user, loading, setUser }}&gt;{children}&lt;/<span class="ty">AuthContext.Provider</span>&gt;
+}
+
+<span class="kw">export</span> <span class="kw">const</span> useAuth = () =&gt; useContext(<span class="ty">AuthContext</span>)</code></pre>
+
+    <p><code>AuthState</code> は共有する中身の型です。<code>user</code>（ログイン中のユーザー、未ログインなら <code>null</code>）、<code>loading</code>（復元中かどうか）、<code>setUser</code>（ログイン/ログアウト時に差し替える関数）の3つ。<code>createContext&lt;AuthState&gt;({...})</code> でこの共有箱を作ります。引数は「Provider に包まれていないときの既定値」で、初期は「未ログイン・読み込み中」です。</p>
+    <p>核心は <code>AuthProvider</code> の <code>useEffect</code> です。</p>
+    <pre><code>  useEffect(() =&gt; {
+    api
+      .me()
+      .then(setUser)
+      .catch(() =&gt; setUser(<span class="kw">null</span>))
+      .finally(() =&gt; setLoading(<span class="kw">false</span>))
+  }, [])</code></pre>
+    <p>第2引数が <strong>空配列 <code>[]</code></strong> なので、この副作用は<strong>アプリ起動時に一度だけ</strong>走ります。中で <code>api.me()</code>（<code>GET /api/auth/me</code>）を呼び、成功したら <code>setUser</code> でユーザーを入れ、失敗（＝Cookie が無い/無効＝未ログイン）したら <code>setUser(null)</code>。どちらの結末でも <code>finally</code> で <code>loading</code> を <code>false</code> にします。ここが<strong>「ページを再読み込みしてもログインが保たれる」仕組みの正体</strong>です。ブラウザを更新すると React の状態は消えますが、<strong>HttpOnly Cookie はブラウザに残っている</strong>。だから起動時に <code>me()</code> を1回叩けば、その Cookie を <code>credentials: 'same-origin'</code> が添えてくれて、サーバが「あなたは誰々です」と返し、状態を<strong>復元</strong>できるのです。第01章で「認証はステートレス、毎回証拠を添える」と作った設計が、フロントのこの3行にそのまま効いています。</p>
+    <p>最後の <code>useAuth = () =&gt; useContext(AuthContext)</code> は、各画面が <code>const { user } = useAuth()</code> と<strong>短く書けるようにする小さな入口</strong>です。以降 <code>Layout</code>・<code>RequireAuth</code>・<code>PostCard</code>・<code>Profile</code> などが、この <code>useAuth()</code> で共有ユーザーを取り出します。</p>
+
+    <div class="box hazard"><div class="box-k">⚠ loading を挟まないと「一瞬ログイン画面に飛ぶ」</div>
+      <p><code>loading</code> という状態を<strong>わざわざ持っている理由</strong>に注意してください。起動直後、<code>me()</code> の結果が返る<strong>前</strong>は、<code>user</code> はまだ <code>null</code>（初期値）です。もしここで <code>loading</code> を見ずに「<code>user</code> が <code>null</code> ならログイン画面へ」と判断すると、<strong>本当はログイン済みなのに、復元が終わる一瞬だけログイン画面へ飛ばされて</strong>から戻る、というちらつきが起きます。<code>loading</code> が <code>true</code> の間は「まだ分からない」として待つ——次の Step 5 の <code>RequireAuth</code> が <code>if (loading) return 読み込み中…</code> としているのは、この誤爆を防ぐためです。</p>
+    </div>
+
+    <h2 class="step" id="step-5"><span class="step-no">Step 5</span>ルーティングと「ログイン必須の守り」 — App.tsx / main.tsx</h2>
+    <p>共有状態が整ったので、次は<strong>URL と画面を結びつけ、入口を組み立てる</strong>部分です。SPA（Single Page Application）では、ページ遷移のたびにサーバへ HTML を取りに行くのではなく、<strong>ブラウザの中で URL に応じて表示する画面を切り替えます</strong>。それを担うのが <code>react-router</code>。まず全体を包む入口 <code>main.tsx</code> から。</p>
+
+    <div class="file-tag">src/frontend/src/main.tsx</div>
+    <pre><code><span class="kw">import</span> { <span class="ty">StrictMode</span> } <span class="kw">from</span> <span class="st">'react'</span>
+<span class="kw">import</span> { createRoot } <span class="kw">from</span> <span class="st">'react-dom/client'</span>
+<span class="kw">import</span> { <span class="ty">BrowserRouter</span> } <span class="kw">from</span> <span class="st">'react-router-dom'</span>
+<span class="kw">import</span> <span class="ty">App</span> <span class="kw">from</span> <span class="st">'./App'</span>
+<span class="kw">import</span> { <span class="ty">AuthProvider</span> } <span class="kw">from</span> <span class="st">'./auth'</span>
+<span class="kw">import</span> <span class="st">'./index.css'</span>
+
+createRoot(document.getElementById(<span class="st">'root'</span>)!).render(
+  &lt;<span class="ty">StrictMode</span>&gt;
+    &lt;<span class="ty">BrowserRouter</span>&gt;
+      &lt;<span class="ty">AuthProvider</span>&gt;
+        &lt;<span class="ty">App</span> /&gt;
+      &lt;/<span class="ty">AuthProvider</span>&gt;
+    &lt;/<span class="ty">BrowserRouter</span>&gt;
+  &lt;/<span class="ty">StrictMode</span>&gt;,
+)</code></pre>
+    <p>ここは<strong>包む順序</strong>がすべてです。<code>createRoot(...).render(...)</code> で、HTML の <code>&lt;div id="root"&gt;&lt;/div&gt;</code>（<code>document.getElementById('root')!</code> の <code>!</code> は「これは <code>null</code> でないと保証する」印）に React を描画します。中身は外側から <code>BrowserRouter</code>（URL の仕組みを提供）→ <code>AuthProvider</code>（ログイン状態を共有）→ <code>App</code>（本体）と入れ子になっています。この順序のおかげで、<code>App</code> 以下の<strong>どの画面からも</strong>ルーティング（<code>useNavigate</code> など）と <code>useAuth()</code> の両方が使えます。<code>StrictMode</code> は開発時に潜在的な不具合を早期発見するための包みです。</p>
+    <p>そして本体 <code>App.tsx</code>。ここに<strong>共通レイアウト・ログイン必須の守り・ルート定義</strong>の3つが入ります。</p>
+
+    <div class="file-tag">src/frontend/src/App.tsx</div>
+    <pre><code><span class="kw">import</span> { <span class="ty">Link</span>, <span class="ty">Navigate</span>, <span class="ty">Outlet</span>, <span class="ty">Route</span>, <span class="ty">Routes</span>, useNavigate } <span class="kw">from</span> <span class="st">'react-router-dom'</span>
+<span class="kw">import</span> * <span class="kw">as</span> api <span class="kw">from</span> <span class="st">'./api/client'</span>
+<span class="kw">import</span> { useAuth } <span class="kw">from</span> <span class="st">'./auth'</span>
+<span class="kw">import</span> <span class="ty">FollowList</span> <span class="kw">from</span> <span class="st">'./pages/FollowList'</span>
+<span class="kw">import</span> <span class="ty">Home</span> <span class="kw">from</span> <span class="st">'./pages/Home'</span>
+<span class="kw">import</span> <span class="ty">Login</span> <span class="kw">from</span> <span class="st">'./pages/Login'</span>
+<span class="kw">import</span> <span class="ty">PostDetail</span> <span class="kw">from</span> <span class="st">'./pages/PostDetail'</span>
+<span class="kw">import</span> <span class="ty">Profile</span> <span class="kw">from</span> <span class="st">'./pages/Profile'</span>
+<span class="kw">import</span> <span class="ty">Signup</span> <span class="kw">from</span> <span class="st">'./pages/Signup'</span>
+
+<span class="kw">function</span> <span class="ty">Layout</span>() {
+  <span class="kw">const</span> { user, setUser } = useAuth()
+  <span class="kw">const</span> navigate = useNavigate()
+
+  <span class="kw">const</span> doLogout = <span class="kw">async</span> () =&gt; {
+    <span class="kw">await</span> api.logout().catch(() =&gt; {})
+    setUser(<span class="kw">null</span>)
+    navigate(<span class="st">'/login'</span>)
+  }
+
+  <span class="kw">return</span> (
+    &lt;<span class="ty">div</span> className=<span class="st">"app"</span>&gt;
+      &lt;<span class="ty">header</span> className=<span class="st">"topbar"</span>&gt;
+        &lt;<span class="ty">Link</span> className=<span class="st">"logo"</span> to=<span class="st">"/"</span>&gt;
+          Chirp
+        &lt;/<span class="ty">Link</span>&gt;
+        &lt;<span class="ty">span</span> className=<span class="st">"spacer"</span> /&gt;
+        {user ? (
+          &lt;&gt;
+            &lt;<span class="ty">Link</span> className=<span class="st">"nav"</span> to={<span class="st">`/users/${user.username}`</span>}&gt;
+              @{user.username}
+            &lt;/<span class="ty">Link</span>&gt;
+            &lt;<span class="ty">button</span> className=<span class="st">"btn btn-outline"</span> onClick={doLogout}&gt;
+              ログアウト
+            &lt;/<span class="ty">button</span>&gt;
+          &lt;/&gt;
+        ) : (
+          &lt;&gt;
+            &lt;<span class="ty">Link</span> className=<span class="st">"nav"</span> to=<span class="st">"/login"</span>&gt;
+              ログイン
+            &lt;/<span class="ty">Link</span>&gt;
+            &lt;<span class="ty">Link</span> className=<span class="st">"nav"</span> to=<span class="st">"/signup"</span>&gt;
+              新規登録
+            &lt;/<span class="ty">Link</span>&gt;
+          &lt;/&gt;
+        )}
+      &lt;/<span class="ty">header</span>&gt;
+      &lt;<span class="ty">Outlet</span> /&gt;
+    &lt;/<span class="ty">div</span>&gt;
+  )
+}
+
+<span class="cm">// ログイン必須ページの守り。未ログインなら /login へ</span>
+<span class="kw">function</span> <span class="ty">RequireAuth</span>({ children }: { children: <span class="ty">React.ReactNode</span> }) {
+  <span class="kw">const</span> { user, loading } = useAuth()
+  <span class="kw">if</span> (loading) <span class="kw">return</span> &lt;<span class="ty">div</span> className=<span class="st">"loading"</span>&gt;読み込み中…&lt;/<span class="ty">div</span>&gt;
+  <span class="kw">if</span> (!user) <span class="kw">return</span> &lt;<span class="ty">Navigate</span> to=<span class="st">"/login"</span> replace /&gt;
+  <span class="kw">return</span> &lt;&gt;{children}&lt;/&gt;
+}
+
+<span class="kw">export</span> <span class="kw">default</span> <span class="kw">function</span> <span class="ty">App</span>() {
+  <span class="kw">return</span> (
+    &lt;<span class="ty">Routes</span>&gt;
+      &lt;<span class="ty">Route</span> element={&lt;<span class="ty">Layout</span> /&gt;}&gt;
+        &lt;<span class="ty">Route</span>
+          path=<span class="st">"/"</span>
+          element={
+            &lt;<span class="ty">RequireAuth</span>&gt;
+              &lt;<span class="ty">Home</span> /&gt;
+            &lt;/<span class="ty">RequireAuth</span>&gt;
+          }
+        /&gt;
+        &lt;<span class="ty">Route</span> path=<span class="st">"/login"</span> element={&lt;<span class="ty">Login</span> /&gt;} /&gt;
+        &lt;<span class="ty">Route</span> path=<span class="st">"/signup"</span> element={&lt;<span class="ty">Signup</span> /&gt;} /&gt;
+        &lt;<span class="ty">Route</span> path=<span class="st">"/users/:username"</span> element={&lt;<span class="ty">Profile</span> /&gt;} /&gt;
+        &lt;<span class="ty">Route</span> path=<span class="st">"/users/:username/followers"</span> element={&lt;<span class="ty">FollowList</span> kind=<span class="st">"followers"</span> /&gt;} /&gt;
+        &lt;<span class="ty">Route</span> path=<span class="st">"/users/:username/following"</span> element={&lt;<span class="ty">FollowList</span> kind=<span class="st">"following"</span> /&gt;} /&gt;
+        &lt;<span class="ty">Route</span> path=<span class="st">"/posts/:id"</span> element={&lt;<span class="ty">PostDetail</span> /&gt;} /&gt;
+        &lt;<span class="ty">Route</span> path=<span class="st">"*"</span> element={&lt;<span class="ty">div</span> className=<span class="st">"empty"</span>&gt;ページが見つかりません。&lt;/<span class="ty">div</span>&gt;} /&gt;
+      &lt;/<span class="ty">Route</span>&gt;
+    &lt;/<span class="ty">Routes</span>&gt;
+  )
+}</code></pre>
+
+    <p>3つの部品を順に。<strong><code>Layout</code></strong> は全ページ共通の枠です。上部バー（<code>topbar</code>）にロゴを置き、<code>useAuth()</code> の <code>user</code> を見て<strong>ログイン中なら「@自分 ＋ ログアウト」、未ログインなら「ログイン ＋ 新規登録」</strong>を出し分けます。<code>{user ? (...) : (...)}</code> の三項演算子と、<code>&lt;&gt;...&lt;/&gt;</code>（フラグメント＝余計な箱を作らずに複数要素をまとめる書き方）に注目。<code>doLogout</code> は <code>api.logout()</code> を叩き（第01章の Cookie 削除）、<code>setUser(null)</code> で共有状態を空にし、<code>navigate('/login')</code> でログイン画面へ送ります。末尾の <code>&lt;Outlet /&gt;</code> が肝で、<strong>「ここに、その URL に対応する子ページを差し込む」</strong>という穴です。だから全ページがこの共通ヘッダーの下に表示されます。</p>
+    <p><strong><code>RequireAuth</code></strong> が、この章で言う「ログイン必須ページの守り」です。中身はたった3行。<code>if (loading)</code> なら「読み込み中…」を出して<strong>待つ</strong>（Step 4 のちらつき防止）。<code>if (!user)</code> なら <code>&lt;Navigate to="/login" replace /&gt;</code> で<strong>ログイン画面へ追い返す</strong>（<code>replace</code> は履歴を残さず置き換え、戻るボタンでループしないようにする）。両方くぐり抜けたら <code>&lt;&gt;{children}&lt;/&gt;</code> で本来の中身を表示します。<code>App</code> の中で <code>&lt;RequireAuth&gt;&lt;Home /&gt;&lt;/RequireAuth&gt;</code> と包んでいるので、<strong>ホームタイムラインは未ログインでは絶対に見えません</strong>。</p>
+    <p>そして <code>App</code> 本体の <code>&lt;Routes&gt;</code>。外側の <code>&lt;Route element={&lt;Layout /&gt;}&gt;</code> が「以下すべてを <code>Layout</code> で包む」宣言で、中の各 <code>&lt;Route path=... element=... /&gt;</code> が Step 1 の対応表そのものです。<code>path="/users/:username"</code> の <strong><code>:username</code></strong> は URL の一部を変数として受け取る書き方で、ページ側は <code>useParams()</code> で取り出します。末尾の <code>path="*"</code> は<strong>どのルートにも当たらなかったとき</strong>の受け皿（「ページが見つかりません。」）です。</p>
+
+    <div class="gonote"><div class="box-k">React メモ · 「守り」はフロントとサーバの二重で</div>
+      <p><code>RequireAuth</code> は<strong>ユーザー体験のための守り</strong>であって、<strong>セキュリティの守りではありません</strong>。フロントのコードはブラウザに配られる以上、その気になれば書き換えられます。だから <code>RequireAuth</code> をすり抜けて <code>GET /api/timeline</code> を直接叩かれても、<strong>サーバ側の <code>requireAuth</code> ミドルウェア（第01章）が Cookie を検証して弾く</strong>——ここが本当の防御線です。フロントの守りは「未ログインの人をログイン画面へ案内して迷わせない」ための親切、サーバの守りは「不正なアクセスを実際に拒否する」ための本丸。<strong>認可は必ずサーバで行い、フロントはその写し</strong>、という二重構造を意識してください。</p>
+    </div>
+
+    <h2 class="step" id="step-6"><span class="step-no">Step 6</span>フィード — カーソルと「世代番号」 — PostFeed.tsx</h2>
+    <p>いよいよ画面の中身です。タイムライン・ユーザーの投稿一覧・リプライ一覧——これらはどれも「投稿を新しい順に並べ、<strong>もっと見る</strong>で続きを足す」同じUIです。だから <code>PostFeed</code> という<strong>1つの共通コンポーネント</strong>にまとめ、「どうやって1ページ取ってくるか（<code>fetchPage</code>）」だけを外から差し替えます。ここに、第04章で作った<strong>キーセットカーソル</strong>がフロントで結実し、さらに<strong>「世代番号で古い応答を捨てる」</strong>という重要な工夫が入ります。</p>
+
+    <div class="file-tag">src/frontend/src/components/PostFeed.tsx</div>
+    <pre><code><span class="kw">import</span> { useCallback, useEffect, useRef, useState } <span class="kw">from</span> <span class="st">'react'</span>
+<span class="kw">import</span> <span class="kw">type</span> { <span class="ty">Post</span>, <span class="ty">PostPage</span> } <span class="kw">from</span> <span class="st">'../api/types'</span>
+<span class="kw">import</span> <span class="ty">PostCard</span> <span class="kw">from</span> <span class="st">'./PostCard'</span>
+
+<span class="kw">interface</span> <span class="ty">Props</span> {
+  <span class="cm">// cursor を受け取って1ページ返す関数（タイムライン/ユーザー投稿/リプライで共用）</span>
+  fetchPage: (cursor?: <span class="ty">number</span>) =&gt; <span class="ty">Promise</span>&lt;<span class="ty">PostPage</span>&gt;
+  emptyMessage: <span class="ty">string</span>
+  <span class="cm">// 新規投稿を先頭（リプライは末尾）に差し込むためのシグナル</span>
+  prepend?: <span class="ty">Post</span> | <span class="kw">null</span>
+  append?: <span class="ty">Post</span> | <span class="kw">null</span>
+}
+
+<span class="cm">// 「もっと見る」方式の投稿フィード。続きはキーセットカーソルで取得する。</span>
+<span class="kw">export</span> <span class="kw">default</span> <span class="kw">function</span> <span class="ty">PostFeed</span>({ fetchPage, emptyMessage, prepend, append }: <span class="ty">Props</span>) {
+  <span class="cm">// posts はサーバのページをそのまま連結した列。prepends / extras は</span>
+  <span class="cm">// prepend / append でローカル追加した投稿で、サーバのページに現れるまでの間</span>
+  <span class="cm">// だけ一覧の先頭／末尾に置く。posts に直接混ぜると、初回ロードの置換で</span>
+  <span class="cm">// 消えたり、未読ページが残っているとき順序が壊れたり、最終ページで同じ</span>
+  <span class="cm">// 投稿が重複したりする</span>
+  <span class="kw">const</span> [posts, setPosts] = useState&lt;<span class="ty">Post</span>[]&gt;([])
+  <span class="kw">const</span> [prepends, setPrepends] = useState&lt;<span class="ty">Post</span>[]&gt;([])
+  <span class="kw">const</span> [extras, setExtras] = useState&lt;<span class="ty">Post</span>[]&gt;([])
+  <span class="kw">const</span> [cursor, setCursor] = useState&lt;<span class="ty">number</span> | <span class="kw">undefined</span>&gt;()
+  <span class="kw">const</span> [hasMore, setHasMore] = useState(<span class="kw">false</span>)
+  <span class="kw">const</span> [loading, setLoading] = useState(<span class="kw">true</span>)
+  <span class="kw">const</span> [error, setError] = useState(<span class="st">''</span>)
+
+  <span class="cm">// 画面遷移で fetchPage が差し替わった後に、前画面の飛行中レスポンスが</span>
+  <span class="cm">// 一覧を上書きしないよう、世代番号で古い応答を捨てる</span>
+  <span class="kw">const</span> gen = useRef(<span class="st">0</span>)
+
+  <span class="kw">const</span> load = useCallback(
+    <span class="kw">async</span> (c?: <span class="ty">number</span>) =&gt; {
+      <span class="kw">const</span> g = gen.current
+      setLoading(<span class="kw">true</span>)
+      setError(<span class="st">''</span>)
+      <span class="kw">try</span> {
+        <span class="kw">const</span> page = <span class="kw">await</span> fetchPage(c)
+        <span class="kw">if</span> (g !== gen.current) <span class="kw">return</span> <span class="cm">// 古いリクエストの結果は捨てる</span>
+        setPosts((prev) =&gt; (c ? [...prev, ...page.posts] : page.posts))
+        <span class="cm">// ローカル追加分がサーバの正しい位置で届いたら、そちらの並びに座を譲る</span>
+        <span class="kw">const</span> pageIds = <span class="kw">new</span> <span class="ty">Set</span>(page.posts.map((p) =&gt; p.id))
+        setPrepends((prev) =&gt; prev.filter((p) =&gt; !pageIds.has(p.id)))
+        setExtras((prev) =&gt; prev.filter((p) =&gt; !pageIds.has(p.id)))
+        setCursor(page.next_cursor)
+        setHasMore(page.next_cursor != <span class="kw">null</span>)
+        setLoading(<span class="kw">false</span>)
+      } <span class="kw">catch</span> (e) {
+        <span class="kw">if</span> (g !== gen.current) <span class="kw">return</span>
+        setError(e <span class="kw">instanceof</span> <span class="ty">Error</span> ? e.message : <span class="st">'読み込みに失敗しました。'</span>)
+        setLoading(<span class="kw">false</span>)
+      }
+    },
+    [fetchPage],
+  )
+
+  useEffect(() =&gt; {
+    gen.current++ <span class="cm">// 世代を進め、以前の飛行中リクエストを無効化する</span>
+    setPosts([])
+    setPrepends([])
+    setExtras([])
+    setCursor(<span class="kw">undefined</span>)
+    setHasMore(<span class="kw">false</span>)
+    load()
+    <span class="kw">return</span> () =&gt; {
+      gen.current++
+    }
+  }, [load])
+
+  useEffect(() =&gt; {
+    <span class="kw">if</span> (prepend) setPrepends((prev) =&gt; [prepend, ...prev])
+  }, [prepend])
+
+  useEffect(() =&gt; {
+    <span class="kw">if</span> (append) setExtras((prev) =&gt; [...prev, append])
+  }, [append])
+
+  <span class="kw">const</span> update = (p: <span class="ty">Post</span>) =&gt; {
+    setPosts((prev) =&gt; prev.map((x) =&gt; (x.id === p.id ? p : x)))
+    setPrepends((prev) =&gt; prev.map((x) =&gt; (x.id === p.id ? p : x)))
+    setExtras((prev) =&gt; prev.map((x) =&gt; (x.id === p.id ? p : x)))
+  }
+  <span class="kw">const</span> remove = (id: <span class="ty">number</span>) =&gt; {
+    setPosts((prev) =&gt; prev.filter((x) =&gt; x.id !== id))
+    setPrepends((prev) =&gt; prev.filter((x) =&gt; x.id !== id))
+    setExtras((prev) =&gt; prev.filter((x) =&gt; x.id !== id))
+  }
+
+  <span class="cm">// 表示は先頭のローカル新規投稿＋サーバの列＋末尾のローカルリプライ。</span>
+  <span class="cm">// ページ応答とシグナルの着順次第では同じ投稿が二重に届く一瞬があるため、</span>
+  <span class="cm">// ID で一意化（先勝ち）してから描画する</span>
+  <span class="kw">const</span> merged = [...prepends, ...posts, ...extras]
+  <span class="kw">const</span> all = merged.filter((p, i) =&gt; merged.findIndex((x) =&gt; x.id === p.id) === i)
+
+  <span class="kw">if</span> (loading &amp;&amp; all.length === <span class="st">0</span>) <span class="kw">return</span> &lt;<span class="ty">div</span> className=<span class="st">"loading"</span>&gt;読み込み中…&lt;/<span class="ty">div</span>&gt;
+  <span class="kw">if</span> (error &amp;&amp; all.length === <span class="st">0</span>) <span class="kw">return</span> &lt;<span class="ty">div</span> className=<span class="st">"empty"</span>&gt;{error}&lt;/<span class="ty">div</span>&gt;
+
+  <span class="kw">return</span> (
+    &lt;<span class="ty">div</span>&gt;
+      {all.length === <span class="st">0</span> ? (
+        &lt;<span class="ty">div</span> className=<span class="st">"empty"</span>&gt;{emptyMessage}&lt;/<span class="ty">div</span>&gt;
+      ) : (
+        all.map((p) =&gt; &lt;<span class="ty">PostCard</span> key={p.id} post={p} onChange={update} onDelete={remove} /&gt;)
+      )}
+      {error &amp;&amp; all.length &gt; <span class="st">0</span> &amp;&amp; &lt;<span class="ty">div</span> className=<span class="st">"empty"</span>&gt;{error}&lt;/<span class="ty">div</span>&gt;}
+      {hasMore &amp;&amp; (
+        &lt;<span class="ty">button</span> className=<span class="st">"more-btn"</span> disabled={loading} onClick={() =&gt; load(cursor)}&gt;
+          {loading ? <span class="st">'読み込み中…'</span> : <span class="st">'もっと見る'</span>}
+        &lt;/<span class="ty">button</span>&gt;
+      )}
+    &lt;/<span class="ty">div</span>&gt;
+  )
+}</code></pre>
+
+    <p>状態は7つ。まず注目してほしいのは、投稿の配列が <code>posts</code>・<code>prepends</code>・<code>extras</code> の<strong>3本に分かれている</strong>ことです。<code>posts</code> は<strong>サーバのページをそのまま連結した列</strong>。<code>prepends</code> と <code>extras</code> は <code>prepend</code>/<code>append</code> シグナルで<strong>ローカルに追加した投稿</strong>（＝自分がたった今投稿したが、まだサーバのどのページにも現れていない1件）で、前者は一覧の<strong>先頭</strong>（ホームの新規投稿）、後者は<strong>末尾</strong>（リプライ）に置きます。なぜ <code>posts</code> に直接混ぜないのか。壊れ方が3つあるからです。(1) ホームでは<strong>初回ロードの応答が配列を丸ごと置換</strong>します——フィードの読み込み中に投稿した1件を <code>posts</code> に混ぜていたら、遅れて届いた応答の置換で<strong>画面から消えます</strong>。(2) リプライ一覧は<strong>古い順</strong>なので、新規リプライを末尾に直接混ぜると、「もっと見る」で届く<strong>より古いリプライ</strong>がその後ろに連結されて<strong>会話順が崩れます</strong>。(3) 読み進めて最終ページに到達すると、サーバから<strong>同じリプライがもう一度</strong>届いて二重表示になり、React の <code>key</code> も衝突します。そこで、ローカル追加分は <code>prepends</code>/<code>extras</code> として別に持ち、表示は <code>[...prepends, ...posts, ...extras]</code> を連結してから <strong>ID で一意化</strong>した <code>all</code>——<strong>先頭のローカル新規投稿＋サーバの列＋末尾のローカルリプライ</strong>。一意化まで要るのは、通信の<strong>着順</strong>は制御できないからです。ページ応答（新規投稿を含むページ）が先に届き、投稿直後のシグナルが後から走ると、同じ投稿が一瞬2本の配列に居ます。<code>filter</code> の「最初に現れた位置だけ残す」（先勝ち）で、この競合でも表示は常に1件に畳まれます。<code>load</code> の連結は <code>setPosts((prev) =&gt; (c ? [...prev, ...page.posts] : page.posts))</code> という素直な形のままでよく（キーセットのおかげでサーバのページ同士は決して重ならない）、新ページの ID 集合 <code>pageIds</code> に <code>prepends</code>/<code>extras</code> の投稿が現れたら——つまりローカル追加分が<strong>サーバの正しい位置で届いたら</strong>——<code>filter</code> で手元の分を取り除いて、サーバ由来の並びに<strong>座を譲り</strong>ます。キーセットが守るのは「サーバ側のページ送りのズレ」まで。「ローカルに足した1件」との整合は、この<strong>役割分担</strong>で守ります。残りの<strong>カーソルの流れ</strong>は素直です。<code>load</code> の中で <code>const page = await fetchPage(c)</code> と1ページ取得し、<code>setCursor(page.next_cursor)</code> と <code>setHasMore(page.next_cursor != null)</code> を更新。<code>next_cursor</code> があれば「まだ続きがある」＝ボタンを出す、無ければ終わり。「もっと見る」を押すと <code>onClick={() =&gt; load(cursor)}</code> で<strong>今持っているカーソルを渡して次のページ</strong>を呼ぶ——第04章で「<code>id</code> をカーソルにして続きを引く」と設計した仕組みが、この <code>fetchPage(cursor)</code> → <code>next_cursor</code> の往復として画面に出ています。</p>
+    <p>そして<strong>この章で最も繊細な工夫</strong>——<code>gen = useRef(0)</code> による<strong>世代管理</strong>です。</p>
+    <pre><code>  useEffect(() =&gt; {
+    gen.current++ <span class="cm">// 世代を進め、以前の飛行中リクエストを無効化する</span>
+    setPosts([])
+    ...
+    load()
+    <span class="kw">return</span> () =&gt; {
+      gen.current++
+    }
+  }, [load])</code></pre>
+    <p>問題はこうです。プロフィールA を開くと <code>fetchPage</code>（A の投稿を取る関数）が走ります。応答が返る前に素早くプロフィールB へ移ると、<code>fetchPage</code> は B 用に差し替わり、B の取得も走る。ところが<strong>A の応答が B より遅れて返ってくる</strong>と、何も対策しなければ「B の画面に A の投稿が上書き表示される」という<strong>取り違え</strong>が起きます。これを防ぐのが世代番号です。<code>load</code> の冒頭で <code>const g = gen.current</code> と<strong>今の世代を控え</strong>、<code>await</code> から戻った直後に <code>if (g !== gen.current) return</code> で<strong>「自分が始まったときの世代と、今の世代がずれていたら、結果を捨てて何もしない」</strong>と確認します。画面が切り替わるたび <code>useEffect</code> が <code>gen.current++</code> で世代を進めるので、<strong>古い（前の画面の）飛行中リクエストの応答は、戻ってきても捨てられる</strong>。<code>useRef</code> を使うのは、この番号を<strong>再描画を起こさずに</strong>持ち回りたいからです（<code>useState</code> だと更新のたびに再描画されてしまう）。</p>
+
+    <div class="gonote"><div class="box-k">React メモ · useRef で「世代」を持つ理由</div>
+      <p><code>useRef(0)</code> が返す <code>gen</code> は <code>{ current: 0 }</code> という<strong>書き換え可能な箱</strong>で、<code>gen.current++</code> しても<strong>再描画は起きません</strong>。ここが <code>useState</code> との決定的な違いです。世代番号は「画面に出す値」ではなく「飛行中リクエストが有効か判定するための内部カウンタ」。もし <code>useState</code> で持つと、値を進めるたびに再描画され、しかも <code>load</code> が握っている世代は<strong>クロージャに閉じ込められた古い値</strong>になってしまい判定が壊れます。<code>useRef</code> なら常に <code>gen.current</code> で<strong>最新の同じ箱</strong>を見られるので、「開始時に控えた <code>g</code>」と「今の <code>gen.current</code>」を正しく比べられる。<strong>「描画に関係しない可変値」は <code>useRef</code></strong>——これが定石です。<code>FollowList.tsx</code> でも同じパターンを使っています。</p>
+    </div>
+
+    <p>残りの2つの <code>useEffect</code> は、<code>prepend</code>（新規投稿を先頭に差し込む＝ホームで自分が投稿したとき）と <code>append</code>（リプライを投稿したとき）のシグナルを受けて、フィードに1件挿入します。どちらも <code>posts</code> ではなく、<strong>専用のローカル配列</strong>へ入ります——<code>prepend</code> は <code>prepends</code> の先頭へ（新しい投稿ほど前）、<code>append</code> は <code>extras</code> の末尾へ。先ほど見た「壊れ方3つ」を避けるための役割分担が、この2行の <code>useEffect</code> にそのまま現れています。末尾の <code>update</code>/<code>remove</code> は、子の <code>PostCard</code> から「この投稿が変わった／消えた」と知らせを受けて配列を差し替える関数で、投稿は3本の配列の<strong>どれに居てもおかしくない</strong>ため、3本すべてに同じ操作を掛けます。次の Step 7 の<strong>楽観的更新</strong>と削除に使われます。描画部の <code>{hasMore &amp;&amp; (...)}</code> は「<code>hasMore</code> が真のときだけボタンを描く」短絡評価で、続きが無ければ「もっと見る」は消えます。</p>
+
+    <h2 class="step" id="step-7"><span class="step-no">Step 7</span>カード — 自動エスケープと楽観的更新 — PostCard.tsx</h2>
+    <p>フィードの1件1件を描くのが <code>PostCard</code> です。ここには、この本全体でも屈指の重要ポイントが2つ詰まっています。<strong>(1) 本文を React が必ずエスケープして描く（XSS 対策の要）</strong>、<strong>(2) いいねの楽観的更新（第06章の回収）</strong>。</p>
+
+    <div class="file-tag">src/frontend/src/components/PostCard.tsx</div>
+    <pre><code><span class="kw">import</span> { <span class="ty">Link</span>, useNavigate } <span class="kw">from</span> <span class="st">'react-router-dom'</span>
+<span class="kw">import</span> * <span class="kw">as</span> api <span class="kw">from</span> <span class="st">'../api/client'</span>
+<span class="kw">import</span> <span class="kw">type</span> { <span class="ty">Post</span> } <span class="kw">from</span> <span class="st">'../api/types'</span>
+<span class="kw">import</span> { useAuth } <span class="kw">from</span> <span class="st">'../auth'</span>
+
+<span class="kw">function</span> formatTime(iso: <span class="ty">string</span>): <span class="ty">string</span> {
+  <span class="kw">const</span> d = <span class="kw">new</span> <span class="ty">Date</span>(iso)
+  <span class="kw">const</span> diff = (<span class="ty">Date</span>.now() - d.getTime()) / <span class="st">1000</span>
+  <span class="kw">if</span> (diff &lt; <span class="st">60</span>) <span class="kw">return</span> <span class="st">'たった今'</span>
+  <span class="kw">if</span> (diff &lt; <span class="st">3600</span>) <span class="kw">return</span> <span class="st">`${Math.floor(diff / 60)}分前`</span>
+  <span class="kw">if</span> (diff &lt; <span class="st">86400</span>) <span class="kw">return</span> <span class="st">`${Math.floor(diff / 3600)}時間前`</span>
+  <span class="kw">return</span> <span class="st">`${d.getFullYear()}/${d.getMonth() + 1}/${d.getDate()}`</span>
+}
+
+<span class="kw">interface</span> <span class="ty">Props</span> {
+  post: <span class="ty">Post</span>
+  onChange: (p: <span class="ty">Post</span>) =&gt; <span class="ty">void</span>
+  onDelete: (id: <span class="ty">number</span>) =&gt; <span class="ty">void</span>
+  linkToDetail?: <span class="ty">boolean</span>
+}
+
+<span class="cm">// 投稿1件の表示。本文はReactが必ずエスケープして描画する（XSS対策はここに依存）。</span>
+<span class="kw">export</span> <span class="kw">default</span> <span class="kw">function</span> <span class="ty">PostCard</span>({ post, onChange, onDelete, linkToDetail = <span class="kw">true</span> }: <span class="ty">Props</span>) {
+  <span class="kw">const</span> { user } = useAuth()
+  <span class="kw">const</span> navigate = useNavigate()
+
+  <span class="kw">const</span> toggleLike = <span class="kw">async</span> () =&gt; {
+    <span class="kw">if</span> (!user) {
+      navigate(<span class="st">'/login'</span>)
+      <span class="kw">return</span>
+    }
+    <span class="cm">// 楽観的更新：先に画面を変え、失敗したら戻す</span>
+    <span class="kw">const</span> optimistic = {
+      ...post,
+      liked_by_me: !post.liked_by_me,
+      like_count: post.like_count + (post.liked_by_me ? -<span class="st">1</span> : <span class="st">1</span>),
+    }
+    onChange(optimistic)
+    <span class="kw">try</span> {
+      <span class="kw">await</span> (post.liked_by_me ? api.unlike(post.id) : api.like(post.id))
+    } <span class="kw">catch</span> {
+      onChange(post)
+    }
+  }
+
+  <span class="kw">const</span> remove = <span class="kw">async</span> () =&gt; {
+    <span class="kw">if</span> (!confirm(<span class="st">'この投稿を削除しますか？'</span>)) <span class="kw">return</span>
+    <span class="kw">try</span> {
+      <span class="kw">await</span> api.deletePost(post.id)
+      onDelete(post.id)
+    } <span class="kw">catch</span> (e) {
+      alert(e <span class="kw">instanceof</span> <span class="ty">Error</span> ? e.message : <span class="st">'削除に失敗しました。'</span>)
+    }
+  }
+
+  <span class="kw">return</span> (
+    &lt;<span class="ty">article</span> className=<span class="st">"post"</span>&gt;
+      &lt;<span class="ty">div</span> className=<span class="st">"head"</span>&gt;
+        &lt;<span class="ty">Link</span> className=<span class="st">"name"</span> to={<span class="st">`/users/${post.author.username}`</span>}&gt;
+          {post.author.display_name}
+        &lt;/<span class="ty">Link</span>&gt;
+        &lt;<span class="ty">span</span> className=<span class="st">"sub"</span>&gt;@{post.author.username}&lt;/<span class="ty">span</span>&gt;
+        &lt;<span class="ty">span</span> className=<span class="st">"sub"</span>&gt;· {formatTime(post.created_at)}&lt;/<span class="ty">span</span>&gt;
+      &lt;/<span class="ty">div</span>&gt;
+      &lt;<span class="ty">div</span> className=<span class="st">"body"</span>&gt;{post.body}&lt;/<span class="ty">div</span>&gt;
+      &lt;<span class="ty">div</span> className=<span class="st">"actions"</span>&gt;
+        &lt;<span class="ty">button</span>
+          onClick={() =&gt; linkToDetail &amp;&amp; navigate(<span class="st">`/posts/${post.id}`</span>)}
+          title=<span class="st">"リプライを見る"</span>
+        &gt;
+          💬 {post.reply_count &gt; <span class="st">0</span> ? post.reply_count : <span class="st">''</span>}
+        &lt;/<span class="ty">button</span>&gt;
+        &lt;<span class="ty">button</span> className={post.liked_by_me ? <span class="st">'liked'</span> : <span class="st">''</span>} onClick={toggleLike} title=<span class="st">"いいね"</span>&gt;
+          {post.liked_by_me ? <span class="st">'❤️'</span> : <span class="st">'🤍'</span>} {post.like_count &gt; <span class="st">0</span> ? post.like_count : <span class="st">''</span>}
+        &lt;/<span class="ty">button</span>&gt;
+        {user?.id === post.author.id &amp;&amp; (
+          &lt;<span class="ty">button</span> className=<span class="st">"del"</span> onClick={remove} title=<span class="st">"削除"</span>&gt;
+            🗑
+          &lt;/<span class="ty">button</span>&gt;
+        )}
+      &lt;/<span class="ty">div</span>&gt;
+    &lt;/<span class="ty">article</span>&gt;
+  )
+}</code></pre>
+
+    <p>まず<strong>本文の描画</strong>を見てください。たった1行です。</p>
+    <pre><code>      &lt;<span class="ty">div</span> className=<span class="st">"body"</span>&gt;{post.body}&lt;/<span class="ty">div</span>&gt;</code></pre>
+    <p>投稿本文 <code>post.body</code> を <code>{}</code> で埋め込んでいるだけ。ここが<strong>XSS 対策の要</strong>です。もしユーザーが本文に <code>&lt;script&gt;alert('乗っ取り')&lt;/script&gt;</code> と書いて投稿したら? ——React は <code>{post.body}</code> を<strong>「テキスト」として</strong>差し込むので、<code>&lt;</code> や <code>&gt;</code> は自動的に <code>&amp;lt;</code> <code>&amp;gt;</code> にエスケープされ、画面には <strong><code>&lt;script&gt;...</code> という文字がそのまま表示</strong>されます。スクリプトとして<strong>実行されることは決してありません</strong>。私たちは <code>escapeHtml</code> のような関数を1つも書いていないのに、安全なのです。これが React（や現代のフロントフレームワーク）の最大の恩恵の一つ——<strong>既定で安全</strong>です。</p>
+
+    <div class="box hazard"><div class="box-k">⚠ XSS はどこで防がれているのか — React の自動エスケープ</div>
+      <p>XSS（クロスサイトスクリプティング）は、攻撃者が投稿本文などに仕込んだスクリプトが、<strong>他人のブラウザ上で実行されてしまう</strong>攻撃です。第01章で「トークンは HttpOnly Cookie にしまって XSS でも盗ませない」と守りましたが、そもそも<strong>スクリプトを実行させない</strong>のが第一の壁。Chirp では、その壁を<strong>React が自動で立てて</strong>います。JSX の <code>{post.body}</code> は必ずテキストとして扱われ、HTML タグは無害な文字列に変換される。<br>
+      この安全が<strong>破れる唯一の道</strong>が、<code>dangerouslySetInnerHTML</code> という API です。名前のとおり「危険」と明示されていて、これを使うと文字列を<strong>生の HTML として</strong>差し込めてしまう（＝スクリプトも動く）。<strong>Chirp はこれをどこでも使っていません</strong>。だから本文・表示名・自己紹介・ユーザー名——ユーザーが入力しうるすべての値は、React が自動エスケープしたまま安全に表示されます。「ユーザー入力を <code>dangerouslySetInnerHTML</code> に渡さない限り、React は XSS から守ってくれる」——これを鉄則として覚えてください。</p>
+    </div>
+
+    <p>次に<strong>いいねの楽観的更新</strong>、<code>toggleLike</code> です。素直に作るなら「API を叩く → 成功を待つ → 画面を更新」ですが、それだとハートを押してから反映まで一瞬待たされます。そこで<strong>順序を逆にします</strong>。</p>
+    <pre><code>    <span class="cm">// 楽観的更新：先に画面を変え、失敗したら戻す</span>
+    <span class="kw">const</span> optimistic = {
+      ...post,
+      liked_by_me: !post.liked_by_me,
+      like_count: post.like_count + (post.liked_by_me ? -<span class="st">1</span> : <span class="st">1</span>),
+    }
+    onChange(optimistic)
+    <span class="kw">try</span> {
+      <span class="kw">await</span> (post.liked_by_me ? api.unlike(post.id) : api.like(post.id))
+    } <span class="kw">catch</span> {
+      onChange(post)
+    }</code></pre>
+    <p><strong>先に画面を変える</strong>のです。<code>optimistic</code> は「いいね状態を反転し、カウントを ±1 した投稿」で、<code>...post</code>（元の投稿を展開）に上書きして作ります。それを即座に <code>onChange(optimistic)</code> で親（<code>PostFeed</code> の <code>update</code>）に渡し、<strong>ハートは押した瞬間に赤くなり、数字も増えます</strong>。その<strong>あとで</strong> <code>await api.like/unlike(...)</code> を投げる。もし通信が失敗したら <code>catch { onChange(post) }</code> で<strong>元の <code>post</code> に戻す</strong>——赤くなったハートが白に戻り、数字も元通り。これが<strong>楽観的更新（optimistic update）</strong>です。「たぶん成功するだろう」と楽観して先に UI を反映し、外れたときだけ取り消す。第06章で「いいねは行の追加/削除だけの軽い操作」と設計したからこそ、フロントでこう<strong>即応</strong>させられます。同じパターンは <code>Profile.tsx</code> のフォロー切り替え（<code>toggleFollow</code>）でも使われています。</p>
+    <p>残りは <code>remove</code>（<code>confirm</code> で削除確認 → <code>api.deletePost</code> → 親の <code>onDelete</code> で一覧から除去、失敗は <code>alert</code>）と、描画部の<strong>削除ボタンの出し分け</strong>です。<code>{user?.id === post.author.id &amp;&amp; (...)}</code> は「<strong>ログイン中の自分が、この投稿の著者のときだけ</strong>ゴミ箱ボタンを描く」。ただしこれも Step 5 と同じで<strong>見た目の親切</strong>にすぎず、実際に他人の投稿を消せないのは第06章のサーバ側 <code>ErrForbidden</code>（本人以外は 403）が守っています。<code>formatTime</code> は「たった今／◯分前／◯時間前／年月日」を出す相対時刻の整形で、素朴な <code>Date</code> 計算です。</p>
+
+    <h2 class="step" id="step-8"><span class="step-no">Step 8</span>投稿フォームと各ページ — Composer.tsx ほか</h2>
+    <p>フィードとカードができたので、あと必要なのは<strong>投稿を入力するフォーム</strong>と、それらを組み合わせた<strong>各ページ</strong>です。まず投稿フォーム <code>Composer</code>。文字数カウントと 280 上限、送信中制御が入ります。</p>
+
+    <div class="file-tag">src/frontend/src/components/Composer.tsx</div>
+    <pre><code><span class="kw">import</span> { useState } <span class="kw">from</span> <span class="st">'react'</span>
+<span class="kw">import</span> * <span class="kw">as</span> api <span class="kw">from</span> <span class="st">'../api/client'</span>
+<span class="kw">import</span> <span class="kw">type</span> { <span class="ty">Post</span> } <span class="kw">from</span> <span class="st">'../api/types'</span>
+
+<span class="kw">const</span> MAX = <span class="st">280</span>
+
+<span class="kw">interface</span> <span class="ty">Props</span> {
+  placeholder: <span class="ty">string</span>
+  replyToId?: <span class="ty">number</span>
+  onPosted: (p: <span class="ty">Post</span>) =&gt; <span class="ty">void</span>
+}
+
+<span class="cm">// 投稿フォーム。文字数チェックは画面でも行うが、最終的な守りはサーバ側にある。</span>
+<span class="kw">export</span> <span class="kw">default</span> <span class="kw">function</span> <span class="ty">Composer</span>({ placeholder, replyToId, onPosted }: <span class="ty">Props</span>) {
+  <span class="kw">const</span> [body, setBody] = useState(<span class="st">''</span>)
+  <span class="kw">const</span> [sending, setSending] = useState(<span class="kw">false</span>)
+  <span class="kw">const</span> [error, setError] = useState(<span class="st">''</span>)
+
+  <span class="kw">const</span> count = [...body.trim()].length
+  <span class="kw">const</span> over = count &gt; MAX
+
+  <span class="kw">const</span> submit = <span class="kw">async</span> () =&gt; {
+    setSending(<span class="kw">true</span>)
+    setError(<span class="st">''</span>)
+    <span class="kw">try</span> {
+      <span class="kw">const</span> post = <span class="kw">await</span> api.createPost(body.trim(), replyToId)
+      setBody(<span class="st">''</span>)
+      onPosted(post)
+    } <span class="kw">catch</span> (e) {
+      setError(e <span class="kw">instanceof</span> <span class="ty">Error</span> ? e.message : <span class="st">'投稿に失敗しました。'</span>)
+    } <span class="kw">finally</span> {
+      setSending(<span class="kw">false</span>)
+    }
+  }
+
+  <span class="kw">return</span> (
+    &lt;<span class="ty">div</span> className=<span class="st">"composer"</span>&gt;
+      &lt;<span class="ty">textarea</span>
+        value={body}
+        placeholder={placeholder}
+        onChange={(e) =&gt; setBody(e.target.value)}
+      /&gt;
+      {error &amp;&amp; &lt;<span class="ty">div</span> className=<span class="st">"error-msg"</span>&gt;{error}&lt;/<span class="ty">div</span>&gt;}
+      &lt;<span class="ty">div</span> className=<span class="st">"row"</span>&gt;
+        &lt;<span class="ty">span</span> className={<span class="st">`count ${over ? 'over' : ''}`</span>}&gt;
+          {count}/{MAX}
+        &lt;/<span class="ty">span</span>&gt;
+        &lt;<span class="ty">button</span>
+          className=<span class="st">"btn btn-primary"</span>
+          disabled={sending || count === <span class="st">0</span> || over}
+          onClick={submit}
+        &gt;
+          {replyToId ? <span class="st">'返信する'</span> : <span class="st">'ポストする'</span>}
+        &lt;/<span class="ty">button</span>&gt;
+      &lt;/<span class="ty">div</span>&gt;
+    &lt;/<span class="ty">div</span>&gt;
+  )
+}</code></pre>
+    <p><code>textarea</code> は<strong>制御コンポーネント</strong>です。<code>value={body}</code> で状態を表示に縛り、<code>onChange={(e) =&gt; setBody(e.target.value)}</code> で入力のたびに状態を更新する。この双方向の紐づけにより、<code>body</code> が<strong>常に入力欄の中身と一致</strong>します。文字数は <code>const count = [...body.trim()].length</code>。ここで <code>[...body.trim()]</code> と<strong>スプレッドで配列化</strong>してから <code>.length</code> を取っているのがポイントで、絵文字などのサロゲートペアを<strong>1文字として</strong>数えるためです（単純な <code>body.length</code> だと絵文字が2文字に化ける）。第02章で本文を「280文字」と決めたのに合わせ、<code>const over = count &gt; MAX</code> で超過を判定し、<code>&lt;span className={\`count ${over ? 'over' : ''}\`}&gt;</code> で赤く見せ、ボタンを <code>disabled={sending || count === 0 || over}</code> で<strong>「送信中／空／超過」なら押せなく</strong>します。<code>sending</code> フラグは<strong>二重送信の防止</strong>で、<code>submit</code> の間だけ <code>true</code> にして連打を止めます。ただしコメントどおり、これは親切な先回りで、<strong>280文字の最終的な守りは第02章のサーバ側検証と DB の <code>CHECK</code> 制約</strong>にあります。</p>
+
+    <p>ページ（<code>pages/*</code>）は、どれも<strong>「API を叩いて <code>useState</code> に入れ、<code>Composer</code> と <code>PostFeed</code> を組んで描く」</strong>という同じ型です。代表として、最も短い <code>Home</code> と、認証の入口 <code>Login</code> を全文で見ます。</p>
+
+    <div class="file-tag">src/frontend/src/pages/Home.tsx</div>
+    <pre><code><span class="kw">import</span> { useCallback, useState } <span class="kw">from</span> <span class="st">'react'</span>
+<span class="kw">import</span> * <span class="kw">as</span> api <span class="kw">from</span> <span class="st">'../api/client'</span>
+<span class="kw">import</span> <span class="kw">type</span> { <span class="ty">Post</span> } <span class="kw">from</span> <span class="st">'../api/types'</span>
+<span class="kw">import</span> <span class="ty">Composer</span> <span class="kw">from</span> <span class="st">'../components/Composer'</span>
+<span class="kw">import</span> <span class="ty">PostFeed</span> <span class="kw">from</span> <span class="st">'../components/PostFeed'</span>
+
+<span class="cm">// ホームタイムライン（FR-9）：自分とフォロイーの投稿を新しい順に</span>
+<span class="kw">export</span> <span class="kw">default</span> <span class="kw">function</span> <span class="ty">Home</span>() {
+  <span class="kw">const</span> [newPost, setNewPost] = useState&lt;<span class="ty">Post</span> | <span class="kw">null</span>&gt;(<span class="kw">null</span>)
+  <span class="kw">const</span> fetchPage = useCallback((cursor?: <span class="ty">number</span>) =&gt; api.timeline(cursor), [])
+
+  <span class="kw">return</span> (
+    &lt;<span class="ty">div</span>&gt;
+      &lt;<span class="ty">Composer</span> placeholder=<span class="st">"いまどうしてる？"</span> onPosted={setNewPost} /&gt;
+      &lt;<span class="ty">PostFeed</span>
+        fetchPage={fetchPage}
+        prepend={newPost}
+        emptyMessage=<span class="st">"タイムラインは空です。誰かをフォローするか、最初の投稿をしてみましょう。"</span>
+      /&gt;
+    &lt;/<span class="ty">div</span>&gt;
+  )
+}</code></pre>
+    <p>これだけです。<code>Composer</code> に「投稿できたら <code>setNewPost</code> を呼べ」と <code>onPosted</code> を渡し、その <code>newPost</code> を <code>PostFeed</code> の <code>prepend</code> に流す。すると Step 6 で見た「<code>prepend</code> を先頭に差し込む」<code>useEffect</code> が動き、<strong>投稿した瞬間に自分の投稿がタイムラインの先頭に現れます</strong>。<code>fetchPage</code> は <code>api.timeline</code> を包んだだけ。<code>useCallback(..., [])</code> で<strong>関数の同一性を固定</strong>しているのは、Step 6 の <code>PostFeed</code> が <code>fetchPage</code> を <code>useEffect</code> の依存にしているためで、毎描画で新しい関数が作られると無限に再取得してしまうのを防ぎます。</p>
+
+    <div class="file-tag">src/frontend/src/pages/Login.tsx</div>
+    <pre><code><span class="kw">import</span> { useState, <span class="kw">type</span> <span class="ty">FormEvent</span> } <span class="kw">from</span> <span class="st">'react'</span>
+<span class="kw">import</span> { <span class="ty">Link</span>, useNavigate } <span class="kw">from</span> <span class="st">'react-router-dom'</span>
+<span class="kw">import</span> * <span class="kw">as</span> api <span class="kw">from</span> <span class="st">'../api/client'</span>
+<span class="kw">import</span> { useAuth } <span class="kw">from</span> <span class="st">'../auth'</span>
+
+<span class="kw">export</span> <span class="kw">default</span> <span class="kw">function</span> <span class="ty">Login</span>() {
+  <span class="kw">const</span> { setUser } = useAuth()
+  <span class="kw">const</span> navigate = useNavigate()
+  <span class="kw">const</span> [identifier, setIdentifier] = useState(<span class="st">''</span>)
+  <span class="kw">const</span> [password, setPassword] = useState(<span class="st">''</span>)
+  <span class="kw">const</span> [error, setError] = useState(<span class="st">''</span>)
+  <span class="kw">const</span> [sending, setSending] = useState(<span class="kw">false</span>)
+
+  <span class="kw">const</span> submit = <span class="kw">async</span> (e: <span class="ty">FormEvent</span>) =&gt; {
+    e.preventDefault()
+    setSending(<span class="kw">true</span>)
+    setError(<span class="st">''</span>)
+    <span class="kw">try</span> {
+      <span class="kw">const</span> user = <span class="kw">await</span> api.login(identifier, password)
+      setUser(user)
+      navigate(<span class="st">'/'</span>)
+    } <span class="kw">catch</span> (err) {
+      setError(err <span class="kw">instanceof</span> <span class="ty">Error</span> ? err.message : <span class="st">'ログインに失敗しました。'</span>)
+    } <span class="kw">finally</span> {
+      setSending(<span class="kw">false</span>)
+    }
+  }
+
+  <span class="kw">return</span> (
+    &lt;<span class="ty">div</span> className=<span class="st">"auth-page"</span>&gt;
+      &lt;<span class="ty">h1</span>&gt;ログイン&lt;/<span class="ty">h1</span>&gt;
+      &lt;<span class="ty">form</span> onSubmit={submit}&gt;
+        &lt;<span class="ty">div</span> className=<span class="st">"field"</span>&gt;
+          &lt;<span class="ty">label</span>&gt;ユーザー名 または メールアドレス&lt;/<span class="ty">label</span>&gt;
+          &lt;<span class="ty">input</span> value={identifier} onChange={(e) =&gt; setIdentifier(e.target.value)} required /&gt;
+        &lt;/<span class="ty">div</span>&gt;
+        &lt;<span class="ty">div</span> className=<span class="st">"field"</span>&gt;
+          &lt;<span class="ty">label</span>&gt;パスワード&lt;/<span class="ty">label</span>&gt;
+          &lt;<span class="ty">input</span>
+            type=<span class="st">"password"</span>
+            value={password}
+            onChange={(e) =&gt; setPassword(e.target.value)}
+            required
+          /&gt;
+        &lt;/<span class="ty">div</span>&gt;
+        {error &amp;&amp; &lt;<span class="ty">div</span> className=<span class="st">"error-msg"</span>&gt;{error}&lt;/<span class="ty">div</span>&gt;}
+        &lt;<span class="ty">button</span> className=<span class="st">"btn btn-primary btn-block"</span> disabled={sending}&gt;
+          ログイン
+        &lt;/<span class="ty">button</span>&gt;
+      &lt;/<span class="ty">form</span>&gt;
+      &lt;<span class="ty">p</span> className=<span class="st">"hint"</span>&gt;
+        アカウントがない方は &lt;<span class="ty">Link</span> to=<span class="st">"/signup"</span>&gt;新規登録&lt;/<span class="ty">Link</span>&gt;
+      &lt;/<span class="ty">p</span>&gt;
+    &lt;/<span class="ty">div</span>&gt;
+  )
+}</code></pre>
+    <p><code>submit</code> の <code>e.preventDefault()</code> は「<code>form</code> の既定動作（ページ全体をリロードして送信）を止める」——SPA では自分で処理するので必須です。<code>api.login(identifier, password)</code> が成功すると <code>setUser(user)</code> で<strong>共有状態を更新</strong>し（＝ヘッダーが即座に「@自分」に変わる）、<code>navigate('/')</code> でホームへ。失敗すれば <code>catch</code> でサーバの日本語メッセージ（第01章の「メールまたはパスワードが違います」等）を <code>error</code> に入れ、画面に赤く出す。この「<strong>フォーム入力 → API → 成功で <code>setUser</code>＋遷移／失敗でメッセージ</strong>」が、認証系ページの共通骨格です。<code>Signup</code> もフィールドが増えるだけで、<code>api.signup(form)</code> → <code>setUser</code> → <code>navigate('/')</code> と<strong>まったく同じ形</strong>です。</p>
+
+    <p>残りのページ（<code>Signup</code> / <code>Profile</code> / <code>PostDetail</code> / <code>FollowList</code>）も、この型の変奏にすぎません。要点だけ抜粋します。</p>
+    <pre><code><span class="cm">// Signup.tsx — 登録して、そのままログイン状態にする</span>
+<span class="kw">const</span> user = <span class="kw">await</span> api.signup(form)
+setUser(user) <span class="cm">// 登録後はそのままログイン状態になる（FR-1）</span>
+navigate(<span class="st">'/'</span>)
+<span class="cm">// …（フォームは username / display_name / email / password の4フィールド）</span>
+
+<span class="cm">// Profile.tsx — プロフィールを取得し、フォローは楽観的更新</span>
+useEffect(() =&gt; {
+  <span class="kw">let</span> stale = <span class="kw">false</span> <span class="cm">// 別ユーザーへ遷移後、前の遅いレスポンスで上書きしない</span>
+  api.getProfile(username).then((p) =&gt; { <span class="kw">if</span> (!stale) setProfile(p) })
+  <span class="kw">return</span> () =&gt; { stale = <span class="kw">true</span> }
+}, [username])
+<span class="cm">// … PostFeed に api.listUserPosts(username) を渡してその人の投稿を並べる</span>
+
+<span class="cm">// PostDetail.tsx — 投稿1件＋リプライ。親投稿にだけ Composer を出す</span>
+&lt;<span class="ty">PostFeed</span> fetchPage={fetchPage} append={newReply} emptyMessage=<span class="st">"まだリプライはありません。"</span> /&gt;
+
+<span class="cm">// FollowList.tsx — フォロー/フォロワー一覧。PostFeed と同じ「世代番号」で古い応答を捨てる</span>
+<span class="kw">const</span> gen = useRef(<span class="st">0</span>)
+<span class="cm">// … useCallback の fetcher が kind に応じて listFollowers / listFollowing を選ぶ</span></code></pre>
+    <p>どれも新しい概念は出てきません。<code>Profile</code> と <code>PostDetail</code> は <code>useRef</code> の代わりに <code>let stale</code> フラグで同じ「古い応答を捨てる」を実現し（単発取得なのでこれで十分）、<code>FollowList</code> は <code>PostFeed</code> とまったく同じ <code>useRef</code> 世代管理を使う。<strong>「API を叩いて <code>useState</code> に入れ、描く」——この1つの型を覚えれば、フロントのどのページも読める</strong>のが Chirp の設計です。</p>
+
+    <h2 class="step" id="step-9"><span class="step-no">Step 9</span>1バイナリにまとめる — go:embed と SPA フォールバック</h2>
+    <p>フロントが完成しました。<code>npm run build</code> すれば、React のコードは <code>frontend/dist/</code> に<strong>ただの HTML・JS・CSS</strong>として吐き出されます。問題は「この静的ファイルたちを、どうやってユーザーに配るか」。別のWebサーバ（nginx 等）を立てる手もありますが、Chirp は<strong>もっと単純な道</strong>を選びます——<strong>ビルド成果物を Go バイナリの中に埋め込み、API を返すサーバがそのまま画面も配る</strong>。第00章の <code>store.go</code> でスキーマを <code>//go:embed</code> したのと、<strong>まったく同じ仕組み</strong>です。</p>
+
+    <div class="file-tag">src/backend/frontend_dist/embed.go</div>
+    <pre><code><span class="cm">// Package frontend_dist はビルド済みフロントエンド（Viteの出力）をバイナリに埋め込む。</span>
+<span class="cm">// フロントエンドのビルド後、frontend/dist の中身をこのディレクトリへコピーする。</span>
+<span class="kw">package</span> frontend_dist
+
+<span class="kw">import</span> <span class="st">"embed"</span>
+
+<span class="cm">//go:embed all:*</span>
+<span class="kw">var</span> files embed.<span class="ty">FS</span>
+
+<span class="cm">// FS はビルド済みSPAのファイルシステムを返す。</span>
+<span class="kw">func</span> FS() embed.<span class="ty">FS</span> { <span class="kw">return</span> files }</code></pre>
+    <p>核心は <code>//go:embed all:*</code> の1行です。第00章では <code>//go:embed schema.sql</code> と<strong>1ファイルを <code>string</code> に</strong>埋め込みましたが、ここは違います。<code>*</code> は「このディレクトリの<strong>全ファイル</strong>」を意味し、<code>all:</code> という接頭辞は「<code>_</code> や <code>.</code> で始まる隠しファイルも<strong>漏れなく</strong>含める」指示です（Vite の出力に <code>.vite</code> などが混じっても取りこぼさない）。埋め込み先は <code>string</code> ではなく <strong><code>embed.FS</code></strong>——「複数ファイルを持つ仮想ファイルシステム」型です。<code>FS()</code> はそれを返すだけ。この <code>frontend_dist.FS()</code> こそ、第00章の <code>main.go</code> で <code>Frontend: frontend_dist.FS()</code> として <code>api.NewServer</code> に渡していた、あの値の正体です。</p>
+    <p>受け取った <code>api</code> パッケージ側は、それをこう使います（第00章から予告していた SPA 配信の実装）。</p>
+
+    <div class="file-tag">src/backend/internal/api/server.go（SPA 配信部分）</div>
+    <pre><code>	<span class="cm">// SPA（履歴APIルーティングのため、未知のパスは index.html にフォールバック）</span>
+	<span class="kw">if</span> cfg.Frontend != <span class="kw">nil</span> {
+		fileServer := http.FileServerFS(cfg.Frontend)
+		m.HandleFunc(<span class="st">"/"</span>, <span class="kw">func</span>(w http.<span class="ty">ResponseWriter</span>, r *http.<span class="ty">Request</span>) {
+			<span class="kw">if</span> strings.HasPrefix(r.URL.Path, <span class="st">"/api/"</span>) {
+				writeError(w, http.<span class="ty">StatusNotFound</span>, <span class="st">"not_found"</span>, <span class="st">"APIエンドポイントが見つかりません。"</span>)
+				<span class="kw">return</span>
+			}
+			path := strings.TrimPrefix(r.URL.Path, <span class="st">"/"</span>)
+			<span class="kw">if</span> path == <span class="st">""</span> {
+				path = <span class="st">"index.html"</span>
+			}
+			<span class="kw">if</span> _, err := fs.Stat(cfg.Frontend, path); err != <span class="kw">nil</span> {
+				r.URL.Path = <span class="st">"/"</span> <span class="cm">// SPAフォールバック</span>
+			}
+			fileServer.ServeHTTP(w, r)
+		})
+	}</code></pre>
+    <p>ここが「1バイナリで API と画面を配る」の締めです。<code>m.HandleFunc("/", ...)</code> は、これまで登録した <code>/api/...</code> の<strong>どれにも当たらなかったリクエストの受け皿</strong>です（Go の <code>ServeMux</code> は最長一致で、具体的な <code>/api/...</code> が優先され、残り全部がこの <code>/</code> に来ます）。中の分岐を追います。まず <code>strings.HasPrefix(r.URL.Path, "/api/")</code> ——<strong><code>/api/</code> で始まるのにここまで来た＝存在しない API</strong>なので、HTML を返さず素直に <code>404</code> の JSON を返します（フロントの <code>request&lt;T&gt;</code> がこれを <code>ApiError</code> に整形します）。次に、それ以外のパスは<strong>埋め込みファイルを探し</strong>、<code>fs.Stat</code> で<strong>実在すれば</strong>そのまま <code>fileServer</code> が配る（<code>/assets/index-abc.js</code> のような実ファイル）。<strong>実在しなければ</strong> <code>r.URL.Path = "/"</code> と書き換えて <code>index.html</code> を返す——これが <strong>SPA フォールバック</strong>です。</p>
+
+    <div class="gonote"><div class="box-k">React メモ · なぜ「未知のパスは index.html」なのか</div>
+      <p><code>BrowserRouter</code>（Step 5）は、<code>/users/alice</code> や <code>/posts/42</code> といった URL を<strong>ブラウザの中だけで</strong>解釈します。しかしユーザーがその URL を<strong>直接開いたりリロードしたり</strong>すると、ブラウザはまず <code>GET /users/alice</code> をサーバに送ります。サーバに <code>/users/alice</code> というファイルは<strong>存在しません</strong>（あるのは <code>index.html</code> と JS の塊だけ）。ここで <code>404</code> を返すと画面が壊れる。だから「実ファイルが無いパスは、とにかく <code>index.html</code> を返す」——すると React が起動し、<code>BrowserRouter</code> が URL <code>/users/alice</code> を見て <code>Profile</code> を描く。<strong>ルーティングの実体はフロントにあり、サーバは全ての未知パスに同じ <code>index.html</code> を配ればいい</strong>。この <code>fs.Stat</code> → 無ければ <code>index.html</code>、という数行が、SPA を正しく動かす定石です。</p>
+    </div>
+
+    <p>こうして、第00章から張ってきた伏線がすべて閉じます。<code>store.go</code> がスキーマを埋め込み、<code>frontend_dist</code> が React を埋め込み、<code>main.go</code> が両方を <code>NewServer</code> に渡し、<code>server.go</code> が <code>/api/...</code> は JSON・それ以外は埋め込んだ画面、と振り分ける。<strong>DB スキーマもバックエンドもフロントエンドも、コンパイルされた1つの実行ファイルの中にいる</strong>のです。</p>
+
+    <h2 class="step" id="step-10"><span class="step-no">Step 10</span>動かして確認する — ビルドと配信</h2>
+    <p>すべての部品が揃いました。フロントをビルドしてバックエンドに埋め込み、単一バイナリを起動して、ブラウザで一連の操作が動くことを確かめます。</p>
+
+    <div class="box do"><div class="box-k">▸ フロントをビルドして埋め込む</div>
+      <p>フロントを本番ビルドし、その成果物 <code>frontend/dist/*</code> を <code>backend/frontend_dist/</code> にコピーしてから、Go をビルドします。<strong>この章で初めて Node.js を使う</strong>ので、まず依存パッケージを入れます（<code>npm install</code> は初回だけ）。</p>
+      <pre class="term"><code><span class="ps">$</span> cd src/frontend
+<span class="cm"># 初回だけ。package.json に書かれた依存を node_modules/ に展開する</span>
+<span class="ps">$</span> npm install
+<span class="out">added 117 packages, and audited 118 packages in 4s</span>
+
+<span class="ps">$</span> npm run build
+<span class="out">&gt; tsc -b &amp;&amp; vite build
+
+vite v5.4.21 building for production...
+✓ 45 modules transformed.
+dist/index.html                   0.41 kB │ gzip:  0.31 kB
+dist/assets/index-BjXbERL0.css    4.62 kB │ gzip:  1.44 kB
+dist/assets/index-D57e1t1t.js   178.30 kB │ gzip: 57.94 kB
+✓ built in 1.20s</span>
+<span class="ps">$</span> cp -r dist/* ../backend/frontend_dist/
+<span class="ps">$</span> cd ../backend &amp;&amp; go build -o chirp ./cmd/server</code></pre>
+      <p><code>npm run build</code> が <code>frontend/dist/</code> に静的ファイルを吐き、それを <code>frontend_dist/</code> へコピー。<code>go build</code> の瞬間に <code>//go:embed all:*</code> が働き、<strong>それらのファイルが <code>chirp</code> バイナリの中へ焼き込まれます</strong>。以後この <code>chirp</code> 1つだけで、API も画面も配れます。</p>
+      <p><code>package.json</code> の <code>build</code> は <code>tsc -b &amp;&amp; vite build</code> の2段です。<strong>先に TypeScript の型検査（<code>tsc</code>）が走る</strong>ので、型エラーが1つでもあると vite の出力は<strong>一度も表示されずに</strong>ビルドが止まります。上のような一覧が出れば、型検査も通っています。</p>
+    </div>
+
+    <div class="box hazard"><div class="box-k">⚠ 落とし穴 — <code>npm install</code> を忘れると、意味の分からないエラーが大量に出る</div>
+      <p><code>node_modules/</code> が無い状態（clone 直後）でいきなり <code>npm run build</code> を打つと、<code>tsc</code> が React の型定義を見つけられず、<strong>自分のコードは何も間違っていないのに</strong>エラーが数十行流れます。</p>
+      <pre class="term"><code><span class="out">src/main.tsx(1,28): error TS2307: Cannot find module 'react' or its corresponding type declarations.
+src/App.tsx(49,5): error TS7026: JSX element implicitly has type 'any' because no interface 'JSX.IntrinsicElements' exists.
+…（同様のエラーが続く）</span></code></pre>
+      <p><code>Cannot find module 'react'</code> が並んだら、<strong>ほぼ確実に <code>npm install</code> の打ち忘れ</strong>です。<code>src/frontend/</code> で <code>npm install</code> を1回打てば消えます。<code>node_modules/</code> は容量が大きくバージョンごとに再現できるので、Git では管理しません（<code>frontend/.gitignore</code>）——だから <strong>clone した人は必ず自分で1回入れる</strong>必要があります。</p>
+      <p>なお、ファイル名の <code>BjXbERL0</code> や <code>D57e1t1t</code> の部分は<strong>中身から計算されるハッシュ</strong>なので、<strong>あなたの手元では別の文字列になります</strong>（サイズも版によって多少前後します）。<strong>一致しないのが正常</strong>です。中身が1バイトでも変われば名前も変わる仕組みで、ブラウザが古いキャッシュを掴み続けるのを防いでいます。</p>
+    </div>
+
+    <div class="box do"><div class="box-k">▸ 単一バイナリで起動して、ブラウザで触る</div>
+      <p>DB を起動し（第00章）、ビルドした <code>chirp</code> を実行します。</p>
+      <pre class="term"><code><span class="ps">$</span> docker compose up -d
+<span class="ps">$</span> ./chirp
+<span class="out">time=... level=INFO msg=起動しました addr=:8080</span></code></pre>
+      <p>ブラウザで <strong><code>http://localhost:8080</code></strong> を開くと、Chirp の画面が出ます（この HTML も JS も、<code>chirp</code> バイナリが埋め込みから配っています）。<strong>新規登録 → 自動でログイン → 「いまどうしてる？」に投稿 → 誰かのプロフィールでフォロー → タイムラインに流れる → ハートでいいね</strong>——ここまで一連で動けば完成です。ページを<strong>再読み込み</strong>してもログインが保たれること（Step 4 の <code>me()</code> 復元）、他人の投稿本文に <code>&lt;b&gt;太字&lt;/b&gt;</code> や <code>&lt;script&gt;</code> を書いても<strong>タグがそのまま文字で表示される</strong>こと（Step 7 の自動エスケープ）も、目で確かめてください。</p>
+    </div>
+
+    <div class="box hazard"><div class="box-k">⚠ 落とし穴 — 開発中は Vite と Go を別々に動かす</div>
+      <p>上の手順は<strong>本番配信（1バイナリ）</strong>の形です。開発中に毎回 <code>npm run build</code> → コピー → <code>go build</code> を回すのは非効率なので、ふだんは <strong>Vite の開発サーバ（<code>npm run dev</code>、通常 5173 番）と Go サーバ（8080 番）を別々に起動</strong>し、Vite 側の <code>proxy</code> 設定で <code>/api</code> を 8080 に転送します。この場合フロントとバックのオリジンが実質同一に見えるよう proxy が仲介するので、<code>credentials: 'same-origin'</code> のまま Cookie が通ります。<strong>埋め込みビルドは「リリースするとき」だけ</strong>——普段はホットリロードの効く <code>npm run dev</code> で書く、と使い分けます。</p>
+    </div>
+
+    <h2>つまずき FAQ</h2>
+    <details class="qa"><summary><code>credentials: 'same-origin'</code> は既定値なのに、なぜわざわざ書くの?</summary>
+      <div class="qa-body"><p>そのとおり、<code>'same-origin'</code> は <code>fetch</code> の<strong>既定値</strong>です。Chirp のように API も画面も同一オリジン（<code>localhost:8080</code>）の構成なら、省略しても Cookie は付きます。それでも書くのは<strong>意図の明示</strong>のため——Chirp のログイン証は HttpOnly Cookie にしまってあり（第01章）、JavaScript からは読めないので「自分で取り出してヘッダに付ける」ことはできず、頼れるのは「ブラウザに自動で添えさせる」だけ。「この <code>fetch</code> は Cookie を前提に認証を通す」という設計を、この一語が読む人に伝えます。挙動が分かれるのは構成を変えたときです。API を<strong>別オリジン</strong>に分離するなら <code>'include'</code> にしないと Cookie は送られません（既定の <code>same-origin</code> はクロスオリジンには付けない）。逆に <code>'omit'</code> と書くと同一オリジンでも Cookie 抜きで飛び、<code>requireAuth</code> が「Cookie が無い＝未ログイン」と判断して <code>401</code> を返します。症状は「ログインしたはずなのに、すぐ弾かれる」。Cookie 認証のフロントでは、この一語が構成変更時の分かれ目になります。</p></div>
+    </details>
+    <details class="qa"><summary><code>gen</code>（<code>useRef</code>）で古い応答を捨てるのは、なぜ必要? 無いと何が困る?</summary>
+      <div class="qa-body"><p><strong>非同期の応答は、送った順に返るとは限らない</strong>からです。プロフィールAを開いて取得が飛び、返る前に素早くプロフィールBへ移ると、B の取得も飛びます。もし A の応答が B より遅れて返ると、対策なしでは「B を見ているのに A の投稿が表示される」取り違えが起きます。<code>gen</code> は各リクエストに「開始時の世代番号」を刻み、<code>await</code> から戻った時に <code>if (g !== gen.current) return</code> で「画面が切り替わった後に返ってきた古い応答」を捨てます。<code>useRef</code> を使うのは、この番号を<strong>再描画を起こさず・常に最新の同じ箱で</strong>持ち回るため。<code>useState</code> だと再描画が走り、クロージャに古い値が閉じ込められて判定が壊れます。</p></div>
+    </details>
+    <details class="qa"><summary>XSS が心配。投稿本文を自分で <code>escapeHtml</code> しなくて大丈夫?</summary>
+      <div class="qa-body"><p>大丈夫です。JSX で <code>{post.body}</code> と書くと、React は中身を<strong>テキストとして</strong>挿入し、<code>&lt;</code> <code>&gt;</code> <code>&amp;</code> などを自動でエスケープします。だから <code>&lt;script&gt;</code> を投稿されても、タグは無害な文字列として<strong>表示されるだけ</strong>で実行されません。自前のエスケープ関数は不要——むしろ書くと二重エスケープでおかしくなります。<strong>この安全が破れる唯一の道が <code>dangerouslySetInnerHTML</code></strong>で、これは文字列を生 HTML として差し込むので、ユーザー入力を渡すと XSS が復活します。Chirp はこれを一切使っていません。「ユーザー入力を <code>dangerouslySetInnerHTML</code> に渡さない限り、React が守ってくれる」と覚えてください。</p></div>
+    </details>
+
+    <h2>理解度チェック</h2>
+    <p>次の問いに<strong>自分の言葉で</strong>答えられたら、この章は卒業です。</p>
+    <details class="qa"><summary>1. ページを再読み込みしてもログイン状態が保たれるのはなぜか。どのコードが効いているか。</summary>
+      <div class="qa-body"><p>ログイン証が<strong>HttpOnly Cookie としてブラウザに残る</strong>から。リロードで React の状態（<code>useState</code>）は消えるが、Cookie は消えない。<code>auth.tsx</code> の <code>AuthProvider</code> が起動時に一度だけ <code>useEffect</code> で <code>api.me()</code>（<code>GET /api/auth/me</code>）を叩き、その際 <code>client.ts</code> の <code>credentials: 'same-origin'</code> が残った Cookie を自動で添える。サーバが「あなたは誰々」と返せば <code>setUser</code> で状態を<strong>復元</strong>し、失敗すれば未ログイン扱い。この「Cookie は残る＋起動時に <code>me()</code> で復元」の組み合わせが、リロード耐性の正体。</p></div>
+    </details>
+    <details class="qa"><summary>2. 「いいね」を押した瞬間にハートが赤くなるのに、通信失敗時は元に戻る。この仕組みの名前と流れは。</summary>
+      <div class="qa-body"><p><strong>楽観的更新（optimistic update）</strong>。<code>PostCard</code> の <code>toggleLike</code> が、API を待たずに<strong>先に</strong>「いいね反転・カウント±1」した <code>optimistic</code> を作り、<code>onChange</code> で即座に画面へ反映する（ハートが赤く、数字が増える）。その<strong>あとで</strong> <code>await api.like/unlike</code> を投げ、<code>catch</code> で失敗したら <code>onChange(post)</code> と<strong>元の投稿に戻す</strong>。「たぶん成功する」と楽観して先に UI を更新し、外れたときだけ取り消すことで、待ち時間ゼロの操作感を得る。第06章で「いいねは行の追加/削除だけ」と軽く設計したから成立する。同型が <code>Profile</code> のフォロー切り替えにもある。</p></div>
+    </details>
+    <details class="qa"><summary>3. <code>//go:embed all:*</code> と SPA フォールバックは、それぞれ何をしていて、どう協調して「1バイナリ配信」を成立させるか。</summary>
+      <div class="qa-body"><p><code>frontend_dist/embed.go</code> の <code>//go:embed all:*</code> は、<code>npm run build</code> の成果物（HTML/JS/CSS、隠しファイル含む）を <code>embed.FS</code> として<strong>Go バイナリに焼き込む</strong>。<code>FS()</code> が返すそれを <code>main.go</code> が <code>NewServer</code> に渡す。<code>server.go</code> は <code>/api/...</code> のどれにも当たらないリクエストを <code>/</code> ハンドラで受け、<strong>実在ファイルはそのまま配り、存在しないパスは <code>index.html</code> にフォールバック</strong>（<code>fs.Stat</code> が失敗したら <code>r.URL.Path = "/"</code>）。これで <code>/users/alice</code> を直接開いても <code>index.html</code> が返って React が起動し、<code>BrowserRouter</code> が正しい画面を描く。結果、API も画面も<strong>1つの実行ファイル</strong>が配れる。第00章の <code>frontend_dist.FS()</code> の伏線がここで回収される。</p></div>
+    </details>
+
+    <h2>まとめ — さらに先へ</h2>
+    <p>この章で、Chirp は<strong>人が触れる製品</strong>になりました。TypeScript の型でサーバの返す形を写し、<code>client.ts</code> の <code>request&lt;T&gt;</code> に <code>credentials: 'same-origin'</code>（既定値）を1か所だけ明示して「全 API が Cookie 認証で動く」意図を刻み、<code>auth.tsx</code> の Context で起動時にログイン状態を復元し、<code>App.tsx</code> の <code>RequireAuth</code> でログイン必須ページを守り、<code>PostFeed</code> でカーソルと世代番号を扱い、<code>PostCard</code> で自動エスケープと楽観的更新を得ました。そして <code>//go:embed all:*</code> で、DB スキーマもバックエンドもフロントも<strong>たった1つの実行ファイル</strong>に収めた。第00章で「フロントもバイナリの中にいる」と予告した設計が、いま現実になりました。</p>
+    <p>ここまでで、認証・投稿・フォロー・タイムライン・リプライ・いいね・性能・画面——SNS の骨格はひととおり組み上がっています。最後の第09章では、この土台の<strong>先</strong>を見渡します。通知、画像投稿、全文検索、リアルタイム更新、そして「個人開発で作ったこの Chirp を、どこまで本物のサービスに近づけられるか」——ここから広がる道を、一緒に眺めましょう。</p>
+
+    <div class="chap-foot">
+      <a class="pager" href="07-perf.html"><span class="dir">← 前へ</span>第07章 · 速くする（N+1と索引）</a>
+      <a class="pager next" href="09-beyond.html"><span class="dir">次へ →</span>第09章 · さらに先へ（発展）</a>
+    </div>
+  </main>
+</div>
+</body>
+</html>

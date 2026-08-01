@@ -1,0 +1,111 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>データを取ってくる — 指数ダッシュボードを作る</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@400;500;600;700&family=Source+Serif+4:opsz,wght@8..60,400;8..60,500;8..60,600&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<div class="shell">
+
+  <aside class="spine">
+    <a class="wordmark" href="index.html">STOCK · from scratch<span class="tick"> ↗</span></a>
+    <div class="book-title">指数ダッシュボードを<br>つくる</div>
+    <div class="book-sub">好きな指数を、好きな期間で</div>
+
+    <div class="legend-rail"><span>読む <b>↓</b></span><span>組む <b>↑</b></span></div>
+
+    <nav aria-label="目次">
+      <ul class="toc">
+        <li><a class="nav-item" href="index.html"><span class="nav-num">序</span><span class="nav-label">はじめに<span class="nav-tag">Intro</span></span></a></li>
+        <li><a class="nav-item" href="00-line.html"><span class="nav-num">00</span><span class="nav-label">一本の線を引く<span class="nav-tag">Line</span></span></a></li>
+        <li><a class="nav-item current" aria-current="page" href="01-fetch.html"><span class="nav-num">01</span><span class="nav-label">データを取ってくる<span class="nav-tag">Fetch</span></span></a></li>
+        <li><a class="nav-item" href="02-store.html"><span class="nav-num">02</span><span class="nav-label">貯めて、切り出す<span class="nav-tag">Store</span></span></a></li>
+        <li><a class="nav-item" href="03-range.html"><span class="nav-num">03</span><span class="nav-label">期間を自由にする<span class="nav-tag">Range</span></span></a></li>
+        <li><a class="nav-item" href="04-overlay.html"><span class="nav-num">04</span><span class="nav-label">二本目を重ねる<span class="nav-tag">Overlay</span></span></a></li>
+        <li><a class="nav-item" href="05-rebase.html"><span class="nav-num">05</span><span class="nav-label">100にそろえる<span class="nav-tag">Rebase</span></span></a></li>
+        <li><a class="nav-item" href="06-downsample.html"><span class="nav-num">06</span><span class="nav-label">長い期間を軽くする<span class="nav-tag">Sample</span></span></a></li>
+        <li><a class="nav-item" href="07-url.html"><span class="nav-num">07</span><span class="nav-label">URLに状態を持たせる<span class="nav-tag">URL</span></span></a></li>
+        <li><a class="nav-item" href="08-finish.html"><span class="nav-num">08</span><span class="nav-label">仕上げと、次の一歩<span class="nav-tag">Finish</span></span></a></li>
+      </ul>
+    </nav>
+
+    <div class="spine-foot">
+      各章は一段の階段。<br>前の章の「できたこと」が<br>次の章の「困りごと」を呼ぶ。
+    </div>
+  </aside>
+
+  <main class="reading">
+    <div class="progress-tag">第01章 / 全9章 · 層: FETCH · 読了目安 1〜2時間</div>
+    <div class="eyebrow"><span>Fetch</span><span class="depth">— 取得を分ける</span></div>
+    <h1>データを取ってくる</h1>
+    <p class="lede">ダミーを本物に置き換えます。ここでの狙いは「取得」を<strong>表示から切り離して</strong>考えること。</p>
+
+    <div class="box goal"><div class="box-k">◈ この章のゴール</div>
+      <p>指数コードを渡すと、その指数の日次終値の並び（取得できる全期間ぶん）が返ってくる——そんな「取得する係」を、画面とは別に用意する。</p>
+    </div>
+
+    <h2>なぜ取得と表示を分けるのか</h2>
+    <p>取得は、画面とは性質がまるで違います。ネットワークは<strong>遅く・失敗し・回数制限がある</strong>。一度リクエストを投げれば数百ミリ秒は待たされますし、相手のサーバー次第では返ってこないこともある。短い時間に何度も叩けば、そのうち弾かれます。一方で画面のほうは、速く軽くヌルヌル動いてほしい。期間を変えたら即座に線が引き直ってほしい。</p>
+    <p>この二つを一つの場所に混ぜると、どちらも扱いづらくなります。画面のコードの中に「サーバーが返してこなかったらどうする」という重い分岐が紛れ込み、取得のコードの中に描画の都合が滲む。だから最初に線を引きます——<strong>「取得する係」を独立させ、画面はその結果だけを受け取る</strong>形にするのです。</p>
+
+    <p>まず決めるのは「何を渡すと、何が返るか」だけ。中身をどう実装するかは後回しにします。</p>
+<pre><code><span class="cm">// 「何を渡すと、何が返るか」だけを先に決める。</span>
+<span class="cm">// 中身（どこから取るか）は後で差し替えられるようにしておく。</span>
+fetchDaily(symbol) -&gt; [{ date, close }]</code></pre>
+
+    <p>ここで一つ、地味だけど大事な設計の判断があります。<strong>この係は「期間」を受け取りません。</strong>渡すのは指数コードだけで、返ってくるのは取得できる<strong>全期間ぶん</strong>。「3月から11月まで」のように期間で絞るのは、この係の仕事ではありません。なぜなら——期間を変えるたびに毎回ネットワークへ取りに行くのは遅く、回数制限にも無防備だから。だから取得は「素材を丸ごと一度取ってくる」に徹し、<strong>期間で切り出すのは次章（貯めた後）</strong>に回します。この線引きが、01章と02章を分ける理由そのものです。</p>
+
+    <p>指数の日次終値を配ってくれる場所は、いくつかあります。手軽なものは非公式で、多少の遅延があったり突然仕様が変わったりする。公式のものは登録や利用制限があり、無料枠が細い。学習用途なら、まずは手軽な方から始めてかまいません。ただし、次の注意だけは最初に頭へ入れておいてください。</p>
+
+    <div class="box hazard"><div class="box-k">⚠ つまずきポイント（かつ守るべき線）</div>
+      <p>日経平均などの指数値の著作権は、算出元（日経平均であれば日本経済新聞社）にあります。取得元の利用規約にも再配布や商用利用の制限があります。この教材で作るものは<strong>個人の学習用途に限定</strong>し、データの再配布や商用公開はしない前提で進めてください。参考実装も Yahoo Finance の非公式APIを、個人学習用途限定で使っています。</p>
+    </div>
+
+    <div class="box do"><div class="box-k">▸ 手を動かす</div>
+      <ol>
+        <li>1指数ぶんの日次終値を、実際に取得してみる（まずは手元にCSVで落とすだけでもよい）。</li>
+        <li>取得が失敗したとき、この係は何を返すべきか決める（空か、エラーか、直近の成功分か）。</li>
+        <li>「営業日にしかデータが無い」ことを、返ってきた実データで確認する。</li>
+      </ol>
+    </div>
+
+    <h2>つまずき FAQ</h2>
+    <details class="qa"><summary>公式APIと非公式API、どちらを使うべき？</summary>
+      <div class="qa-body"><p>学習用途なら、まずは手軽な非公式APIで「線が本物になる感動」を先に取りにいくのが素直です。ただし非公式APIは、いつ仕様が変わっても・止まっても文句を言えない立場だと理解しておくこと。だからこそこの章で「取得する係」を切り離しておく価値があります。入口（引数）と出口（戻り値）さえ固定しておけば、後で公式APIや別のソースに<strong>中身だけ差し替え</strong>られる。表示側は何も変わりません。参考実装は Yahoo Finance の非公式APIを、個人学習用途限定という前提で使っています。</p></div>
+    </details>
+    <details class="qa"><summary>取得に失敗したら、アプリごと止めるべき？</summary>
+      <div class="qa-body"><p>止めないほうが素直です。ネットワークは日常的に失敗するもので、失敗のたびに画面が真っ白になるのは使い勝手が悪い。おすすめは<strong>「保存済みのデータ＋警告を出して継続する」</strong>という形。つまり、取得できなかったら前回うまく取れた分を使い、「今のデータは古いかもしれません」と添えて表示を続ける。参考実装もこの方針（NFR-03: 取得失敗時は保存済みデータ＋warning で継続）を採っています。ただしこれは「貯めておいたデータ」があって初めて成立する話——だから次の第02章で「貯める」に進みます。</p></div>
+    </details>
+
+    <h2>理解度チェック</h2>
+    <p>次の問いに自分の言葉で答えてから、答えを開いてください。</p>
+    <details class="qa"><summary>Q1. 取得と表示を分ける利点は？</summary>
+      <div class="qa-body"><p>取得は遅く・失敗し・回数制限があるのに対し、表示は速く軽く動いてほしい——性質が正反対だから。混ぜると、画面のコードに重い失敗処理が紛れ込み、取得のコードに描画の都合が滲んで、どちらも扱いづらくなる。切り離せば、画面は「返ってきた結果」だけを受け取ればよく、それぞれを独立に扱える。</p></div>
+    </details>
+    <details class="qa"><summary>Q2. 取得の入口と出口（引数と戻り値）だけを先に決めると、何が嬉しい？</summary>
+      <div class="qa-body"><p>「指数コードを渡すと、その指数の全期間の日次終値の並びが返る」という約束さえ固定しておけば、その中身（どこから・どうやって取るか）を後から自由に差し替えられる。非公式APIから公式APIへ、あるいはローカルのCSVへ乗り換えても、約束が同じなら表示側は一切変わらない。入口と出口を先に決めることが、後の乗り換えの自由を生む。</p></div>
+    </details>
+    <details class="qa"><summary>なぜ取得する係に「期間（from / to）」を渡さないの？</summary>
+      <div class="qa-body"><p>期間で絞るたびに外部へ取りに行くと、遅いうえ回数制限にも無防備になるから。だから取得は「取れる全期間を一度に丸ごと取ってくる」に徹し、期間で切り出すのは<strong>次章で作る貯め箱（手元のデータ）</strong>の役割にします。こう分けておくと、同じ期間を何度見てもネットワークへ出ていかずに済みます。参考実装の取得関数も、受け取るのは指数のシンボルだけで、常に全期間を取ってきます。</p></div>
+    </details>
+
+    <div class="box done"><div class="box-k">✓ 完了の合図</div>
+      <p>指数コードを渡すと、その指数の全期間ぶんの日次終値の並びが返ってくる。手で書いたダミーではなく、本物のデータで線が引けている。そして取得に失敗したとき、この係が何を返すか（空・エラー・直近の成功分）を自分で決められている。</p>
+    </div>
+
+    <h2>まとめ — 次の層へ</h2>
+    <p>本物のデータで線が引けるようになりました。でも、毎回この係を叩いて外部から取りに行くのは、回数制限に対してあまりに無防備です。同じ期間を見るたびにネットワークへ出ていくのは遅いし、いつ弾かれてもおかしくない。ここで湧く自然な欲求が——<strong>「一度取ったものは、手元に貯めておきたい」</strong>。次章では、取ってきたデータを貯め、そこから必要な期間だけを切り出す仕組みを作ります。前章のFAQで触れた「失敗しても保存済みデータで継続する」も、この貯め箱があって初めて動きます。</p>
+
+    <div class="chap-foot">
+      <a class="pager" href="00-line.html"><span class="dir">← 前へ</span>第00章 · 一本の線を引く</a>
+      <a class="pager next" href="02-store.html"><span class="dir">次へ →</span>第02章 · 貯めて、切り出す</a>
+    </div>
+  </main>
+</div>
+</body>
+</html>

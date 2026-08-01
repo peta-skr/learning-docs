@@ -1,0 +1,509 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>第01章 プロセスと標準入出力 — 手を動かして作るオンラインジャッジ</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500;600&family=Source+Serif+4:opsz,wght@8..60,400;8..60,600;8..60,700&family=Noto+Serif+JP:wght@400;600;700&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<div class="shell">
+
+  <aside class="spine">
+    <a class="wordmark" href="index.html">JUDGE · from scratch</a>
+    <div class="book-title">手を動かして作る<br>オンラインジャッジ</div>
+    <div class="book-sub">Go で サンドボックスから Web まで</div>
+
+    <div class="legend"><span>読む <b>↓</b></span><span>組む <b>↑</b></span></div>
+
+    <nav aria-label="目次">
+      <ul class="toc">
+        <li><a class="nav-item" href="index.html"><span class="nav-num">序</span><span class="nav-label">はじめに・準備<span class="nav-tag">Setup</span></span></a></li>
+        <li><a class="nav-item" href="00-smallest.html"><span class="nav-num">00</span><span class="nav-label">いちばん小さいジャッジ<span class="nav-tag">Judge</span></span></a></li>
+        <li><a class="nav-item current" aria-current="page" href="01-process.html"><span class="nav-num">01</span><span class="nav-label">プロセスと標準入出力<span class="nav-tag">IO</span></span></a></li>
+        <li><a class="nav-item" href="02-verdict.html"><span class="nav-num">02</span><span class="nav-label">verdict — 判定の種類<span class="nav-tag">Verdict</span></span></a></li>
+        <li><a class="nav-item" href="03-threat.html"><span class="nav-num">03</span><span class="nav-label">なぜ他人のコードは危険か<span class="nav-tag">Threat</span></span></a></li>
+        <li><a class="nav-item" href="04-sandbox.html"><span class="nav-num">04</span><span class="nav-label">コンテナに閉じ込める<span class="nav-tag">Sandbox</span></span></a></li>
+        <li><a class="nav-item" href="05-limits.html"><span class="nav-num">05</span><span class="nav-label">時間とメモリを断ち切る<span class="nav-tag">Limits</span></span></a></li>
+        <li><a class="nav-item" href="06-lang.html"><span class="nav-num">06</span><span class="nav-label">いろんな言語で<span class="nav-tag">Lang</span></span></a></li>
+        <li><a class="nav-item" href="07-store.html"><span class="nav-num">07</span><span class="nav-label">問題とテストケースを持つ<span class="nav-tag">Store</span></span></a></li>
+        <li><a class="nav-item" href="08-queue.html"><span class="nav-num">08</span><span class="nav-label">提出を「あとで」捌く<span class="nav-tag">Queue</span></span></a></li>
+        <li><a class="nav-item" href="09-web.html"><span class="nav-num">09</span><span class="nav-label">画面をつける<span class="nav-tag">Web</span></span></a></li>
+      </ul>
+    </nav>
+
+    <div class="spine-foot">
+      各章は「実行の心臓部」から<br>始めて「Web」へ登る。<br>下（採点の核）から上（画面）へ<br>積み上げて動かしていく。
+    </div>
+  </aside>
+
+  <main class="reading">
+    <div class="progress-tag">第01章 / 全10章 · 層: IO · 読了目安 2.5〜3.5時間</div>
+    <div class="eyebrow"><span>IO</span><span class="depth">— ホストとコンテナの境界</span></div>
+    <h1>プロセスと標準入出力</h1>
+    <p class="lede">第00章で「出力を比べて合否を出す目」はできました。ですがその目に食わせる<strong>「実際の出力」は、いったい誰がどうやって手に入れるのか?</strong> 提出コードは、いずれ隔離された Docker コンテナの中で走ります。ホストにいるジャッジ本体と、コンテナの中にいるランナーは、別々のプロセスです。<strong>別プロセスの間で、ファイル一式を渡し、実行結果を受け取る</strong>——その通信の作法を、この章で1本のプロトコルとして固めます。標準入力に <code>tar</code> でファイルを流し込み、標準出力に行指向のフレームで結果を返す。核心は「なぜ生出力を base64 でくるむのか」と「なぜ壊れた結果を握りつぶさず IE にするのか」です。</p>
+
+    <div class="box goal"><div class="box-k">◈ この章のゴール</div>
+      <p>次の 3 つを、自分の目と手で確認できたら達成です。</p>
+      <ol>
+        <li><code>go test ./internal/judge/ -run 'TestMakeTar|TestParseCompileOutput|TestParseRunOutput'</code> が PASS する。tar の往復・コンパイル段の解釈・実行段フレームの解釈が、機械で確かめられる。</li>
+        <li>「ホストは stdin に <code>tar</code>、コンテナは stdout に行フレーム」という<strong>境界を越える2方向の約束</strong>を、自分の言葉で図解できる。</li>
+        <li>生出力を <code>base64</code> でくるむ理由（マーカー衝突の回避）と、制御行の破損を <code>IE</code> にする理由（NF-08。壊れた採点結果を <code>AC</code>/<code>WA</code> にしない）を説明できる。</li>
+      </ol>
+    </div>
+
+    <div class="box map"><div class="box-k">☰ この章のステップ</div>
+      <ol>
+        <li><a href="#step-1">ホストとコンテナの境界を、何で越えるか</a></li>
+        <li><a href="#step-2">ファイル一式を <code>tar</code> で渡す — <code>MakeTar</code></a></li>
+        <li><a href="#step-3">コンパイル段を解釈する — <code>ParseCompileOutput</code></a></li>
+        <li><a href="#step-4">実行段のフレームを解釈する — <code>ParseRunOutput</code></a></li>
+        <li><a href="#step-5">base64 と scanner のバッファ — 生出力を安全にくるむ</a></li>
+        <li><a href="#step-6">破損を握りつぶさず IE にする — <code>collectUntilEnd</code> と <code>___DONE___</code></a></li>
+        <li><a href="#step-7">手を動かす — フレームを1行ずつ壊してみる</a></li>
+      </ol>
+    </div>
+
+    <h2>「実際の出力」は境界の向こうから来る</h2>
+    <p>第00章の <code>decideCase</code> は、<code>CaseOutcome</code> という構造体——終了コード・標準出力・経過時間の入れ物——を受け取って verdict を決めました。あのとき、この構造体は「第04章のランナーが埋める」とだけ言って素通りしました。<strong>その「埋める」の中身が、この章です。</strong></p>
+    <p>ただし本章では、まだ Docker の起動フラグ（<code>--network none</code> など）には踏み込みません。それは第04章の主題です。この章で固めるのは、その一段手前——<strong>「ホストのジャッジ本体」と「コンテナの中で提出コードを走らせるランナースクリプト」が、どんな形式で情報をやり取りするか</strong>という<em>プロトコル</em>だけです。プロトコルとは、要するに2者間の「約束ごと」。どちらが何を送り、どちらが何を返し、その中身をどう区切るか。ここが曖昧だと、どんなに堅牢なサンドボックスを組んでも、返ってきたバイト列を正しく <code>CaseOutcome</code> に組み直せません。</p>
+    <p>プロトコルを別の関心事として切り出す意義は、テスタビリティにあります。Docker を1回も起動せずに「この文字列が来たら、この <code>CaseOutcome</code> になるはず」を全部テストで固定できる。実際、この章で読む <code>protocol.go</code> の関数群は、Docker 不要でユニットテストが通ります。実行機構（第04章）とプロトコル（この章）を分けたからこそ、境界の解釈だけを机上で検証できるのです。</p>
+
+    <h2>この層が上下の層に約束すること</h2>
+    <p>この章で作る層（プロトコル）が、上（採点ロジック）と下（コンテナ内ランナー）に約束するのは、次の3つです。</p>
+    <ul>
+      <li>ホストは、提出コード・コンパイル成果物・テストケースを<strong>1本の <code>tar</code> ストリーム</strong>に固め、コンテナの標準入力へ流し込む。ホスト側のディスクにファイルを書き散らさない。</li>
+      <li>コンテナは、コンパイル結果と各ケースの実行結果を、<strong>行指向のフレーム</strong>（<code>___OK___</code> / <code>___CE___</code> / <code>___CASE___</code> / <code>___OUT___</code> / <code>___ERR___</code> / <code>___DONE___</code>）で標準出力へ返す。プログラムの<strong>生出力は base64 でくるむ</strong>ので、出力の中身がフレームのマーカー行と衝突することはない。</li>
+      <li>制御行が壊れていたら（フィールド不足・数値や base64 の不正）、<strong>握りつぶさず error にする</strong>。呼び出し側はその error を <code>IE</code> として扱い、壊れた採点結果を <code>AC</code>/<code>WA</code> に化けさせない（NF-08）。</li>
+    </ul>
+    <p>逆に、この層が<strong>やらない</strong>ことも明確にしておきます。どう隔離するか（Docker のフラグ）、どう時間やメモリを測るか、その値を verdict にどう落とすか——それらは第04章と第00章の担当です。この層はただ、<strong>境界を越えるバイト列の「詰め方」と「解き方」</strong>だけを引き受けます。詰める（<code>MakeTar</code>）と解く（<code>ParseCompileOutput</code> / <code>ParseRunOutput</code>）、この対称が本章の骨格です。</p>
+
+    <h2 class="step" id="step-1"><span class="step-no">Step 1</span>ホストとコンテナの境界を、何で越えるか</h2>
+    <p>コードを読む前に、これから扱う「境界」の絵を頭に入れます。序章で触れた「三段重ねのプロセス」——Go のジャッジ本体が <code>docker run</code> を起動し、その中でランナースクリプトが提出コードを走らせる——を思い出してください。ジャッジ本体とランナーは、別のプロセス、別の世界（コンテナの内と外）にいます。この2つの世界をつなぐ管は、たった2本です。<strong>コンテナの標準入力（下り）</strong>と<strong>コンテナの標準出力（上り）</strong>。</p>
+
+    <div class="ascii">ホストとコンテナの境界 — 2本の管で越える
+
+  ┌─────────────────────────┐              ┌──────────────────────────┐
+  │ ホスト（ジャッジ本体）    │              │ コンテナ（ランナー）       │
+  │                         │              │                          │
+  │  MakeTar(files)         │              │  tar を展開               │
+  │   提出コード             │  ─ stdin ──▶ │   提出コードをコンパイル    │
+  │   コンパイル成果物        │   （tar）    │   各テストケースを実行     │
+  │   テストケース           │              │                          │
+  │                         │              │                          │
+  │  ParseCompileOutput     │ ◀── stdout ─ │  ___OK___ / ___CE___     │
+  │  ParseRunOutput         │  （行フレーム）│  ___CASE___ ___OUT___    │
+  │   → CaseOutcome[]       │              │  ___ERR___ ___DONE___    │
+  └─────────────────────────┘              └──────────────────────────┘
+        「詰める」と「解く」                     「展開する」と「報告する」</div>
+
+    <p>下りの管（stdin）には、ファイル<strong>一式</strong>を渡さねばなりません。提出したソースコード、Go ならコンパイル済みのバイナリ、それに全テストケースの入力ファイル。バラバラのファイルを1本の標準入力ストリームに乗せる標準的な方法が <code>tar</code> です。序章の予告どおり、ここで <code>MakeTar</code> が効きます。</p>
+    <p>上りの管（stdout）には、<strong>複数の情報が順に流れてきます</strong>。コンパイルが通ったか落ちたか、通ったなら成果物のバイト列、各ケースの終了コード・経過時間・メモリ・標準出力・標準エラー、そして「全部終わった」の合図。これらを1本のストリームの中で区別するために、<strong>マーカー行</strong>で区切ります。<code>___CASE___</code> で始まる行はケースの見出し、<code>___OUT___</code> の次は標準出力、というように。テキストの行を「フレーム」の単位として使うわけです。</p>
+    <p>ここで、すぐに1つの危険が見えます。<strong>提出コードの標準出力の中身に、たまたま <code>___DONE___</code> や <code>___CASE___</code> という文字列が含まれていたら?</strong> マーカーと本文が見分けられなくなり、フレームの境界が壊れます。この衝突をどう防ぐか——それがこの章の核心の1つで、答えは Step 5 の base64 です。まずは「行を区切りに使う」という素朴な設計に、この地雷が最初から埋まっていることだけ、頭の隅に置いてください。</p>
+    <p>プロトコルの全体像は、<code>protocol.go</code> の冒頭コメントに1枚の仕様書として書いてあります。まずこれを読みます。この章の残りは、このコメントを実装するコードを1つずつ解いていく作業です。</p>
+
+    <div class="file-tag">internal/judge/protocol.go（冒頭のプロトコル定義コメント）</div>
+    <pre><code><span class="kw">package</span> judge
+
+<span class="kw">import</span> (
+	<span class="st">"archive/tar"</span>
+	<span class="st">"bufio"</span>
+	<span class="st">"bytes"</span>
+	<span class="st">"encoding/base64"</span>
+	<span class="st">"fmt"</span>
+	<span class="st">"strconv"</span>
+	<span class="st">"strings"</span>
+)
+
+<span class="cm">// コンテナ内ランナー（images/*/judge スクリプト）との受け渡しプロトコル。</span>
+<span class="cm">//</span>
+<span class="cm">// 入力: stdin に tar（提出コード・コンパイル成果物・テストケース）</span>
+<span class="cm">// 出力: stdout に行指向のフレーム</span>
+<span class="cm">//</span>
+<span class="cm">//   コンパイル段:</span>
+<span class="cm">//     ___OK___          （成功。続けて base64 成果物 → ___END___。成果物なしなら即 ___END___）</span>
+<span class="cm">//     ___CE___          （失敗。続けてエラーメッセージ生テキスト → ___END___）</span>
+<span class="cm">//   実行段（ケースごと）:</span>
+<span class="cm">//     ___CASE___ &lt;name&gt; &lt;exit&gt; &lt;elapsed_sec&gt; &lt;maxrss_kb&gt;</span>
+<span class="cm">//     ___OUT___ / base64(stdout 先頭1MB) / ___END___</span>
+<span class="cm">//     ___ERR___ / base64(stderr 先頭4KB) / ___END___</span>
+<span class="cm">//   全ケース終了: ___DONE___</span>
+<span class="cm">//</span>
+<span class="cm">// プログラムの生出力は必ず base64 でくるむため、マーカー行との衝突は起きない。</span></code></pre>
+
+    <p>この15行のコメントが、本章の設計図そのものです。読み解くときの目印を先に置いておきます。<strong>下り（stdin）は1種類</strong>——tar だけ。<strong>上り（stdout）は2段</strong>——まずコンパイル段（<code>___OK___</code> か <code>___CE___</code>）、次に実行段（<code>___CASE___</code> …の繰り返し）、最後に <code>___DONE___</code>。そして最終行の一文——<strong>「生出力は必ず base64 でくるむ」</strong>——が、Step 1 で見た衝突の地雷をどう踏み抜かずに済ませるかの、この設計の答えです。import に <code>archive/tar</code>・<code>encoding/base64</code>・<code>bufio</code> が並んでいるのも予告です。tar で詰め、base64 でくるみ、bufio で行ごとに解く。この3つが道具箱の中身です。</p>
+
+    <h2 class="step" id="step-2"><span class="step-no">Step 2</span>ファイル一式を <code>tar</code> で渡す — MakeTar</h2>
+    <p>まず下りの管——ホストからコンテナへファイルを渡す側——から作ります。序章で予告した <code>MakeTar</code> です。やることは単純で、<strong>「ファイル名 → 中身」のマップを受け取り、それを1本の <code>tar</code> ストリームに固める</strong>。それだけです。ファイルは <code>internal/judge/protocol.go</code>。</p>
+
+    <div class="file-tag">internal/judge/protocol.go（MakeTar）</div>
+    <pre><code><span class="cm">// MakeTar はファイル名→内容のマップから tar ストリームを作る。</span>
+<span class="kw">func</span> MakeTar(files map[<span class="ty">string</span>][]<span class="ty">byte</span>) (*bytes.<span class="ty">Buffer</span>, <span class="ty">error</span>) {
+	buf := &amp;bytes.<span class="ty">Buffer</span>{}
+	tw := tar.NewWriter(buf)
+	<span class="kw">for</span> name, content := <span class="kw">range</span> files {
+		hdr := &amp;tar.<span class="ty">Header</span>{Name: name, Mode: <span class="st">0o755</span>, Size: int64(len(content))}
+		<span class="kw">if</span> err := tw.WriteHeader(hdr); err != <span class="kw">nil</span> {
+			<span class="kw">return</span> <span class="kw">nil</span>, err
+		}
+		<span class="kw">if</span> _, err := tw.Write(content); err != <span class="kw">nil</span> {
+			<span class="kw">return</span> <span class="kw">nil</span>, err
+		}
+	}
+	<span class="kw">if</span> err := tw.Close(); err != <span class="kw">nil</span> {
+		<span class="kw">return</span> <span class="kw">nil</span>, err
+	}
+	<span class="kw">return</span> buf, <span class="kw">nil</span>
+}</code></pre>
+
+    <p>上から順に読みます。1行1行が <code>tar</code> という形式の「作法」に対応しています。</p>
+    <p><strong>① 書き込み先の入れ物を用意する。</strong> <code>buf := &amp;bytes.Buffer{}</code> は、メモリ上の書き込み可能なバッファです。tar の中身をファイルではなく<strong>メモリに</strong>組み立てます。ディスクに一時ファイルを作らないのがミソで、こうしておけば後で <code>buf</code> をそのまま <code>docker run</code> の標準入力に <code>cmd.Stdin = buf</code> のように差せます。ホスト側にファイルを一切書き残さない、という序章で予告した「小技」の実体がこれです。</p>
+    <p><strong>② tar のライターをかぶせる。</strong> <code>tw := tar.NewWriter(buf)</code> で、<code>buf</code> に「tar 形式で書く」ためのライターを取り付けます。以降 <code>tw</code> にファイルを書けば、<code>buf</code> の中に tar のバイト列が積み上がっていきます。</p>
+    <p><strong>③ ファイルごとに「ヘッダ → 中身」を書く。</strong> <code>for name, content := range files</code> でマップを回し、1ファイルずつ処理します。<code>tar</code> は「ファイルの見出し（ヘッダ）を書いてから、その中身を書く」という並びを繰り返す形式です。<code>tar.Header{Name: name, Mode: 0o755, Size: int64(len(content))}</code> がその見出し——ファイル名・パーミッション・<strong>バイト数</strong>を宣言します。とくに <code>Size</code> は必須で、これを実際の中身の長さ（<code>len(content)</code>）と正しく一致させないと、展開側が「宣言より中身が長い/短い」と壊れます。<code>Mode: 0o755</code>（実行可能）にしてあるのは、コンパイル成果物（バイナリ）やスクリプトをそのまま実行できるようにするためです。</p>
+    <p><strong>④ ヘッダを書き、続けて中身を書く。</strong> <code>tw.WriteHeader(hdr)</code> で見出しを、<code>tw.Write(content)</code> で中身を書きます。この2つは<strong>必ずこの順</strong>。ヘッダが「次に何バイトのファイルが来るか」を宣言し、その直後にちょうどそのバイト数を流す、という契約だからです。どちらもエラーを返しうるので、<code>if err != nil { return nil, err }</code> でその場で異常を上へ返します。ここで握りつぶすと、壊れた tar をコンテナに渡してしまい、後段で「なぜか展開できない」という追いにくい事故になります。</p>
+    <p><strong>⑤ 最後に必ず Close する。</strong> <code>tw.Close()</code> は飾りではありません。<code>tar</code> はアーカイブの末尾に<strong>「ここで終わり」を示す終端ブロック</strong>を書く決まりで、それを書き込むのが <code>Close</code> の仕事です。これを忘れると、展開側は「まだファイルが続くのか?」と待ち続け、途中で切れた不完全な tar になります。<code>defer tw.Close()</code> と書きたくなりますが、ここでは<strong>あえて明示的に <code>Close</code> を呼び、そのエラーも確認</strong>しています。終端ブロックの書き込み失敗を見逃さないためで、<code>defer</code> では戻り値のエラーを拾いにくいからです。すべて成功したら、tar が詰まった <code>buf</code> を返します。</p>
+
+    <div class="gonote"><div class="box-k">GO メモ · archive/tar と「ヘッダ→中身」の並び</div>
+      <p><code>archive/tar</code> は Go 標準ライブラリで、外部依存なしに tar アーカイブを読み書きできます。書き込みの基本形は本文のとおり <strong><code>WriteHeader(hdr)</code> → <code>Write(content)</code> の繰り返し → 最後に <code>Close()</code></strong>。<code>tar.Header.Size</code> は<strong>宣言と実データが一致していなければならない</strong>のが最大の落とし穴で、<code>Size</code> を間違えると <code>Write</code> が「宣言バイト数を超えた」とエラーを返します。<br>
+      <code>*bytes.Buffer</code> は「メモリ上の可変長バイト列」で、<code>io.Writer</code>（書ける先）としても <code>io.Reader</code>（読める元）としても振る舞います。だから <code>tar.NewWriter(buf)</code> で書き込み先にでき、後で <code>cmd.Stdin = buf</code> のように読み取り元にもできます。この二役が、ディスクを介さずに「メモリで組んで、そのまま標準入力へ流す」を可能にしています。</p>
+    </div>
+
+    <p>展開する側（コンテナ内のランナースクリプト）は、この tar を標準入力から受け取り、<code>tar xf -</code> のように展開して提出コードやテストケースを取り出します。その中身は第04章の Docker イメージの話なので、ここでは「ホスト側が正しい tar を作れること」だけを担保します。それを機械で確かめるのが <code>TestMakeTarRoundtrip</code> です。</p>
+
+    <div class="box do"><div class="box-k">▸ 動かして確認</div>
+      <p><code>MakeTar</code> だけで、tar の往復テストが通ります。Docker は不要です。<code>TestMakeTarRoundtrip</code> は「マップを tar にして、また展開して、同じ中身が戻るか」を確かめます。</p>
+      <pre class="term"><code><span class="ps">$</span> cd backend
+<span class="ps">$</span> go test ./internal/judge/ -run TestMakeTarRoundtrip -v
+<span class="out">=== RUN   TestMakeTarRoundtrip
+--- PASS: TestMakeTarRoundtrip (0.00s)
+PASS
+ok      judge/internal/judge    0.008s</span></code></pre>
+      <p>このテストは <code>{"main.go": "package main", "cases/c001.in": "3 5\n"}</code> という2ファイルのマップを <code>MakeTar</code> で固め、<code>tar.NewReader</code> で展開し直して、ファイル名と中身がそっくり戻ることを確かめます。<code>cases/c001.in</code> のようにディレクトリを含むパスも扱えるので、テストケースを <code>cases/</code> 以下にまとめて渡せます。往復（round-trip）が一致する——これが「ホスト側の詰め方は正しい」の機械的な証拠です。</p>
+    </div>
+
+    <h2 class="step" id="step-3"><span class="step-no">Step 3</span>コンパイル段を解釈する — ParseCompileOutput</h2>
+    <p>ここから上りの管——コンテナが返してくる stdout を解く側——に移ります。上りは2段でした。まず<strong>コンパイル段</strong>から。Go のようなコンパイル言語では、提出コードを実行する前にビルドします。コンテナは、その結果を <code>___OK___</code>（成功）か <code>___CE___</code>（コンパイルエラー）のどちらかのフレームで返してきます。それを解釈するのが <code>ParseCompileOutput</code> です。</p>
+    <p>まず、この関数が返す型を頭に入れます。第00章の <code>JudgeSubmission</code> の骨格で <code>cres.OK</code> や <code>cres.Artifact</code>・<code>cres.Message</code> を参照していたのを覚えているでしょうか。あの <code>cres</code> の正体がこれです。</p>
+
+    <div class="file-tag">internal/judge/protocol.go（CompileResult）</div>
+    <pre><code><span class="kw">type</span> <span class="ty">CompileResult</span> <span class="kw">struct</span> {
+	OK       <span class="ty">bool</span>
+	Artifact []<span class="ty">byte</span> <span class="cm">// コンパイル成果物（Go のバイナリ。TS 型検査は nil）</span>
+	Message  <span class="ty">string</span> <span class="cm">// CE 時のコンパイラ出力</span>
+}</code></pre>
+
+    <p><code>OK</code> はコンパイルが通ったか。通ったなら <code>Artifact</code> にビルドされたバイナリのバイト列が入り（この成果物を実行段で走らせます）、落ちたなら <code>Message</code> にコンパイラのエラー出力が入って <code>CE</code> の理由を提出者に見せられます。コメントにあるとおり、TypeScript の型検査のように「成果物が生まれない」言語では <code>Artifact</code> は <code>nil</code> のままです。では、この構造体を stdout から組み立てる本体を読みます。</p>
+
+    <div class="file-tag">internal/judge/protocol.go（ParseCompileOutput）</div>
+    <pre><code><span class="cm">// ParseCompileOutput はコンパイル段コンテナの stdout を解釈する。</span>
+<span class="kw">func</span> ParseCompileOutput(stdout []<span class="ty">byte</span>) (*<span class="ty">CompileResult</span>, <span class="ty">error</span>) {
+	sc := newScanner(stdout)
+	<span class="kw">for</span> sc.Scan() {
+		<span class="kw">switch</span> line := sc.Text(); {
+		<span class="kw">case</span> line == <span class="st">"___OK___"</span>:
+			b64 := collectUntilEnd(sc)
+			artifact, err := base64.StdEncoding.DecodeString(b64)
+			<span class="kw">if</span> err != <span class="kw">nil</span> {
+				<span class="kw">return</span> <span class="kw">nil</span>, fmt.Errorf(<span class="st">"broken artifact base64: %w"</span>, err)
+			}
+			<span class="kw">return</span> &amp;<span class="ty">CompileResult</span>{OK: <span class="kw">true</span>, Artifact: artifact}, <span class="kw">nil</span>
+		<span class="kw">case</span> line == <span class="st">"___CE___"</span>:
+			msg := collectRawUntilEnd(sc)
+			<span class="kw">return</span> &amp;<span class="ty">CompileResult</span>{OK: <span class="kw">false</span>, Message: msg}, <span class="kw">nil</span>
+		}
+	}
+	<span class="kw">return</span> <span class="kw">nil</span>, fmt.Errorf(<span class="st">"no compile marker in output"</span>)
+}</code></pre>
+
+    <p>この関数の形は<strong>「stdout を1行ずつ読み、最初に見つけたマーカーで分岐して即 return する」</strong>という素直なものです。上から追います。</p>
+    <p><strong>① 行スキャナを用意する。</strong> <code>sc := newScanner(stdout)</code> は、バイト列を<strong>1行ずつ</strong>読み進める道具（<code>bufio.Scanner</code> のラッパー）を作ります。中身は Step 5 で読みますが、いまは「<code>sc.Scan()</code> を呼ぶたびに次の1行へ進み、<code>sc.Text()</code> でその行の文字列が取れる」とだけ捉えれば十分です。行指向のフレームを解くのだから、まず行ごとに読める道具を用意する、という素直な発想です。</p>
+    <p><strong>② 各行をマーカーと突き合わせる。</strong> <code>for sc.Scan()</code> で1行ずつ進み、<code>switch line := sc.Text(); { case ... }</code> でその行を判定します。この <code>switch</code> は式のない <code>switch { case 条件: }</code> の形で、各 <code>case</code> は真偽の条件です。探しているのは <code>___OK___</code> か <code>___CE___</code> の行。それ以外の行（tar 展開の副産物やランナーの雑多なログ）は、どの <code>case</code> にも当たらず<strong>読み飛ばされます</strong>。マーカーだけを拾って進む、というゆるい姿勢です。</p>
+    <p><strong>③ <code>___OK___</code> なら、続く base64 を集めて復号する。</strong> 成功の見出しを見つけたら、その<strong>次の行から <code>___END___</code> まで</strong>が base64 でくるまれた成果物です。<code>collectUntilEnd(sc)</code>（Step 6 で読む）がその断片を <code>___END___</code> まで集めて連結し、<code>base64.StdEncoding.DecodeString</code> で元のバイナリに戻します。ここで<strong>復号に失敗したら握りつぶさず error を返す</strong>——<code>fmt.Errorf("broken artifact base64: %w", err)</code>。成果物が壊れているのに「コンパイル成功」を装って実行段に進めば、動かないバイナリを走らせて意味不明な結果になります。だから「壊れた成功」は成功と認めず、上位で <code>IE</code> に倒せるよう error として返すのです。復号できたら <code>OK: true</code> と <code>Artifact</code> を詰めて即 <code>return</code>。</p>
+    <p><strong>④ <code>___CE___</code> なら、エラーメッセージを生テキストで集める。</strong> コンパイル失敗の見出しなら、続くのは base64 ではなく<strong>コンパイラのエラー出力そのもの</strong>（人間が読むテキスト）です。だから <code>collectUntilEnd</code>（base64 用）ではなく <code>collectRawUntilEnd(sc)</code>（生テキスト用）で <code>___END___</code> まで集めます。この2つの「集める関数」を使い分けているのが読みどころで、その違いは Step 6 で詳しく見ます。<code>OK: false</code> と <code>Message</code> を詰めて <code>return</code>。この <code>Message</code> が、第00章で見た <code>CompileOutput: truncateStr(cres.Message, 64&lt;&lt;10)</code> として提出者に見せる CE の理由になります。</p>
+    <p><strong>⑤ どちらのマーカーも見つからずに読み切ったら error。</strong> ループを最後まで回っても <code>___OK___</code> にも <code>___CE___</code> にも出会わなかったら、それは<strong>コンパイル段の報告が壊れている</strong>ということです。<code>fmt.Errorf("no compile marker in output")</code> を返します。「成功とも失敗とも言えない」状態を、勝手にどちらかに決めつけない。これも NF-08 の思想——<strong>疑わしいときは AC を出さない、判断できないなら IE</strong>——の一貫です。<code>TestParseCompileOutputBroken</code> が、まさにマーカーのない <code>"garbage\n"</code> を渡して error になることを固定しています。</p>
+
+    <div class="box do"><div class="box-k">▸ 動かして確認</div>
+      <p>コンパイル段の3ケース——成功・失敗・破損——を通します。Docker は不要です。</p>
+      <pre class="term"><code><span class="ps">$</span> cd backend
+<span class="ps">$</span> go test ./internal/judge/ -run TestParseCompileOutput -v
+<span class="out">=== RUN   TestParseCompileOutputOK
+--- PASS: TestParseCompileOutputOK (0.00s)
+=== RUN   TestParseCompileOutputCE
+--- PASS: TestParseCompileOutputCE (0.00s)
+=== RUN   TestParseCompileOutputBroken
+--- PASS: TestParseCompileOutputBroken (0.00s)
+PASS
+ok      judge/internal/judge    0.009s</span></code></pre>
+      <p><code>TestParseCompileOutputOK</code> は <code>___OK___</code> に続けて base64 化した擬似 ELF バイナリを流し、<code>Artifact</code> が元のバイト列に戻ることを確かめます。<code>TestParseCompileOutputCE</code> は <code>___CE___</code> に <code>main.go:5: undefined: fmt.Pintln</code> という<strong>タイポを含むコンパイルエラー</strong>を流し、<code>Message</code> がその生テキストのまま取れることを確かめます（生テキストなので一字一句そのまま）。<code>TestParseCompileOutputBroken</code> はマーカーのないゴミを流し、<strong>error になる</strong>こと——沈黙して成功や失敗をでっち上げないこと——を固定します。この3本が、コンパイル段の解釈の「成功・失敗・破損」の三面を守ります。</p>
+    </div>
+
+    <h2 class="step" id="step-4"><span class="step-no">Step 4</span>実行段のフレームを解釈する — ParseRunOutput</h2>
+    <p>コンパイル段の次は<strong>実行段</strong>です。ここが本章でいちばん複雑で、いちばん大事なところ。コンテナは全テストケースを順に実行し、ケースごとに「見出し（<code>___CASE___</code>）+ 標準出力（<code>___OUT___</code>）+ 標準エラー（<code>___ERR___</code>）」の3点セットを stdout に流し、最後に <code>___DONE___</code> で締めます。これを解いて <code>CaseOutcome</code> の配列に組み直すのが <code>ParseRunOutput</code> です。第00章の <code>decideCase</code> が食べていた <code>CaseOutcome</code> は、まさにここで生まれます。</p>
+    <p>まず、生まれる2つの型を確認します。</p>
+
+    <div class="file-tag">internal/judge/protocol.go（CaseOutcome / RunOutcome）</div>
+    <pre><code><span class="kw">type</span> <span class="ty">CaseOutcome</span> <span class="kw">struct</span> {
+	Name      <span class="ty">string</span>
+	ExitCode  <span class="ty">int</span>
+	ElapsedMS <span class="ty">int</span>
+	MaxRSSKB  <span class="ty">int</span>
+	Stdout    []<span class="ty">byte</span>
+	Stderr    []<span class="ty">byte</span>
+}
+
+<span class="kw">type</span> <span class="ty">RunOutcome</span> <span class="kw">struct</span> {
+	Cases []<span class="ty">CaseOutcome</span>
+	Done  <span class="ty">bool</span> <span class="cm">// ___DONE___ まで到達した（false = コンテナごと落ちた/打ち切られた）</span>
+}</code></pre>
+
+    <p><code>CaseOutcome</code> は第00章で「第04章のランナーが埋める」と言った、あの構造体です。名前・終了コード・経過時間（ミリ秒）・最大メモリ・標準出力・標準エラー。<code>RunOutcome</code> はそれを束ね、加えて <code>Done</code>——<strong>最後まで（<code>___DONE___</code> まで）ちゃんと到達したか</strong>——という真偽値を持ちます。この <code>Done</code> フラグが、後述する「採点が完走したことの確認」の要になります。では本体です。少し長いので、まず全文を載せてから、部分ごとに解きます。</p>
+
+    <div class="file-tag">internal/judge/protocol.go（ParseRunOutput）</div>
+    <pre><code><span class="cm">// ParseRunOutput は実行段コンテナの stdout を解釈する。</span>
+<span class="cm">// 制御行の破損（フィールド不足・数値/ base64 の不正）は握りつぶさず error にする。</span>
+<span class="cm">// 呼び出し側はこの error を IE として扱う（NF-08。壊れた採点結果を AC/WA にしない）。</span>
+<span class="kw">func</span> ParseRunOutput(stdout []<span class="ty">byte</span>) (*<span class="ty">RunOutcome</span>, <span class="ty">error</span>) {
+	out := &amp;<span class="ty">RunOutcome</span>{}
+	sc := newScanner(stdout)
+	<span class="kw">for</span> sc.Scan() {
+		line := sc.Text()
+		<span class="kw">switch</span> {
+		<span class="kw">case</span> strings.HasPrefix(line, <span class="st">"___CASE___ "</span>):
+			fields := strings.Fields(line)
+			<span class="cm">// ___CASE___ name exit elapsed maxrss</span>
+			<span class="kw">if</span> len(fields) != <span class="st">5</span> {
+				<span class="kw">return</span> <span class="kw">nil</span>, fmt.Errorf(<span class="st">"malformed CASE line: %q"</span>, line)
+			}
+			c := <span class="ty">CaseOutcome</span>{Name: fields[<span class="st">1</span>]}
+			<span class="kw">var</span> err <span class="ty">error</span>
+			<span class="kw">if</span> c.ExitCode, err = strconv.Atoi(fields[<span class="st">2</span>]); err != <span class="kw">nil</span> {
+				<span class="kw">return</span> <span class="kw">nil</span>, fmt.Errorf(<span class="st">"bad exit code in %q: %w"</span>, line, err)
+			}
+			elapsedSec, err := strconv.ParseFloat(fields[<span class="st">3</span>], <span class="st">64</span>)
+			<span class="kw">if</span> err != <span class="kw">nil</span> {
+				<span class="kw">return</span> <span class="kw">nil</span>, fmt.Errorf(<span class="st">"bad elapsed in %q: %w"</span>, line, err)
+			}
+			c.ElapsedMS = int(elapsedSec * <span class="st">1000</span>)
+			<span class="kw">if</span> c.MaxRSSKB, err = strconv.Atoi(fields[<span class="st">4</span>]); err != <span class="kw">nil</span> {
+				<span class="kw">return</span> <span class="kw">nil</span>, fmt.Errorf(<span class="st">"bad maxrss in %q: %w"</span>, line, err)
+			}
+			out.Cases = append(out.Cases, c)
+		<span class="kw">case</span> line == <span class="st">"___OUT___"</span>:
+			<span class="kw">if</span> n := len(out.Cases); n &gt; <span class="st">0</span> {
+				b, err := base64.StdEncoding.DecodeString(collectUntilEnd(sc))
+				<span class="kw">if</span> err != <span class="kw">nil</span> {
+					<span class="kw">return</span> <span class="kw">nil</span>, fmt.Errorf(<span class="st">"bad stdout base64: %w"</span>, err)
+				}
+				out.Cases[n-<span class="st">1</span>].Stdout = b
+			}
+		<span class="kw">case</span> line == <span class="st">"___ERR___"</span>:
+			<span class="kw">if</span> n := len(out.Cases); n &gt; <span class="st">0</span> {
+				b, err := base64.StdEncoding.DecodeString(collectUntilEnd(sc))
+				<span class="kw">if</span> err != <span class="kw">nil</span> {
+					<span class="kw">return</span> <span class="kw">nil</span>, fmt.Errorf(<span class="st">"bad stderr base64: %w"</span>, err)
+				}
+				out.Cases[n-<span class="st">1</span>].Stderr = b
+			}
+		<span class="kw">case</span> line == <span class="st">"___DONE___"</span>:
+			out.Done = <span class="kw">true</span>
+		}
+	}
+	<span class="kw">if</span> err := sc.Err(); err != <span class="kw">nil</span> {
+		<span class="kw">return</span> <span class="kw">nil</span>, fmt.Errorf(<span class="st">"scan run output: %w"</span>, err)
+	}
+	<span class="kw">return</span> out, <span class="kw">nil</span>
+}</code></pre>
+
+    <p>全体の骨格は <code>ParseCompileOutput</code> と同じ——「1行ずつ読み、マーカーで分岐」——ですが、こちらは<strong>即 return せず、状態（<code>out.Cases</code>）を積み上げながら最後まで読む</strong>点が違います。ケースが複数あるからです。4つの <code>case</code> を1つずつ解きます。</p>
+
+    <p><strong>① <code>___CASE___ </code> で始まる行 — 新しいケースの見出し。</strong> <code>strings.HasPrefix(line, "___CASE___ ")</code>（末尾にスペースがある点に注意——見出しの後に必ずフィールドが続くため）で判定します。この行は <code>___CASE___ c001 0 0.42 3824</code> のように<strong>スペース区切りで5フィールド</strong>——マーカー・名前・終了コード・経過秒・最大メモリ——を持ちます。<code>strings.Fields(line)</code> でスペース区切りに割り、まず<strong>フィールド数を検査</strong>します。<code>if len(fields) != 5 { return nil, ... }</code>。ここが最初の関門で、フィールドが足りない（ランナーが途中で切れた等）なら、<strong>握りつぶさず error</strong>。壊れた見出しから無理にケースを組み立てて、欠けた値をゼロで埋めたりしたら、その <code>0</code> が「正常終了」に見えて <code>AC</code> に化ける恐れがあるからです。</p>
+    <p>数が合ったら、各フィールドを<strong>型に変換しながら詰めます</strong>。<code>fields[1]</code>（名前）はそのまま文字列。<code>fields[2]</code>（終了コード）は <code>strconv.Atoi</code> で <code>int</code> に。<code>fields[3]</code>（経過秒）は <code>strconv.ParseFloat</code> で <code>float64</code> にしてから <code>int(elapsedSec * 1000)</code> で<strong>秒をミリ秒に換算</strong>——ランナーは秒（<code>0.42</code>）で報告し、ジャッジは内部でミリ秒（<code>420</code>）で扱う、その変換をここで済ませます。<code>fields[4]</code>（最大メモリ KB）も <code>Atoi</code>。<strong>変換のどれか1つでも失敗したら、その場で error を返す</strong>のが要点です。<code>"notanumber"</code> のような数値でない終了コードが来たら <code>strconv.Atoi</code> が失敗し、<code>bad exit code in ...</code> の error になります。数値であるべき場所に数値が来ないのは<strong>制御情報の破損</strong>で、これを黙って <code>0</code> にすると採点結果が静かに壊れます。すべて成功したら <code>out.Cases = append(out.Cases, c)</code> で新しいケースを配列に積みます。</p>
+    <p><strong>② <code>___OUT___</code> — 直前のケースの標準出力。</strong> この見出しの<strong>次の行から <code>___END___</code> まで</strong>が、base64 でくるまれた標準出力です。<code>collectUntilEnd(sc)</code> で断片を集めて連結し、<code>base64.StdEncoding.DecodeString</code> で元のバイト列に戻します。ここで注目すべきは <code>if n := len(out.Cases); n > 0</code> という<strong>ガード</strong>です。標準出力は「直前のケース」に属します。<code>out.Cases[n-1].Stdout = b</code> で<strong>配列の最後のケース</strong>に紐づけるのですが、もし <code>___CASE___</code> より先に <code>___OUT___</code> が来たら（ありえない順序ですが）、<code>n == 0</code> で <code>out.Cases[-1]</code> という<strong>範囲外アクセスで panic</strong>してしまいます。<code>n > 0</code> のガードは、その順序異常でクラッシュしないための保険です。復号に失敗すれば、ここでも <code>bad stdout base64</code> の error——マーカーの内側が壊れていたら成功と認めない、の一貫です。</p>
+    <p><strong>③ <code>___ERR___</code> — 直前のケースの標準エラー。</strong> ②と完全に対称です。base64 を復号して <code>out.Cases[n-1].Stderr</code> に紐づけます。標準エラーは、第00章の <code>decideCase</code> が Node の <code>"heap out of memory"</code> を探して MLE を判定するのに使っていた、あの <code>Stderr</code> です。ここで正しく組み立てておかないと、あの MLE 判定が空振りします。プロトコル層の正しさが、上の判定層の正しさを支えているのがわかります。</p>
+    <p><strong>④ <code>___DONE___</code> — ランナーが報告を最後までやり切った合図。</strong> この行を見たら <code>out.Done = true</code> を立てるだけ。単純ですが、この1行が本章の重要な思想を担います。<strong><code>___DONE___</code> に到達したということは、ランナーが（打ち切りを含めて）報告を最後まで正常に完了した</strong>という証拠です。ここで正確に押さえておきたいのは、ランナーは<strong>最初の非0終了ケースで残りを打ち切っても <code>___DONE___</code> を出す</strong>ことです（<code>images/common/loop.sh</code>: 非0終了で <code>break</code> した<strong>後</strong>に <code>echo "___DONE___"</code>。第05章で詳しく見ます）。つまり <code>___DONE___</code> は「全ケースを走らせ切った」ではなく「<strong>ランナーが自分の仕事を最後まで正常に終えて、きちんと締めくくった</strong>」の合図です。逆に、コンテナが OOM で丸ごと落ちたり、外側から打ち切られたりすると、締めくくりの <code>___DONE___</code> は<strong>来ません</strong>。<code>Done</code> が <code>false</code> のまま返るので、上位は「これは<strong>コンテナごと途中で死んだ</strong>＝報告されたケース数は信用できない」と判断できます。この完走確認の意味は Step 6 でもう一段深掘りします。</p>
+    <p><strong>⑤ 最後にスキャン自体のエラーを確認する。</strong> ループを抜けたら <code>if err := sc.Err(); err != nil</code> を検査します。これは「行の中身」ではなく「<strong>行を読む処理そのもの</strong>」が失敗していないかの確認です。とくに<strong>1行が長すぎてバッファに収まらなかった</strong>場合、<code>bufio.Scanner</code> は途中で読むのをやめ、<code>sc.Err()</code> にエラーを立てます（Step 5 で詳述）。これを見ずに <code>out</code> を返すと、<strong>途中で切れた出力を「完全なもの」として扱う</strong>事故になる。だから最後の関門としてここで拾い、error にして上位へ渡します。すべて無事なら、組み上がった <code>out</code> を返します。</p>
+
+    <div class="box hazard"><div class="box-k">⚠ 落とし穴 — 欠けた値をゼロで埋めてはいけない</div>
+      <p>パーサを書くとき、つい「フィールドが足りなければ空文字、数値でなければ 0」で穴埋めして<strong>とりあえず動かしたく</strong>なります。ジャッジではこれが致命傷です。終了コードのフィールドが壊れて <code>0</code> で埋まると、<code>decideCase</code>（第00章）は「<code>exit 0</code> = 正常終了」と読んで出力比較へ進み、たまたま出力が一致すれば<strong>壊れた実行を <code>AC</code> にしてしまう</strong>。<code>ParseRunOutput</code> が <code>len(fields) != 5</code>・<code>strconv</code> 失敗・base64 失敗のどれでも<strong>即 error を返す</strong>のは、この「破損の穴埋めが AC に化ける」経路を断つためです。制御情報（見出し・終了コード・時間）が1文字でも壊れていたら、その提出の採点結果は<strong>まるごと信用しない</strong>——それが <code>IE</code> に倒す、の意味です。<code>TestParseRunOutputMalformed</code> が、数値でない終了コードとフィールド不足の両方で error になることを固定しています。</p>
+    </div>
+
+    <div class="box do"><div class="box-k">▸ 動かして確認</div>
+      <p>実行段の解釈を、正常・不完全・破損の3面で通します。Docker は不要です。</p>
+      <pre class="term"><code><span class="ps">$</span> cd backend
+<span class="ps">$</span> go test ./internal/judge/ -run TestParseRunOutput -v
+<span class="out">=== RUN   TestParseRunOutput
+--- PASS: TestParseRunOutput (0.00s)
+=== RUN   TestParseRunOutputIncomplete
+--- PASS: TestParseRunOutputIncomplete (0.00s)
+=== RUN   TestParseRunOutputMalformed
+--- PASS: TestParseRunOutputMalformed (0.00s)
+PASS
+ok      judge/internal/judge    0.010s</span></code></pre>
+      <p><code>TestParseRunOutput</code> は2ケース分のフレーム（<code>c001</code> は正常終了で出力 <code>8\n</code>、<code>c002</code> は <code>exit 137</code> で stderr が <code>killed</code>）と <code>___DONE___</code> を流し、<code>Done == true</code>・2ケース・各フィールドが期待どおり（<code>0.42</code>秒 → <code>420</code>ms、<code>1.95</code>秒 → <code>1950</code>ms への換算も含めて）復元されることを確かめます。<code>TestParseRunOutputIncomplete</code> は <strong><code>___DONE___</code> を欠いた</strong>ストリーム（コンテナが途中で落ちた想定）を流し、<code>Done == false</code> になること——完走していないと正しく判断できること——を固定します。<code>TestParseRunOutputMalformed</code> は落とし穴で述べた破損2種で error になることを守ります。この3本で、実行段の解釈が「正しく組み、壊れたら壊れたと言う」ことが機械保証されます。</p>
+    </div>
+
+    <h2 class="step" id="step-5"><span class="step-no">Step 5</span>base64 と scanner のバッファ — 生出力を安全にくるむ</h2>
+    <p>ここで、本章の核心の1つ——<strong>なぜ生出力を base64 でくるむのか</strong>——に正面から向き合います。Step 1 で埋めた地雷を、いま踏み抜かずに済ませる仕掛けです。</p>
+    <p>思い出してください。上りのストリームは、行を区切り（フレーム）に使っていました。<code>___DONE___</code> という行を見たら「全部終わり」と判断する。ここで、提出コードが次のような Go だったら何が起きるでしょう。</p>
+    <pre><code><span class="kw">package</span> main
+<span class="kw">import</span> <span class="st">"fmt"</span>
+<span class="kw">func</span> main() {
+	fmt.Println(<span class="st">"___DONE___"</span>) <span class="cm">// 提出コードが「たまたま」マーカー文字列を出力</span>
+}</code></pre>
+    <p>この提出の<strong>標準出力</strong>そのものが <code>___DONE___</code> という行を含みます。もし生の出力をそのまま stdout に流していたら、パーサは提出コードの出力の中の <code>___DONE___</code> を「全ケース終了の合図」と<strong>誤読</strong>し、そこでフレームの解釈を打ち切ってしまう。悪意ある提出者は、わざと <code>___CASE___ fake 0 0.0 0</code> のような行を出力して、<strong>偽のケース結果をでっち上げる</strong>ことすらできます。制御チャネル（フレーム）とデータチャネル（プログラムの出力）が同じ1本のストリームを共有しているのに、両者を文字列だけで見分けようとしているのが、この地雷の正体です。</p>
+    <p><strong>答えが base64 です。</strong> プログラムの生出力（stdout / stderr）を、そのまま流すのではなく <code>base64</code> で符号化してから <code>___OUT___</code> … <code>___END___</code> の内側に入れます。base64 の出力は <code>A-Z a-z 0-9 + / =</code> という<strong>限られた文字だけ</strong>で構成され、アンダースコア <code>_</code> を含みません。だから <code>___DONE___</code> や <code>___CASE___</code> という<strong>マーカーが base64 文字列の中に現れることは、原理的にありえない</strong>。提出コードが何を出力しようと——マーカーそっくりの文字列でも、改行だらけでも、ヌルバイトを含むバイナリでも——base64 でくるめば、それは無害な英数字の羅列になり、フレームの境界を壊せません。冒頭コメントの一文「プログラムの生出力は必ず base64 でくるむため、マーカー行との衝突は起きない」は、この保証を宣言したものです。</p>
+
+    <div class="ascii">なぜ base64 でくるむか — 制御とデータの分離
+
+  提出コードの生出力               生のまま流すと…          base64 でくるむと…
+  ┌───────────────┐            ___OUT___                ___OUT___
+  │ ___DONE___    │  ──▶       ___DONE___   ← 誤読!      X19fRE9ORV9fXwo=  ← 安全
+  │ (改行やバイナリ)│            ___END___                ___END___
+  └───────────────┘            制御行と衝突              _ を含まない英数字だけ</div>
+
+    <p>もう1つ、<code>newScanner</code> の中身をここで読みます。行を1つずつ取り出す道具ですが、<strong>1行がどれだけ長くなりうるか</strong>に、静かな落とし穴があります。</p>
+
+    <div class="file-tag">internal/judge/protocol.go（newScanner）</div>
+    <pre><code><span class="kw">func</span> newScanner(b []<span class="ty">byte</span>) *bufio.<span class="ty">Scanner</span> {
+	sc := bufio.NewScanner(bytes.NewReader(b))
+	sc.Buffer(make([]<span class="ty">byte</span>, <span class="st">0</span>, <span class="st">64</span>*<span class="st">1024</span>), <span class="st">4</span>*<span class="st">1024</span>*<span class="st">1024</span>)
+	<span class="kw">return</span> sc
+}</code></pre>
+
+    <p><code>bufio.NewScanner</code> は「バイト列を1行ずつ読む」道具ですが、<strong>デフォルトでは1行あたり最大 64KB まで</strong>しか扱えません。それを超える長い行に出会うと、<code>Scan()</code> は <code>false</code> を返して止まり、<code>Err()</code> に <code>bufio.Scanner: token too long</code> を立てます。ここで効いてくるのが、base64 の <code>___OUT___</code> ブロックを<strong>ランナーがどう折り返して流すか</strong>です。標準出力は先頭1MB まで取ります（コメントの <code>base64(stdout 先頭1MB)</code>）。1MB を base64 にすると約1.33MB。もしランナーがこれを<strong>折り返さず1行で</strong>流してきたら、その1行だけで <strong>64KB を軽く超え</strong>、デフォルトのままではスキャナが途中で止まってしまいます。</p>
+    <p>そこで <code>sc.Buffer(make([]byte, 0, 64*1024), 4*1024*1024)</code> で<strong>バッファ上限を 4MB に引き上げています</strong>。第1引数 <code>make([]byte, 0, 64*1024)</code> は初期バッファ（64KB から始めて必要なら伸ばす）、第2引数 <code>4*1024*1024</code> が<strong>1トークン（1行）の最大サイズ 4MB</strong>です。1MB の出力を base64 化した約1.33MB が、たとえ丸ごと1行で来ても余裕をもって収まります。<strong>これは「ランナーの実装（折り返しの有無）に依存しないための防御」</strong>です。現行のランナー（<code>images/common/loop.sh</code>）は素の <code>base64</code>（GNU coreutils）を使っていて既定で76桁ごとに折り返すので、いまのシステムでは1行が 64KB に達することはありません。しかしランナーを <code>base64 -w0</code>（折り返しなし＝1行出力）に差し替えたら、途端にこの上限引き上げが<strong>実際に必須</strong>になります。プロトコルを解く側が折り返しの有無に縛られないよう、あらかじめ上限を上げてある——バッファ上限は「静かなサイズ制限」で、忘れると再現性の低いバグになるので、明示的に上げているわけです。</p>
+
+    <div class="gonote"><div class="box-k">GO メモ · bufio.Scanner の Buffer 上限と encoding/base64</div>
+      <p><code>bufio.Scanner</code> は改行区切りで1行ずつ読む便利な道具ですが、<strong>1行の最大長にデフォルト上限（<code>bufio.MaxScanTokenSize</code> = 64KB）がある</strong>のが有名な罠です。長い行を扱うなら <code>sc.Buffer(buf, max)</code> で上限を明示的に引き上げる必要があります。第2引数が「1トークンの最大バイト数」で、これを超えると <code>Scan()</code> が止まり <code>Err()</code> に <code>token too long</code> が立ちます。<strong><code>Scan()</code> のループの後に必ず <code>Err()</code> を確認する</strong>のが定石で、これを怠ると「途中で切れた入力」を「最後まで読んだ」と勘違いします。<br>
+      <code>encoding/base64</code> の <code>StdEncoding</code> は、任意のバイト列を <code>A-Z a-z 0-9 + / =</code> の64文字（＋パディング）だけに符号化します。<code>_</code> を含まないので、アンダースコア区切りのマーカー（<code>___END___</code> など）と衝突しません。バイナリ（コンパイル成果物）や、改行・制御文字を含むプログラム出力を、テキストの行ストリームに安全に載せる常套手段です。復号は <code>DecodeString</code> で、壊れた base64 は error を返すので、それを握りつぶさないことが採点の信頼性に直結します。</p>
+    </div>
+
+    <h2 class="step" id="step-6"><span class="step-no">Step 6</span>破損を握りつぶさず IE にする — collectUntilEnd と ___DONE___</h2>
+    <p>最後に、これまで何度も呼ばれてきた2つの「集める関数」——<code>collectUntilEnd</code> と <code>collectRawUntilEnd</code>——を読み、<strong>破損を IE にする方針</strong>と<strong><code>___DONE___</code> 到達の意味</strong>を締めくくります。</p>
+    <p>まず2つの関数。どちらも「<code>___END___</code> の行が来るまで、その手前の行を集める」点は同じですが、<strong>集め方が違います</strong>。</p>
+
+    <div class="file-tag">internal/judge/protocol.go（collectUntilEnd / collectRawUntilEnd）</div>
+    <pre><code><span class="cm">// collectUntilEnd は ___END___ まで読み、base64 断片を連結して返す。</span>
+<span class="kw">func</span> collectUntilEnd(sc *bufio.<span class="ty">Scanner</span>) <span class="ty">string</span> {
+	<span class="kw">var</span> sb strings.<span class="ty">Builder</span>
+	<span class="kw">for</span> sc.Scan() {
+		line := sc.Text()
+		<span class="kw">if</span> line == <span class="st">"___END___"</span> {
+			<span class="kw">break</span>
+		}
+		sb.WriteString(strings.TrimSpace(line))
+	}
+	<span class="kw">return</span> sb.String()
+}
+
+<span class="cm">// collectRawUntilEnd は ___END___ まで生テキストとして読む（CE メッセージ用）。</span>
+<span class="kw">func</span> collectRawUntilEnd(sc *bufio.<span class="ty">Scanner</span>) <span class="ty">string</span> {
+	<span class="kw">var</span> lines []<span class="ty">string</span>
+	<span class="kw">for</span> sc.Scan() {
+		line := sc.Text()
+		<span class="kw">if</span> line == <span class="st">"___END___"</span> {
+			<span class="kw">break</span>
+		}
+		lines = append(lines, line)
+	}
+	<span class="kw">return</span> strings.Join(lines, <span class="st">"\n"</span>)
+}</code></pre>
+
+    <p><strong><code>collectUntilEnd</code> は base64 用。</strong> <code>___END___</code> まで各行を読み、<code>strings.TrimSpace(line)</code> で<strong>前後の空白を落としてから連結</strong>します（<code>strings.Builder</code> に <code>WriteString</code>）。各行の前後の空白を落とすのは、行に<strong>紛れ込んだスペース・タブ・<code>\r</code></strong>を除くためです。ランナーが1MB の出力を base64 化して複数行に折り返して送ってきても、この関数がその折り返しを<strong>剥がして1本に綴じ直す</strong>ので、呼び出し側は <code>DecodeString</code> にそのまま渡せます。厳密に言えば <code>base64.StdEncoding.DecodeString</code> は <code>\n</code> や <code>\r</code> を無視してくれる（改行が残っていても復号自体は通る）のですが、<strong>スペースやタブが混ざると復号エラー</strong>になります。だから <code>TrimSpace</code> で空白系の混入を落としておくのが、確実な下ごしらえです。なお <code>bufio.Scanner</code> が返す各行にはそもそも行末の改行は含まれません（<code>Scan</code> が剥がす）。</p>
+    <p><strong><code>collectRawUntilEnd</code> は生テキスト用。</strong> 対して CE のエラーメッセージは、<strong>人間が読む複数行のテキスト</strong>です。改行こそが意味を持つ（何行目のどのエラー、という構造）。だから <code>TrimSpace</code> で潰したりせず、各行を <code>lines</code> に溜め、最後に <code>strings.Join(lines, "\n")</code> で<strong>改行を保ったまま</strong>1つの文字列にします。同じ「<code>___END___</code> まで集める」でも、<strong>base64 は改行を消し、生テキストは改行を残す</strong>。この非対称が、Step 3 で <code>ParseCompileOutput</code> が2つを使い分けていた理由です。<code>___OK___</code> の後（base64 成果物）は <code>collectUntilEnd</code>、<code>___CE___</code> の後（生エラー）は <code>collectRawUntilEnd</code>。データの性質に合わせて集め方を変えているのです。</p>
+
+    <p>ここで、本章の思想を貫く問い——<strong>なぜ破損を握りつぶさず IE にするのか</strong>——を、要件の言葉で締めます。<code>ParseRunOutput</code> のコメントは、この方針を明文で書いていました。「制御行の破損（フィールド不足・数値/ base64 の不正）は握りつぶさず error にする。呼び出し側はこの error を IE として扱う（NF-08。壊れた採点結果を AC/WA にしない）」。第00章で <code>IE</code> を「疑わしいときは AC を出さないための逃げ場」と定義しましたが、その逃げ場に<strong>正しく倒すための入口</strong>が、このプロトコル層の各 error なのです。</p>
+    <p>採点における最悪の事故は、<strong>ジャッジが自信を持って間違えること</strong>——壊れた入力から <code>AC</code> や <code>WA</code> をでっち上げることです。提出者は「正しいのに落とされた」「間違いなのに通った」と、いずれも誤った学びを得ます。プロトコル層が「見出しのフィールドが1つ足りない」「終了コードが数値でない」「base64 が壊れている」を<strong>すべて error にして上げる</strong>のは、これらの破損の1つでも <code>AC</code>/<code>WA</code> に化けさせないためです。<strong>「解釈できない = 判定しない = IE」</strong>。この規律が、10章ぶんの積み上げの土台にある信頼の源です。</p>
+    <p>そして最後に <strong><code>___DONE___</code> 到達の意味</strong>。<code>ParseRunOutput</code> は破損があれば error を返しますが、破損<strong>がなくても</strong>安心はできません。コンテナが3ケース目の途中で OOM で丸ごと落ちたら、パーサはそこまでのケースを<strong>きれいに読めてしまう</strong>——error にはならない。しかし締めくくりの <code>___DONE___</code> は来ないので <code>Done == false</code> になります。つまり <code>Done</code> は<strong>「破損はないが、ランナーが報告を締めくくる前にコンテナごと死んだ」を検出する第二のセンサー</strong>です。error（解釈の破損）と <code>Done == false</code>（報告が締めくくられていない）、この二重の網で「完全な採点結果でなければ AC/WA を出さない」を守る。<code>___DONE___</code> を確認するとは、<strong>「ランナーが（打ち切り含め）報告を最後まで正常に完了した」という締めくくりの証明書</strong>を確認することにほかなりません。この <code>error</code> か <code>Done == false</code> を <code>IE</code> に倒す変換は、この関数自身ではなく、<strong>第02章で見る判定の合成（<code>JudgeSubmission</code>）</strong>が行います——採点全体を組み上げる過程で、報告が締めくくられていない提出を <code>IE</code> に倒すのです。</p>
+
+    <div class="box hazard"><div class="box-k">⚠ 落とし穴 — この章に潜む3つの地雷</div>
+      <p>本章のプロトコルには、忘れると静かに壊れる3つの罠が同居しています。<strong>①マーカー衝突</strong>——プログラムの生出力をそのまま行ストリームに流すと、出力中の <code>___DONE___</code> や <code>___CASE___</code> を制御行と誤読する。必ず <code>base64</code> でくるんで、<code>_</code> を含まない文字集合に落とすこと。<strong>②scanner のデフォルトバッファ上限</strong>——<code>bufio.Scanner</code> は既定で1行 64KB までしか読めない。1MB の base64 出力を<strong>折り返さず1行で</strong>流すランナー（<code>base64 -w0</code> 相当）では軽く超えるので、<code>sc.Buffer(..., 4MB)</code> で上限を上げ、ランナーの折り返し方に依存しないようにする。現行の <code>loop.sh</code> は素の <code>base64</code> で76桁折り返しなので今は超えないが、これは実装に縛られないための防御。あわせて<strong>ループ後に <code>sc.Err()</code> を必ず確認</strong>する。忘れると「途中で切れた出力」を「完全」と誤認する。<strong>③破損の握りつぶし</strong>——フィールド不足・数値変換失敗・base64 復号失敗を「とりあえずゼロ/空で埋める」と、壊れた実行が <code>AC</code>/<code>WA</code> に化ける。すべて error にして <code>IE</code> に倒し、<code>___DONE___</code> 未達（<code>Done == false</code>）も同様に扱う。この3つは、どれも「テストでは緑が出てしまう」種類のバグなので、設計で断つしかありません。</p>
+    </div>
+
+    <div class="box do"><div class="box-k">▸ 動かして確認</div>
+      <p>この章のプロトコル関数を、Docker 抜きでまとめて緑にします。実行機構（第04章）を一切必要としない、境界の解釈だけの検証です。</p>
+      <pre class="term"><code><span class="ps">$</span> cd backend
+<span class="ps">$</span> go test ./internal/judge/ -run 'TestMakeTar|TestParseCompileOutput|TestParseRunOutput' -v
+<span class="out">=== RUN   TestMakeTarRoundtrip
+--- PASS: TestMakeTarRoundtrip (0.00s)
+=== RUN   TestParseCompileOutputOK
+--- PASS: TestParseCompileOutputOK (0.00s)
+=== RUN   TestParseCompileOutputCE
+--- PASS: TestParseCompileOutputCE (0.00s)
+=== RUN   TestParseCompileOutputBroken
+--- PASS: TestParseCompileOutputBroken (0.00s)
+=== RUN   TestParseRunOutput
+--- PASS: TestParseRunOutput (0.00s)
+=== RUN   TestParseRunOutputIncomplete
+--- PASS: TestParseRunOutputIncomplete (0.00s)
+=== RUN   TestParseRunOutputMalformed
+--- PASS: TestParseRunOutputMalformed (0.00s)
+PASS
+ok      judge/internal/judge    0.012s</span></code></pre>
+      <p>7本すべてが緑なら、<strong>ホストとコンテナの境界を越える約束——詰める（tar）と解く（フレーム）——は完成</strong>です。この上に、次章以降で「実際にコンテナを起動して、この tar を渡し、このフレームを受け取る」実行機構を積みます。境界の形式がここで固定されているから、実行機構は「約束どおりに送受信するだけ」で済みます。</p>
+    </div>
+
+    <h2 class="step" id="step-7"><span class="step-no">Step 7</span>手を動かす — フレームを1行ずつ壊してみる</h2>
+    <p>ここまでの「破損は握りつぶさず error にする」を、テストを<strong>いじって</strong>体で確かめます。<code>protocol_test.go</code> のケースは、プロトコルの解釈を固定した「仕様書」です。ここに壊れたフレームを足して、パーサが正しく怒るかを見ます。</p>
+    <p>まず、<code>TestParseRunOutputMalformed</code> の発想を借りて、自分で壊れた <code>___CASE___</code> 行を作ってみてください。次のような小さなテストを <code>protocol_test.go</code> に足します。</p>
+    <div class="file-tag">internal/judge/protocol_test.go（追記して実験）</div>
+    <pre><code><span class="kw">func</span> TestParseRunOutputBadElapsed(t *testing.<span class="ty">T</span>) {
+	<span class="cm">// 経過秒が数値でない → 握りつぶさず error になるべき</span>
+	bad := <span class="st">"___CASE___ c001 0 notafloat 1000\n___DONE___\n"</span>
+	<span class="kw">if</span> _, err := ParseRunOutput([]<span class="ty">byte</span>(bad)); err == <span class="kw">nil</span> {
+		t.Error(<span class="st">"expected error for bad elapsed"</span>)
+	}
+}</code></pre>
+    <p>これは <code>fields[3]</code>（経過秒）に <code>notafloat</code> を入れています。<code>strconv.ParseFloat</code> が失敗し、<code>bad elapsed in ...</code> の error になるはず。<code>___DONE___</code> が後ろにあっても、<strong>破損の方が優先</strong>されます（ケース見出しの解釈で先に error を返すので、そこで打ち切られる）。走らせて緑になることを確かめてください。</p>
+    <pre class="term"><code><span class="ps">$</span> go test ./internal/judge/ -run TestParseRunOutputBadElapsed -v
+<span class="out">=== RUN   TestParseRunOutputBadElapsed
+--- PASS: TestParseRunOutputBadElapsed (0.00s)
+PASS
+ok      judge/internal/judge    0.006s</span></code></pre>
+    <div class="box do"><div class="box-k">▸ さらに手を動かすなら</div>
+      <p>余力があれば、次を試してみてください。答えは自分の目で確かめられます。</p>
+      <ol>
+        <li>正常なフレームで、<code>___OUT___</code> の中身をわざと壊れた base64（例: <code>"@@@@"</code>）にする。<code>bad stdout base64</code> の error になるはず。<strong>制御行だけでなく「中身」の破損も IE に倒れる</strong>ことを確かめる。</li>
+        <li>提出コードが <code>___DONE___</code> という<strong>文字列を出力</strong>した状況を再現する。正しく base64 でくるんで <code>___OUT___</code> ブロックに入れたフレームを作り、<code>Stdout</code> に <code>"___DONE___\n"</code> が復元され、かつ <code>Done</code> は本物の <code>___DONE___</code> 行でのみ立つことを確かめる。<strong>base64 が衝突を防いでいる</strong>のを体で理解する。</li>
+        <li>（実験）<code>newScanner</code> の <code>sc.Buffer(..., 4*1024*1024)</code> の上限を <code>1024</code>（1KB）に書き換え、大きめの base64 を含む <code>___OUT___</code> を流してみる。<code>sc.Err()</code> が <code>token too long</code> を拾って error になることを確認し、「なぜバッファ上限を上げるのか」を失敗から理解する。確認したら必ず元に戻すこと。</li>
+      </ol>
+    </div>
+
+    <h2>つまずき FAQ</h2>
+    <details class="qa"><summary>なぜ提出コードの標準出力を、そのまま stdout に流さず <code>base64</code> でくるむの?</summary>
+      <div class="qa-body"><p>制御チャネル（フレーム）とデータチャネル（プログラムの出力）が、同じ1本の標準出力ストリームを共有しているからです。生のまま流すと、提出コードが出力した <code>___DONE___</code> や <code>___CASE___</code> という<strong>文字列</strong>が、フレームの<strong>マーカー行</strong>と見分けられなくなり、境界の解釈が壊れます。悪意ある提出者は偽のケース結果をでっち上げることすらできます。<code>base64</code> の出力は <code>A-Z a-z 0-9 + / =</code> だけで <code>_</code> を含まないので、アンダースコア区切りのマーカーと<strong>原理的に衝突しません</strong>。プログラムが何を出力しようと、くるめば無害な英数字の羅列になり、フレームを壊せません。</p></div>
+    </details>
+    <details class="qa"><summary><code>ParseRunOutput</code> はなぜ、フィールド不足や数値変換の失敗を「とりあえずゼロ」で埋めずに error にするの?</summary>
+      <div class="qa-body"><p>壊れた制御情報から採点結果をでっち上げないためです。もし終了コードのフィールドが壊れて <code>0</code> で埋まると、<code>decideCase</code>（第00章）は「<code>exit 0</code> = 正常終了」と読んで出力比較へ進み、<strong>壊れた実行を <code>AC</code> にしてしまう</strong>恐れがあります。制御行の破損（フィールド不足・数値/base64 の不正）を<strong>すべて error にして上げ、上位が <code>IE</code> に倒す</strong>のが要件 NF-08「壊れた採点結果を AC/WA にしない」の実装です。ジャッジにとって最悪の事故は「自信を持って間違えること」。解釈できないなら判定しない——それが <code>IE</code> です。</p></div>
+    </details>
+    <details class="qa"><summary><code>___DONE___</code> に到達したかを確認する（<code>Done</code> フラグ）意味は? 破損チェックだけでは足りないの?</summary>
+      <div class="qa-body"><p>足りません。破損チェック（error）は「読めた行が壊れていないか」を見ますが、コンテナが3ケース目の途中で <strong>OOM で丸ごと落ちた</strong>ような場合、そこまでのケースは<strong>きれいに読めてしまい error になりません</strong>。しかし締めくくりの <code>___DONE___</code> は来ないので <code>Done == false</code> になります。つまり <code>Done</code> は「破損はないが、ランナーが報告を締めくくる前にコンテナごと死んだ」を検出する<strong>第二のセンサー</strong>です（ランナーは最初の非0終了ケースで打ち切っても <code>___DONE___</code> は出すので、<code>Done == true</code> は「全ケース走った」ではなく「ランナーが報告を正常に締めくくった」の意）。error（解釈の破損）と <code>Done == false</code>（報告が締めくくられていない）の二重の網で、「完全な採点結果でなければ AC/WA を出さない」を守ります。この2経路を実際に <code>IE</code> へ倒すのは、第02章で見る判定の合成（<code>JudgeSubmission</code>）です。</p></div>
+    </details>
+
+    <h2>理解度チェック</h2>
+    <p>次の問いに<strong>自分の言葉で</strong>答えられたら、この章は卒業です。</p>
+    <details class="qa"><summary>1. ホストとコンテナは、どの管を使って、それぞれ何をやり取りするか。下り・上りの形式を答えよ。</summary>
+      <div class="qa-body"><p><strong>下り（コンテナの標準入力）</strong>には、ホストが提出コード・コンパイル成果物・テストケースを<strong>1本の <code>tar</code> ストリーム</strong>に固めて流す（<code>MakeTar</code>）。ディスクに一時ファイルを書かず、メモリで組んでそのまま stdin へ差す。<strong>上り（コンテナの標準出力）</strong>には、コンテナが<strong>行指向のフレーム</strong>を返す——コンパイル段は <code>___OK___</code>（base64 成果物）か <code>___CE___</code>（生エラー）、実行段はケースごとに <code>___CASE___</code>（見出し5フィールド）+ <code>___OUT___</code>/<code>___ERR___</code>（base64 でくるんだ出力）、最後に <code>___DONE___</code>。ホストは <code>ParseCompileOutput</code> / <code>ParseRunOutput</code> でこれを解いて <code>CaseOutcome</code> に組み直す。</p></div>
+    </details>
+    <details class="qa"><summary>2. 「生出力を base64 でくるむ」ことで、どんな事故を防いでいるか。base64 の何の性質が効いているか。</summary>
+      <div class="qa-body"><p>提出コードの出力に含まれる文字列が、フレームの<strong>マーカー行（<code>___DONE___</code> 等）と衝突して誤読される</strong>事故を防いでいる。効いているのは、base64 の出力が <code>A-Z a-z 0-9 + / =</code> という限られた文字だけで構成され、<strong>アンダースコア <code>_</code> を含まない</strong>という性質。マーカーは <code>_</code> 区切りなので、base64 化された出力の中にマーカーが現れることは原理的にありえない。だから提出コードが <code>___DONE___</code> そっくりの文字列やバイナリを出力しても、くるめばフレームを壊せない。制御チャネルとデータチャネルを、文字集合の分離で切り分けている。</p></div>
+    </details>
+    <details class="qa"><summary>3. <code>ParseRunOutput</code> が採点結果を「信用できない」と判断する2つの経路は何か。それぞれ上位でどう扱われるか。</summary>
+      <div class="qa-body"><p>①<strong>error を返す経路</strong>——制御行の破損（<code>___CASE___</code> のフィールド不足、終了コードや経過秒の数値変換失敗、<code>___OUT___</code>/<code>___ERR___</code> の base64 復号失敗、スキャン自体の失敗）を握りつぶさず error にする。②<strong><code>Done == false</code> の経路</strong>——締めくくりの <code>___DONE___</code> に到達しなかった場合（コンテナが丸ごと落ちた／外側から打ち切られた）、破損はなくても報告が締めくくられていないと判断する（ランナーは非0終了で残りを打ち切っても <code>___DONE___</code> は出すので、<code>Done == false</code> は「ケースが少ない」ではなく「コンテナごと途中で死んだ」を意味する）。第02章で見る判定の合成（<code>JudgeSubmission</code>）が、このどちらかを見たらその提出を <code>IE</code> に倒す（NF-08）。壊れた/不完全な結果を <code>AC</code>/<code>WA</code> に化けさせない、二重の網。</p></div>
+    </details>
+
+    <h2>まとめ — 次の層へ</h2>
+    <p>この章で、ホストのジャッジ本体とコンテナ内ランナーが<strong>境界を越えて情報をやり取りする約束</strong>——プロトコル——を固めました。下りは <code>tar</code> でファイル一式を1本のストリームに詰め（<code>MakeTar</code>）、上りは行指向のフレームで結果を返す。生出力は必ず <code>base64</code> でくるんで<strong>マーカー衝突を原理的に封じ</strong>、<code>bufio.Scanner</code> のバッファ上限を上げて大きな出力にも耐えさせ、そして制御行の破損も <code>___DONE___</code> 未達も<strong>握りつぶさず error / <code>Done == false</code> にして <code>IE</code> へ倒す</strong>。第00章の <code>decideCase</code> が食べていた <code>CaseOutcome</code> は、まさにこの <code>ParseRunOutput</code> が生む——採点ロジックと実行機構をつなぐ配管が、ここで通りました。</p>
+    <p>ただし、この章もまだ<strong>宙に浮いた約束</strong>です。この <code>tar</code> を実際にどのコンテナへ渡し、このフレームを<strong>誰が生成</strong>するのか——提出コードを本当に隔離環境で走らせ、時間とメモリを測り、フレームを組んで返すランナーは、まだ存在しません。それを作る前に、次の第02章では<strong>結果の語彙——verdict——を、もう一段深く</strong>見ます。第00章で7つを並べましたが、実際の判定でそれらがどう組み合わさり、提出全体の verdict がどう確定するのか。採点の「出口」を固めてから、いよいよ第03章で「なぜ他人のコードは危険か」——サンドボックスが要る理由——へ潜っていきます。</p>
+
+    <div class="chap-foot">
+      <a class="pager" href="00-smallest.html"><span class="dir">← 前へ</span>第00章 · いちばん小さいジャッジ</a>
+      <a class="pager next" href="02-verdict.html"><span class="dir">次へ →</span>第02章 · verdict — 判定の種類</a>
+    </div>
+  </main>
+</div>
+</body>
+</html>

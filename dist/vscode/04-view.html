@@ -1,0 +1,838 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>第04章 画面に描く — ゼロから作るテキストエディタ</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500;600&family=Source+Serif+4:opsz,wght@8..60,400;8..60,600;8..60,700&family=Noto+Serif+JP:wght@400;600;700&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<div class="shell">
+
+  <aside class="spine">
+    <a class="wordmark" href="index.html">MINT EDITOR · from scratch</a>
+    <div class="book-title">ゼロから作る<br>テキストエディタ</div>
+    <div class="book-sub">TypeScript と Canvas で mint editor を組む</div>
+
+    <div class="legend"><span>読む <b>↓</b></span><span>組む <b>↑</b></span></div>
+
+    <nav aria-label="目次">
+      <ul class="toc">
+        <li><a class="nav-item" href="index.html"><span class="nav-num">序</span><span class="nav-label">はじめに・準備<span class="nav-tag">Setup</span></span></a></li>
+        <li><a class="nav-item" href="00-overview.html"><span class="nav-num">00</span><span class="nav-label">文字を打てる箱の正体<span class="nav-tag">Overview</span></span></a></li>
+        <li><a class="nav-item" href="01-buffer.html"><span class="nav-num">01</span><span class="nav-label">テキストを持つ<span class="nav-tag">Buffer</span></span></a></li>
+        <li><a class="nav-item" href="02-document.html"><span class="nav-num">02</span><span class="nav-label">行とカーソル<span class="nav-tag">Doc</span></span></a></li>
+        <li><a class="nav-item" href="03-history.html"><span class="nav-num">03</span><span class="nav-label">編集と取り消し<span class="nav-tag">Undo</span></span></a></li>
+        <li><a class="nav-item current" aria-current="page" href="04-view.html"><span class="nav-num">04</span><span class="nav-label">画面に描く<span class="nav-tag">Canvas</span></span></a></li>
+        <li><a class="nav-item" href="05-input.html"><span class="nav-num">05</span><span class="nav-label">入力を受ける<span class="nav-tag">Input</span></span></a></li>
+        <li><a class="nav-item" href="06-search.html"><span class="nav-num">06</span><span class="nav-label">複数カーソルと検索<span class="nav-tag">Multi</span></span></a></li>
+        <li><a class="nav-item" href="07-highlight.html"><span class="nav-num">07</span><span class="nav-label">色をつける<span class="nav-tag">Syntax</span></span></a></li>
+        <li><a class="nav-item" href="08-ime.html"><span class="nav-num">08</span><span class="nav-label">日本語を打つ<span class="nav-tag">IME</span></span></a></li>
+        <li><a class="nav-item" href="09-assemble.html"><span class="nav-num">09</span><span class="nav-label">開いて保存する・組み立て<span class="nav-tag">Assemble</span></span></a></li>
+      </ul>
+    </nav>
+
+    <div class="spine-foot">
+      各章は一つの部品・機能。<br>下（バッファ）から上（UI）へ<br>積み上げて動かしていく。
+    </div>
+  </aside>
+
+  <main class="reading">
+    <div class="progress-tag">第04章 / 全10章 · 層: VIEW · 読了目安 2〜3時間</div>
+    <div class="eyebrow"><span>CANVAS</span><span class="depth">— 見えている行だけを描く</span></div>
+    <h1>画面に描く</h1>
+    <p class="lede">ここまでで、テキストを持ち（第01章）、行とカーソルを数え（第02章）、編集を取り消せる（第03章）ようになりました。でも、まだ<strong>目には見えません</strong>。この章でついに <code>&lt;canvas&gt;</code> に文字を描きます。ただし本書の描画には一貫した掟が1つあります —— <strong>見えている行だけ描く</strong>。文書が10万行あっても、画面に映るのは数十行。だから毎フレームの仕事量は文書の大きさによらず一定で、いつまでも軽い。そしてスクロールは<strong>自作しません</strong>。ブラウザの <code>overflow:auto</code> に丸ごと任せ、canvas は画面に貼り付けたまま、中身だけ描き替えます。この2つの発想が、この章の背骨です。</p>
+
+    <div class="box goal"><div class="box-k">◈ この章のゴール</div>
+      <p>次の 3 つを、自分の目と手で確認できたら達成です。</p>
+      <ol>
+        <li><code>editor/metrics.ts</code> の <code>FontMetrics</code> を読み、「Canvas に桁の概念はない。桁とピクセルの変換は <code>measureText</code> の実測でやる」を自分の言葉で言える。</li>
+        <li><code>editor/view.ts</code> の <code>render()</code> にある<strong>可視範囲 <code>firstLine</code> / <code>lastLine</code> の2行</strong>が、なぜこのエディタで最も大事な計算なのかを説明できる。</li>
+        <li><code>cd src &amp;&amp; npm run build</code> が通り、<code>npm run dev</code> でブラウザに文字・カーソル・行番号が描かれ、10万行スクロールしても軽いことを目視する。</li>
+      </ol>
+    </div>
+
+    <div class="box map"><div class="box-k">☰ この章のステップ</div>
+      <ol>
+        <li><a href="#step-1">桁とピクセルを変換する — FontMetrics（<code>editor/metrics.ts</code>）</a></li>
+        <li><a href="#step-2">EditorView の骨格 — 何を持ち、いつ描くか</a></li>
+        <li><a href="#step-3">スクロールを自作しない — sizer + sticky canvas</a></li>
+        <li><a href="#step-4">可視範囲を計算する — この2行が心臓（<code>render</code> 前半）</a></li>
+        <li><a href="#step-5">背景・選択・検索一致を重ねる</a></li>
+        <li><a href="#step-6">テキスト本体とカーソルを描く</a></li>
+        <li><a href="#step-7">ガターと座標変換 — 画面とオフセットを行き来する</a></li>
+      </ol>
+    </div>
+
+    <h2>「全部描く」は、なぜ罠なのか</h2>
+    <p>素朴に考えると、描画はこうなります —— 文書の全行をループして、1行ずつ <code>ctx.fillText</code> する。10行のファイルならこれで完璧に動きます。ところが10万行のファイルを開いた瞬間、フレームごとに10万回の <code>fillText</code> が走り、画面はカクつき、キー入力は詰まります。しかも画面に映っているのは、そのうちせいぜい50行。<strong>99.95% は、誰も見ていない場所を描くための無駄</strong>です。</p>
+    <p>だから本書は最初から別の発想で描きます。<strong>スクロール位置から「いま見えている行の範囲」を割り出し、その数十行だけを描く。</strong> 序章の全体像図で「10万行あっても見えている数十行だけ描くから軽い」と予告したのが、これです。この章の <code>render()</code> は、煎じ詰めれば「可視範囲を求めて、その範囲だけ塗る」——それだけのことを、背景・選択・検索・文字・カーソルの5層について繰り返しているにすぎません。</p>
+    <p>そしてもう1つの掟が「スクロールを自作しない」。可視範囲だけ描くなら、スクロールバーもホイールも自分で実装しなければ……と思いきや、そこはブラウザに丸投げします。透明な実寸の箱（sizer）を1つ置いてスクロールバーを本物の長さにし、canvas は <code>position:sticky</code> で画面に貼り付けたまま、<code>scrollTop</code> を読んで中身を描き替えるだけ。この構成の妙が Step 3 の主役です。まずは、描画のいちばん下で働く「ものさし」——文字幅の計測から始めます。</p>
+
+    <h2 class="step" id="step-1"><span class="step-no">Step 1</span>桁とピクセルを変換する — FontMetrics</h2>
+    <p>Canvas は絵を描く板です。<code>ctx.fillText("あ", 120, 30)</code> のように<strong>ピクセル座標</strong>で「ここに描け」と命じます。ところがエディタの世界は「3行目の5桁目」のような<strong>桁</strong>で位置を考えます。この2つの世界をつなぐ変換係が必要です。それが <code>FontMetrics</code>。作るファイルは <code>editor/metrics.ts</code>。短いので全文を一気に読みます。</p>
+
+    <div class="file-tag">editor/metrics.ts</div>
+    <pre><code><span class="cm">/**
+ * FontMetrics — 文字の幅を測る係。
+ *
+ * Canvas には「桁」の概念がないので、桁 ⇄ ピクセルの変換はすべて
+ * measureText の実測にもとづく。等幅フォントでも全角文字・絵文字は
+ * 半角の約2倍幅になるため、コードポイント単位で測ってキャッシュする。
+ */</span>
+<span class="kw">export class</span> <span class="ty">FontMetrics</span> {
+  <span class="kw">readonly</span> fontSize: <span class="ty">number</span>;
+  <span class="kw">readonly</span> font: <span class="ty">string</span>;
+  <span class="kw">readonly</span> lineHeight: <span class="ty">number</span>;
+  <span class="kw">readonly</span> baseWidth: <span class="ty">number</span>;
+  <span class="kw">readonly</span> ascent: <span class="ty">number</span>;
+  <span class="kw">readonly</span> tabSize = <span class="st">4</span>;
+
+  <span class="kw">private</span> ctx: <span class="ty">CanvasRenderingContext2D</span>;
+  <span class="kw">private</span> widths = <span class="kw">new</span> <span class="ty">Map</span>&lt;<span class="ty">string</span>, <span class="ty">number</span>&gt;();
+
+  <span class="kw">constructor</span>(family: <span class="ty">string</span>, fontSize: <span class="ty">number</span>) {
+    <span class="kw">this</span>.fontSize = fontSize;
+    <span class="kw">this</span>.font = <span class="st">`${fontSize}px ${family}`</span>;
+    <span class="kw">const</span> canvas = <span class="ty">document</span>.createElement(<span class="st">"canvas"</span>);
+    <span class="kw">this</span>.ctx = canvas.getContext(<span class="st">"2d"</span>)!;
+    <span class="kw">this</span>.ctx.font = <span class="kw">this</span>.font;
+    <span class="kw">this</span>.baseWidth = <span class="kw">this</span>.ctx.measureText(<span class="st">"x"</span>).width;
+    <span class="kw">this</span>.lineHeight = <span class="ty">Math</span>.round(fontSize * <span class="st">1.6</span>);
+    <span class="kw">const</span> m = <span class="kw">this</span>.ctx.measureText(<span class="st">"Mg"</span>);
+    <span class="kw">this</span>.ascent = m.fontBoundingBoxAscent || <span class="ty">Math</span>.round(fontSize * <span class="st">0.8</span>);
+  }
+
+  <span class="cm">/** 1文字（コードポイント）の幅。タブは半角4文字ぶんの固定幅 */</span>
+  charWidth(ch: <span class="ty">string</span>): <span class="ty">number</span> {
+    <span class="kw">if</span> (ch === <span class="st">"\t"</span>) <span class="kw">return</span> <span class="kw">this</span>.baseWidth * <span class="kw">this</span>.tabSize;
+    <span class="kw">let</span> w = <span class="kw">this</span>.widths.get(ch);
+    <span class="kw">if</span> (w === <span class="kw">undefined</span>) {
+      <span class="kw">this</span>.ctx.font = <span class="kw">this</span>.font;
+      w = <span class="kw">this</span>.ctx.measureText(ch).width;
+      <span class="kw">this</span>.widths.set(ch, w);
+    }
+    <span class="kw">return</span> w;
+  }
+
+  <span class="cm">/** 行テキストの column 桁目（UTF-16 単位）の x 座標 */</span>
+  xForColumn(text: <span class="ty">string</span>, column: <span class="ty">number</span>): <span class="ty">number</span> {
+    <span class="kw">let</span> x = <span class="st">0</span>;
+    <span class="kw">let</span> i = <span class="st">0</span>;
+    <span class="kw">while</span> (i &lt; column &amp;&amp; i &lt; text.length) {
+      <span class="kw">const</span> cp = text.codePointAt(i)!;
+      <span class="kw">const</span> s = <span class="ty">String</span>.fromCodePoint(cp);
+      x += <span class="kw">this</span>.charWidth(s);
+      i += s.length;
+    }
+    <span class="kw">return</span> x;
+  }
+
+  <span class="cm">/** x 座標に最も近い文字境界の桁。クリック位置 → カーソル位置に使う */</span>
+  columnForX(text: <span class="ty">string</span>, x: <span class="ty">number</span>): <span class="ty">number</span> {
+    <span class="kw">if</span> (x &lt;= <span class="st">0</span>) <span class="kw">return</span> <span class="st">0</span>;
+    <span class="kw">let</span> acc = <span class="st">0</span>;
+    <span class="kw">let</span> i = <span class="st">0</span>;
+    <span class="kw">while</span> (i &lt; text.length) {
+      <span class="kw">const</span> cp = text.codePointAt(i)!;
+      <span class="kw">const</span> s = <span class="ty">String</span>.fromCodePoint(cp);
+      <span class="kw">const</span> w = <span class="kw">this</span>.charWidth(s);
+      <span class="kw">if</span> (x &lt; acc + w / <span class="st">2</span>) <span class="kw">return</span> i;
+      acc += w;
+      i += s.length;
+    }
+    <span class="kw">return</span> text.length;
+  }
+
+  lineWidth(text: <span class="ty">string</span>): <span class="ty">number</span> {
+    <span class="kw">return</span> <span class="kw">this</span>.xForColumn(text, text.length);
+  }
+}</code></pre>
+
+    <p>まずコンストラクタから。ここで<strong>フォントに関する定数を1回だけ測って</strong>、あとはずっと使い回します。<code>document.createElement("canvas")</code> で画面に出さない<strong>測定専用の隠し canvas</strong> を作り、その 2D コンテキストで <code>measureText</code> を呼ぶのがポイントです。実際に描く canvas とは別物で構いません。フォントさえ同じなら、幅の測定結果は同じだからです。</p>
+    <ul>
+      <li><code>baseWidth = ctx.measureText("x").width</code> — 半角1文字ぶんの基準幅。ガター幅の見積もりなどで使う「だいたいの1文字幅」です。</li>
+      <li><code>lineHeight = Math.round(fontSize * 1.6)</code> — 1行の高さ。フォントサイズの1.6倍を四捨五入した整数ピクセル。<strong>この <code>lineHeight</code> が、後で可視範囲を求める割り算の分母になります</strong>。行の高さが一定（等高）だからこそ、「<code>y ÷ 行の高さ</code>」で何行目かが即座に分かる。ここが軽さの土台です。</li>
+      <li><code>ascent</code> — ベースラインより上の高さ。<code>fontBoundingBoxAscent</code> が使えればそれを、なければ <code>fontSize * 0.8</code> で代用します（<code>||</code> のフォールバック）。</li>
+    </ul>
+
+    <p>いちばん大事なのは <code>charWidth</code> と <code>xForColumn</code> の考え方です。等幅フォントなら「1桁 = 固定幅」で済みそうに思えますが、<strong>そうはいきません</strong>。等幅フォントでも、日本語（全角）や絵文字は半角の約2倍の幅を取ります。<code>"a"</code> と <code>"あ"</code> は、同じ1文字でも画面上の幅が違う。だから「桁 × 固定幅」では、日本語の混じった行でカーソルがずれてしまいます。</p>
+    <p>そこで <code>charWidth</code> は、1文字ずつ <code>ctx.measureText(ch).width</code> で<strong>実測</strong>します。ただし毎回測るのは無駄なので、<code>widths</code>（<code>Map&lt;string, number&gt;</code>）に<strong>キャッシュ</strong>します。同じ文字はどの行に何度出てきても、測るのは最初の1回だけ。<code>if (w === undefined)</code> で「まだ測っていなければ測って覚える」という定石です。タブ（<code>"\t"</code>）だけは特別扱いで、実測せず「半角4文字ぶん（<code>baseWidth * tabSize</code>）」の固定幅を返します。</p>
+
+    <div class="gonote"><div class="box-k">TS メモ · codePointAt と「コードポイント単位」で測る理由</div>
+      <p><code>xForColumn</code> と <code>columnForX</code> のループが、<code>i++</code> ではなく <code>i += s.length</code> で進んでいるのに気づきましたか。JavaScript の文字列は <strong>UTF-16</strong> で、絵文字のような文字は<strong>2つのコード単位（サロゲートペア）</strong>で1文字を表します。<code>"😀".length</code> は <code>2</code>。もし <code>i++</code> で1単位ずつ測ると、サロゲートペアの<strong>片割れ</strong>を1文字として <code>measureText</code> に渡してしまい、幅がおかしくなります。<br>
+      そこで <code>text.codePointAt(i)</code> で「本当の1文字（コードポイント）」を取り出し、<code>String.fromCodePoint(cp)</code> で文字列に戻して測り、<code>i += s.length</code>（絵文字なら2、通常文字なら1）でインデックスを進めます。こうして<strong>桁（UTF-16 単位）</strong>とピクセルを、文字の切れ目を壊さずに変換します。<code>codePointAt</code> の後ろの <code>!</code> は「<code>undefined</code> ではないと分かっている」という TypeScript への断言（非 null アサーション）です。</p>
+    </div>
+
+    <p>残る2つは、この <code>charWidth</code> を積み上げるだけです。<code>xForColumn(text, column)</code> は「行頭から <code>column</code> 桁目まで、各文字の幅を足していった x 座標」を返します（<strong>桁 → ピクセル</strong>。カーソルや選択の描画位置に使う）。逆に <code>columnForX(text, x)</code> は「x 座標がどの文字の上にあるか」を、文字幅を足しながら探して桁を返します（<strong>ピクセル → 桁</strong>。マウスクリックをカーソル位置に変換するのに使う）。<code>if (x &lt; acc + w / 2)</code> の <code>w / 2</code> がしゃれていて、「文字の左半分をクリックしたらその文字の手前、右半分なら次」という、エディタらしいスナップを1行で実現しています。<code>lineWidth</code> は「行末までの x」= その行の総幅で、<code>xForColumn(text, text.length)</code> の別名です。</p>
+
+    <div class="box hazard"><div class="box-k">⚠ 落とし穴 — 「等幅だから桁×固定幅でいい」は日本語で破綻する</div>
+      <p>英数字だけを試していると <code>baseWidth * column</code> で完璧に動いてしまうため、この罠は日本語を打った瞬間に牙をむきます。<code>"関数"</code> の後ろにカーソルを置くと、固定幅計算では<strong>2桁ぶん</strong>しか進まないのに、実際の描画は<strong>4半角ぶん</strong>進んでいて、カーソルが文字から離れて浮く。<code>FontMetrics</code> が全角・絵文字・タブまで含めて<strong>実測で幅を返す</strong>のは、この座標のズレを根絶するためです。以降 <code>view.ts</code> は幅の計算をすべて <code>metrics</code> に委ね、自分では一度も「固定幅 × 桁」をしません。</p>
+    </div>
+
+    <h2 class="step" id="step-2"><span class="step-no">Step 2</span>EditorView の骨格 — 何を持ち、いつ描くか</h2>
+    <p>ものさしができたので、描画の本体 <code>EditorView</code> に入ります。作るファイルは <code>editor/view.ts</code>。この章でいちばん大きなファイル（約430行）ですが、恐れることはありません。中身は「<strong>可視範囲を求めて、その範囲だけ5層に塗る</strong>」の一点張りです。まずは冒頭 —— インポート、設計コメント、色定義、そしてクラスが持つフィールドとコンストラクタを読みます。</p>
+
+    <div class="file-tag">editor/view.ts（冒頭）</div>
+    <pre><code><span class="kw">import type</span> { <span class="ty">Editor</span> } <span class="kw">from</span> <span class="st">"./editor"</span>;
+<span class="kw">import</span> { <span class="ty">FontMetrics</span> } <span class="kw">from</span> <span class="st">"./metrics"</span>;
+<span class="kw">import</span> { rangeIsEmpty, rangeMax, rangeMin } <span class="kw">from</span> <span class="st">"../core/types"</span>;
+<span class="kw">import type</span> { <span class="ty">TokenType</span> } <span class="kw">from</span> <span class="st">"../core/tokenizer"</span>;
+
+<span class="cm">/**
+ * EditorView — Canvas への描画とスクロールの管理。
+ *
+ * 描画の心臓部は「見えている行しか描かない」こと。
+ * スクロール位置から可視行範囲 [firstLine, lastLine] を計算し、
+ * その範囲だけを 背景 → 選択 → 検索一致 → 文字 → カーソル の順に重ねる。
+ * 文書が10万行あってもフレームあたりの仕事は画面の行数ぶんで一定になる。
+ *
+ * スクロールはブラウザに任せる: overflow:auto のコンテナに
+ * 文書の実寸をもつ透明な sizer を置き、canvas は sticky で画面に固定する。
+ * ホイール・スクロールバー・慣性スクロールがすべて無料で手に入る。
+ */</span>
+
+<span class="kw">export interface</span> <span class="ty">CompositionState</span> {
+  active: <span class="ty">boolean</span>;
+  <span class="cm">/** IME の未確定文字列 */</span>
+  text: <span class="ty">string</span>;
+  <span class="cm">/** 未確定文字列内のカーソル位置 */</span>
+  caret: <span class="ty">number</span>;
+}
+
+<span class="kw">const</span> COLORS = {
+  bg: <span class="st">"#14161f"</span>,
+  gutterBg: <span class="st">"#14161f"</span>,
+  gutterFg: <span class="st">"#4b5268"</span>,
+  gutterActiveFg: <span class="st">"#9aa3c0"</span>,
+  gutterBorder: <span class="st">"#232633"</span>,
+  text: <span class="st">"#d5dae8"</span>,
+  currentLine: <span class="st">"rgba(255,255,255,0.045)"</span>,
+  selection: <span class="st">"rgba(72,118,214,0.35)"</span>,
+  selectionInactive: <span class="st">"rgba(72,118,214,0.18)"</span>,
+  cursor: <span class="st">"#7aa2ff"</span>,
+  match: <span class="st">"rgba(230,180,80,0.28)"</span>,
+  matchActive: <span class="st">"rgba(240,160,60,0.55)"</span>,
+  preeditUnderline: <span class="st">"#7aa2ff"</span>,
+};
+
+<span class="kw">const</span> TOKEN_COLORS: <span class="ty">Record</span>&lt;<span class="ty">TokenType</span>, <span class="ty">string</span>&gt; = {
+  kw: <span class="st">"#c792ea"</span>,
+  str: <span class="st">"#a8d08a"</span>,
+  cm: <span class="st">"#5f6a8a"</span>,
+  num: <span class="st">"#f08d6c"</span>,
+  fn: <span class="st">"#7aa2ff"</span>,
+  id: <span class="st">"#d5dae8"</span>,
+  pn: <span class="st">"#8fd3e8"</span>,
+};</code></pre>
+
+    <p>設計コメントが、この章の全メッセージを先に言い切っています。「見えている行しか描かない」「背景 → 選択 → 検索一致 → 文字 → カーソルの順に重ねる」「スクロールはブラウザに任せる」。以降のコードは、この3文を機械語に翻訳したものにすぎません。</p>
+    <p><code>CompositionState</code> は IME の未確定文字列（変換中の「にほんご」など）の状態です。この章では深入りせず、第08章で正面から扱います。いまは「描画係も IME の途中状態を知る必要がある」とだけ押さえてください。<code>COLORS</code> は配色の一覧、<code>TOKEN_COLORS</code> は構文ハイライトの色（第07章のトークン種別 <code>TokenType</code> ごと）です。色を<strong>1か所の定数にまとめる</strong>のは、描画コードのあちこちに <code>"#7aa2ff"</code> のような数字が散らばるのを防ぐためです。</p>
+
+    <p>続いてクラス本体のフィールドと、コンストラクタ。<strong>「何を持つか」と「いつ描くか」</strong>がここで決まります。</p>
+
+    <div class="file-tag">editor/view.ts（つづき・EditorView のフィールドと構築）</div>
+    <pre><code><span class="kw">export class</span> <span class="ty">EditorView</span> {
+  <span class="kw">readonly</span> editor: <span class="ty">Editor</span>;
+  <span class="kw">readonly</span> metrics: <span class="ty">FontMetrics</span>;
+  <span class="kw">readonly</span> scroller: <span class="ty">HTMLElement</span>;
+  <span class="kw">readonly</span> canvas: <span class="ty">HTMLCanvasElement</span>;
+  <span class="kw">private</span> sizer: <span class="ty">HTMLElement</span>;
+  <span class="kw">private</span> ctx: <span class="ty">CanvasRenderingContext2D</span>;
+
+  composition: <span class="ty">CompositionState</span> = { active: <span class="kw">false</span>, text: <span class="st">""</span>, caret: <span class="st">0</span> };
+  focused = <span class="kw">false</span>;
+
+  <span class="kw">private</span> cursorVisible = <span class="kw">true</span>;
+  <span class="kw">private</span> blinkTimer: <span class="ty">number</span> | <span class="ty">undefined</span>;
+  <span class="kw">private</span> renderQueued = <span class="kw">false</span>;
+  <span class="kw">private</span> maxLineLength = <span class="st">0</span>;
+  <span class="kw">private</span> measuredMaxWidth = <span class="st">0</span>;
+  <span class="cm">/** カーソル位置に textarea を追従させるためのコールバック（input.ts が設定） */</span>
+  onCursorViewportPos: ((x: <span class="ty">number</span>, y: <span class="ty">number</span>) =&gt; <span class="ty">void</span>) | <span class="kw">null</span> = <span class="kw">null</span>;
+
+  <span class="kw">constructor</span>(editor: <span class="ty">Editor</span>, scroller: <span class="ty">HTMLElement</span>, canvas: <span class="ty">HTMLCanvasElement</span>, sizer: <span class="ty">HTMLElement</span>) {
+    <span class="kw">this</span>.editor = editor;
+    <span class="kw">this</span>.scroller = scroller;
+    <span class="kw">this</span>.canvas = canvas;
+    <span class="kw">this</span>.sizer = sizer;
+    <span class="kw">this</span>.ctx = canvas.getContext(<span class="st">"2d"</span>)!;
+    <span class="kw">this</span>.metrics = <span class="kw">new</span> <span class="ty">FontMetrics</span>(<span class="st">'"Consolas", "Cascadia Mono", "MS Gothic", monospace'</span>, <span class="st">15</span>);
+
+    <span class="kw">this</span>.scanMaxLineLength();
+    editor.onDidChange(() =&gt; {
+      <span class="kw">this</span>.updateMaxLineLengthAroundSelections();
+      <span class="kw">this</span>.restartBlink();
+      <span class="kw">this</span>.scheduleRender();
+    });
+    scroller.addEventListener(<span class="st">"scroll"</span>, () =&gt; <span class="kw">this</span>.scheduleRender(), { passive: <span class="kw">true</span> });
+    <span class="kw">new</span> <span class="ty">ResizeObserver</span>(() =&gt; {
+      <span class="kw">this</span>.layout();
+      <span class="kw">this</span>.scheduleRender();
+    }).observe(scroller);
+    <span class="kw">this</span>.layout();
+    <span class="kw">this</span>.restartBlink();
+    <span class="kw">this</span>.scheduleRender();
+  }</code></pre>
+
+    <p>フィールドは3種類に分けて眺めると見通せます。</p>
+    <ul>
+      <li><strong>外から渡される道具</strong>: <code>editor</code>（頭脳。テキストとカーソルを持つ第02章の司令塔）、<code>scroller</code>（スクロールする外枠の DOM）、<code>canvas</code>（描く板）、<code>sizer</code>（実寸の透明な箱。Step 3 の主役）。この4つがコンストラクタの引数で、view は<strong>DOM を自分では作らず、渡されたものに描くだけ</strong>です。</li>
+      <li><strong>自分で用意する道具</strong>: <code>ctx</code>（canvas の 2D コンテキスト）、<code>metrics</code>（Step 1 の <code>FontMetrics</code>。ここでフォントとサイズ15pxを固定）。</li>
+      <li><strong>状態</strong>: <code>focused</code>（フォーカスの有無で選択色を変える）、<code>cursorVisible</code>/<code>blinkTimer</code>（カーソル点滅）、<code>renderQueued</code>（描画の二重予約を防ぐ旗）、<code>maxLineLength</code>/<code>measuredMaxWidth</code>（横スクロール幅の見積もり用。Step 3 で使う）。</li>
+    </ul>
+
+    <p>コンストラクタの本質は<strong>「いつ描くか」の配線</strong>です。描画は「呼ばれたら描く」受け身の関数で、<strong>誰かが描画を要求したとき</strong>にだけ走ります。その要求元が3つ、ここで繋がれます。</p>
+    <ol>
+      <li><code>editor.onDidChange(...)</code> — <strong>編集が起きたとき</strong>。文字が入る・消える・カーソルが動くたびに呼ばれ、最大行長を更新し、点滅をリセットし（打っている間はカーソルを消さない）、再描画を予約します。</li>
+      <li><code>scroller.addEventListener("scroll", ...)</code> — <strong>スクロールしたとき</strong>。可視範囲が変わるので描き直す。<code>{ passive: true }</code> は「このリスナーはスクロールを妨げない」とブラウザに約束して、スクロールを滑らかに保つおまじないです。</li>
+      <li><code>new ResizeObserver(...)</code> — <strong>枠のサイズが変わったとき</strong>。ウィンドウのリサイズなどで <code>scroller</code> の大きさが変わったら、canvas の解像度を取り直して（<code>layout()</code>）描き直します。</li>
+    </ol>
+    <p>この3本の線が引かれた瞬間から、<code>EditorView</code> は「変化があれば勝手に描き直す」自律した部品になります。あとはそれぞれの引き金が <code>scheduleRender()</code> を叩くだけ。その <code>scheduleRender</code> の中身が次の要点です。</p>
+
+    <div class="file-tag">editor/view.ts（つづき・描画の予約と点滅）</div>
+    <pre><code>  scheduleRender(): <span class="ty">void</span> {
+    <span class="kw">if</span> (<span class="kw">this</span>.renderQueued) <span class="kw">return</span>;
+    <span class="kw">this</span>.renderQueued = <span class="kw">true</span>;
+    requestAnimationFrame(() =&gt; {
+      <span class="kw">this</span>.renderQueued = <span class="kw">false</span>;
+      <span class="kw">this</span>.render();
+    });
+  }
+
+  restartBlink(): <span class="ty">void</span> {
+    <span class="kw">this</span>.cursorVisible = <span class="kw">true</span>;
+    <span class="kw">if</span> (<span class="kw">this</span>.blinkTimer !== <span class="kw">undefined</span>) clearInterval(<span class="kw">this</span>.blinkTimer);
+    <span class="kw">this</span>.blinkTimer = <span class="ty">window</span>.setInterval(() =&gt; {
+      <span class="kw">this</span>.cursorVisible = !<span class="kw">this</span>.cursorVisible;
+      <span class="kw">this</span>.scheduleRender();
+    }, <span class="st">530</span>);
+  }</code></pre>
+
+    <p><code>scheduleRender</code> は<strong>描画をまとめる</strong>ための小さな関所です。1フレームの間に、編集・スクロール・点滅から何度描画を要求されても、実際に描くのは1回だけにしたい。そこで <code>renderQueued</code> という旗を立て、すでに予約済みなら即 <code>return</code> して二重予約を捨てます。予約は <code>requestAnimationFrame</code>（次の画面更新のタイミング）に載せるので、描画はブラウザの60fpsに自然に同期します。「<strong>いま描け</strong>」ではなく「<strong>次の描き時に1回だけ描け</strong>」——これが、大量のイベントが来ても描画が詰まらない秘訣です。</p>
+    <p><code>restartBlink</code> はカーソルの点滅です。530ミリ秒ごとに <code>cursorVisible</code> を反転して再描画を予約するだけ。名前が <code>restart</code> なのは、キーを打った瞬間に <code>cursorVisible = true</code> に戻してタイマーを張り直すから。文字を打っている最中にカーソルが消えるのは目障りなので、打つたびに「いま見えている状態」からリセットするわけです。</p>
+
+    <div class="gonote"><div class="box-k">TS メモ · requestAnimationFrame で「間引く」設計</div>
+      <p><code>requestAnimationFrame</code>（rAF）は「次に画面を描き替えるとき、この関数を1回呼んで」とブラウザに頼む API です。エディタでは、1回のキー入力が「テキスト変更 → 最大長更新 → 点滅リセット」と複数の描画要求を連鎖させがちですが、それらを rAF の手前で <code>renderQueued</code> によって1つに畳むことで、<strong>1フレーム1描画</strong>を保証します。「起きたことをすぐ描く」のではなく「描き時に最新状態を1回描く」——この間引きは、リアルタイム描画の定石です。<code>window.setInterval</code> の戻り値の型がブラウザでは <code>number</code> なので、<code>blinkTimer</code> は <code>number | undefined</code> にしてあります。</p>
+    </div>
+
+    <h2 class="step" id="step-3"><span class="step-no">Step 3</span>スクロールを自作しない — sizer + sticky canvas</h2>
+    <p>ここが、このエディタの設計でいちばん「うまい」と唸る部分です。可視範囲だけを描くと決めた以上、スクロールは大問題になりそうに見えます。canvas は画面サイズぶんしかないのに、10万行ぶんのスクロールバーをどう出す? ホイールは? 慣性スクロールは? ——これを全部自作すると、車輪の再発明で数百行が溶けます。</p>
+    <p>本書の答えは明快です。<strong>スクロールは1行も自作しない。ブラウザの <code>overflow:auto</code> に丸投げする。</strong> 仕掛けはこうです。</p>
+
+    <div class="ascii">スクロールを自作しない — sizer + sticky canvas の構造
+
+  .scroller  (overflow:auto — ブラウザがスクロールを担当)
+  ┌────────────────────────────┐ ← 画面に見えている窓（clientHeight）
+  │ &lt;canvas&gt;  position:sticky   │   窓に貼り付いて動かない。
+  │  ここに可視範囲だけ描く      │   中身だけ scrollTop に応じて描き替える
+  │                            │
+  │        ※ この裏側に sizer が重なっている（下図）
+  └────────────────────────────┘
+        ⋮
+  scroller が信じている「中身の全高」＝ sizer の height
+  ┌ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ┐ ← #sizer（position:absolute）
+    height = 全行 × lineHeight …      visibility:hidden で見えないが
+  │           ⋮ 10万行ぶん ⋮        │ 箱としては存在し、スクロール範囲を決める
+  └ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ┘
+
+  ポイント: sizer は absolute なので canvas と場所を取り合わない。
+           2つは「縦に並ぶ」のではなく「重なっている」。</div>
+
+    <p>3つの部品の役割を分けて言います。</p>
+    <ul>
+      <li><strong><code>scroller</code></strong>: <code>overflow:auto</code> の外枠。スクロールバー・ホイール・慣性・タッチ —— スクロールに関する一切を<strong>ブラウザが</strong>面倒みてくれる箱。</li>
+      <li><strong><code>sizer</code></strong>: 中身が空の <code>&lt;div&gt;</code>。<code>position:absolute</code> で<strong>通常の流れから抜け</strong>、<code>visibility:hidden</code> で<strong>描画されない</strong>。それでも「箱」としては存在するので、<strong>高さに文書の実寸</strong>（全行 × 行高）を入れてやれば、<code>scroller</code> は「10万行ぶんの中身がある」と信じて正しい長さのスクロールバーを出します。sizer は<strong>スクロール範囲の宣言</strong>だけが仕事です。</li>
+      <li><strong><code>canvas</code></strong>: <code>position:sticky</code> で窓の上端に貼り付く。だからスクロールしても canvas 自体は動かず<strong>常に画面いっぱい</strong>に居続ける。動くのは中身（描く内容）だけ。<code>scrollTop</code> を読んで「いま何行目から見えているか」を計算し、その範囲を描き直します。</li>
+    </ul>
+
+    <p>この仕掛けは<strong>CSS が担っている</strong>ので、CSS も見ておきます。ここだけは JavaScript ではなくスタイルシートが本体です。</p>
+
+    <div class="file-tag">style.css（スクロールに関わる部分）</div>
+    <pre><code><span class="kw">#scroller</span> {
+  <span class="ty">position</span>: relative;
+  <span class="ty">flex</span>: <span class="st">1</span>;
+  <span class="ty">overflow</span>: auto;        <span class="cm">/* ← スクロールはここがブラウザ任せで担当 */</span>
+}
+
+<span class="kw">#sizer</span> {
+  <span class="ty">position</span>: absolute;    <span class="cm">/* ← 流れから抜ける。canvas と場所を取り合わない */</span>
+  <span class="ty">top</span>: <span class="st">0</span>;
+  <span class="ty">left</span>: <span class="st">0</span>;
+  <span class="ty">width</span>: <span class="st">1px</span>;          <span class="cm">/* 初期値。実寸は JS が毎回書き換える */</span>
+  <span class="ty">height</span>: <span class="st">1px</span>;
+  <span class="ty">visibility</span>: hidden;   <span class="cm">/* ← 見えないが「箱」は残る */</span>
+}
+
+<span class="kw">#editor-canvas</span> {
+  <span class="ty">position</span>: sticky;      <span class="cm">/* ← 窓に貼り付いて動かない */</span>
+  <span class="ty">top</span>: <span class="st">0</span>;
+  <span class="ty">left</span>: <span class="st">0</span>;
+  <span class="ty">display</span>: block;
+  <span class="ty">cursor</span>: text;
+}</code></pre>
+
+    <p>HTML 側の並びは <code>#sizer</code> が<strong>先</strong>、<code>&lt;canvas&gt;</code> が<strong>後</strong>です（第09章 <code>main.ts</code> で全文を読みます）。</p>
+    <pre><code>&lt;<span class="kw">div</span> <span class="ty">id</span>=<span class="st">"scroller"</span>&gt;
+  &lt;<span class="kw">div</span> <span class="ty">id</span>=<span class="st">"sizer"</span>&gt;&lt;/<span class="kw">div</span>&gt;
+  &lt;<span class="kw">canvas</span> <span class="ty">id</span>=<span class="st">"editor-canvas"</span>&gt;&lt;/<span class="kw">canvas</span>&gt;
+&lt;/<span class="kw">div</span>&gt;</code></pre>
+
+    <div class="box hazard"><div class="box-k">⚠ 落とし穴 — <code>visibility:hidden</code> であって <code>display:none</code> ではない</div>
+      <p>sizer を隠すのに <code>display: none</code> を使うと、<strong>この仕掛けは丸ごと壊れます</strong>。<code>display:none</code> は要素をレイアウトから完全に取り除くので、指定した <code>height</code> も消え、<code>scroller</code> は「中身が無い」と判断してスクロールバーを出しません。一方 <code>visibility: hidden</code> は<strong>箱は残したまま描画だけをやめる</strong>ので、高さは生きています。「見えない」にも2種類ある——**場所ごと消すのか、描画だけやめるのか**——を使い分ける、CSS の典型例です。</p>
+      <p>同じ理由で <code>position: absolute</code> も必須です。もし static（既定）のままだと、sizer は通常の流れの中で10万行ぶんの縦幅を占め、その<strong>下に</strong> canvas が置かれることになります。すると canvas は窓の遥か下——スクロールしても永遠に見えない位置——に行ってしまう。absolute で流れから抜けているからこそ、canvas と sizer は<strong>同じ場所に重なれる</strong>のです。</p>
+    </div>
+    <p>この構成の見返りは絶大です。<strong>スクロールの実装コードはゼロ</strong>。ホイールもスクロールバーのドラッグも、OS のスムーズスクロールも、全部ブラウザ製の本物が手に入る。view がやるのは「<code>scroll</code> イベントが来たら <code>scrollTop</code> を見て描き直す」だけ。プロジェクトの CLAUDE.md がこの設計を「<strong>スクロールは自作しない: overflow:auto + 実寸 sizer + position:sticky の canvas</strong>」と一言で書いているのは、この章の核心だからです。</p>
+
+    <div class="box hazard"><div class="box-k">⚠ 落とし穴 — スクロールを自作しようとすると全部を作り直す羽目になる</div>
+      <p>「canvas に描くなら、スクロールも自分で持つべきだ」と考えて、ホイールイベントを拾って <code>scrollY</code> 変数を自分で増減させ始める —— これが典型的な泥沼です。一度自作を始めると、スクロールバーの見た目、ドラッグ、ページアップ／ダウン、慣性、トラックパッドの2本指、キーボードの矢印スクロール……と、ブラウザが無料でくれるものを1つずつ再実装する羽目になり、しかもどれも「本物ほど滑らかにならない」。<br>
+      本書は逆張りします。<strong>スクロールという厄介な状態管理を、まるごとブラウザに外注する。</strong> view は <code>scrollTop</code> を<strong>読むだけ</strong>（書くのは「カーソルを画面内に入れる」時だけ、Step 7 の <code>revealPrimary</code>）。sizer に実寸を与えることと、canvas を sticky にすること —— この2点さえ守れば、スクロールは"タダ"で正しく動きます。</p>
+    </div>
+
+    <p>では、この構成を支えるレイアウト系メソッドを読みます。canvas の解像度合わせ、ガター幅、そして肝心の <strong>sizer の実寸設定</strong>です。</p>
+
+    <div class="file-tag">editor/view.ts（つづき・レイアウト）</div>
+    <pre><code>  <span class="cm">// ---------------------------------------------------------------- レイアウト</span>
+
+  <span class="kw">private</span> layout(): <span class="ty">void</span> {
+    <span class="kw">const</span> dpr = <span class="ty">window</span>.devicePixelRatio || <span class="st">1</span>;
+    <span class="kw">const</span> w = <span class="kw">this</span>.scroller.clientWidth;
+    <span class="kw">const</span> h = <span class="kw">this</span>.scroller.clientHeight;
+    <span class="kw">this</span>.canvas.width = <span class="ty">Math</span>.max(<span class="st">1</span>, <span class="ty">Math</span>.round(w * dpr));
+    <span class="kw">this</span>.canvas.height = <span class="ty">Math</span>.max(<span class="st">1</span>, <span class="ty">Math</span>.round(h * dpr));
+    <span class="kw">this</span>.canvas.style.width = <span class="st">`${w}px`</span>;
+    <span class="kw">this</span>.canvas.style.height = <span class="st">`${h}px`</span>;
+  }
+
+  <span class="kw">private</span> gutterWidth(): <span class="ty">number</span> {
+    <span class="kw">const</span> digits = <span class="ty">Math</span>.max(<span class="st">3</span>, <span class="ty">String</span>(<span class="kw">this</span>.editor.doc.lineCount).length);
+    <span class="kw">return</span> <span class="ty">Math</span>.ceil(digits * <span class="kw">this</span>.metrics.baseWidth) + <span class="st">26</span>;
+  }
+
+  pageLines(): <span class="ty">number</span> {
+    <span class="kw">return</span> <span class="ty">Math</span>.max(<span class="st">1</span>, <span class="ty">Math</span>.floor(<span class="kw">this</span>.scroller.clientHeight / <span class="kw">this</span>.metrics.lineHeight) - <span class="st">1</span>);
+  }
+
+  <span class="cm">/** ファイル読み込み時などに全行の最大長を数え直す（1パスのみ） */</span>
+  scanMaxLineLength(): <span class="ty">void</span> {
+    <span class="kw">const</span> doc = <span class="kw">this</span>.editor.doc;
+    <span class="kw">let</span> max = <span class="st">0</span>;
+    <span class="kw">for</span> (<span class="kw">let</span> i = <span class="st">0</span>; i &lt; doc.lineCount; i++) {
+      <span class="kw">const</span> len = doc.getLineLength(i);
+      <span class="kw">if</span> (len &gt; max) max = len;
+    }
+    <span class="kw">this</span>.maxLineLength = max;
+    <span class="kw">this</span>.measuredMaxWidth = <span class="st">0</span>;
+  }
+
+  <span class="cm">/** 編集後、カーソル行だけ最大長を更新する（縮む方向は無視してよい） */</span>
+  <span class="kw">private</span> updateMaxLineLengthAroundSelections(): <span class="ty">void</span> {
+    <span class="kw">const</span> doc = <span class="kw">this</span>.editor.doc;
+    <span class="kw">for</span> (<span class="kw">const</span> sel <span class="kw">of</span> <span class="kw">this</span>.editor.selections) {
+      <span class="kw">const</span> line = doc.lineAt(sel.head);
+      <span class="kw">const</span> len = doc.getLineLength(line);
+      <span class="kw">if</span> (len &gt; <span class="kw">this</span>.maxLineLength) <span class="kw">this</span>.maxLineLength = len;
+    }
+  }
+
+  <span class="kw">private</span> updateSizer(): <span class="ty">void</span> {
+    <span class="kw">const</span> lh = <span class="kw">this</span>.metrics.lineHeight;
+    <span class="kw">const</span> height = <span class="kw">this</span>.editor.doc.lineCount * lh + <span class="kw">this</span>.scroller.clientHeight - lh * <span class="st">2</span>;
+    <span class="kw">const</span> approxWidth = <span class="kw">this</span>.maxLineLength * <span class="kw">this</span>.metrics.baseWidth;
+    <span class="kw">const</span> width = <span class="kw">this</span>.gutterWidth() + <span class="ty">Math</span>.max(approxWidth, <span class="kw">this</span>.measuredMaxWidth) + <span class="st">60</span>;
+    <span class="kw">this</span>.sizer.style.height = <span class="st">`${Math.max(height, this.scroller.clientHeight)}px`</span>;
+    <span class="kw">this</span>.sizer.style.width = <span class="st">`${width}px`</span>;
+  }</code></pre>
+
+    <p><code>layout()</code> は canvas の<strong>解像度合わせ</strong>です。ここに <code>devicePixelRatio</code>（dpr）が出てくるのは、高精細ディスプレイ（Retina など）で文字をくっきり描くため。CSS 上の見た目サイズ（<code>style.width/height</code>）は窓と同じ <code>w × h</code> ピクセルにしつつ、実際の描画バッファ（<code>canvas.width/height</code>）は <code>w×dpr × h×dpr</code> と物理ピクセルぶん大きく取ります。dpr=2 の画面なら、CSS 300px の canvas を中身は 600px で描く。あとは描画時に <code>ctx.scale(dpr, dpr)</code> で座標系を2倍に拡大すれば、コードは論理ピクセルのまま書けて、出力だけが2倍精細になります。<code>Math.max(1, ...)</code> は「0px の canvas」を避ける保険です。</p>
+    <p><code>gutterWidth()</code> は左端の行番号エリア（ガター）の幅。行数の桁数（最低3桁）× 基準文字幅 + 余白26px で決めます。10万行なら6桁ぶん確保する、という具合に<strong>行番号の桁数に応じて自動で広がります</strong>。<code>pageLines()</code> は「1画面に何行入るか（-1 は重なり保険）」で、PageUp/PageDown の移動量に使います。</p>
+    <p>そして <code>updateSizer()</code> が、Step 3 の主役 —— <strong>sizer に実寸を与える</strong>関数です。高さの式は <code>全行数 × 行高 + 窓の高さ − 行高×2</code> です。<strong>窓の高さを足す</strong>のは、末尾の行でも画面の上のほうまで持ち上げられるようにするため（最終行が画面の一番下に貼り付いたまま、では編集しづらい）。そこから<strong>2行ぶんを引く</strong>のは、逆に持ち上げすぎて<strong>真っ白な画面までスクロールできてしまう</strong>のを防ぐためです。足しっぱなしだと、末尾まで送ったとき画面まるごと1枚ぶんの空白が見えてしまう。最後に <code>Math.max(height, clientHeight)</code> でクランプしているのは、<strong>文書が数行しかないとき</strong>に sizer が窓より小さくなってしまわないための下限です。幅は <code>ガター幅 + 最長行の推定幅 + 60</code>。この2つを sizer の <code>style</code> に書き込むことで、ブラウザは「これだけの中身がある」と理解し、縦横のスクロールバーを正しい長さで出します。<strong>view はスクロールバーを一度も描いていない</strong>のに、本物のスクロールバーが出る —— これが sizer の魔法です。</p>
+
+    <div class="gonote"><div class="box-k">TS メモ · 最長行の幅を「推定」と「実測」で二段構えにする理由</div>
+      <p>横スクロールのために sizer の<strong>幅</strong>も要りますが、全行の実幅を <code>measureText</code> で測るのは重い（10万行ぶんは非現実的）。そこで <code>maxLineLength</code>（最長行の<strong>文字数</strong>）× <code>baseWidth</code> で<strong>ざっくり推定</strong>し、実際に描いた行の実幅の最大値 <code>measuredMaxWidth</code> と <code>Math.max</code> で突き合わせます。描画は可視範囲だけなので、実測値は「見えた行」ぶんしか溜まりませんが、推定値が下支えするのでスクロールバーが極端に短くなることはありません。<code>scanMaxLineLength</code> はファイルを開いたとき1回だけ全行を1パスで数え、<code>updateMaxLineLengthAroundSelections</code> は編集のたびカーソル行だけ更新します（行が縮む方向は放置してよい —— スクロール可能幅が少し広いぶんには害がないため）。「正確さ」より「軽さ」を選ぶ、個人開発らしい割り切りです。</p>
+    </div>
+
+    <h2 class="step" id="step-4"><span class="step-no">Step 4</span>可視範囲を計算する — この2行が心臓</h2>
+    <p>いよいよ描画本体 <code>render()</code> です。長い関数ですが、やることは「可視範囲を求め、その範囲だけを5層に塗る」の一点。まずは前半 —— 準備と、<strong>このエディタで最も大事な2行</strong>を読みます。</p>
+
+    <div class="file-tag">editor/view.ts（つづき・render 前半）</div>
+    <pre><code>  <span class="kw">private</span> render(): <span class="ty">void</span> {
+    <span class="kw">if</span> (<span class="kw">this</span>.editor.revealRequested) {
+      <span class="kw">this</span>.editor.revealRequested = <span class="kw">false</span>;
+      <span class="kw">this</span>.revealPrimary();
+    }
+    <span class="kw">this</span>.updateSizer();
+
+    <span class="kw">const</span> ctx = <span class="kw">this</span>.ctx;
+    <span class="kw">const</span> dpr = <span class="ty">window</span>.devicePixelRatio || <span class="st">1</span>;
+    <span class="kw">const</span> w = <span class="kw">this</span>.scroller.clientWidth;
+    <span class="kw">const</span> h = <span class="kw">this</span>.scroller.clientHeight;
+    <span class="kw">const</span> lh = <span class="kw">this</span>.metrics.lineHeight;
+    <span class="kw">const</span> doc = <span class="kw">this</span>.editor.doc;
+    <span class="kw">const</span> gutterW = <span class="kw">this</span>.gutterWidth();
+    <span class="kw">const</span> scrollTop = <span class="kw">this</span>.scroller.scrollTop;
+    <span class="kw">const</span> scrollLeft = <span class="kw">this</span>.scroller.scrollLeft;
+
+    ctx.save();
+    ctx.scale(dpr, dpr);
+    ctx.fillStyle = COLORS.bg;
+    ctx.fillRect(<span class="st">0</span>, <span class="st">0</span>, w, h);
+    ctx.font = <span class="kw">this</span>.metrics.font;
+    ctx.textBaseline = <span class="st">"alphabetic"</span>;
+
+    <span class="cm">// 可視範囲: この2行がこのエディタで最も大事な計算</span>
+    <span class="kw">const</span> firstLine = <span class="ty">Math</span>.max(<span class="st">0</span>, <span class="ty">Math</span>.floor(scrollTop / lh));
+    <span class="kw">const</span> lastLine = <span class="ty">Math</span>.min(doc.lineCount - <span class="st">1</span>, <span class="ty">Math</span>.ceil((scrollTop + h) / lh));
+
+    <span class="kw">const</span> yOf = (line: <span class="ty">number</span>) =&gt; line * lh - scrollTop;
+    <span class="kw">const</span> contentX = gutterW - scrollLeft;
+
+    <span class="cm">// 複数カーソルの IME 未確定文字列: 行 → 挿入情報</span>
+    <span class="kw">const</span> preedits = <span class="kw">new</span> <span class="ty">Map</span>&lt;<span class="ty">number</span>, { column: <span class="ty">number</span>; caret: <span class="ty">number</span> }[]&gt;();
+    <span class="kw">if</span> (<span class="kw">this</span>.composition.active) {
+      <span class="kw">for</span> (<span class="kw">const</span> sel <span class="kw">of</span> <span class="kw">this</span>.editor.selections) {
+        <span class="kw">const</span> pos = doc.toPosition(sel.head);
+        <span class="kw">if</span> (!preedits.has(pos.line)) preedits.set(pos.line, []);
+        preedits.get(pos.line)!.push({ column: pos.column, caret: <span class="kw">this</span>.composition.caret });
+      }
+    }
+
+    <span class="cm">// ---- 本文（ガター右側にクリップ）----</span>
+    ctx.save();
+    ctx.beginPath();
+    ctx.rect(gutterW, <span class="st">0</span>, w - gutterW, h);
+    ctx.clip();
+
+    <span class="kw">const</span> activeLines = <span class="kw">new</span> <span class="ty">Set</span>(<span class="kw">this</span>.editor.selections.filter(rangeIsEmpty).map((s) =&gt; doc.lineAt(s.head)));
+
+    <span class="kw">for</span> (<span class="kw">let</span> line = firstLine; line &lt;= lastLine; line++) {
+      <span class="kw">const</span> y = yOf(line);
+
+      <span class="cm">// 現在行の帯（選択が空のカーソル行のみ）</span>
+      <span class="kw">if</span> (activeLines.has(line)) {
+        ctx.fillStyle = COLORS.currentLine;
+        ctx.fillRect(gutterW, y, w - gutterW, lh);
+      }
+    }</code></pre>
+
+    <p>冒頭の <code>revealRequested</code> は「編集の結果カーソルが画面外へ出たので、見える位置までスクロールして」という要求です（<code>revealPrimary</code> は Step 7）。次に <code>updateSizer()</code> で sizer を最新の実寸に合わせ、あとは描画に使う値を <code>const</code> に取り出します。<code>ctx.save()</code> → <code>ctx.scale(dpr, dpr)</code> で高精細対応の座標系にし、<code>fillRect(0,0,w,h)</code> で<strong>まず全面を背景色で塗りつぶす</strong>（毎フレーム、まっさらから描き直す）。<code>ctx.font</code> と <code>textBaseline="alphabetic"</code> で文字の描画設定を整えます。</p>
+
+    <p>そして —— コメントが宣言するとおり、<strong>この2行がこのエディタの心臓</strong>です。</p>
+    <pre><code><span class="kw">const</span> firstLine = <span class="ty">Math</span>.max(<span class="st">0</span>, <span class="ty">Math</span>.floor(scrollTop / lh));
+<span class="kw">const</span> lastLine = <span class="ty">Math</span>.min(doc.lineCount - <span class="st">1</span>, <span class="ty">Math</span>.ceil((scrollTop + h) / lh));</code></pre>
+    <p>行はすべて同じ高さ <code>lh</code> だから、話は割り算1つで済みます。「上端の <code>scrollTop</code> ピクセルは、何行目から始まるか?」 —— <code>scrollTop ÷ lh</code> を切り捨てれば <code>firstLine</code>。「下端 <code>scrollTop + h</code>（窓の底）は何行目で終わるか?」 —— こちらは切り上げて <code>lastLine</code>。<code>Math.max(0, ...)</code> と <code>Math.min(lineCount - 1, ...)</code> は、文書の外へはみ出さないためのクランプです。</p>
+    <p>この2行が出す <code>[firstLine, lastLine]</code> こそ、<strong>これから描くすべての範囲</strong>です。文書が10行だろうと10万行だろうと、この範囲は<strong>窓に入る数十行</strong>にしかならない。以降のループはすべて <code>for (let line = firstLine; line &lt;= lastLine; line++)</code> の形をとり、<strong>可視範囲の外は1ピクセルも触りません</strong>。10万行あっても軽い、の正体はこの割り算2つです。序章で予告した「見えている数十行だけ描く」が、ここで現実のコードになりました。</p>
+
+    <p>補助として2つの小さな道具を用意します。<code>yOf(line) = line * lh - scrollTop</code> は「文書の <code>line</code> 行目は、いま画面の何ピクセル目に描くか」。文書内の絶対位置（<code>line * lh</code>）から、スクロール量 <code>scrollTop</code> を引くだけ。<code>contentX = gutterW - scrollLeft</code> は本文の左端 x（ガターぶん右へ、横スクロールぶん左へ）。この2つで、文書座標と画面座標を行き来します。</p>
+    <p>続く <code>preedits</code> の <code>Map</code> は IME 変換中の未確定文字列を「どの行のどの桁に差し込むか」の索引で、第08章の話。いまは飛ばして構いません。</p>
+
+    <p>そして本文の描画に入る前に <code>ctx.clip()</code> で<strong>クリップ領域</strong>をガターの右側に絞ります。<code>ctx.rect(gutterW, 0, w - gutterW, h)</code> で「ガターより右の矩形」を切り抜き、以降の描画はこの中だけに制限される。こうしておくと、横スクロールで本文が左へずれても、<strong>ガター（行番号）の上に本文がはみ出して重なることがありません</strong>。最後に <code>activeLines</code>（カーソルがある＝選択が空の行の集合）を作り、可視範囲をループして<strong>現在行の帯</strong>（薄い横帯）を敷きます。これが「5層」の第1層、いちばん下の背景です。</p>
+
+    <div class="box hazard"><div class="box-k">⚠ 落とし穴 — 毎フレーム全面クリアを忘れると「残像」が出る</div>
+      <p>Canvas は「命令した絵がそのまま残る」板です。前フレームの文字を消さずに新しい文字を描くと、スクロールのたびに古い行が下敷きに残り、画面が文字だらけの残像で汚れます。だから <code>render()</code> は毎回いちばん最初に <code>fillRect(0, 0, w, h)</code> で<strong>全面を背景色で塗り直し</strong>、まっさらな板から描き始めます。「差分だけ描く」最適化に手を出したくなりますが、可視範囲だけなら全消し＆全描きでも十分軽く、バグの温床（消し残し）を作らないほうが賢明です。</p>
+    </div>
+
+    <h2 class="step" id="step-5"><span class="step-no">Step 5</span>背景・選択・検索一致を重ねる</h2>
+    <p>背景（現在行の帯）の上に、<strong>選択範囲</strong>と<strong>検索一致</strong>の色を重ねます。どちらも「範囲を、行ごとに矩形に分けて塗る」という同じ形です。文字より先に塗るので、文字は色帯の<strong>上</strong>に乗ります。</p>
+
+    <div class="file-tag">editor/view.ts（つづき・選択と検索一致）</div>
+    <pre><code>    <span class="cm">// 選択範囲の矩形</span>
+    ctx.fillStyle = <span class="kw">this</span>.focused ? COLORS.selection : COLORS.selectionInactive;
+    <span class="kw">for</span> (<span class="kw">const</span> sel <span class="kw">of</span> <span class="kw">this</span>.editor.selections) {
+      <span class="kw">if</span> (rangeIsEmpty(sel)) <span class="kw">continue</span>;
+      <span class="kw">const</span> from = rangeMin(sel);
+      <span class="kw">const</span> to = rangeMax(sel);
+      <span class="kw">const</span> fromPos = doc.toPosition(from);
+      <span class="kw">const</span> toPos = doc.toPosition(to);
+      <span class="kw">for</span> (<span class="kw">let</span> line = <span class="ty">Math</span>.max(fromPos.line, firstLine); line &lt;= <span class="ty">Math</span>.min(toPos.line, lastLine); line++) {
+        <span class="kw">const</span> text = doc.getLine(line);
+        <span class="kw">const</span> x1 = line === fromPos.line ? <span class="kw">this</span>.metrics.xForColumn(text, fromPos.column) : <span class="st">0</span>;
+        <span class="kw">let</span> x2 = line === toPos.line ? <span class="kw">this</span>.metrics.xForColumn(text, toPos.column) : <span class="kw">this</span>.metrics.lineWidth(text) + <span class="kw">this</span>.metrics.baseWidth * <span class="st">0.6</span>;
+        <span class="kw">if</span> (x2 - x1 &lt; <span class="st">2</span>) x2 = x1 + <span class="st">2</span>; <span class="cm">// 空行の選択も見えるように</span>
+        ctx.fillRect(contentX + x1, yOf(line), x2 - x1, lh);
+      }
+    }
+
+    <span class="cm">// 検索一致のハイライト</span>
+    <span class="kw">if</span> (<span class="kw">this</span>.editor.searchQuery) {
+      <span class="kw">const</span> viewFrom = doc.lineStartOffset(firstLine);
+      <span class="kw">const</span> viewTo = doc.lineEndOffset(lastLine);
+      <span class="kw">const</span> activeNo = <span class="kw">this</span>.editor.activeMatchNumber();
+      <span class="kw">const</span> matches = <span class="kw">this</span>.editor.matches;
+      <span class="kw">for</span> (<span class="kw">let</span> i = <span class="st">0</span>; i &lt; matches.length; i++) {
+        <span class="kw">const</span> m = matches[i];
+        <span class="kw">if</span> (m.to &lt; viewFrom || m.from &gt; viewTo) <span class="kw">continue</span>;
+        ctx.fillStyle = i + <span class="st">1</span> === activeNo ? COLORS.matchActive : COLORS.match;
+        <span class="kw">const</span> fromPos = doc.toPosition(m.from);
+        <span class="kw">const</span> toPos = doc.toPosition(m.to);
+        <span class="kw">for</span> (<span class="kw">let</span> line = <span class="ty">Math</span>.max(fromPos.line, firstLine); line &lt;= <span class="ty">Math</span>.min(toPos.line, lastLine); line++) {
+          <span class="kw">const</span> text = doc.getLine(line);
+          <span class="kw">const</span> x1 = line === fromPos.line ? <span class="kw">this</span>.metrics.xForColumn(text, fromPos.column) : <span class="st">0</span>;
+          <span class="kw">const</span> x2 = line === toPos.line ? <span class="kw">this</span>.metrics.xForColumn(text, toPos.column) : <span class="kw">this</span>.metrics.lineWidth(text);
+          ctx.fillRect(contentX + x1, yOf(line), <span class="ty">Math</span>.max(x2 - x1, <span class="st">2</span>), lh);
+        }
+      }
+    }</code></pre>
+
+    <p>選択範囲の描画から。色は <code>focused</code> かどうかで <code>selection</code>（濃い）か <code>selectionInactive</code>（薄い）を選びます。ウィンドウがアクティブでないときに選択が薄くなる、あの挙動です。<code>editor.selections</code>（複数カーソルなので配列）を回し、<code>rangeIsEmpty(sel)</code> —— ただのカーソル（幅ゼロ）—— は選択帯を描かないので <code>continue</code> でスキップ。第00章で見た <code>rangeMin</code>/<code>rangeMax</code> で範囲の左端・右端オフセットを取り、<code>doc.toPosition</code> で <code>(行, 桁)</code> に変換します。</p>
+    <p>肝は<strong>内側のループが可視範囲と交差する行だけ</strong>を回すこと。<code>Math.max(fromPos.line, firstLine)</code> から <code>Math.min(toPos.line, lastLine)</code> まで —— つまり「選択が及ぶ行」と「画面に見える行」の<strong>重なり</strong>だけ。選択が1万行に及んでいても、描くのは画面内の数十行ぶんの矩形だけです。各行の左端 <code>x1</code>・右端 <code>x2</code> は、その行が選択の始端行なら桁から、途中の行なら行頭（<code>0</code>）から、終端行なら桁まで、途中なら行末まで、と場合分けして <code>xForColumn</code>／<code>lineWidth</code> で求めます。<code>if (x2 - x1 &lt; 2) x2 = x1 + 2</code> は、空行や改行だけを選んだときも<strong>2px の細い帯</strong>を見せて「選ばれている」と分からせる工夫です。</p>
+    <p>検索一致（<code>searchQuery</code> があるとき）も、構造はまったく同じです。違いは2点。まず <code>if (m.to &lt; viewFrom || m.from &gt; viewTo) continue</code> で、<strong>可視範囲の外にある一致は最初から捨てる</strong>（<code>viewFrom</code>/<code>viewTo</code> は可視範囲の先頭・末尾オフセット）。一致が文書全体に1万個あっても、塗るのは画面内のものだけ。そして色は、いま選ばれている一致（<code>activeMatchNumber()</code>）だけ <code>matchActive</code>（濃い）、それ以外は <code>match</code>（薄い）にして、「次を検索」で移動している一致を目立たせます。<strong>可視範囲でまず刈り込んでから描く</strong> —— この章で何度も出てくる、軽さの型がここにも効いています。</p>
+
+    <div class="gonote"><div class="box-k">TS メモ · 三項演算子で「行の中の位置」を場合分けする</div>
+      <p><code>line === fromPos.line ? xForColumn(...) : 0</code> の <code>? :</code> は三項演算子です。「複数行にまたがる選択の、いまの行はどこから塗るか」を1行で表しています —— <strong>始端の行だけ</strong>は選択開始桁から、それ以外の行は行頭（<code>0</code>）から。右端も同様に、<strong>終端の行だけ</strong>は選択終了桁まで、それ以外は行末まで。範囲選択が「最初の行は途中から、真ん中の行は全幅、最後の行は途中まで」という階段状になるのは、この2つの三項演算子の合わせ技です。<code>if</code> 文で書くと4分岐に膨らむところを、行ごとに独立した矩形として簡潔に畳んでいます。</p>
+    </div>
+
+    <h2 class="step" id="step-6"><span class="step-no">Step 6</span>テキスト本体とカーソルを描く</h2>
+    <p>色帯の上に、ついに<strong>文字そのもの</strong>を描きます。そしてカーソルを最後に重ねます。ここが「5層」の第4層・第5層です。</p>
+
+    <div class="file-tag">editor/view.ts（つづき・テキスト本体）</div>
+    <pre><code>    <span class="cm">// テキスト本体</span>
+    <span class="kw">const</span> baselineOffset = <span class="ty">Math</span>.round((lh - <span class="kw">this</span>.metrics.fontSize) / <span class="st">2</span>) + <span class="ty">Math</span>.round(<span class="kw">this</span>.metrics.fontSize * <span class="st">0.8</span>);
+    <span class="kw">for</span> (<span class="kw">let</span> line = firstLine; line &lt;= lastLine; line++) {
+      <span class="kw">const</span> rawText = doc.getLine(line);
+      <span class="kw">const</span> y = yOf(line) + baselineOffset;
+      <span class="kw">const</span> pre = preedits.get(line);
+
+      <span class="kw">if</span> (pre &amp;&amp; pre.length &gt; <span class="st">0</span>) {
+        <span class="cm">// IME 変換中の行: 未確定文字列を差し込んで無地で描く</span>
+        <span class="kw">this</span>.renderComposingLine(ctx, rawText, pre, contentX, y, yOf(line));
+        <span class="kw">continue</span>;
+      }
+
+      <span class="kw">const</span> width = <span class="kw">this</span>.metrics.lineWidth(rawText);
+      <span class="kw">if</span> (width &gt; <span class="kw">this</span>.measuredMaxWidth) <span class="kw">this</span>.measuredMaxWidth = width;
+
+      <span class="kw">const</span> tokens = <span class="kw">this</span>.editor.highlighter.getTokens(line);
+      <span class="kw">if</span> (tokens.length === <span class="st">0</span>) {
+        ctx.fillStyle = COLORS.text;
+        <span class="kw">this</span>.fillTextExpanded(ctx, rawText, contentX, y);
+      } <span class="kw">else</span> {
+        <span class="kw">let</span> cursor = <span class="st">0</span>;
+        <span class="kw">let</span> x = contentX;
+        <span class="kw">for</span> (<span class="kw">const</span> t <span class="kw">of</span> tokens) {
+          <span class="kw">if</span> (t.start &gt; cursor) {
+            x += <span class="kw">this</span>.drawRun(ctx, rawText.slice(cursor, t.start), COLORS.text, x, y);
+          }
+          x += <span class="kw">this</span>.drawRun(ctx, rawText.slice(t.start, t.end), TOKEN_COLORS[t.type], x, y);
+          cursor = t.end;
+        }
+        <span class="kw">if</span> (cursor &lt; rawText.length) {
+          <span class="kw">this</span>.drawRun(ctx, rawText.slice(cursor), COLORS.text, x, y);
+        }
+      }
+    }
+
+    <span class="cm">// カーソル</span>
+    <span class="kw">if</span> (<span class="kw">this</span>.focused &amp;&amp; <span class="kw">this</span>.cursorVisible) {
+      ctx.fillStyle = COLORS.cursor;
+      <span class="kw">for</span> (<span class="kw">const</span> sel <span class="kw">of</span> <span class="kw">this</span>.editor.selections) {
+        <span class="kw">const</span> pos = doc.toPosition(sel.head);
+        <span class="kw">if</span> (pos.line &lt; firstLine || pos.line &gt; lastLine) <span class="kw">continue</span>;
+        <span class="kw">const</span> text = doc.getLine(pos.line);
+        <span class="kw">let</span> x: <span class="ty">number</span>;
+        <span class="kw">if</span> (<span class="kw">this</span>.composition.active) {
+          <span class="kw">const</span> withPre = text.slice(<span class="st">0</span>, pos.column) + <span class="kw">this</span>.composition.text;
+          x = <span class="kw">this</span>.metrics.xForColumn(withPre, pos.column + <span class="kw">this</span>.composition.caret);
+        } <span class="kw">else</span> {
+          x = <span class="kw">this</span>.metrics.xForColumn(text, pos.column);
+        }
+        ctx.fillRect(contentX + x, yOf(pos.line) + <span class="st">1</span>, <span class="st">2</span>, lh - <span class="st">2</span>);
+      }
+    }
+
+    ctx.restore(); <span class="cm">// クリップ解除</span></code></pre>
+
+    <p><code>baselineOffset</code> は、行の箱（高さ <code>lh</code>）の中で文字を<strong>縦に中央寄せ</strong>するための、行の上端からベースラインまでの距離です。<code>textBaseline="alphabetic"</code> で描くので、文字の下端の基準線をここに合わせます。あとは可視範囲を回し、各行の生テキスト <code>rawText</code> を、y = <code>yOf(line) + baselineOffset</code> の位置に描きます。<code>if (pre ...) renderComposingLine(...)</code> は IME 変換中の行の分岐（第08章）で、通常時は素通りします。</p>
+    <p>通常の行は、<strong>トークン（構文ハイライトの色の区切り）</strong>があるかで二手に分かれます。<code>highlighter.getTokens(line)</code> が空なら、色分け不要なので <code>fillTextExpanded</code> で行全体を1色（<code>COLORS.text</code>）で描くだけ。トークンがあれば、<code>cursor</code>（行内の描画済み位置）と <code>x</code>（描画済みの x 座標）を進めながら、<strong>トークンの前の地の文 → トークン本体</strong>を順に <code>drawRun</code> で描き、最後に残りを描きます。<code>drawRun</code> は「その色で文字列を描き、描いた幅を返す」ので、返り値を <code>x</code> に足していけば次の描画開始位置が求まる —— <strong>横に継ぎ足していく</strong>素直な作りです。色の中身（第07章のトークナイザ）はまだ空でも、この描画の骨組みは今できています。</p>
+    <p>カーソルは最後に、いちばん上へ。<code>focused &amp;&amp; cursorVisible</code>（フォーカスがあり、点滅の点灯フェーズ）のときだけ描きます。各カーソル（<code>sel.head</code>）の <code>(行, 桁)</code> を求め、<strong>可視範囲外なら描かない</strong>（<code>if (pos.line &lt; firstLine || pos.line &gt; lastLine) continue</code>）。x は <code>xForColumn</code> で桁 → ピクセルに変換し、<code>fillRect(contentX + x, yOf(...) + 1, 2, lh - 2)</code> で<strong>幅2pxの縦棒</strong>を描く —— これがカーソルの正体です。IME 変換中は未確定文字列ぶん右にずらす分岐が入ります（第08章）。最後の <code>ctx.restore()</code> で Step 4 で掛けたクリップを解除し、本文の描画が完了します。</p>
+
+    <p>本文で使った小さなヘルパー3つも読んでおきます。<code>drawRun</code>・<code>fillTextExpanded</code>、そして IME 用の <code>renderComposingLine</code> です。</p>
+
+    <div class="file-tag">editor/view.ts（つづき・描画ヘルパー）</div>
+    <pre><code>  <span class="cm">/** IME 変換中の行: rawText に未確定文字列を差し込み、無地＋下線で描く */</span>
+  <span class="kw">private</span> renderComposingLine(
+    ctx: <span class="ty">CanvasRenderingContext2D</span>,
+    rawText: <span class="ty">string</span>,
+    pre: { column: <span class="ty">number</span>; caret: <span class="ty">number</span> }[],
+    contentX: <span class="ty">number</span>,
+    baselineY: <span class="ty">number</span>,
+    topY: <span class="ty">number</span>,
+  ): <span class="ty">void</span> {
+    <span class="kw">const</span> sorted = [...pre].sort((a, b) =&gt; a.column - b.column);
+    <span class="kw">let</span> display = rawText;
+    <span class="kw">const</span> compText = <span class="kw">this</span>.composition.text;
+    <span class="cm">// 後ろから差し込めば手前の桁がずれない</span>
+    <span class="kw">for</span> (<span class="kw">let</span> i = sorted.length - <span class="st">1</span>; i &gt;= <span class="st">0</span>; i--) {
+      display = display.slice(<span class="st">0</span>, sorted[i].column) + compText + display.slice(sorted[i].column);
+    }
+    ctx.fillStyle = COLORS.text;
+    <span class="kw">this</span>.fillTextExpanded(ctx, display, contentX, baselineY);
+    <span class="cm">// 未確定部分の下線</span>
+    ctx.strokeStyle = COLORS.preeditUnderline;
+    ctx.lineWidth = <span class="st">1</span>;
+    <span class="kw">let</span> shift = <span class="st">0</span>;
+    <span class="kw">for</span> (<span class="kw">const</span> p <span class="kw">of</span> sorted) {
+      <span class="kw">const</span> start = p.column + shift;
+      <span class="kw">const</span> x1 = <span class="kw">this</span>.metrics.xForColumn(display, start);
+      <span class="kw">const</span> x2 = <span class="kw">this</span>.metrics.xForColumn(display, start + compText.length);
+      <span class="kw">const</span> uy = topY + <span class="kw">this</span>.metrics.lineHeight - <span class="st">3</span>;
+      ctx.beginPath();
+      ctx.moveTo(contentX + x1, uy + <span class="st">0.5</span>);
+      ctx.lineTo(contentX + x2, uy + <span class="st">0.5</span>);
+      ctx.stroke();
+      shift += compText.length;
+    }
+  }
+
+  <span class="cm">/** タブを空白に展開しつつ描く。戻り値は描いた幅 */</span>
+  <span class="kw">private</span> drawRun(ctx: <span class="ty">CanvasRenderingContext2D</span>, text: <span class="ty">string</span>, color: <span class="ty">string</span>, x: <span class="ty">number</span>, y: <span class="ty">number</span>): <span class="ty">number</span> {
+    <span class="kw">if</span> (text.length === <span class="st">0</span>) <span class="kw">return</span> <span class="st">0</span>;
+    ctx.fillStyle = color;
+    <span class="kw">return</span> <span class="kw">this</span>.fillTextExpanded(ctx, text, x, y);
+  }
+
+  <span class="kw">private</span> fillTextExpanded(ctx: <span class="ty">CanvasRenderingContext2D</span>, text: <span class="ty">string</span>, x: <span class="ty">number</span>, y: <span class="ty">number</span>): <span class="ty">number</span> {
+    <span class="kw">const</span> expanded = text.includes(<span class="st">"\t"</span>) ? text.replace(/\t/g, <span class="st">" "</span>.repeat(<span class="kw">this</span>.metrics.tabSize)) : text;
+    ctx.fillText(expanded, x, y);
+    <span class="kw">return</span> <span class="kw">this</span>.metrics.lineWidth(text);
+  }
+}</code></pre>
+
+    <p>いちばん下の <code>fillTextExpanded</code> が、実は全テキスト描画の底です。<code>ctx.fillText</code> はタブを幅ゼロのように扱うので、<strong>タブを <code>tabSize</code> ぶんの空白に展開してから</strong>描きます（<code>text.replace(/\t/g, ...)</code>）。返す幅は展開後ではなく<strong>元テキストの <code>lineWidth</code></strong> —— <code>metrics.charWidth</code> がタブを固定幅として測るので、幅計算と描画がずれません。<code>drawRun</code> はこれに色を添えただけの薄い包みで、空文字なら何もせず幅0を返します。</p>
+    <p><code>renderComposingLine</code> は IME 変換中の行専用（第08章で詳しく扱います）。要点だけ言えば、<strong>未確定文字列は文書には入れず、描画のときだけ表示テキストに差し込む</strong>（CLAUDE.md の「IME: 未確定文字列は文書に入れない。ビューが見た目だけ差し込む」）。複数カーソルに対応するため、差し込みは<strong>後ろの桁から</strong>行い（手前の桁がずれないように）、変換中の部分には下線を引きます。この章では「view には IME 用の特別描画パスがある」とだけ覚えておけば十分です。</p>
+
+    <h2 class="step" id="step-7"><span class="step-no">Step 7</span>ガターと座標変換 — 画面とオフセットを行き来する</h2>
+    <p>本文を描き終えたら、最後に<strong>ガター（行番号）</strong>を描きます。そして描画とは別に、<strong>マウス座標を文書オフセットに直す</strong>変換と、<strong>カーソルを画面内に入れる</strong>スクロールを見ます。この3つで、view は「見せる」だけでなく「触れる」部品になります。まずは <code>render()</code> の末尾、ガター描画です。</p>
+
+    <div class="file-tag">editor/view.ts（つづき・render 末尾のガター）</div>
+    <pre><code>    <span class="cm">// ---- ガター（行番号）----</span>
+    ctx.fillStyle = COLORS.gutterBg;
+    ctx.fillRect(<span class="st">0</span>, <span class="st">0</span>, gutterW, h);
+    ctx.strokeStyle = COLORS.gutterBorder;
+    ctx.beginPath();
+    ctx.moveTo(gutterW - <span class="st">0.5</span>, <span class="st">0</span>);
+    ctx.lineTo(gutterW - <span class="st">0.5</span>, h);
+    ctx.stroke();
+    ctx.textAlign = <span class="st">"right"</span>;
+    <span class="kw">for</span> (<span class="kw">let</span> line = firstLine; line &lt;= lastLine; line++) {
+      ctx.fillStyle = activeLines.has(line) ? COLORS.gutterActiveFg : COLORS.gutterFg;
+      ctx.fillText(<span class="ty">String</span>(line + <span class="st">1</span>), gutterW - <span class="st">14</span>, yOf(line) + baselineOffset);
+    }
+    ctx.textAlign = <span class="st">"left"</span>;
+    ctx.restore();
+
+    <span class="cm">// 隠し textarea をプライマリカーソルへ追従させる（IME 候補窓の位置決め）</span>
+    <span class="kw">if</span> (<span class="kw">this</span>.onCursorViewportPos) {
+      <span class="kw">const</span> head = <span class="kw">this</span>.editor.selections[<span class="kw">this</span>.editor.selections.length - <span class="st">1</span>].head;
+      <span class="kw">const</span> pos = doc.toPosition(head);
+      <span class="kw">const</span> x = gutterW - scrollLeft + <span class="kw">this</span>.metrics.xForColumn(doc.getLine(pos.line), pos.column);
+      <span class="kw">this</span>.onCursorViewportPos(x, yOf(pos.line));
+    }
+  }</code></pre>
+
+    <p>ガターは本文の<strong>クリップを解除したあと</strong>（Step 6 末尾の <code>ctx.restore()</code> の後）に、ガター背景で塗り直し、右端に1本の縦罫線を引き、可視範囲の行番号を右揃え（<code>textAlign="right"</code>）で描きます。行番号は0始まりの内部行に <code>+1</code> して人間向けの1始まりに。カーソルのある行（<code>activeLines</code>）だけ明るい色にして「いまここ」を示します。<code>gutterW - 0.5</code> の <code>0.5</code> は、1px の罫線をピクセル境界にきっちり載せて<strong>ぼやけさせない</strong>ための定番テクニックです。</p>
+    <p>末尾の <code>onCursorViewportPos</code> は、隠し <code>&lt;textarea&gt;</code> をカーソルの<strong>画面上の位置</strong>へ追従させるコールバックです。IME の変換候補ウィンドウは、OS がこの textarea の位置に出すので、カーソルの真下に候補を出すには毎フレームここを更新する必要があります（第05・08章）。描画のたびにプライマリカーソルの viewport 座標を通知しておく、という配線です。</p>
+
+    <p>最後に、描画とは逆向きの2つの座標変換。<strong>マウス → オフセット</strong>（<code>offsetAtClient</code>）と、<strong>カーソル → スクロール</strong>（<code>revealPrimary</code>）です。ファイル上ではこれらは <code>render</code> の前に定義されていますが、意味の流れで最後に読みます。</p>
+
+    <div class="file-tag">editor/view.ts（座標変換・revealPrimary）</div>
+    <pre><code>  <span class="cm">/** クライアント座標 → 文書オフセット */</span>
+  offsetAtClient(clientX: <span class="ty">number</span>, clientY: <span class="ty">number</span>): <span class="ty">number</span> {
+    <span class="kw">const</span> rect = <span class="kw">this</span>.canvas.getBoundingClientRect();
+    <span class="kw">const</span> doc = <span class="kw">this</span>.editor.doc;
+    <span class="kw">const</span> y = clientY - rect.top + <span class="kw">this</span>.scroller.scrollTop;
+    <span class="kw">const</span> line = <span class="ty">Math</span>.max(<span class="st">0</span>, <span class="ty">Math</span>.min(doc.lineCount - <span class="st">1</span>, <span class="ty">Math</span>.floor(y / <span class="kw">this</span>.metrics.lineHeight)));
+    <span class="kw">const</span> x = clientX - rect.left - <span class="kw">this</span>.gutterWidth() + <span class="kw">this</span>.scroller.scrollLeft;
+    <span class="kw">const</span> column = <span class="kw">this</span>.metrics.columnForX(doc.getLine(line), x);
+    <span class="kw">return</span> doc.toOffset(line, column);
+  }
+
+  <span class="cm">/** プライマリカーソルを可視範囲に入れる */</span>
+  revealPrimary(): <span class="ty">void</span> {
+    <span class="kw">const</span> doc = <span class="kw">this</span>.editor.doc;
+    <span class="kw">const</span> head = <span class="kw">this</span>.editor.selections[<span class="kw">this</span>.editor.selections.length - <span class="st">1</span>].head;
+    <span class="kw">const</span> pos = doc.toPosition(head);
+    <span class="kw">const</span> lh = <span class="kw">this</span>.metrics.lineHeight;
+    <span class="kw">const</span> top = pos.line * lh;
+    <span class="kw">const</span> viewH = <span class="kw">this</span>.scroller.clientHeight;
+    <span class="kw">if</span> (top &lt; <span class="kw">this</span>.scroller.scrollTop) {
+      <span class="kw">this</span>.scroller.scrollTop = top;
+    } <span class="kw">else if</span> (top + lh &gt; <span class="kw">this</span>.scroller.scrollTop + viewH) {
+      <span class="kw">this</span>.scroller.scrollTop = top + lh - viewH;
+    }
+    <span class="kw">const</span> x = <span class="kw">this</span>.metrics.xForColumn(doc.getLine(pos.line), pos.column);
+    <span class="kw">const</span> viewW = <span class="kw">this</span>.scroller.clientWidth - <span class="kw">this</span>.gutterWidth();
+    <span class="kw">if</span> (x &lt; <span class="kw">this</span>.scroller.scrollLeft + <span class="st">10</span>) {
+      <span class="kw">this</span>.scroller.scrollLeft = <span class="ty">Math</span>.max(<span class="st">0</span>, x - <span class="st">10</span>);
+    } <span class="kw">else if</span> (x &gt; <span class="kw">this</span>.scroller.scrollLeft + viewW - <span class="st">30</span>) {
+      <span class="kw">this</span>.scroller.scrollLeft = x - viewW + <span class="st">30</span>;
+    }
+  }</code></pre>
+
+    <p><code>offsetAtClient</code> は<strong>クリックした場所を文書オフセットに直す</strong>関数で、描画の完全な逆再生です。canvas の画面位置（<code>getBoundingClientRect</code>）を基準に、クリックの y からスクロール量を足して文書内の y にし、<code>÷ lineHeight</code> で行を求める（可視範囲計算と同じ割り算!）。x はガター幅と横スクロールを補正し、<code>metrics.columnForX</code>（Step 1、ピクセル → 桁）で桁を求め、<code>doc.toOffset(line, column)</code> でオフセットに変換します。第05章の入力層は、マウスクリックをこの1本の関数でカーソル位置に翻訳します。</p>
+    <p><code>revealPrimary</code> は、この章で唯一 view が<strong>スクロール位置を書き込む</strong>場所です（Step 3 で「読むだけ」と言った例外）。編集でカーソルが画面外へ出たとき、プライマリカーソルの行 <code>top</code> が窓の上より上なら <code>scrollTop = top</code>（上に寄せる）、下より下なら下端に合わせる。横方向も同様に、少しの余白（10px / 30px）を持たせて画面内へ収めます。カーソルに追従してスクロールする、あの当たり前の挙動の実装です。<code>scrollTop</code> に代入すると <code>scroller</code> が <code>scroll</code> イベントを発火し、それが Step 2 の配線経由で再描画を呼ぶ —— <strong>状態を書けば描画は自動で追いつく</strong>、という一貫した流れです。</p>
+
+    <div class="gonote"><div class="box-k">TS メモ · selections[length - 1] が「プライマリ」カーソル</div>
+      <p><code>editor.selections</code> は複数カーソルの配列で、その<strong>末尾</strong>（<code>selections[selections.length - 1]</code>）を「プライマリ（主）カーソル」として扱います。複数カーソルでも、スクロールを追従させる基準や IME 候補窓の位置決めは1つに絞る必要があるからです。最後に足したカーソルが主、という直感的な約束です。カーソルが1本のときは、当然それが唯一かつプライマリになります。複数カーソルの仕組みそのものは第06章で扱います。</p>
+    </div>
+
+    <div class="box do"><div class="box-k">▸ 動かして確認</div>
+      <p>この章のコードは Canvas 描画が中心で、<code>core/</code> の単体テストのような自動検証はありません（描画の正しさは目で見るのが確実です）。まず<strong>型が通ること</strong>を確かめ、次に<strong>ブラウザで実際に描かれること</strong>を確かめます。<code>src/</code> の中で次を実行してください。</p>
+      <pre class="term"><code><span class="ps">$</span> cd src
+<span class="ps">$</span> npm run build
+<span class="out">&gt; tsc --noEmit &amp;&amp; vite build
+✓ built in 251ms</span></code></pre>
+      <p>（実際にはこの前後に変換モジュール数や成果物の一覧も出ます。時間は環境で変わるので、<strong><code>✓ built</code> が出ればOK</strong>と考えてください。）<code>tsc --noEmit</code>（型チェック）が通れば、<code>view.ts</code> と <code>metrics.ts</code> の型はすべて整合しています。続いて開発サーバを立ち上げ、ブラウザで描画を目視します。</p>
+      <pre class="term"><code><span class="ps">$</span> npm run dev
+<span class="out">  VITE v5.4.x  ready in 320 ms
+  ➜  Local:   http://localhost:5173/</span></code></pre>
+      <p>ブラウザで開いて、次を自分の目で確かめてください。これがこの章の"テスト"です。</p>
+      <ol>
+        <li><strong>文字・行番号・カーソルが描かれる</strong> — 左にガター（行番号）、右に本文、点滅する縦棒のカーソル。</li>
+        <li><strong>日本語でカーソルがずれない</strong> — 「関数」など全角を打ち、カーソルが文字の右端にぴたりと付く（Step 1 の実測幅が効いている）。</li>
+        <li><strong>選択が階段状に描かれる</strong> — 複数行をドラッグ選択し、始端の行は途中から、途中の行は全幅、終端の行は途中まで、と帯が出る。</li>
+        <li><strong>10万行でも軽い</strong> — 大きめのテキストを貼り付け（または長い行を大量に作り）、スクロールしても引っかからない。可視範囲だけ描いている証拠です。</li>
+      </ol>
+      <p><strong>補足（Windows）</strong>: 序章の落とし穴のとおり、プロジェクトの絶対パスに日本語が含まれると <code>npm run dev</code>（Vite）が <code>exit 0xC0000409</code> で落ちることがあります。その場合は <code>C:\work\mint\</code> のような英語だけのパスにコピーしてから <code>npm run dev</code> してください（<code>npm run build</code> は影響を受けません）。</p>
+    </div>
+
+    <h2>つまずき FAQ</h2>
+    <details class="qa"><summary>なぜ全行を描かず「見えている行だけ」で足りるの? スクロールしたら描いてない部分が見えるのでは?</summary>
+      <div class="qa-body"><p>スクロールするたびに <code>render()</code> が呼ばれ、そのときの <code>scrollTop</code> から<strong>可視範囲を計算し直して</strong>描くからです。canvas は <code>position:sticky</code> で画面に固定されていて、スクロールで動くのは sizer（実寸の透明な箱）だけ。だから canvas には「常に、いま見えている範囲」を描けばよく、見えていない行は描く必要がありません。スクロールした瞬間に <code>firstLine</code>/<code>lastLine</code> が更新され、新しく見えてくる行がその場で描かれます。全行を描く実装は10万行で破綻しますが、可視範囲方式は文書の大きさによらず一定の仕事量で済みます。</p>
+      <p><strong>ただし1つだけ例外があります。</strong>色付け（第07章の <code>Highlighter</code>）は、ある行のトークンを求めるのに<strong>その手前の行の状態</strong>を必要とします（ブロックコメントが行をまたぐため）。だから遠くの行へ<strong>初めて</strong>飛ぶと、0行目からそこまでを一度だけ舐めることになります。10万行の文書の末尾へ一気にジャンプしたときの実測は<strong>約115ms</strong>——一瞬引っかかる程度ですが、確かにゼロではありません。ただしこれは初回だけで、2回目以降はキャッシュが効いて<strong>0ms</strong>に戻ります。「描画は常に一定、色付けだけは初回に文書の大きさに比例した下ごしらえが入る」と切り分けて覚えてください。詳しくは第07章で扱います。</p></div>
+    </details>
+    <details class="qa"><summary>スクロールを自作しないと言うけど、canvas は画面サイズしかないのに、どうやって10万行ぶんスクロールできるの?</summary>
+      <div class="qa-body"><p>鍵は <code>sizer</code> です。<code>scroller</code>（<code>overflow:auto</code>）の中に、高さ <code>全行 × lineHeight</code>（＝文書の実寸）をもつ透明な <code>&lt;div&gt;</code> を1枚置きます。中身は空でも、<strong>高さがあるぶんブラウザは「10万行ぶんの中身がある」と信じ</strong>、正しい長さのスクロールバーを出し、ホイールやドラッグでのスクロールを全部やってくれます。canvas 自体は sticky で窓に貼り付いたまま動かず、<code>scroll</code> イベントで <code>scrollTop</code> を読んで中身だけ描き替える。<strong>スクロールという状態と操作をブラウザに外注し、view は結果の <code>scrollTop</code> を読むだけ</strong>——これが「自作しない」の意味です。</p></div>
+    </details>
+    <details class="qa"><summary>等幅フォントなら「桁 × 固定幅」でカーソル位置を計算できそうなのに、なぜ <code>measureText</code> で1文字ずつ測るの?</summary>
+      <div class="qa-body"><p>等幅フォントでも、<strong>全角文字（日本語）・絵文字・タブは半角と幅が違う</strong>からです。「桁 × 固定幅」だと、日本語が混じった行でカーソルや選択が文字からずれます。<code>FontMetrics.charWidth</code> は各文字を <code>measureText</code> で実測し（結果は <code>Map</code> にキャッシュ）、<code>xForColumn</code> はそれを積み上げて桁 → ピクセルを、<code>columnForX</code> は逆にピクセル → 桁を求めます。さらに絵文字はサロゲートペアで1文字が2コード単位になるため、<code>codePointAt</code> と <code>i += s.length</code> で<strong>文字の切れ目を壊さずに</strong>測っています。実測に徹することで、どんな文字が来ても座標がずれません。</p></div>
+    </details>
+
+    <h2>理解度チェック</h2>
+    <p>次の問いに<strong>自分の言葉で</strong>答えられたら、この章は卒業です。</p>
+    <details class="qa"><summary>1. <code>render()</code> の <code>firstLine</code> / <code>lastLine</code> を求める2行を書き、それがなぜ「最も大事な計算」なのか説明せよ。</summary>
+      <div class="qa-body"><p><code>firstLine = Math.max(0, Math.floor(scrollTop / lh))</code>、<code>lastLine = Math.min(lineCount - 1, Math.ceil((scrollTop + h) / lh))</code>。全行が同じ高さ <code>lh</code> なので、スクロール上端・下端のピクセルを <code>lh</code> で割るだけで「いま見えている行の範囲」が求まる。以降のすべての描画ループがこの範囲だけを回るので、<strong>文書が10万行あっても仕事量は画面内の数十行ぶんで一定</strong>になる。「見えている行だけ描く」という本章の掟を実現する、たった2行の心臓部だから。</p></div>
+    </details>
+    <details class="qa"><summary>2. 「スクロールを自作しない」構成を、<code>scroller</code> / <code>sizer</code> / <code>canvas</code> の3つの役割で説明せよ。</summary>
+      <div class="qa-body"><p><strong><code>scroller</code></strong>（<code>overflow:auto</code>）がスクロール一切をブラウザに担当させる外枠。<strong><code>sizer</code></strong> は中身が空だが高さ＝文書の実寸（全行 × 行高）をもつ透明な箱で、これがスクロールバーの長さを決める（場所取り役）。<strong><code>canvas</code></strong> は <code>position:sticky</code> で窓に貼り付き、動かず常に画面いっぱいに居続け、<code>scrollTop</code> を読んで可視範囲だけ描き替える。ホイール・スクロールバー・慣性はブラウザ製が無料で手に入り、view はスクロール位置を基本「読むだけ」（書くのは <code>revealPrimary</code> だけ）。</p></div>
+    </details>
+    <details class="qa"><summary>3. なぜ <code>FontMetrics</code> は文字幅を <code>measureText</code> で実測し、<code>Map</code> にキャッシュするのか。等幅前提だと何が起きるか。</summary>
+      <div class="qa-body"><p>Canvas には桁の概念がなく、桁 ⇄ ピクセルの変換には実際の文字幅が要る。等幅フォントでも全角・絵文字・タブは半角と幅が違うため、「桁 × 固定幅」で計算するとカーソルや選択が日本語混じりの行でずれる。だから <code>charWidth</code> は各文字を実測する。ただし毎フレーム全文字を測るのは重いので、測った幅を <code>Map&lt;string, number&gt;</code> にキャッシュし、同じ文字は2回目以降キャッシュから返す。実測（正確さ）とキャッシュ（軽さ）の両取り。さらに <code>codePointAt</code> でサロゲートペアを1文字として扱い、絵文字でも幅を壊さない。</p></div>
+    </details>
+
+    <h2>まとめ — 次の層へ</h2>
+    <p>この章で、エディタはついに<strong>目に見える</strong>ようになりました。手にした発想は2つ。1つは<strong>可視範囲だけ描く</strong> —— <code>scrollTop ÷ lineHeight</code> の割り算2つで <code>[firstLine, lastLine]</code> を求め、背景 → 選択 → 検索一致 → 文字 → カーソルの5層を、その範囲にだけ重ねる。だから10万行でも軽い。もう1つは<strong>スクロールを自作しない</strong> —— 実寸の sizer と sticky な canvas で、スクロールの厄介事をまるごとブラウザに外注する。そして最下層では <code>FontMetrics</code> が、桁とピクセルを <code>measureText</code> の実測で正確に橋渡ししていました。</p>
+    <p>けれど、この描画係はまだ<strong>受け身</strong>です。編集が起きれば描き直し、スクロールされれば描き直す —— でも、その「編集」や「スクロール」を<strong>起こす</strong>のは誰でしょう。キーボードのキー、マウスのクリック、ホイール、そして日本語の変換。それらの生のイベントを、第02章で作った <code>Edit</code> やカーソル移動に<strong>翻訳する</strong>係がまだいません。</p>
+    <p>次の第05章では、その<strong>入力の受け取り</strong>（<code>editor/input.ts</code>）を作ります。この章で用意した <code>offsetAtClient</code>（クリック → オフセット）がさっそく主役の1人として登場します。キーを押す、範囲をドラッグする、ホイールで送る —— あの当たり前の操作が、どうやって編集操作に化けるのか。エディタの「心拍」（序章の図）が、ようやく1周まわり始めます。</p>
+
+    <div class="chap-foot">
+      <a class="pager" href="03-history.html"><span class="dir">← 前へ</span>第03章 · 編集と取り消し</a>
+      <a class="pager next" href="05-input.html"><span class="dir">次へ →</span>第05章 · 入力を受ける</a>
+    </div>
+  </main>
+</div>
+</body>
+</html>

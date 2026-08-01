@@ -1,0 +1,614 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>第00章 ディスクとページ — ディスクからつくるデータベース</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500;600&family=Source+Serif+4:opsz,wght@8..60,400;8..60,600;8..60,700&family=Noto+Serif+JP:wght@400;600;700&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<div class="shell">
+
+  <aside class="spine">
+    <a class="wordmark" href="index.html">MINIDB · from scratch</a>
+    <div class="book-title">ディスクから<br>つくるデータベース</div>
+    <div class="book-sub">Go で B+Tree から SQL まで</div>
+
+    <div class="legend"><span>読む <b>↓</b></span><span>組む <b>↑</b></span></div>
+
+    <nav aria-label="目次">
+      <ul class="toc">
+        <li><a class="nav-item" href="index.html"><span class="nav-num">序</span><span class="nav-label">はじめに・準備<span class="nav-tag">Setup</span></span></a></li>
+        <li><a class="nav-item current" aria-current="page" href="00-disk.html"><span class="nav-num">00</span><span class="nav-label">ディスクとページ<span class="nav-tag">Disk</span></span></a></li>
+        <li><a class="nav-item" href="01-page.html"><span class="nav-num">01</span><span class="nav-label">ページの中身<span class="nav-tag">Page</span></span></a></li>
+        <li><a class="nav-item" href="02-buffer.html"><span class="nav-num">02</span><span class="nav-label">バッファプール<span class="nav-tag">Buffer</span></span></a></li>
+        <li><a class="nav-item" href="03-btree.html"><span class="nav-num">03</span><span class="nav-label">B+Tree 索引<span class="nav-tag">Index</span></span></a></li>
+        <li><a class="nav-item" href="04-catalog.html"><span class="nav-num">04</span><span class="nav-label">表とカタログ<span class="nav-tag">Catalog</span></span></a></li>
+        <li><a class="nav-item" href="05-sql.html"><span class="nav-num">05</span><span class="nav-label">SQL を実行する<span class="nav-tag">Query</span></span></a></li>
+        <li><a class="nav-item" href="06-wal.html"><span class="nav-num">06</span><span class="nav-label">壊れない仕組み<span class="nav-tag">WAL</span></span></a></li>
+        <li><a class="nav-item" href="07-txn.html"><span class="nav-num">07</span><span class="nav-label">索引とトランザクション<span class="nav-tag">Txn</span></span></a></li>
+      </ul>
+    </nav>
+
+    <div class="spine-foot">
+      各章は一つの層。<br>下（ディスク）から上（SQL）へ<br>積み上げて動かしていく。
+    </div>
+  </aside>
+
+  <main class="reading">
+    <div class="progress-tag">第00章 / 全8章 · 層: DISK · 読了目安 2〜3時間</div>
+    <div class="eyebrow"><span>Disk</span><span class="depth">— 最下層</span></div>
+    <h1>ディスクとページ</h1>
+    <p class="lede">データベースの底には、たった一つのファイルがあります。この章では、そのファイルを<strong>番号で読み書きできる固定サイズの区画（ページ）の並び</strong>として扱う部品 <code>DiskManager</code> を作ります。全部で 100 行ほどの小さなコードですが、「再起動してもデータが残る」という、データベースの一番最初の魔法がここで解けます。</p>
+
+    <div class="box goal"><div class="box-k">◈ この章のゴール</div>
+      <p>次の 2 つを、自分の目と手で確認できたら達成です。</p>
+      <ol>
+        <li><code>go test ./internal/storage</code> で、この章の 5 本のテスト（<code>TestPersistAcrossReopen</code> ほか）がすべて PASS する。</li>
+        <li>自分で書いた DB ファイルを 16 進ダンプで開き、<strong>「ページ番号 × 4096 バイト目」に自分の書いたバイトが本当に置かれている</strong>ことを目視する。</li>
+      </ol>
+    </div>
+
+    <div class="box map"><div class="box-k">☰ この章のステップ</div>
+      <ol>
+        <li><a href="#step-1">ページを型にする — <code>page.go</code></a></li>
+        <li><a href="#step-2">ファイルを開き、ページ総数を復元する — <code>OpenDiskManager</code></a></li>
+        <li><a href="#step-3">新しいページを配る — <code>AllocatePage</code></a></li>
+        <li><a href="#step-4">狙った場所を読み書きする — <code>ReadPage</code> / <code>WritePage</code></a></li>
+        <li><a href="#step-5">「書いた」と「消えない」の間 — <code>Sync</code> / <code>Close</code></a></li>
+        <li><a href="#step-6">テストを読む — 「再起動しても残る」を機械で確かめる</a></li>
+        <li><a href="#step-7">演習: ファイルの中身を 16 進で覗く</a></li>
+      </ol>
+    </div>
+
+    <h2>なぜ「ページ」なのか</h2>
+    <p>ディスク（HDD でも SSD でも）は、メモリに比べて桁違いに遅い装置です。メモリへのアクセスがナノ秒単位なのに対し、ディスク I/O はマイクロ秒〜ミリ秒単位。数千倍から数百万倍の差があります。しかも遅いだけでなく、<strong>1 バイトだけ読む、ということがそもそもできません</strong>。OS もハードウェアも、内部では「ブロック」と呼ばれるまとまった単位（多くの環境で 4KB）でしかディスクとやり取りしないからです。1 バイト欲しくても、裏では 4KB がまるごと動いています。</p>
+    <p>だからデータベースは、ディスクとのやり取りを最初から<em>ページ</em>という固定サイズの単位に揃えてしまいます。<strong>ページ</strong>とは「ディスク読み書きの最小単位として DB が決めた、固定長のバイトのかたまり」のことです。minidb では 1 ページ = 4096 バイト（4KiB）。PostgreSQL は 8KB、MySQL（InnoDB）は 16KB と大きさこそ違いますが、「固定長ページの並びとしてファイルを扱う」という発想は本物の DB もまったく同じです。</p>
+    <p>固定長にすると、何がうれしいのでしょうか。最大の御利益は、<strong>置き場所が計算だけで決まる</strong>ことです。ファイルを 4096 バイトずつに区切れば、<code>i</code> 番目のページはファイルの <code>i × 4096</code> バイト目から始まる、と一意に決まります。「ページ番号 3 を読みたい」と思ったら、目次も検索も要らず、<code>3 × 4096 = 12288</code> バイト目へ一発で飛べばいい。この計算 1 回の単純さが、これから上に積むすべての層の土台になります。</p>
+
+    <div class="ascii">ファイル = ページの配列
+
+   page 0        page 1        page 2        page 3
+ ┌───────────┐┌───────────┐┌───────────┐┌───────────┐
+ │  4096 B   ││  4096 B   ││  4096 B   ││  4096 B   │
+ └───────────┘└───────────┘└───────────┘└───────────┘
+ 0           4096         8192        12288       16384
+                                                (バイト位置)
+
+   ページ番号 i  →  先頭位置 = i × 4096   （目次いらず！）</div>
+
+    <p>もう一つの御利益は、あとの章で効いてきます。ページの大きさがすべて同じなら、「メモリに何枚キャッシュするか」（第02章 バッファプール）も「空いた場所を再利用できるか」も、パズルのピースが全部同じ形なので管理がとても簡単になるのです。可変長のかたまりを詰めたり抜いたりすると必ず「隙間」の管理に苦しむことになりますが、固定長ならその悩みが消えます。</p>
+
+    <h2>この層が上の層に約束すること</h2>
+    <p>この章で作る層（ディスクマネージャ）が周囲に約束するのは、たったこれだけです。</p>
+    <ul>
+      <li>ページ番号をくれれば、その 4096 バイトを<strong>読む</strong>／<strong>書く</strong>。</li>
+      <li>新しいページが要るなら、ファイル末尾に<strong>割り当てて</strong>番号を返す。</li>
+      <li>「消えない」保証が欲しくなったら、<strong>Sync</strong> でディスクまで届けさせる。</li>
+    </ul>
+    <p>逆に、この層が<strong>やらない</strong>ことをはっきりさせておきます。ページの<strong>中身の解釈は一切しません</strong>。4096 バイトの中にレコードがどう並んでいるか、それが表なのか索引なのか — そういう意味づけは全部、上の層の仕事です。この層から見れば、ページはただの無地のバイト列です。層ごとに責務を一つに絞る。この規律が、8 章ぶんの積み上げを可能にします。</p>
+
+    <h2 class="step" id="step-1"><span class="step-no">Step 1</span>ページを型にする — page.go</h2>
+    <p>最初のステップでは、いま説明した「ページ」という概念を Go の型にします。作るのは <code>internal/storage/page.go</code>。定数 2 つと型 2 つだけの、この本でいちばん短いファイルです。短いですが、ここで決めたことは 8 章すべてを縛る「憲法」になるので、1 行ずつ見ていきます。</p>
+
+    <div class="file-tag">internal/storage/page.go</div>
+    <pre><code><span class="cm">// Package storage は、データベースファイルを固定長ページの列として扱う最下層。</span>
+<span class="cm">// ここより上の層は「バイト列のページを ID で読み書きできる」ことだけを前提にする。</span>
+<span class="kw">package</span> storage
+
+<span class="cm">// PageSize は 1 ページのバイト数。1 ページ = 1 回のディスク I/O 単位であり、</span>
+<span class="cm">// ファイル内のオフセットは PageID * PageSize で一意に決まる。</span>
+<span class="cm">// 4KiB は多くの OS のページサイズ / ファイルシステムのブロックサイズと一致する。</span>
+<span class="kw">const</span> PageSize = <span class="st">4096</span>
+
+<span class="cm">// PageID はファイル先頭からのページ番号（0 始まり）。</span>
+<span class="kw">type</span> <span class="ty">PageID</span> <span class="kw">uint32</span>
+
+<span class="cm">// InvalidPageID は「ページを指していない」ことを表す番兵値。</span>
+<span class="kw">const</span> InvalidPageID <span class="ty">PageID</span> = <span class="st">0xFFFFFFFF</span>
+
+<span class="cm">// Page は 1 ページ分のメモリ上のバイト列。</span>
+<span class="cm">// 解釈（レコード配置など）は上位層が行い、この層では中身に関知しない。</span>
+<span class="kw">type</span> <span class="ty">Page</span> [PageSize]<span class="kw">byte</span></code></pre>
+
+    <p>順に見ます。<code>PageSize = 4096</code> は先ほどの「1 ページ = 4096 バイト」の宣言です。コメントにある<strong>オフセット</strong>とは「ファイル先頭から数えて何バイト目か」という位置のことで、この言葉はこの先ずっと使います。4096 という値そのものに深い数学はなく、「OS やファイルシステムが内部で使うブロックサイズ（多くの環境で 4KB）に揃えると I/O の無駄がない」という工学的な選択です。</p>
+    <p><code>PageID</code> はページ番号の型です。ただの <code>uint32</code>（0 〜 約 42 億の符号なし整数）ですが、<code>type PageID uint32</code> と<strong>名前を付け直して</strong>います。42 億ページ × 4096 バイトで最大 16TiB。学習用 DB には一生困らない広さです。</p>
+    <p><code>InvalidPageID</code> は少し先回りの定数です。<strong>番兵値</strong>とは「正常な値ではありえないと決めた特別な値」のこと。あとで B+Tree（第03章）を作るとき、「右隣のページは存在しない」を表現する必要が出てきます。そのときに 0 を使うわけにはいきません — 0 は<strong>正当なページ番号</strong>だからです。そこで <code>uint32</code> の最大値 <code>0xFFFFFFFF</code>（= 4294967295）を「どこも指していない」の意味に予約しておきます。</p>
+    <p>最後の <code>type Page [PageSize]byte</code> がこのファイルの主役です。序章の道具箱で触れたとおり、<code>[4096]byte</code> は<strong>配列</strong> — 長さが 4096 に固定された、値としてコピーされるバイトの並びです。スライス <code>[]byte</code> ではなく配列にしたのは意図的で、「ページは常にきっかり 4096 バイト」というルールを、実行時チェックではなく<strong>型そのもの</strong>で保証するためです。長さ 4095 の <code>Page</code> はコンパイルの時点で存在できません。</p>
+
+    <div class="gonote"><div class="box-k">GO メモ · type による型の定義</div>
+      <p><code>type PageID uint32</code> は「<code>uint32</code> を土台に、<code>PageID</code> という新しい型を作る」という宣言です。中身はただの整数ですが、Go は <code>PageID</code> と <code>uint32</code> を別の型として区別するので、混ぜるときは <code>PageID(n)</code> のような明示的な変換が要ります。手間に見えて、これが効きます。「ページ番号のつもりがバイト位置を渡していた」というような取り違えを、コンパイラが止めてくれるからです。同様に <code>type Page [PageSize]byte</code> は「4096 バイト配列に <code>Page</code> という名前を付けた」もの。定数 <code>PageSize</code> はコンパイル時に確定しているので、配列の長さに使えます。</p>
+    </div>
+
+    <div class="box do"><div class="box-k">▸ 動かして確認</div>
+      <p>コードはまだ「型を置いた」だけなので、テストの前に <code>go doc</code> で型が意図どおり公開されているかを眺めてみましょう（コマンドはすべて <code>src/</code> の中で実行します）。<code>go doc</code> はコード中のコメントをそのままドキュメントとして表示するコマンドです。</p>
+      <pre class="term"><code><span class="ps">$</span> go doc ./internal/storage Page
+<span class="out">package storage // import "minidb/internal/storage"
+
+type Page [PageSize]byte
+    Page は 1 ページ分のメモリ上のバイト列。 解釈（レコード配置など）は上位層が行い、この層では中身に関知しない。</span>
+
+<span class="ps">$</span> go doc ./internal/storage PageSize
+<span class="out">package storage // import "minidb/internal/storage"
+
+const PageSize = 4096
+    PageSize は 1 ページのバイト数。1 ページ = 1 回のディスク I/O 単位であり、 ファイル内のオフセットは PageID *
+    PageSize で一意に決まる。 4KiB は多くの OS のページサイズ / ファイルシステムのブロックサイズと一致する。</span></code></pre>
+      <p>宣言の上に書いたコメントが、そのまま説明文として出てきました。Go では「公開する名前の直上のコメント = 公式ドキュメント」です。本書のコードのコメントも、この形式で書かれています。</p>
+    </div>
+
+    <h2 class="step" id="step-2"><span class="step-no">Step 2</span>ファイルを開き、ページ総数を復元する — OpenDiskManager</h2>
+    <p>型ができたので、いよいよファイルを扱う本体 <code>DiskManager</code> を作ります。このステップで書くのは、構造体の定義と、DB ファイルを開く関数 <code>OpenDiskManager</code> です。ここには、この章でいちばん美しい仕掛け — <strong>ファイルサイズからページ総数を復元する</strong> — が入っています。</p>
+
+    <div class="file-tag">internal/storage/disk.go</div>
+    <pre><code><span class="kw">package</span> storage
+
+<span class="kw">import</span> (
+	<span class="st">"fmt"</span>
+	<span class="st">"os"</span>
+)
+
+<span class="cm">// DiskManager はデータベースファイルへのページ単位の読み書きを担う。</span>
+<span class="cm">// 責務は「PageID とファイルオフセットの対応」と「新規ページの割り当て」のみ。</span>
+<span class="cm">// 空きページの再利用（FR-02）は上位層（フリーリスト）が決め、この層は関知しない。</span>
+<span class="kw">type</span> <span class="ty">DiskManager</span> <span class="kw">struct</span> {
+	file     *os.File
+	numPages <span class="ty">PageID</span> <span class="cm">// 次に割り当てる PageID = 現在のページ総数</span>
+}
+
+<span class="cm">// OpenDiskManager はデータベースファイルを開く。存在しなければ作成する。</span>
+<span class="cm">// 既存ファイルの場合、サイズからページ総数を復元する（これが M0 の「再起動後も読める」の要）。</span>
+<span class="kw">func</span> OpenDiskManager(path <span class="kw">string</span>) (*<span class="ty">DiskManager</span>, <span class="kw">error</span>) {
+	f, err := os.OpenFile(path, os.O_RDWR|os.O_CREATE, <span class="st">0o644</span>)
+	<span class="kw">if</span> err != <span class="kw">nil</span> {
+		<span class="kw">return</span> <span class="kw">nil</span>, fmt.Errorf(<span class="st">"storage: open %s: %w"</span>, path, err)
+	}
+	info, err := f.Stat()
+	<span class="kw">if</span> err != <span class="kw">nil</span> {
+		f.Close()
+		<span class="kw">return</span> <span class="kw">nil</span>, fmt.Errorf(<span class="st">"storage: stat %s: %w"</span>, path, err)
+	}
+	size := info.Size()
+	<span class="kw">if</span> size%PageSize != <span class="st">0</span> {
+		<span class="cm">// ページ書き込みの途中でクラッシュした疑い（torn write）。</span>
+		<span class="cm">// ここで拒否すると WAL 回復に到達できなくなるので、ページ境界まで</span>
+		<span class="cm">// 0 埋めして開く。中身の正しさはコミット済みなら WAL の redo が復元し、</span>
+		<span class="cm">// 未コミットなら元々存在しないはずのデータなので捨ててよい。</span>
+		size = (size/PageSize + <span class="st">1</span>) * PageSize
+		<span class="kw">if</span> err := f.Truncate(size); err != <span class="kw">nil</span> {
+			f.Close()
+			<span class="kw">return</span> <span class="kw">nil</span>, fmt.Errorf(<span class="st">"storage: %s の torn write 修復に失敗: %w"</span>, path, err)
+		}
+	}
+	<span class="kw">return</span> &amp;<span class="ty">DiskManager</span>{
+		file:     f,
+		numPages: <span class="ty">PageID</span>(size / PageSize),
+	}, <span class="kw">nil</span>
+}
+
+<span class="cm">// …（AllocatePage 以降のメソッドは Step 3〜5 で）</span></code></pre>
+
+    <p>構造体 <code>DiskManager</code> が持つのは 2 つだけです。<code>file</code> は開いた DB ファイルそのもの（<code>*os.File</code>）。<code>numPages</code> は「いま何ページあるか」で、コメントのとおり<strong>次に割り当てるページ番号</strong>とも読めます。ページ番号は 0 始まりなので、3 ページあれば使用中の番号は 0, 1, 2、次に配る番号は 3。「総数」と「次の番号」が同じ値になる — 0 始まりの小さな御利益です。</p>
+    <p><code>OpenDiskManager</code> の流れを追います。まず <code>os.OpenFile</code> でファイルを開きます。フラグ <code>os.O_RDWR|os.O_CREATE</code> は「読み書き両用で開き、なければ作る」という指定です（詳細は下の GO メモ）。次に <code>f.Stat()</code> でファイルの情報を取り、<code>info.Size()</code> でサイズ（バイト数）を得ます。</p>
+    <p>そして本題の 1 行、<code>numPages: PageID(size / PageSize)</code>。ここに注目してください。<code>numPages</code> は、<strong>どこにも保存していません</strong>。ファイルの先頭に「ページ数: 3」と書き込んだりもしません。それでも再オープンで正しい値に戻るのは、<strong>ファイルサイズ ÷ ページサイズ</strong>という計算だけで復元できるからです。12288 バイトのファイルなら 12288 ÷ 4096 = 3 ページ。それ以外にありえません。</p>
+
+    <div class="ascii">再オープン時の numPages 復元
+
+     ファイルサイズ 12288 バイト
+    ────────────────────────────  =  3    →  numPages = 3
+        PageSize (4096)                       次に配る番号も 3
+
+  「管理情報を保存する」のではなく
+  「ディスク上の事実から計算し直す」</div>
+
+    <p>これは単なる省力化ではなく、<strong>設計思想</strong>です。管理情報を別に保存すると、「実体（ファイル）と帳簿（管理情報）が食い違ったらどちらを信じるか」という問題が必ず生まれます。ディスク上の事実から状態を再構成できるなら、帳簿は要らない。食い違いも起きようがない。この「事実から再構成する」という習慣は、第06章のクラッシュ回復（WAL）で同じ形のまま拡大再登場します。</p>
+    <p>残るは <code>size%PageSize != 0</code> の分岐です。<code>%</code> は割り算の余りなので、これは「サイズが 4096 の倍数でない = ページの途中でファイルが切れている」の検出です。この状態を <strong>torn write</strong>（破れた書き込み）と呼びます。ページを書いている最中に電源が落ちると、ページの前半だけがディスクに届いた中途半端なファイルが残ることがあるのです。minidb はこれをエラーにせず、<code>f.Truncate(size)</code> でページ境界まで 0 埋めして開き直します。<code>(size/PageSize + 1) * PageSize</code> は「4096 の倍数への切り上げ」の定石で、たとえば 4196 バイトなら 4196/4096 = 1（整数除算は切り捨て）、+1 して × 4096 で 8192 バイトになります。<code>Truncate</code> は名前に反してファイルを<strong>伸ばす</strong>こともでき、伸びた部分は 0 で埋まります。</p>
+    <p>「壊れかけのファイルを黙って直していいのか?」と思うかもしれません。コメントが答えています。壊れた半端なページの中身は、コミット済みのデータなら第06章で作る WAL（書き込みログ）が復元してくれるし、未コミットなら元々「なかったことにすべき」データです。だからこの層の仕事は<strong>形式を直すことだけ</strong>（サイズをページ境界に揃える）。中身の正しさは上の層が引き受けます。ここでもまた、責務の分離です。いまは「WAL という保険が後の章で入るから、ここでは拒否せず開く」とだけ覚えて先へ進んでください。</p>
+
+    <div class="gonote"><div class="box-k">GO メモ · os.OpenFile とフラグ</div>
+      <p>普段よく見る <code>os.Open</code> は読み取り専用です。読み書きやファイル作成など細かい指定をしたいときは <code>os.OpenFile(パス, フラグ, パーミッション)</code> を使います。フラグは <code>|</code>（ビット OR）で組み合わせます。<code>os.O_RDWR</code> = 読み書き両用、<code>os.O_CREATE</code> = なければ新規作成。第 3 引数 <code>0o644</code>（<code>0o</code> は 8 進数リテラル）は新規作成時のファイル権限で、Unix 系での「所有者は読み書き、他は読み取りのみ」。Windows ではほぼ飾りですが、慣習として付けます。</p>
+    </div>
+
+    <div class="gonote"><div class="box-k">GO メモ · fmt.Errorf と %w — エラーのラップ</div>
+      <p><code>fmt.Errorf("storage: open %s: %w", path, err)</code> は、元のエラー <code>err</code> を新しいメッセージで<strong>包む</strong>書き方です。動詞 <code>%w</code>（wrap の w）を使うと、元のエラーが中に保持されたまま「storage: open mydata.db: （元の理由）」という文脈付きメッセージになります。エラーが層を上へ伝わるたびに「どの層の・何の操作で失敗したか」が前置きとして積み重なるので、最終的に表示されたとき、失敗の経路が一本の文で読めます。本書のエラーはすべて「<code>パッケージ名: 操作: 原因</code>」の形で統一されています。</p>
+    </div>
+
+    <div class="box do"><div class="box-k">▸ 動かして確認</div>
+      <p>torn write の修復は、テストで確認できます。テスト <code>TestOpenRepairsTornFile</code> は「4096 + 100 バイト」という半端なファイルをわざと作って開き、2 ページに修復されることを検証しています。</p>
+      <pre><code><span class="cm">// ページ境界に揃っていないファイル（torn write）は 0 埋めで修復して開く。</span>
+<span class="cm">// ここで拒否すると WAL 回復に到達できず、クラッシュ耐性（M6）が壊れるため。</span>
+<span class="kw">func</span> TestOpenRepairsTornFile(t *testing.T) {
+	path := filepath.Join(t.TempDir(), <span class="st">"torn.db"</span>)
+	<span class="kw">if</span> err := os.WriteFile(path, <span class="kw">make</span>([]<span class="kw">byte</span>, PageSize+<span class="st">100</span>), <span class="st">0o644</span>); err != <span class="kw">nil</span> {
+		t.Fatal(err)
+	}
+	d, err := OpenDiskManager(path)
+	<span class="cm">// …（開けること・NumPages()==2・ページ1が読めることを検証）</span></code></pre>
+      <pre class="term"><code><span class="ps">$</span> go test ./internal/storage -run TestOpenRepairsTornFile -v
+<span class="out">=== RUN   TestOpenRepairsTornFile
+--- PASS: TestOpenRepairsTornFile (0.01s)
+PASS
+ok  	minidb/internal/storage	3.277s</span></code></pre>
+      <p>4196 バイトの半端なファイルが、拒否されずに 2 ページ（8192 バイト）として開けました。</p>
+    </div>
+
+    <h2 class="step" id="step-3"><span class="step-no">Step 3</span>新しいページを配る — AllocatePage</h2>
+    <p>ファイルは開けるようになりました。次は「新しいページをください」に応える窓口です。上の層が新しいデータを置きたくなったとき、勝手な番号に書き込まれては管理が破綻します。必ずこの窓口から番号をもらう、という決まりにします。</p>
+
+    <div class="file-tag">internal/storage/disk.go（つづき）</div>
+    <pre><code><span class="cm">// AllocatePage はファイル末尾に新しいページを確保し、その ID を返す。</span>
+<span class="cm">// この時点ではまだディスクに書かれない（WritePage で初めて実体化する）。</span>
+<span class="kw">func</span> (d *<span class="ty">DiskManager</span>) AllocatePage() <span class="ty">PageID</span> {
+	id := d.numPages
+	d.numPages++
+	<span class="kw">return</span> id
+}
+
+<span class="cm">// NumPages は現在のページ総数を返す。</span>
+<span class="kw">func</span> (d *<span class="ty">DiskManager</span>) NumPages() <span class="ty">PageID</span> { <span class="kw">return</span> d.numPages }
+
+<span class="cm">// EnsurePages はページ総数が n 以上になるよう管理情報を広げる。</span>
+<span class="cm">// WAL 回復（M6）で「クラッシュ前に割り当て済みだったがデータファイルには</span>
+<span class="cm">// まだ書かれていない」ページを書き戻すために使う。</span>
+<span class="kw">func</span> (d *<span class="ty">DiskManager</span>) EnsurePages(n <span class="ty">PageID</span>) {
+	<span class="kw">if</span> n &gt; d.numPages {
+		d.numPages = n
+	}
+}</code></pre>
+
+    <p><code>AllocatePage</code> は拍子抜けするほど単純です。いまの総数をそのまま新しい番号として返し、総数を 1 増やす。Step 2 で見た「総数 = 次に配る番号」の関係があるので、これだけで 0, 1, 2, … と隙間なく連番が配られます。割り当ては常に<strong>ファイル末尾への追加</strong>で、途中の空きページを探して再利用する、といった賢いことはしません。ページの再利用は上の層（フリーリスト）の関心事であって、この層は関知しない — 構造体のコメントで宣言した責務どおりです。</p>
+    <p>コメントの「この時点ではまだディスクに書かれない」は見逃せません。<code>AllocatePage</code> が増やすのはメモリ上のカウンタ <code>numPages</code> だけで、ファイルには 1 バイトも触っていません。ファイルが実際に伸びるのは、その番号に初めて <code>WritePage</code>（Step 4）したときです。つまり「割り当て」とは<strong>予約</strong>にすぎません。予約だけして書かずにプログラムが終われば、ファイルサイズは変わらないので、再オープン時の <code>numPages</code> は元に戻ります。それで困らないのか? — 困りません。書かれていないページには意味のあるデータが存在しないので、番号を配り直しても誰も損をしないのです。</p>
+    <p><code>NumPages</code> はカウンタを外から読むためだけの 1 行メソッド。<code>EnsurePages</code> は第06章への伏線で、クラッシュ回復のときに「ログにはページ 5 まで使った記録があるのに、データファイルは 3 ページしかない」という状況を直すために、カウンタを外から広げる裏口です。いまは出番がないので、「そういう非常口が要るときが来る」とだけ頭の隅に置いてください。</p>
+
+    <div class="gonote"><div class="box-k">GO メモ · メソッドとポインタレシーバ</div>
+      <p><code>func (d *DiskManager) AllocatePage() PageID</code> の先頭の <code>(d *DiskManager)</code> は<strong>レシーバ</strong>といい、「この関数は <code>DiskManager</code> に属するメソッドで、呼び出し時は <code>d</code> という名前で自分自身を参照する」という意味です。<code>d.AllocatePage()</code> のようにドットで呼びます。<code>*DiskManager</code> と<strong>ポインタ</strong>にしているのは、メソッドの中で <code>d.numPages++</code> と自分の状態を書き換えるからです。ポインタでないレシーバはコピーに対して動くので、変更が呼び出し元に残りません。「状態を変えるメソッドはポインタレシーバ」と覚えておけば当面は困りません。</p>
+    </div>
+
+    <div class="box do"><div class="box-k">▸ 動かして確認</div>
+      <p>「0 から始まる連番が配られること」を検証するテストを実行します。</p>
+      <pre class="term"><code><span class="ps">$</span> go test ./internal/storage -run TestAllocateAssignsSequentialIDs -v
+<span class="out">=== RUN   TestAllocateAssignsSequentialIDs
+--- PASS: TestAllocateAssignsSequentialIDs (0.00s)
+PASS
+ok  	minidb/internal/storage	1.047s</span></code></pre>
+      <p>テスト本体（<code>disk_test.go</code>）は、新しい DB で <code>AllocatePage()</code> を 3 回呼び、返り値が 0, 1, 2 になることを <code>for</code> ループで確かめているだけの 10 行ほどのコードです。ぜひ開いて読んでみてください。</p>
+    </div>
+
+    <h2 class="step" id="step-4"><span class="step-no">Step 4</span>狙った場所を読み書きする — ReadPage / WritePage</h2>
+    <p>いよいよこの層の主業務、ページの読み書きです。冒頭で立てた方針 — 「ページ番号 × 4096 = 置き場所」— を、そのままコードにします。</p>
+
+    <div class="file-tag">internal/storage/disk.go（つづき）</div>
+    <pre><code><span class="cm">// ReadPage は指定ページをディスクから読み出す。</span>
+<span class="kw">func</span> (d *<span class="ty">DiskManager</span>) ReadPage(id <span class="ty">PageID</span>, p *<span class="ty">Page</span>) <span class="kw">error</span> {
+	<span class="kw">if</span> id &gt;= d.numPages {
+		<span class="kw">return</span> fmt.Errorf(<span class="st">"storage: read: PageID %d は未割り当て（総数 %d）"</span>, id, d.numPages)
+	}
+	<span class="kw">if</span> _, err := d.file.ReadAt(p[:], <span class="kw">int64</span>(id)*PageSize); err != <span class="kw">nil</span> {
+		<span class="kw">return</span> fmt.Errorf(<span class="st">"storage: read page %d: %w"</span>, id, err)
+	}
+	<span class="kw">return</span> <span class="kw">nil</span>
+}
+
+<span class="cm">// WritePage は指定ページをディスクに書き込む。</span>
+<span class="cm">// 書き込みは OS のページキャッシュに乗るだけで、永続化の保証は Sync が担う。</span>
+<span class="kw">func</span> (d *<span class="ty">DiskManager</span>) WritePage(id <span class="ty">PageID</span>, p *<span class="ty">Page</span>) <span class="kw">error</span> {
+	<span class="kw">if</span> id &gt;= d.numPages {
+		<span class="kw">return</span> fmt.Errorf(<span class="st">"storage: write: PageID %d は未割り当て（総数 %d）"</span>, id, d.numPages)
+	}
+	<span class="kw">if</span> _, err := d.file.WriteAt(p[:], <span class="kw">int64</span>(id)*PageSize); err != <span class="kw">nil</span> {
+		<span class="kw">return</span> fmt.Errorf(<span class="st">"storage: write page %d: %w"</span>, id, err)
+	}
+	<span class="kw">return</span> <span class="kw">nil</span>
+}</code></pre>
+
+    <p>2 つのメソッドは鏡写しなので、まとめて解説します。核心は真ん中の 1 行、<code>d.file.ReadAt(p[:], int64(id)*PageSize)</code> です。序章で顔合わせした <code>ReadAt</code> / <code>WriteAt</code> は「位置を明示して読み書きする」メソッドでした。その位置引数に <code>int64(id)*PageSize</code> — まさに<strong>ページ番号 × 4096</strong> — を渡しています。この章の冒頭からずっと話してきた計算式が、コードとして実体化する瞬間です。</p>
+    <p>細部を 3 つ拾います。まず <code>int64(id)</code> という型変換。ファイル内の位置は Go では <code>int64</code>（64 ビット整数）で表す決まりです。<code>id</code> は <code>uint32</code> ベースの <code>PageID</code> なので、<strong>掛け算の前に</strong> <code>int64</code> へ広げています。順序が大事で、もし <code>int64(id * PageSize)</code> と書くと、掛け算が 32 ビットのまま行われて大きなページ番号で桁あふれ（オーバーフロー）し、まったく違う場所を読み書きする恐ろしいバグになります。</p>
+    <p>次に <code>p[:]</code>。<code>ReadAt</code> が受け取るのはスライス <code>[]byte</code> ですが、<code>Page</code> は配列です。<code>p[:]</code> は「配列全体を指すスライスを作る」書き方で、序章で強調した「スライスはコピーではなく窓」がここで効きます。<code>ReadAt</code> がこの窓に書き込むと、その中身はそのまま呼び出し元の <code>Page</code> に入る、というわけです。しかも <code>ReadAt</code> には「<code>len(p[:])</code> バイトきっかり読めなければエラーを返す」という保証があるので、「4096 バイト頼んだのに 4000 バイトしか読めていなかった」という中途半端は起きません。</p>
+    <p>最後に、両メソッド先頭の <code>if id &gt;= d.numPages</code> という<strong>範囲チェック</strong>。割り当てていない番号への読み書きを、エラーとして門前払いしています。実は <code>ReadAt</code> 自体もファイル外を読めばエラーを返すので、このチェックがなくても「だいたい」は動きます。それでも自前で検査するのは、<strong>エラーメッセージの質</strong>のためです。「EOF」という無機質な報告より、「PageID 7 は未割り当て（総数 3）」のほうが、上の層のバグを一瞬で特定できます。境界の破れは、破れた場所でいちばん饒舌に報告させる — デバッグのしやすさは、こうして最下層から仕込んでいきます。</p>
+
+    <div class="box hazard"><div class="box-k">⚠ 落とし穴 — WriteAt は「隙間」を 0 で埋める</div>
+      <p>ページ 0, 1, 2 を割り当てて、<strong>ページ 2 だけ</strong>に書き込むと何が起きるでしょうか。ファイルはまだ 0 バイトなのに、いきなり 8192 バイト目へ <code>WriteAt</code> することになります。このとき OS はエラーにせず、ファイルを 12288 バイトまで伸ばし、<strong>書かれなかった 0 〜 8191 バイト目を 0 で埋めます</strong>。つまり「書いた覚えのないページが 0 だらけで存在する」状態は正常にありえます。</p>
+      <p>ただし勘違いしないでください。<strong>「0 だらけのページ」は、そのまま使える空ページ<em>ではありません</em>。</strong> 第01章では、ページの中に「どこまで使ったか」を記録するヘッダを置きます。全部 0 のページはそのヘッダも 0 なので、「空っぽ」ではなく「<strong>でたらめな値が入っている</strong>」状態です。そこで第01章以降では、新しく確保したページに対して<strong>必ず明示的な初期化を 1 回行い</strong>、そこで初めて「空である」という状態をヘッダに書き込みます。この層で知っておくべきなのは「穴は 0 で埋まる」という OS の性質だけで、その 0 に意味を与えるのは上の層の仕事です。</p>
+    </div>
+
+    <div class="box do"><div class="box-k">▸ 動かして確認</div>
+      <p>2 本のテストで確認します。<code>TestMultiplePagesKeepIndependentContent</code> は 5 ページにそれぞれ違う中身（ページ i の全バイトを値 i に）を書き、再オープン後も混ざらず読めることを、<code>TestReadUnallocatedPageFails</code> は未割り当てページの読み出しがちゃんとエラーになる（黙って 0 を返したりしない）ことを検証します。</p>
+      <pre class="term"><code><span class="ps">$</span> go test ./internal/storage -run 'TestMultiplePagesKeepIndependentContent|TestReadUnallocatedPageFails' -v
+<span class="out">=== RUN   TestMultiplePagesKeepIndependentContent
+--- PASS: TestMultiplePagesKeepIndependentContent (0.02s)
+=== RUN   TestReadUnallocatedPageFails
+--- PASS: TestReadUnallocatedPageFails (0.00s)
+PASS
+ok  	minidb/internal/storage	0.744s</span></code></pre>
+      <p>「ページ同士が混ざらない」は当たり前に見えて、オフセット計算を 1 か所でも間違えると即座に壊れる性質です。この 2 本が、計算式の正しさの証人になります。</p>
+    </div>
+
+    <h2 class="step" id="step-5"><span class="step-no">Step 5</span>「書いた」と「消えない」の間 — Sync / Close</h2>
+    <p>残るメソッドは 2 つ。コード量はこの章で最少ですが、<strong>概念の重さは最大</strong>です。先に問いを立てます — <code>WritePage</code> が成功を返したとき、そのデータは電源を抜いても残るでしょうか?</p>
+    <p>答えは<strong>ノー</strong>です。<code>WriteAt</code> が成功しても、データは OS が管理するメモリ上の中継地帯 — <strong>ページキャッシュ</strong>と呼びます — に乗っただけかもしれません。OS は性能のために、ディスクへの実書き込みを遅らせてまとめて行います。アプリから見れば「書けた」、しかし物理ディスクにはまだ届いていない。この間に電源が落ちれば、書いたはずのデータは消えます。</p>
+
+    <div class="ascii">「書いた」と「消えない」の間
+
+  WritePage()                      Sync() = fsync
+      │                                │
+      ▼                                ▼
+ ┌──────────┐      ┌───────────────────┐      ┌───────────────┐
+ │ アプリの  │ ──→ │ OS ページキャッシュ  │ ──→ │  物理ディスク   │
+ │ メモリ    │      │ （メモリ上・揮発）   │      │ （電源断でも残る）│
+ └──────────┘      └───────────────────┘      └───────────────┘
+                     ▲ 電源断でここは消える</div>
+
+    <p>メモリからディスクへ「いますぐ、確実に」送り出させる命令が、Unix 系 OS で <strong>fsync</strong> と呼ばれるシステムコールです。Go では <code>f.Sync()</code> がそれに当たります（Windows では同等の <code>FlushFileBuffers</code> が呼ばれます — 名前は違えど意味は同じです）。</p>
+
+    <div class="file-tag">internal/storage/disk.go（つづき・これで全文）</div>
+    <pre><code><span class="cm">// Sync は OS のバッファをディスクへ確実に書き出す。</span>
+<span class="cm">// 「書いた」と「消えない」の間にあるのがこの 1 行（L-03 / M6 の土台）。</span>
+<span class="kw">func</span> (d *<span class="ty">DiskManager</span>) Sync() <span class="kw">error</span> {
+	<span class="kw">if</span> err := d.file.Sync(); err != <span class="kw">nil</span> {
+		<span class="kw">return</span> fmt.Errorf(<span class="st">"storage: sync: %w"</span>, err)
+	}
+	<span class="kw">return</span> <span class="kw">nil</span>
+}
+
+<span class="cm">// Close はファイルを閉じる。閉じる前に Sync する。</span>
+<span class="kw">func</span> (d *<span class="ty">DiskManager</span>) Close() <span class="kw">error</span> {
+	<span class="kw">if</span> err := d.Sync(); err != <span class="kw">nil</span> {
+		d.file.Close()
+		<span class="kw">return</span> err
+	}
+	<span class="kw">return</span> d.file.Close()
+}</code></pre>
+
+    <p><code>Sync</code> は <code>d.file.Sync()</code> を呼んでエラーに文脈を付けるだけ。しかしコメントの一文 — <strong>「書いた」と「消えない」の間にあるのがこの 1 行</strong> — が、この章でいちばん大事な文です。データベースが「コミットしたデータは失われません」と約束できるのは、どこかで必ず fsync を呼んでいるからです。そして fsync は<strong>遅い</strong>（物理ディスクの応答を待つので、メモリ書き込みの数百〜数万倍の時間がかかります）。速さのために減らしたいが、減らしすぎると約束を破る。<strong>「いつ Sync するか」がデータベース設計の核心</strong>になる — この伏線は第06章（WAL）で回収します。</p>
+    <p><code>Close</code> は「閉じる前に必ず Sync する」という作法をメソッドに焼き込んだものです。エラー処理の形に注目してください。<code>Sync</code> が失敗しても <code>d.file.Close()</code> は呼んでから、<strong>Sync のエラーのほうを</strong>返しています。ファイルを掴みっぱなしにしない後始末は済ませつつ、呼び出し元には「同期に失敗した（= データが消えるかもしれない）」という重要度の高い報告を優先して伝える、という優先順位です。</p>
+
+    <div class="box hazard"><div class="box-k">⚠ 落とし穴 — Sync を対症療法にしない</div>
+      <p>このプロジェクトの決まりごとを一つ。この先の章で「テストが通らないから Sync を足す」「遅いから Sync を消す」という対症療法は<strong>禁止</strong>です。Sync の位置は minidb のクラッシュ耐性の設計そのものであり、動かすなら「どの時点で何が保証されるべきか」から考え直します。逆に、うっかり消すとテストは通り続けるのに電源断でだけ壊れる、という最悪の潜伏バグになります。</p>
+    </div>
+
+    <div class="box do"><div class="box-k">▸ 動かして確認</div>
+      <p><code>Sync</code> / <code>Close</code> の効果は「プロセスをまたいでも残るか」で初めて観測できます。それはこの章のクライマックスなので、次のステップで専用のテストをじっくり読みながら確認します。ここでは <code>disk.go</code> が全文そろってコンパイルできることだけ確かめておきましょう。</p>
+      <pre class="term"><code><span class="ps">$</span> go build ./internal/storage
+<span class="out">（何も表示されなければ成功です）</span></code></pre>
+    </div>
+
+    <h2 class="step" id="step-6"><span class="step-no">Step 6</span>テストを読む — 「再起動しても残る」を機械で確かめる</h2>
+    <p><code>disk.go</code> の全メソッドが出そろいました。仕上げに、この章の受け入れ基準そのものであるテスト <code>TestPersistAcrossReopen</code> を<strong>全文</strong>読みます。序章で言ったとおり、本書のテストは章の完了条件を書き下した教材です。とくにこのテストは「データベースとは何か」への最初の答えになっています。</p>
+    <p>検証したいのは「<strong>再起動してもデータが残る</strong>」。でもテストの中で PC を再起動するわけにはいきません。そこで、<strong>Close して、開き直す</strong>ことを再起動の代役にします。Close すればメモリ上の <code>DiskManager</code>（<code>numPages</code> を含む）は用済みになり、開き直したときに頼れるのはディスク上のファイルだけ。プロセス再起動と本質的に同じ状況が作れます。</p>
+
+    <div class="file-tag">internal/storage/disk_test.go（抜粋）</div>
+    <pre><code><span class="cm">// M0 受け入れ基準: データを書き込み、再起動後に同じ内容を読み出せる。</span>
+<span class="cm">// 「再起動」は Close → 再 Open で表現する。</span>
+<span class="kw">func</span> TestPersistAcrossReopen(t *testing.T) {
+	path := filepath.Join(t.TempDir(), <span class="st">"test.db"</span>)
+
+	d, err := OpenDiskManager(path)
+	<span class="kw">if</span> err != <span class="kw">nil</span> {
+		t.Fatal(err)
+	}
+	id := d.AllocatePage()
+	<span class="kw">var</span> w <span class="ty">Page</span>
+	copy(w[:], []<span class="kw">byte</span>(<span class="st">"hello, disk"</span>))
+	w[PageSize-<span class="st">1</span>] = <span class="st">0xAB</span> <span class="cm">// ページ末尾まで書けることも確認</span>
+	<span class="kw">if</span> err := d.WritePage(id, &amp;w); err != <span class="kw">nil</span> {
+		t.Fatal(err)
+	}
+	<span class="kw">if</span> err := d.Close(); err != <span class="kw">nil</span> {
+		t.Fatal(err)
+	}
+
+	<span class="cm">// ---- ここが「再起動」 ----</span>
+	d2, err := OpenDiskManager(path)
+	<span class="kw">if</span> err != <span class="kw">nil</span> {
+		t.Fatal(err)
+	}
+	<span class="kw">defer</span> d2.Close()
+
+	<span class="kw">if</span> got := d2.NumPages(); got != <span class="st">1</span> {
+		t.Fatalf(<span class="st">"再オープン後のページ総数 = %d, want 1"</span>, got)
+	}
+	<span class="kw">var</span> r <span class="ty">Page</span>
+	<span class="kw">if</span> err := d2.ReadPage(id, &amp;r); err != <span class="kw">nil</span> {
+		t.Fatal(err)
+	}
+	<span class="kw">if</span> !bytes.Equal(r[:], w[:]) {
+		t.Fatal(<span class="st">"再オープン後に読んだページが書いた内容と一致しない"</span>)
+	}
+}</code></pre>
+
+    <p>前半は、この章で作った API の総復習です。開いて（<code>OpenDiskManager</code>）、割り当てて（<code>AllocatePage</code> — 最初の 1 枚なので <code>id</code> は 0 のはず）、ページ <code>w</code> に <code>copy</code> で文字列を書き込み（<code>copy(w[:], ...)</code> — ここでも配列→スライスの <code>p[:]</code> 変換が出てきます）、<code>WritePage</code> して <code>Close</code>。細かい芸として <code>w[PageSize-1] = 0xAB</code>、つまり<strong>ページの最後の 1 バイト</strong>（4095 バイト目）にも印を付けています。もしオフセット計算がわずかにずれて 4096 バイト全部が書けていなければ、末尾のこの 1 バイトが真っ先に化けるからです。境界の両端に印を置くのは、テストの定石です。</p>
+    <p>後半、<code>d2</code> と別の変数で開き直しているのが「再起動」です。検証は 2 段構え。まず <code>NumPages()</code> が 1 に戻っているか — Step 2 の「ファイルサイズから復元」が働いた証拠です（どこにも 1 と保存していないのに、です）。次に <code>ReadPage</code> で読み戻し、<code>bytes.Equal</code> で<strong>4096 バイト全部</strong>が書いたものと一致するかを比べます。この 2 つが通れば、「メモリ上のデータ構造」だったものが「電源を切っても存在し続けるデータ」へ昇格した、と言えます。</p>
+    <p>ほかの 4 本のテストは、すでに各ステップで登場しました。役割を一覧にしておきます。</p>
+    <table>
+      <tr><th>テスト</th><th>検証していること</th></tr>
+      <tr><td><code>TestPersistAcrossReopen</code></td><td>書く → 閉じる → 開き直す → 同じ内容が読める（この章の受け入れ基準）</td></tr>
+      <tr><td><code>TestAllocateAssignsSequentialIDs</code></td><td>割り当てが 0, 1, 2, … の連番になる</td></tr>
+      <tr><td><code>TestMultiplePagesKeepIndependentContent</code></td><td>5 ページに別々の中身を書いても混ざらない（オフセット計算の正しさ）</td></tr>
+      <tr><td><code>TestReadUnallocatedPageFails</code></td><td>未割り当てページの読み出しがエラーになる（黙って 0 を返さない）</td></tr>
+      <tr><td><code>TestOpenRepairsTornFile</code></td><td>半端なサイズのファイルを 0 埋めで修復して開ける</td></tr>
+    </table>
+
+    <div class="gonote"><div class="box-k">GO メモ · t.TempDir と defer</div>
+      <p><code>t.TempDir()</code> は、テスト用の一時ディレクトリを作って返してくれるヘルパーです。テストが終わると<strong>中身ごと自動で削除される</strong>ので、後片付けのコードが要りません（だからテスト実行後に <code>test.db</code> を探しても見つかりません）。<code>filepath.Join(dir, "test.db")</code> は OS ごとの区切り文字（Windows は <code>\</code>、Unix は <code>/</code>）を意識せずにパスをつなぐ関数です。もう一つの <code>defer d2.Close()</code> は「この関数を抜けるとき（return 直前）に必ず <code>d2.Close()</code> を実行せよ」という予約です。途中のどの <code>t.Fatal</code> で抜けても閉じ忘れが起きないので、「開いたら直後に <code>defer Close</code>」は Go の基本作法です。</p>
+    </div>
+
+    <div class="box do"><div class="box-k">▸ 動かして確認</div>
+      <p>この章のクライマックスです。じっくり実行してください。</p>
+      <pre class="term"><code><span class="ps">$</span> go test ./internal/storage -run TestPersistAcrossReopen -v
+<span class="out">=== RUN   TestPersistAcrossReopen
+--- PASS: TestPersistAcrossReopen (0.01s)
+PASS
+ok  	minidb/internal/storage	0.740s</span></code></pre>
+      <p>PASS の 4 文字が「再起動してもデータが残る」の機械による証明です。とはいえ、テストは一時ディレクトリの中で完結してしまい、ファイルの<strong>実物</strong>を拝めません。そこで最後のステップでは、自分の手でファイルを作って中身を覗きます。</p>
+    </div>
+
+    <h2 class="step" id="step-7"><span class="step-no">Step 7</span>演習: ファイルの中身を 16 進で覗く</h2>
+    <p>ここまでの話 — 「ページ番号 i の中身はファイルの i × 4096 バイト目にある」— を、テスト越しではなく<strong>裸眼で</strong>確認します。やることは 2 つ。小さな使い捨てプログラムで DB ファイルを作り、それを 16 進ダンプ（ファイルの生のバイトを 16 進数で一覧表示すること）で開きます。</p>
+    <p><code>internal/</code> 配下のパッケージはモジュールの外から import できない（序章の GO メモ参照）ので、使い捨てプログラムは <code>src/</code> の中に置きます。<code>src/cmd/diskdemo/main.go</code> を新規作成してください。<strong>確認が終わったらディレクトリごと削除する</strong>一時ファイルです。</p>
+
+    <div class="file-tag">cmd/diskdemo/main.go（一時的に作る・あとで消す）</div>
+    <pre><code><span class="cm">// ページが本当に「番号 × 4096 バイト目」に置かれることを目で確かめる</span>
+<span class="cm">// 使い捨てプログラム。確認が終わったらこのディレクトリごと消してよい。</span>
+<span class="kw">package</span> main
+
+<span class="kw">import</span> (
+	<span class="st">"fmt"</span>
+	<span class="st">"os"</span>
+
+	<span class="st">"minidb/internal/storage"</span>
+)
+
+<span class="kw">func</span> main() {
+	d, err := storage.OpenDiskManager(<span class="st">"demo.db"</span>)
+	<span class="kw">if</span> err != <span class="kw">nil</span> {
+		fmt.Fprintln(os.Stderr, err)
+		os.Exit(<span class="st">1</span>)
+	}
+	<span class="kw">defer</span> d.Close()
+
+	<span class="cm">// ページを 3 枚割り当てる（ID は 0, 1, 2 になるはず）</span>
+	a := d.AllocatePage()
+	b := d.AllocatePage()
+	c := d.AllocatePage()
+	fmt.Println(<span class="st">"allocated:"</span>, a, b, c)
+
+	<span class="cm">// ページ 0 と 2 にだけ目印の文字列を書く。ページ 1 は空のまま。</span>
+	<span class="kw">var</span> p0, p2 storage.<span class="ty">Page</span>
+	copy(p0[:], []<span class="kw">byte</span>(<span class="st">"hello, page zero"</span>))
+	copy(p2[:], []<span class="kw">byte</span>(<span class="st">"MINIDB PAGE TWO"</span>))
+	<span class="kw">if</span> err := d.WritePage(a, &amp;p0); err != <span class="kw">nil</span> {
+		fmt.Fprintln(os.Stderr, err)
+		os.Exit(<span class="st">1</span>)
+	}
+	<span class="kw">var</span> empty storage.<span class="ty">Page</span>
+	<span class="kw">if</span> err := d.WritePage(b, &amp;empty); err != <span class="kw">nil</span> {
+		fmt.Fprintln(os.Stderr, err)
+		os.Exit(<span class="st">1</span>)
+	}
+	<span class="kw">if</span> err := d.WritePage(c, &amp;p2); err != <span class="kw">nil</span> {
+		fmt.Fprintln(os.Stderr, err)
+		os.Exit(<span class="st">1</span>)
+	}
+	fmt.Println(<span class="st">"wrote demo.db"</span>)
+}</code></pre>
+
+    <p>実行します。予想を先に立てましょう — ID は 0, 1, 2 が配られ、ファイルは 3 ページ = 12288 バイトになるはずです。</p>
+    <pre class="term"><code><span class="ps">$</span> go run ./cmd/diskdemo
+<span class="out">allocated: 0 1 2
+wrote demo.db</span></code></pre>
+
+    <p>ここからは PowerShell の出番です。まずファイルサイズを確かめます。</p>
+    <pre class="term"><code><span class="ps">PS&gt;</span> (Get-Item demo.db).Length
+<span class="out">12288</span>
+<span class="ps">PS&gt;</span> 12288 / 4096
+<span class="out">3</span></code></pre>
+    <p>予想どおり、きっかり 3 ページぶんです。次に <code>Format-Hex</code> で中身を 16 進ダンプします。出力は 1 行 = 16 バイトで、左端がオフセット（16 進）、右端が文字として読める部分です。まずファイル先頭 = ページ 0 の頭を 2 行だけ（以下、実際にはこの上にファイルパスの見出し行が付きますが、紙面では省略します）。</p>
+    <pre class="term"><code><span class="ps">PS&gt;</span> Format-Hex .\demo.db | Select-Object -First 2
+<span class="out">           00 01 02 03 04 05 06 07 08 09 0A 0B 0C 0D 0E 0F
+
+00000000   68 65 6C 6C 6F 2C 20 70 61 67 65 20 7A 65 72 6F  hello, page zero
+00000010   00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00  ................</span></code></pre>
+    <p>オフセット 0 に <code>68 65 6C 6C 6F ...</code> — ASCII の <code>hello, page zero</code> がそのまま座っています。書いた 16 文字の後ろは、<code>Page</code> 変数の残りがゼロ値のまま書かれたので 0 が続きます。</p>
+    <p>ではページ 2 はどこにあるべきか。<strong>2 × 4096 = 8192 バイト目</strong>、16 進なら <code>0x2000</code> です。<code>Format-Hex</code> は 1 行 16 バイトで出力するので、8192 ÷ 16 = 512 行を読み飛ばせばそこに届きます。</p>
+    <pre class="term"><code><span class="ps">PS&gt;</span> Format-Hex .\demo.db | Select-Object -Skip 512 -First 2
+<span class="out">00002000   4D 49 4E 49 44 42 20 50 41 47 45 20 54 57 4F 00  MINIDB PAGE TWO.
+00002010   00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00  ................</span></code></pre>
+    <p>オフセット <code>00002000</code>、計算どおりの場所に <code>MINIDB PAGE TWO</code> がいました。念のため、何も書いていないページ 1（オフセット <code>0x1000</code> = 4096、つまり 256 行目）も覗くと、こちらは全部 0 です。</p>
+    <pre class="term"><code><span class="ps">PS&gt;</span> Format-Hex .\demo.db | Select-Object -Skip 256 -First 1
+<span class="out">00001000   00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00  ................</span></code></pre>
+    <p>仕上げに、Step 2 の「numPages 復元」も裸眼で確かめられます。<strong>同じプログラムをもう一度</strong>実行してください。新しいプロセスは <code>demo.db</code>（12288 バイト）を開き、サイズから「もう 3 ページある」と復元するはずです。だとすれば、次に配られる ID は — </p>
+    <pre class="term"><code><span class="ps">PS&gt;</span> go run ./cmd/diskdemo
+<span class="out">allocated: 3 4 5
+wrote demo.db</span>
+<span class="ps">PS&gt;</span> (Get-Item demo.db).Length
+<span class="out">24576</span></code></pre>
+    <p><code>allocated: 3 4 5</code>。前回の続きから配られました。<code>numPages</code> をどこにも保存していないのに、プロセスをまたいで番号が継続する — 「ディスク上の事実から状態を再構成する」が動いている現場です。ファイルも 6 ページ = 24576 バイトに育っています。</p>
+
+    <div class="box do"><div class="box-k">▸ 後片付け</div>
+      <p>確認が済んだら、デモの痕跡を消して <code>src/</code> を元どおりにしておきます（<code>git status</code> がきれいになることも確認しておくと安心です）。</p>
+      <pre class="term"><code><span class="ps">PS&gt;</span> Remove-Item demo.db
+<span class="ps">PS&gt;</span> Remove-Item -Recurse .\cmd\diskdemo</code></pre>
+    </div>
+
+    <h2>つまずき FAQ</h2>
+
+    <details class="qa"><summary>go test を実行すると「go.mod file not found」や「no test files」と言われる</summary>
+      <div class="qa-body"><p>実行する場所を確認してください。本書のコマンドはすべて、<code>go.mod</code> がある <code>src/</code> ディレクトリの中で実行する前提です。リポジトリ直下や <code>src/internal/storage</code> の中で打つと、モジュールが見つからない・パス指定が合わないなどのエラーになります。迷ったら <code>ls go.mod</code>（PowerShell でも同じ）で、いまいる場所に <code>go.mod</code> があるかを見るのが早いです。</p></div>
+    </details>
+
+    <details class="qa"><summary>「storage: read: PageID 0 は未割り当て（総数 0）」というエラーが出た</summary>
+      <div class="qa-body"><p>このエラーメッセージは Step 4 の範囲チェックが出しています。読み方のコツは括弧の中で、「総数 0」= まだ 1 ページも割り当てていない、という現在の状態報告です。つまり <code>AllocatePage</code> を呼ぶ前に <code>ReadPage</code> / <code>WritePage</code> を呼んでいます。新品のファイルはページ 0 すら持っていない、というのがこの層のルールです。まず <code>AllocatePage()</code> で番号をもらってから読み書きしてください。</p></div>
+    </details>
+
+    <details class="qa"><summary>Windows で demo.db が削除できない（「別のプロセスが使用中」）</summary>
+      <div class="qa-body"><p>そのファイルを開いたままのプロセスが残っています。よくあるのは、序章で触った REPL（<code>minidb-repl</code>）を <code>.exit</code> せずに別ウィンドウで開きっぱなしにしているケースや、デモプログラムがエラーで止まって Close まで到達しなかったケースです。該当するターミナルを閉じれば消せるようになります。Windows は「開いているファイルは消せない」が原則で、これは第06章で DB ファイルの置き換え戦略を考えるときにも効いてくる制約です。</p></div>
+    </details>
+
+    <details class="qa"><summary>Format-Hex に -Offset を付けたらエラーになった</summary>
+      <div class="qa-body"><p>Windows 標準の Windows PowerShell 5.1 の <code>Format-Hex</code> には <code>-Offset</code> / <code>-Count</code> パラメータがありません（新しい PowerShell 7 系にはあります）。本文で <code>Select-Object -Skip 512 -First 2</code> という行数指定を使ったのはそのためで、この書き方ならどちらのバージョンでも動きます。1 行 = 16 バイトなので、「見たいオフセット ÷ 16」が Skip に渡す行数です。</p></div>
+    </details>
+
+    <details class="qa"><summary>テストが作った test.db を見てみたいのに、どこにも見つからない</summary>
+      <div class="qa-body"><p><code>t.TempDir()</code> が作る一時ディレクトリは、テスト終了時に中身ごと自動削除されます（Step 6 の GO メモ参照）。ファイルの実物を観察したいときのために Step 7 の演習を用意しました。あちらは自分のプログラムで <code>demo.db</code> を作るので、好きなだけ眺められます。</p></div>
+    </details>
+
+    <h2>理解度チェック</h2>
+    <p>次の問いに自分の言葉で答えてから、答えを開いてください。とくに Q1・Q2 のような手計算は、この先の章でバイト列を追うときの基礎体力になります。</p>
+
+    <details class="qa"><summary>Q1. ページ番号 3 のページは、ファイルの何バイト目から始まる? その最後のバイトは何バイト目?</summary>
+      <div class="qa-body"><p>先頭は 3 × 4096 = <strong>12288 バイト目</strong>（16 進で 0x3000）。ページは 4096 バイトなので、最後のバイトは 12288 + 4095 = <strong>16383 バイト目</strong>です。次の 16384 バイト目からはページ 4 が始まります。「先頭 = 番号 × 4096」「末尾 = 次のページの先頭 − 1」が即答できれば合格です。</p></div>
+    </details>
+
+    <details class="qa"><summary>Q2. サイズが 20480 バイトの DB ファイルを OpenDiskManager で開いた。NumPages() はいくつ? 次の AllocatePage() が返す ID は?</summary>
+      <div class="qa-body"><p>20480 ÷ 4096 = 5 なので <code>NumPages()</code> は <strong>5</strong>。使用中の番号は 0〜4 で、次の <code>AllocatePage()</code> は<strong>5</strong> を返します。「総数と次に配る番号は同じ値」（0 始まりだから）を思い出せたかがポイントです。</p></div>
+    </details>
+
+    <details class="qa"><summary>Q3. WritePage がエラーなく成功した直後に PC の電源が落ちた。書いたデータは残っている?</summary>
+      <div class="qa-body"><p><strong>残っている保証はありません。</strong><code>WriteAt</code> の成功は「OS のページキャッシュ（メモリ上）に受け付けられた」ことしか意味せず、物理ディスクへの反映は OS の都合で遅延されます。電源断に耐えると言えるのは <code>Sync()</code>（= fsync）がエラーなく返ってから。「書いた」と「消えない」は別の話 — この章の中心テーマです。</p></div>
+    </details>
+
+    <details class="qa"><summary>Q4. numPages はどのファイルにも保存していないのに、なぜ再オープン後も正しい値に戻る?</summary>
+      <div class="qa-body"><p>ファイルサイズ ÷ PageSize という計算で復元できるからです（<code>OpenDiskManager</code> の <code>numPages: PageID(size / PageSize)</code>）。ページは固定長で隙間なく並ぶため、サイズと総数が 1 対 1 に対応します。管理情報を別に保存すると実体との食い違いが起こりうるので、「ディスク上の事実から再構成できるものは保存しない」という設計方針を採っています。</p></div>
+    </details>
+
+    <details class="qa"><summary>Q5. サイズが 4196 バイトのファイルを開くと何が起きる? なぜエラーで拒否しない?</summary>
+      <div class="qa-body"><p>4196 は 4096 の倍数でないので torn write（書き込み途中のクラッシュ）が疑われます。<code>OpenDiskManager</code> は <code>(4196/4096 + 1) × 4096 = 8192</code> バイトへ <code>Truncate</code> で 0 埋め拡張し、2 ページのファイルとして開きます。拒否しないのは、ここで開けないと第06章の WAL 回復処理まで到達できないから。形式（ページ境界）はこの層が直し、中身の正しさは WAL が保証する、という分担です。</p></div>
+    </details>
+
+    <details class="qa"><summary>Q6. Page はなぜスライス []byte ではなく配列 [PageSize]byte なのか?</summary>
+      <div class="qa-body"><p>「ページは常にきっかり 4096 バイト」という不変条件を、型そのもので保証するためです。スライスなら長さ 4000 の「ページもどき」が実行時に紛れ込めますが、配列型 <code>[PageSize]byte</code> なら長さ違いはコンパイルエラーになります。<code>ReadAt</code> / <code>copy</code> などスライスを要求する場面では <code>p[:]</code> で全体を指す窓を作って渡せばよい（コピーは発生しない）、というのが使い分けでした。</p></div>
+    </details>
+
+    <div class="box done"><div class="box-k">✓ 完了の合図</div>
+      <p>この章の 5 本のテストが一度に PASS し、Step 7 の 16 進ダンプで「番号 × 4096 の位置に自分のバイトがある」ことを目視できたら、第00章は完了です。</p>
+      <pre class="term"><code><span class="ps">$</span> go test ./internal/storage -run 'TestPersistAcrossReopen|TestAllocateAssignsSequentialIDs|TestMultiplePagesKeepIndependentContent|TestReadUnallocatedPageFails|TestOpenRepairsTornFile' -v
+<span class="out">=== RUN   TestPersistAcrossReopen
+--- PASS: TestPersistAcrossReopen (0.01s)
+=== RUN   TestAllocateAssignsSequentialIDs
+--- PASS: TestAllocateAssignsSequentialIDs (0.00s)
+=== RUN   TestMultiplePagesKeepIndependentContent
+--- PASS: TestMultiplePagesKeepIndependentContent (0.01s)
+=== RUN   TestReadUnallocatedPageFails
+--- PASS: TestReadUnallocatedPageFails (0.00s)
+=== RUN   TestOpenRepairsTornFile
+--- PASS: TestOpenRepairsTornFile (0.00s)
+PASS
+ok  	minidb/internal/storage	0.623s</span></code></pre>
+      <p>（<code>go test ./internal/storage -v</code> と丸ごと実行しても構いません。その場合は第01章で解説するスロット化ページのテストも一緒に走ります。）</p>
+    </div>
+
+    <h2>まとめ — 次の層へ</h2>
+    <p>この章で手に入れたものを数えましょう。ファイルは 4096 バイト固定のページの並びになり、ページ番号 × 4096 という計算 1 回でどこへでも読み書きできるようになりました。ページ総数はファイルサイズから復元されるので、プロセスを何度再起動してもデータと番号は継続します。そして「書いた」（WriteAt）と「消えない」（fsync）が別物であることを知り、その橋を渡す <code>Sync</code> を手に入れました。100 行ほどのコードですが、これで minidb は「メモリ上のプログラム」から「ディスクに実在するデータベース」の側へ足を踏み入れたことになります。</p>
+    <p>ただし、大きな未解決問題が残っています。この層にとってページは<strong>無地の 4096 バイト</strong>でしかありません。では、その中に <code>(1, 'alice', 30)</code> のような<strong>長さがまちまちの行データ</strong>を、どうやって複数個詰め込むのでしょうか。先頭から順に並べるだけだと、「2 番目の行はどこから?」が分からなくなり、行を消したときの隙間も再利用できません。1 枚のページの中に目次を作り、可変長のレコードを出し入れする技術 — <strong>スロット化ページ</strong> — が次章の主題です。ディスクの区画整理が済んだので、次は部屋の中の家具の置き方を決めに行きましょう。</p>
+
+    <div class="chap-foot">
+      <a class="pager" href="index.html"><span class="dir">← 前へ</span>序章 · はじめに・準備</a>
+      <a class="pager next" href="01-page.html"><span class="dir">次へ →</span>第01章 · ページの中身</a>
+    </div>
+  </main>
+</div>
+</body>
+</html>

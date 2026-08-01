@@ -1,0 +1,178 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>100を基準にそろえる — 指数ダッシュボードを作る</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@400;500;600;700&family=Source+Serif+4:opsz,wght@8..60,400;8..60,500;8..60,600&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<div class="shell">
+
+  <aside class="spine">
+    <a class="wordmark" href="index.html">STOCK · from scratch<span class="tick"> ↗</span></a>
+    <div class="book-title">指数ダッシュボードを<br>つくる</div>
+    <div class="book-sub">好きな指数を、好きな期間で</div>
+
+    <div class="legend-rail"><span>読む <b>↓</b></span><span>組む <b>↑</b></span></div>
+
+    <nav aria-label="目次">
+      <ul class="toc">
+        <li><a class="nav-item" href="index.html"><span class="nav-num">序</span><span class="nav-label">はじめに<span class="nav-tag">Intro</span></span></a></li>
+        <li><a class="nav-item" href="00-line.html"><span class="nav-num">00</span><span class="nav-label">一本の線を引く<span class="nav-tag">Line</span></span></a></li>
+        <li><a class="nav-item" href="01-fetch.html"><span class="nav-num">01</span><span class="nav-label">データを取ってくる<span class="nav-tag">Fetch</span></span></a></li>
+        <li><a class="nav-item" href="02-store.html"><span class="nav-num">02</span><span class="nav-label">貯めて、切り出す<span class="nav-tag">Store</span></span></a></li>
+        <li><a class="nav-item" href="03-range.html"><span class="nav-num">03</span><span class="nav-label">期間を自由にする<span class="nav-tag">Range</span></span></a></li>
+        <li><a class="nav-item" href="04-overlay.html"><span class="nav-num">04</span><span class="nav-label">二本目を重ねる<span class="nav-tag">Overlay</span></span></a></li>
+        <li><a class="nav-item current" aria-current="page" href="05-rebase.html"><span class="nav-num">05</span><span class="nav-label">100にそろえる<span class="nav-tag">Rebase</span></span></a></li>
+        <li><a class="nav-item" href="06-downsample.html"><span class="nav-num">06</span><span class="nav-label">長い期間を軽くする<span class="nav-tag">Sample</span></span></a></li>
+        <li><a class="nav-item" href="07-url.html"><span class="nav-num">07</span><span class="nav-label">URLに状態を持たせる<span class="nav-tag">URL</span></span></a></li>
+        <li><a class="nav-item" href="08-finish.html"><span class="nav-num">08</span><span class="nav-label">仕上げと、次の一歩<span class="nav-tag">Finish</span></span></a></li>
+      </ul>
+    </nav>
+
+    <div class="spine-foot">
+      各章は一段の階段。<br>前の章の「できたこと」が<br>次の章の「困りごと」を呼ぶ。
+    </div>
+  </aside>
+
+  <main class="reading">
+    <div class="progress-tag">第05章 / 全9章 · 層: REBASE · 読了目安 2〜3時間</div>
+    <div class="eyebrow"><span>Rebase</span><span class="depth">— この教材の山場</span></div>
+    <h1>100を基準にそろえる</h1>
+    <p class="lede">前章の壁を、<strong>指数化（リベース）</strong>と<strong>日付の整列</strong>で越えます。この教材の山場です。</p>
+
+    <div class="box goal"><div class="box-k">◈ この章のゴール</div>
+      <p>期間の開始時点を100として各指数をそろえ、スケールの違う指数どうしを「読める」比較にする。</p>
+    </div>
+
+    <h2>開始日を100にそろえる</h2>
+    <p>前章で、40,000円の指数と6,000ptの指数を重ねると片方が潰れて読めない——という壁にぶつかりました。ここを越える考え方は、拍子抜けするほどシンプルです。<strong>期間の最初の日の値を100とみなし、以降を「開始比」に変換する</strong>。それだけ。</p>
+
+    <p>ある日の値を、開始日の値で割って、100を掛ける。<code>その日の値 ÷ 開始日の値 × 100</code>。これで40,000円も6,000ptも、絶対の大きさは消えて「開始からどう動いたか」という同じ土俵に乗ります。開始日はどちらもきっかり100。5%上がった日はどちらも105。スケールの差そのものが、比較の邪魔をしなくなります。</p>
+
+    <p>数字を入れて追ってみます。実際の水準に近い値で、2024年の年初から数日ぶんを並べてみましょう。</p>
+
+    <div class="ascii">              開始日        最終日       指数化後
+  S&amp;P500      4,700 pt  →   4,841 pt     100 → 103.0
+  日経平均   33,000 円  →  34,650 円     100 → 105.0</div>
+
+    <p>実数値のままだと <code>4,841</code> と <code>34,650</code> で<strong>7倍の開き</strong>があり、同じ軸に置くと片方が潰れて読めません。ところが指数化すると <code>103.0</code> と <code>105.0</code>。<strong>「日経のほうが2ポイント多く上げた」と一目で読める</strong>ようになりました。ここが、第04章の「読めない」が「読める」に変わる瞬間です。（この数字は参考実装のテスト <code>TestSeriesRebaseStartsAt100</code> が実際に使っている値なので、後でテストを開くと再会します。）</p>
+
+<pre><code><span class="cm">// 開始日を100にそろえる（リベース）— まずは素朴に</span>
+rebase(points):
+  base = points[0].close        <span class="cm">// 開始日の値</span>
+  <span class="kw">for</span> p <span class="kw">in</span> points:
+    p.value = p.close / base * 100</code></pre>
+
+    <p>たったこれだけで、第04章で片方が床に張り付いていた2本が、同じ高さから出発して並んで動くようになります。ここが山場の頂上……に見えますが、実はその手前に一段、隠れた段差があります。<strong>この <code>points[0]</code> が、後で壊れます。</strong>なぜ壊れるのかは、次の節を読むと分かります。</p>
+
+    <h2>まず日付をそろえる</h2>
+    <p>隠れた段差とは、前章で顔を出した<strong>「休場日のズレ」</strong>です。米国指数と日本指数では、営業日も祝日も違う。つまり「存在する日付」そのものが指数ごとにバラバラです。この状態でいきなりリベースしようとすると、<strong>そもそも基準にすべき開始日が揃わない</strong>——片方には1月2日の値があるのに、もう片方は1月2日が休場で値が無い、といったことが普通に起きます。</p>
+
+    <p>だから順序が大事です。<strong>先に日付をそろえてから、リベースする</strong>。具体的には二段構え。まず全指数の日付を一本の軸に統合し（<strong>和集合</strong>）、次にデータの無い日を直前の値で埋める（<strong>フォワードフィル</strong>）。整列という土台を敷いてから、その上で100にそろえます。</p>
+
+    <div class="ascii">米指数(US) と 日指数(JP)、営業日がずれている
+  日付:    1/2   1/3   1/4   1/5   1/6
+  US:      100         102   103         ← 1/3, 1/6 が休場
+  JP:             99          101   102   ← 1/2, 1/4 が休場
+
+── 和集合の軸に統合（両方の日付をぜんぶ並べる）──
+  軸 :     1/2   1/3   1/4   1/5   1/6
+  US:      100   ・    102   103   ・     ← ・ は穴（値が無い）
+  JP:      ・    99    ・    101   102
+
+── フォワードフィル（穴を直前の値で埋める）──
+  軸 :     1/2   1/3   1/4   1/5   1/6
+  US:      100   100   102   103   103    ← 直前値でつなぐ
+  JP:      ・    99    99    101   102     ← 系列開始前(1/2)だけは穴のまま
+
+これで全指数が同じ軸に乗った。ここで初めてリベースできる。</div>
+
+    <p>フォワードフィル（前方補完）は「休みの日は、直近についた値のまま横ばい」とみなす割り切りです。株価は休場日に動かないので、これは実態にもよく合います。ただし<strong>系列の開始より前</strong>——上の図でJPの1/2のように、まだその指数のデータが1つも無い区間——は埋めません。埋める材料（直前の値）が存在しないからです。この穴は穴のまま残し、描画側で「線を引かない」ことで扱います。</p>
+
+    <h2>素朴なリベースが、ここで壊れる</h2>
+    <p>さて、整列した軸の上で、さきほどの素朴なリベースをもう一度見てください。</p>
+<pre><code>base = points[0].close        <span class="cm">// 「開始日の値」のつもり</span></code></pre>
+
+    <p>上の図のJPの行を見ると、<strong>1/2 は穴</strong>です。つまり <code>points[0]</code> には値がありません。素朴な書き方は「軸の先頭＝その系列の開始日」だと暗黙に決めつけていましたが、<strong>整列した後の軸は全指数の和集合</strong>なので、系列によっては先頭が穴から始まります。ここで <code>base</code> が取れず、以降の割り算が全部おかしくなる——これが隠れていた段差の正体です。</p>
+
+    <p>直し方は素直です。<strong>先頭ではなく、「最初に値が入っている日」を基準にする</strong>。穴は飛ばして、値が現れた日を100とみなします。</p>
+
+<pre><code><span class="cm">// 整列後の穴を織り込んだ形（参考実装もこれ）</span>
+rebase(values):
+  base = 最初の「値が入っている」要素     <span class="cm">// 穴は飛ばす</span>
+  <span class="kw">for</span> v <span class="kw">in</span> values:
+    <span class="kw">if</span> v が穴: そのまま穴               <span class="cm">// 系列開始前は描かない</span>
+    <span class="kw">else</span>:      v.value = v / base * 100</code></pre>
+
+    <p>こうすると、JPは「1/2は穴のまま、1/3の99を100とみなす」という自然な振る舞いになります。始まる日が違う指数どうしでも、それぞれが自分の開始日から100で立ち上がる。<strong>「まず整列する」を先に決めたからこそ、この直し方が見えた</strong>——順序が効いている、というのはこういう意味です。</p>
+
+    <div class="box hazard"><div class="box-k">⚠ 順序を間違えない</div>
+      <p>次章では、点が多すぎて重いグラフを「間引く」処理を入れます。このとき順序を守ってください——<strong>整列 → 指数化 → その後で間引き</strong>。逆にして先に間引くと、間引き方によっては<strong>開始日の点が消え</strong>、基準にすべき100が別の日の値にすり替わって、以降すべての値が狂うことがあります。</p>
+      <p>ここで大事なのは、<strong>この事故が起きるかどうかは「どんな間引きを使うか」に依存する</strong>ということです。第06章で使う LTTB は<strong>先頭の点を必ず残す</strong>性質があるので、たまたま順序を逆にしても開始日は生き残り、値は正しいままになります。ところが「N個おきに1個」のような素朴な等間隔間引きは先頭を保証しません。実際に1000点の系列を「6番目から10個おき」で間引いてから指数化すると、基準が1番目ではなく6番目の値になってしまい、<strong>同じ996番目の点</strong>が <code>107.3303</code> から <code>105.7130</code> へと<strong>1.6ポイントずれました</strong>（同じデータの、同じ日の値なのに、です）。</p>
+      <p>つまり「先に間引いても平気だった」は、<strong>使った道具にたまたま救われただけ</strong>。間引きの実装を差し替えた瞬間に牙を剥きます。だから順序のほうを固定します。</p>
+      <p>ただし、順序を守れば万事解決というわけでもありません。<strong>順序が守るのは「基準（=100）が正しい日から取られること」だけ</strong>です。実測してみると、正しい順序でも先頭を捨てる間引きを使えば——</p>
+      <div class="ascii">1000点の系列を指数化し、その後「6番目から10個おき」で間引く（＝1〜5番目は捨てる）
+
+  指数化直後（1000点）  1番目=100.0000 … 996番目=107.3303 … 1000番目=107.2659
+  間引いた後（100点）   1番目=101.5299 … 最後 =107.3303
+                        └ 6番目の点     └ 996番目の点（＝元の値のまま）
+
+  ※ 残った100点は、どれも元の値と1桁も違わない。捨てられただけ。</div>
+      <p>数字が動いたように見えますが、<strong>値は1つも書き換わっていません</strong>。<code>107.2659</code>（1000番目）と <code>107.3303</code>（996番目）は<strong>そもそも別の日の値</strong>で、間引きで1000番目が捨てられたため、グラフの右端が996番目に変わっただけです。残った点はすべて元の値そのまま——<strong>基準を先に固めたので、どの点も「開始日の何％」を正しく表しています</strong>。</p>
+      <p>では何が失われたのか。<strong>基準点そのものの表示</strong>です。1番目（=100.0000）が捨てられたので、グラフが100から始まらない。読者は「あれ、基準はどこ？」となります。つまり<strong>順序は値の正しさを守り、「先頭を残すこと」はグラフの読みやすさを守る</strong>——別々の問題なので、両方を意識してください。第06章の LTTB は、後者も同時に満たしてくれる道具です。</p>
+    </div>
+
+    <div class="box hazard"><div class="box-k">⚠ 「テストがあるから安心」とは限らない</div>
+      <p>参考実装には <code>TestSeriesRebaseStartsAt100</code> というテストがあり、休場日ズレを含む2系列で<strong>開始点が必ず100になること</strong>を検証しています。ただし——<strong>このテストは上の順序を守らせてはいません。</strong>テストデータが3日ぶんしかなく、間引きは「軸の点数が N 以下なら素通りする」ので、<strong>間引き処理を一度も通らない</strong>からです。実際に参考実装の順序を入れ替えても、このテストは緑のまま通ります。</p>
+      <p>これは教材として大事な一段です。<strong>テストは「書いてあること」ではなく「実際に通った経路」しか守れません。</strong></p>
+      <p>ではデータを数千点に増やせば縛れるでしょうか。<strong>それでも縛れません。</strong>参考実装の LTTB は<strong>先頭の点を必ず選ぶ</strong>うえ、指数化は全部の値を同じ正の倍率で掛けるだけなので、三角形の面積の大小関係が変わりません。つまり<strong>どちらの順序でも LTTB は同じ点を選び、開始点はどちらでも 100 になります</strong>（5,000点・N=600 で実測し、選ばれたインデックスが完全に一致することを確認しました）。</p>
+      <p>「開始点=100」という<strong>結果</strong>を見ている限り、順序違反は原理的に検出できないのです。順序を本当に縛るなら、見るものを変える必要があります——たとえば<strong>呼び出し順そのものを記録する</strong>（間引き器を差し替え可能にして、呼ばれた順を記録する）か、<strong>先頭を捨てる間引き器</strong>を注入して差が出る状況を作るか。<strong>「何を検査すれば、壊れたときに落ちるのか」から逆算する</strong>——これがテストを書くときの本当の問いです。</p>
+    </div>
+
+    <p>通貨が違う点はどうでしょう。ドル建ての指数と円建ての指数を「開始比％」にしてしまえば、単位はどちらも消えて無次元の％になり、土俵は揃います。厳密にはドル建ての1%と円建ての1%を同一視することの割り切りは残ります（為替の動きは織り込まれない）が、初版ではこれで十分です。「為替まで込みで厳密に比べたい」は発展演習として最終章に残します。</p>
+
+    <div class="box do"><div class="box-k">▸ 手を動かす</div>
+      <ol>
+        <li>2指数をリベースして重ね、開始日=100から比較できることを確かめる。片方が床に張り付いていた前章のグラフが、並んで読めるようになれば成功。</li>
+        <li>開始日がどちらかの指数の休場日だった場合、基準点をどう選ぶか決める（和集合軸の最初の日にする／各系列の最初の実データにする、など）。挙動を自分で言語化する。</li>
+        <li>指数化モードと実数値モードを切り替えられるようにする。「絶対の水準を見たいとき」と「動きを比べたいとき」を、ボタン一つで行き来できると使い勝手が上がる。</li>
+      </ol>
+    </div>
+
+    <h2>つまずき FAQ</h2>
+    <details class="qa"><summary>開始日の値がたまたま欠けていたら、base が取れずに全部おかしくなりませんか？</summary>
+      <div class="qa-body"><p>それを防ぐのが「先に整列する」ことです。和集合軸を作りフォワードフィルを掛けた後は、少なくとも各系列の開始日以降には必ず値が入っています。基準にする <code>base</code> は「整列後の、その系列に値が入っている最初の日」を採ればよく、生データの穴に振り回されません。整列を飛ばして生データの先頭を <code>base</code> にすると、まさにご懸念の事故が起きます。だから順序が効くのです。</p></div>
+    </details>
+    <details class="qa"><summary>フォワードフィルで横ばいに埋めると、休みの日も「動かなかった」ことになってしまい不正確では？</summary>
+      <div class="qa-body"><p>むしろ実態に合っています。休場日はその指数に取引が無く、値は前営業日のまま変わりません。「直前の値で横ばい」は、株価の休場日の振る舞いそのものです。注意すべきなのは休場日ではなく<strong>系列開始前</strong>——まだデータが1つも無い区間で、ここは埋める材料が無いので穴のまま残し、描画で線を引かないことで正しく扱います。</p></div>
+    </details>
+
+    <h2>理解度チェック</h2>
+    <p>次の問いに自分の言葉で答えてから、答えを開いてください。</p>
+    <details class="qa"><summary>Q1. なぜ「整列」を先に、「間引き」を後にするのか？</summary>
+      <div class="qa-body"><p>間引きは点を捨てる処理なので、先に間引くと開始日の点が消えることがある。開始日は指数化の基準（=100）だから、それが消えると基準が別の日の値にすり替わり、以降すべての値が狂う。だから「整列 → 指数化（基準を確定）→ 間引き」の順にして、基準を先に固めてから点を減らす。<strong>ここで一段深く言えるなら満点</strong>——第06章で使う LTTB は先頭点を必ず残すので、逆順にしても<em>たまたま</em>壊れない。壊れるのは等間隔間引きのように先頭を保証しない実装に差し替えたとき。つまり順序を固定する意味は「いま壊れるから」ではなく、<strong>間引きの実装が何であっても「基準が正しい日から取られること」を保つため</strong>。安全を道具の性質に依存させない、というのが本質。<strong>さらに一段</strong>——順序が守るのはあくまで<strong>値の正しさ</strong>で、「開始日=100 の点が画面に残るか」は別問題。先頭を捨てる間引きなら、正しい順序でもグラフは100から始まらない（値は正しいまま）。LTTB はその両方を満たす。</p></div>
+    </details>
+    <details class="qa"><summary>Q2. 開始比％にすると、なぜ通貨やスケールの差が吸収されるのか？</summary>
+      <div class="qa-body"><p>各値を「開始日の値で割って100倍」した瞬間、単位（円・pt・ドル）は割り算で打ち消され、残るのは「開始から何％動いたか」という無次元の量だけになるから。40,000円も6,000ptも開始日はきっかり100になり、絶対の大きさの差が比較の邪魔をしなくなる。ドル建てと円建ての1%を同一視する割り切りは残るが、動きの比較には十分。</p></div>
+    </details>
+
+    <div class="box done"><div class="box-k">✓ 完了の合図</div>
+      <p>スケールの違う2指数が、開始日=100からそろって並び、どちらがどれだけ動いたかを目で追えるようになっている。実数値モードに切り替えると片方が潰れる——その「潰れ」こそ、この章でリベースが解いた問題です。整列（和集合＋フォワードフィル）→ 指数化、の順序が体に入っていれば、山場は越えました。</p>
+    </div>
+
+    <h2>まとめ — 次の層へ</h2>
+    <p>スケールの壁を越え、複数の指数を「読める」比較にできました。整列してから100にそろえる——この順序が、山場の核心でした。ところが、ここまで来て新しい困りごとが顔を出します。数日ぶんなら軽快なこのグラフも、<strong>10年・20年といった全期間</strong>を描こうとすると点が数千・数万に膨れ、描画が重くなる。次章では、見た目を保ったまま点を賢く<strong>間引いて軽くする</strong>方法に進みます。ただし——先ほど念を押したとおり、間引きは必ず指数化の<strong>後</strong>で。</p>
+
+    <div class="chap-foot">
+      <a class="pager" href="04-overlay.html"><span class="dir">← 前へ</span>第04章 · 二本目を重ねる</a>
+      <a class="pager next" href="06-downsample.html"><span class="dir">次へ →</span>第06章 · 長い期間を軽くする</a>
+    </div>
+  </main>
+</div>
+</body>
+</html>

@@ -1,0 +1,575 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>第03章 数としての文字列 — Redis をつくる</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500;600&family=Source+Serif+4:opsz,wght@8..60,400;8..60,600;8..60,700&family=Noto+Serif+JP:wght@400;600;700&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<div class="shell">
+
+  <aside class="spine">
+    <a class="wordmark" href="index.html">MINI-REDIS · from scratch</a>
+    <div class="book-title">Redis を<br>つくる</div>
+    <div class="book-sub">Go で RESP から Sorted Set まで</div>
+
+    <div class="legend"><span>読む <b>↓</b></span><span>組む <b>↑</b></span></div>
+
+    <nav aria-label="目次">
+      <ul class="toc">
+        <li><a class="nav-item" href="index.html"><span class="nav-num">序</span><span class="nav-label">はじめに・準備<span class="nav-tag">Setup</span></span></a></li>
+        <li><a class="nav-item" href="00-server.html"><span class="nav-num">00</span><span class="nav-label">返事をするサーバ<span class="nav-tag">RESP</span></span></a></li>
+        <li><a class="nav-item" href="01-keyspace.html"><span class="nav-num">01</span><span class="nav-label">キーと値<span class="nav-tag">Store</span></span></a></li>
+        <li><a class="nav-item" href="02-expire.html"><span class="nav-num">02</span><span class="nav-label">有効期限<span class="nav-tag">Expire</span></span></a></li>
+        <li><a class="nav-item current" aria-current="page" href="03-string.html"><span class="nav-num">03</span><span class="nav-label">数としての文字列<span class="nav-tag">String</span></span></a></li>
+        <li><a class="nav-item" href="04-list.html"><span class="nav-num">04</span><span class="nav-label">List<span class="nav-tag">List</span></span></a></li>
+        <li><a class="nav-item" href="05-hash.html"><span class="nav-num">05</span><span class="nav-label">Hash<span class="nav-tag">Hash</span></span></a></li>
+        <li><a class="nav-item" href="06-set.html"><span class="nav-num">06</span><span class="nav-label">Set とエンコーディング<span class="nav-tag">Set</span></span></a></li>
+        <li><a class="nav-item" href="07-zset.html"><span class="nav-num">07</span><span class="nav-label">Sorted Set と skiplist<span class="nav-tag">ZSet</span></span></a></li>
+        <li><a class="nav-item" href="08-pubsub.html"><span class="nav-num">08</span><span class="nav-label">Pub/Sub<span class="nav-tag">PubSub</span></span></a></li>
+        <li><a class="nav-item" href="09-finish.html"><span class="nav-num">09</span><span class="nav-label">仕上げと設計判断<span class="nav-tag">Finish</span></span></a></li>
+      </ul>
+    </nav>
+
+    <div class="spine-foot">
+      各章は一つのデータ型・機能。<br>下（RESP）から上（Sorted Set）へ<br>積み上げて動かしていく。
+    </div>
+  </aside>
+
+  <main class="reading">
+    <div class="progress-tag">第03章 / 全10章 · 層: STRING · 読了目安 2〜3時間</div>
+    <div class="eyebrow"><span>STRING</span><span class="depth">— キースペースの上</span></div>
+    <h1>数としての文字列</h1>
+    <p class="lede">Redis の <code>string</code> は、ただの文字列ではありません。中身がたまたま数字なら、<code>INCR</code> で 1 増やせる<strong>カウンタ</strong>になり、その加算は何本のクライアントが同時に叩いても 1 つも取りこぼしません。この章では、キースペースの上に <code>SET</code>／<code>GET</code> と、<code>INCR</code>／<code>DECR</code>／<code>APPEND</code>／<code>STRLEN</code> を積みます。<code>string.go</code> ひとつ、約 240 行。読み終えたとき、「バイト列が整数として振る舞う」しくみと、「読み→計算→書きが 1 つのロックの中にある」ことの重みが、手の中に残ります。</p>
+
+    <div class="box goal"><div class="box-k">◈ この章のゴール</div>
+      <p>次の 3 つを、自分の目と手で確認できたら達成です。</p>
+      <ol>
+        <li><code>go test -run TestIncrDecr -v</code> で、<code>INCR</code>／<code>DECRBY</code>・オーバーフロー・非整数・arity のすべてが PASS する。</li>
+        <li><code>go test -run TestServerConcurrentIncr -v</code> で、8 本のクライアントが同じキーへ 200 回ずつ <code>INCR</code> しても、最終値がきっかり <code>1600</code> になる（取りこぼしゼロ）。</li>
+        <li><code>go test -run TestTypeAndWrongType -v</code> で、<code>list</code> に <code>GET</code> や <code>INCR</code> を投げると <code>WRONGTYPE</code> が返り、サーバは落ちない。</li>
+      </ol>
+    </div>
+
+    <div class="box map"><div class="box-k">☰ この章のステップ</div>
+      <ol>
+        <li><a href="#step-1">型を見張る門番 — <code>getStringLocked</code> と WRONGTYPE</a></li>
+        <li><a href="#step-2"><code>SET</code> と <code>GET</code> — オプションを解く</a></li>
+        <li><a href="#step-3"><code>SET</code> コマンドのパース — NX / XX / EX / PX</a></li>
+        <li><a href="#step-4"><code>INCR</code> の心臓 — 読み・計算・書きを 1 つのロックで</a></li>
+        <li><a href="#step-5">コマンドの薄皮 — <code>cmdIncrBy</code> と符号反転の罠</a></li>
+        <li><a href="#step-6"><code>APPEND</code> と <code>STRLEN</code> — 長さを返す 2 つ</a></li>
+        <li><a href="#step-7">テストを読む — 並行 INCR が取りこぼさない証明</a></li>
+      </ol>
+    </div>
+
+    <h2>Redis の string は「バイト列」だが、整数としても振る舞う</h2>
+    <p>Redis の一番よく使われる型は <code>string</code> です。名前は「文字列」ですが、実体は<strong>任意のバイト列</strong> — テキストでも、JPEG のバイナリでも、数字の並びでも、同じ 1 つの型に収まります。第00章で「Bulk は長さで区切るからバイナリセーフ」と念を押したのは、まさにこの型が中に何でも入れられるためでした。</p>
+    <p>ところがこのバイト列は、<strong>中身がたまたま10進数の整数として読めるとき</strong>だけ、算術の対象になります。<code>SET n 41</code> したあと <code>INCR n</code> すると <code>42</code> になる。Redis は値 <code>"41"</code> を整数に読み直し、1 足し、また文字列 <code>"42"</code> に戻して書く。<strong>格納は文字列のまま、演算のときだけ数として解釈する</strong> — これが「数としての文字列」の正体です。だから <code>SET n abc</code> のあと <code>INCR n</code> は「整数じゃない」とエラーになりますし、<code>APPEND n xyz</code> のように文字列として足すこともできます。1 つの値が、見る角度で数にも文字列にもなる。</p>
+    <p>そしてこの章で、本書の<strong>型システムが初めて実戦に出ます</strong>。第01章で登場した番兵エラー <code>errWrongType</code> — 「そのキーは別の型で使われている」を表す値 — が、String コマンドで本格的に効きます。<code>list</code> をしまったキーに <code>GET</code> や <code>INCR</code> を投げたら、静かに間違った答えを返すのではなく、<code>WRONGTYPE</code> エラーで<strong>きっぱり断る</strong>。この「型不一致は必ず断る」規律が、Redis のデータ構造すべてに通底する約束です。String はその最初の適用例になります。</p>
+
+    <h2>この章で作る string.go の地図</h2>
+    <p>作るファイルは <code>string.go</code> 1 つ。中身は大きく 2 段に分かれます。</p>
+    <ul>
+      <li><strong>ストア層のメソッド</strong>（<code>Store</code> に生える）: <code>getStringLocked</code>／<code>SetString</code>／<code>SetWithOptions</code>／<code>GetString</code>／<code>IncrBy</code>／<code>Append</code>／<code>StrLen</code>。ロックを取り、型を確かめ、辞書 <code>data</code> を読み書きする「本体」。</li>
+      <li><strong>コマンドハンドラ</strong>（ただの関数）: <code>cmdSet</code>／<code>cmdGet</code>／<code>cmdSetNX</code>／<code>cmdSetEX</code>／<code>cmdIncrBy</code>／<code>cmdAppend</code>／<code>cmdStrLen</code>。RESP の引数をパースし、ストア層を呼び、結果を第00章の応答ヘルパーで RESP にして返す「薄皮」。</li>
+    </ul>
+    <p>この「ロックと型を握るストア層」と「引数を捌く薄皮」の 2 段構えは、第04章以降の List・Hash・Set・ZSet でもまったく同じ形で繰り返されます。String でこの型を体に入れておくと、あとが速い。<code>command.go</code> の <code>switch</code> には <code>SET</code>／<code>GET</code>／<code>SETNX</code>／<code>SETEX</code>／<code>INCR</code>／<code>DECR</code>／<code>INCRBY</code>／<code>DECRBY</code>／<code>APPEND</code>／<code>STRLEN</code> の <code>case</code> が加わり、それぞれが上のハンドラを呼ぶだけになります（末尾で確認します）。</p>
+
+    <h2 class="step" id="step-1"><span class="step-no">Step 1</span>型を見張る門番 — getStringLocked と WRONGTYPE</h2>
+    <p>String のすべてのコマンドは、まず「そのキーは本当に文字列か?」を確かめてから始めます。その確認を一手に引き受けるのが <code>getStringLocked</code> です。この章のほぼ全メソッドがこの 1 つを通るので、最初に読みます。ファイルの頭、import と 2 つの番兵エラーから。</p>
+
+    <div class="file-tag">string.go（先頭・エラーと門番）</div>
+    <pre><code><span class="kw">package</span> main
+
+<span class="kw">import</span> (
+	<span class="st">"errors"</span>
+	<span class="st">"math"</span>
+	<span class="st">"strconv"</span>
+	<span class="st">"time"</span>
+)
+
+<span class="kw">var</span> errNotInteger = errors.New(<span class="st">"ERR value is not an integer or out of range"</span>)
+<span class="kw">var</span> errOverflow = errors.New(<span class="st">"ERR increment or decrement would overflow"</span>)
+
+<span class="cm">// getStringLocked は文字列として値を取り出す。別の型なら errWrongType。</span>
+<span class="kw">func</span> (s *<span class="ty">Store</span>) getStringLocked(key <span class="ty">string</span>) (<span class="ty">string</span>, <span class="ty">bool</span>, <span class="ty">error</span>) {
+	v, ok := s.getLocked(key)
+	<span class="kw">if</span> !ok {
+		<span class="kw">return</span> <span class="st">""</span>, <span class="kw">false</span>, <span class="kw">nil</span>
+	}
+	str, isStr := v.(<span class="ty">string</span>)
+	<span class="kw">if</span> !isStr {
+		<span class="kw">return</span> <span class="st">""</span>, <span class="kw">false</span>, errWrongType
+	}
+	<span class="kw">return</span> str, <span class="kw">true</span>, <span class="kw">nil</span>
+}</code></pre>
+
+    <p>2 つの番兵エラーは、この章で新しく増える「壊れ方」の名前です。<code>errNotInteger</code> は「値が整数として読めない、または範囲外」（<code>INCR abc</code> のとき）、<code>errOverflow</code> は「加算/減算で int64 の端を越える」（<code>INCR 9223372036854775807</code> のとき）。どちらも第00章で学んだ番兵エラーの流儀で、メッセージ文字列がそのまま本家 Redis のエラー文言になっています。<code>errWrongType</code> はここでは定義されていません — 第01章の <code>store.go</code> で作った既存の値を、そのまま使います。</p>
+    <p>本題の <code>getStringLocked</code> を、戻り値の <strong>3 つ組 <code>(string, bool, error)</code></strong> で読み解きます。この 3 つ組が、Redis のキーが取りうる「3 つの状態」にちょうど対応しています。</p>
+    <table>
+      <tr><th>状況</th><th>戻り値</th><th>意味</th></tr>
+      <tr><td>キーが無い（または失効済み）</td><td><code>"", false, nil</code></td><td>エラーではない。「無い」だけ</td></tr>
+      <tr><td>キーが有り、値は文字列</td><td><code>値, true, nil</code></td><td>正常。値を使ってよい</td></tr>
+      <tr><td>キーが有るが、別の型（list 等）</td><td><code>"", false, errWrongType</code></td><td>型不一致。断る</td></tr>
+    </table>
+    <p>1 行目、<code>s.getLocked(key)</code> は第01章で作った「ロック内側でキーを引く」ヘルパーで、<strong>Lazy 失効を内蔵</strong>しています（引いた瞬間に期限切れなら消して「無い」と答える、第02章）。だから String のコマンドは、失効の心配を <code>getLocked</code> に丸投げできます。取れなければ <code>"", false, nil</code> — <strong>これはエラーではありません</strong>。「無いキーを GET したら nil」は Redis では正常な結果で、後続のコマンドは <code>bool</code> の <code>false</code> を見て「無い」と分岐します。</p>
+    <p>2 段目が<strong>この章の主役</strong>です。<code>v</code> は <code>getLocked</code> が返した <code>any</code>（何の型か決まっていない値）。<code>str, isStr := v.(string)</code> は Go の<strong>型アサーション</strong>で、「この <code>any</code> の中身は本当に <code>string</code> か?」を試します。中身が文字列なら <code>str</code> に取り出せて <code>isStr</code> は <code>true</code>。しかしそのキーに <code>LPUSH</code> で <code>*List</code> をしまってあったら、<code>isStr</code> は <code>false</code> になり、ここで <code>errWrongType</code> を返す。<strong>これが「list のキーに GET すると WRONGTYPE」の発生源</strong>です。門番はたった 4 行ですが、Redis の型安全がここから始まります。</p>
+
+    <div class="gonote"><div class="box-k">GO メモ · 型アサーション v.(string) の2値形</div>
+      <p>Go の <code>any</code>（= <code>interface{}</code>）は「何の型でも入る箱」です。中身を取り出すには<strong>型アサーション</strong> <code>v.(T)</code> を使います。1 値で受ける <code>str := v.(string)</code> は、中身が <code>string</code> でないと <strong>panic</strong> します。危険なので、Redis のように「別の型かもしれない」場面では必ず<strong>2 値形</strong> <code>str, ok := v.(string)</code> を使います。中身が <code>string</code> なら <code>(値, true)</code>、違えば <code>(ゼロ値, false)</code> を返し、panic しません。「型で分岐したいが、間違っても落としたくない」ときの定石で、この本のすべてのデータ型ハンドラがこの 2 値形で自分の型を確かめています。</p>
+    </div>
+
+    <div class="box hazard"><div class="box-k">⚠ 落とし穴 — 「無い」と「型違い」を混ぜない</div>
+      <p><code>getStringLocked</code> が「無い（<code>false, nil</code>）」と「型違い（<code>false, errWrongType</code>）」を<strong>別の戻り値で区別</strong>しているのは意図的です。もしこの 2 つを一緒くたに「取れなかった」で扱うと、<code>list</code> のキーに <code>GET</code> したとき <code>WRONGTYPE</code> ではなく <code>(nil)</code> を返してしまい、クライアントは「そのキーは空だ」と誤解します。<strong>「存在しない」と「型が違う」は根本的に別の事態</strong> — 前者は普通の結果、後者はクライアントのバグの疑い。だから <code>bool</code> で「有る/無い」を、<code>error</code> で「型違いか」を、独立した 2 チャンネルで返しています。<code>GetString</code> を呼ぶ側は、まず <code>err</code> を見て、次に <code>ok</code> を見る、という順で判定します（Step 2 で確認）。</p>
+    </div>
+
+    <h2 class="step" id="step-2"><span class="step-no">Step 2</span>SET と GET — オプションを解く前に、素直な 2 つ</h2>
+    <p>門番ができたので、まず一番素直な書きと読み — <code>SetString</code> と <code>GetString</code> を見ます。オプション付きの複雑な <code>SET</code> は Step 3 に回し、ここでは骨だけ。</p>
+
+    <div class="file-tag">string.go（SetString / SetWithOptions / GetString）</div>
+    <pre><code><span class="cm">// SetString は無条件の SET。既存の有効期限は消える（本家と同じ）。</span>
+<span class="kw">func</span> (s *<span class="ty">Store</span>) SetString(key, val <span class="ty">string</span>) {
+	s.mu.Lock()
+	<span class="kw">defer</span> s.mu.Unlock()
+	s.data[key] = val
+	<span class="kw">delete</span>(s.expires, key)
+}
+
+<span class="cm">// SetWithOptions は SET の NX / XX / EX / PX をまとめて扱う。</span>
+<span class="cm">// 条件を満たさず設定しなかったときは false。</span>
+<span class="kw">func</span> (s *<span class="ty">Store</span>) SetWithOptions(key, val <span class="ty">string</span>, ttl time.<span class="ty">Duration</span>, nx, xx <span class="ty">bool</span>) <span class="ty">bool</span> {
+	s.mu.Lock()
+	<span class="kw">defer</span> s.mu.Unlock()
+	_, exists := s.getLocked(key)
+	<span class="kw">if</span> (nx &amp;&amp; exists) || (xx &amp;&amp; !exists) {
+		<span class="kw">return</span> <span class="kw">false</span>
+	}
+	s.data[key] = val
+	<span class="kw">delete</span>(s.expires, key)
+	<span class="kw">if</span> ttl &gt; <span class="st">0</span> {
+		s.expires[key] = time.Now().Add(ttl)
+	}
+	<span class="kw">return</span> <span class="kw">true</span>
+}
+
+<span class="kw">func</span> (s *<span class="ty">Store</span>) GetString(key <span class="ty">string</span>) (<span class="ty">string</span>, <span class="ty">bool</span>, <span class="ty">error</span>) {
+	s.mu.Lock()
+	<span class="kw">defer</span> s.mu.Unlock()
+	<span class="kw">return</span> s.getStringLocked(key)
+}</code></pre>
+
+    <p><code>SetString</code> は 2 行の仕事です。辞書 <code>data[key]</code> に文字列を書き、<strong><code>expires</code> からそのキーを消す</strong>。この 2 行目 <code>delete(s.expires, key)</code> が Redis の大事な約束を体現しています——<strong>素の <code>SET</code> は既存の有効期限を消す</strong>。<code>SET k v EX 100</code>（100 秒で失効）と設定したキーに、あとから <code>SET k w</code> と素で上書きすると、TTL は消えて無期限になります。この「値を書き直すと期限もリセット」は本家 Redis と同じ挙動で、Step 4 の <code>IncrBy</code> がこれと<strong>逆</strong>の振る舞い（期限を残す）をするので、その対比を頭に置いておいてください。</p>
+    <p><code>SetWithOptions</code> は、その <code>SET</code> に条件と TTL を足した版です。まず <code>getLocked</code> で「そのキーが既に有るか」を <code>exists</code> に取り、<strong>NX/XX の条件判定</strong>をします。<code>nx &amp;&amp; exists</code>（NX = 無いときだけ、なのに既に有る）または <code>xx &amp;&amp; !exists</code>（XX = 有るときだけ、なのに無い）なら、<strong>何もせず <code>false</code> を返す</strong>。条件を通れば書き込み、<code>ttl > 0</code> のときだけ失効時刻を <code>expires</code> に登録します。この <code>bool</code> の戻り値が、コマンド層で「<code>+OK</code> か <code>nil</code> か」の分岐になります（Step 3）。ここでも <code>delete(s.expires, key)</code> を先に呼んで一度期限を白紙にしてから、必要なら付け直しています。</p>
+    <p><code>GetString</code> は、ロックを取って <code>getStringLocked</code> を呼ぶだけ。「公開メソッドはロックを取り、<code>...Locked</code> の内側ヘルパーはロック済み前提」という第01章からの規約が、ここでも守られています。門番のロジックは <code>getStringLocked</code> に集約し、<code>GetString</code> はロックの皮をかぶせるだけ。</p>
+
+    <div class="box do"><div class="box-k">▸ 動かして確認</div>
+      <p><code>SET</code> の基本と、<code>GET</code> が存在しないキーで nil を返すことを確認します。</p>
+      <pre class="term"><code><span class="ps">$</span> go test -run TestStringBasics -v
+<span class="out">=== RUN   TestStringBasics
+--- PASS: TestStringBasics (0.00s)
+PASS</span></code></pre>
+      <p>このテストは <code>SET k v</code> → <code>+OK</code>、<code>GET k</code> → <code>$1\r\nv\r\n</code>、そして <code>GET missing</code> → <code>$-1\r\n</code>（nil）を検証します。存在しないキーで <strong><code>nullBulk()</code> の <code>$-1</code></strong> が返るのは、<code>getStringLocked</code> が <code>ok=false</code> を返し、コマンド層がそれを nil に変換しているからです。</p>
+    </div>
+
+    <h2 class="step" id="step-3"><span class="step-no">Step 3</span>SET コマンドのパース — NX / XX / EX / PX を読み解く</h2>
+    <p>ストア層ができたので、<code>SET key value [NX|XX] [EX 秒 | PX ミリ秒]</code> という<strong>可変長の構文</strong>を RESP の引数配列から読み解く <code>cmdSet</code> です。この章でいちばん分岐の多い関数ですが、やっていることは「余った引数を 1 つずつ見て、フラグや TTL に振り分ける」だけです。</p>
+
+    <div class="file-tag">string.go（cmdSet・これで全文）</div>
+    <pre><code><span class="cm">// SET key value [NX|XX] [EX seconds | PX milliseconds]</span>
+<span class="kw">func</span> cmdSet(s *<span class="ty">Store</span>, args []<span class="ty">string</span>) <span class="ty">string</span> {
+	<span class="kw">if</span> len(args) &lt; <span class="st">3</span> {
+		<span class="kw">return</span> errorMsg(<span class="st">"ERR wrong number of arguments for 'set' command"</span>)
+	}
+	<span class="kw">var</span> ttl time.<span class="ty">Duration</span>
+	<span class="kw">var</span> nx, xx <span class="ty">bool</span>
+	<span class="kw">for</span> i := <span class="st">3</span>; i &lt; len(args); i++ {
+		<span class="kw">switch</span> upper(args[i]) {
+		<span class="kw">case</span> <span class="st">"NX"</span>:
+			nx = <span class="kw">true</span>
+		<span class="kw">case</span> <span class="st">"XX"</span>:
+			xx = <span class="kw">true</span>
+		<span class="kw">case</span> <span class="st">"EX"</span>, <span class="st">"PX"</span>:
+			<span class="kw">if</span> i+<span class="st">1</span> &gt;= len(args) {
+				<span class="kw">return</span> errorMsg(<span class="st">"ERR syntax error"</span>)
+			}
+			n, err := strconv.ParseInt(args[i+<span class="st">1</span>], <span class="st">10</span>, <span class="st">64</span>)
+			<span class="kw">if</span> err != <span class="kw">nil</span> {
+				<span class="kw">return</span> errorMsg(<span class="st">"ERR value is not an integer or out of range"</span>)
+			}
+			unit := time.Second
+			<span class="kw">if</span> upper(args[i]) == <span class="st">"PX"</span> {
+				unit = time.Millisecond
+			}
+			<span class="cm">// 0以下と、Duration に変換するとオーバーフローする巨大値は拒否</span>
+			<span class="kw">if</span> n &lt;= <span class="st">0</span> || n &gt; math.MaxInt64/int64(unit) {
+				<span class="kw">return</span> errorMsg(<span class="st">"ERR invalid expire time in 'set' command"</span>)
+			}
+			ttl = time.Duration(n) * unit
+			i++
+		<span class="kw">default</span>:
+			<span class="kw">return</span> errorMsg(<span class="st">"ERR syntax error"</span>)
+		}
+	}
+	<span class="kw">if</span> nx &amp;&amp; xx {
+		<span class="kw">return</span> errorMsg(<span class="st">"ERR syntax error"</span>)
+	}
+	<span class="kw">if</span> !s.SetWithOptions(args[<span class="st">1</span>], args[<span class="st">2</span>], ttl, nx, xx) {
+		<span class="kw">return</span> nullBulk() <span class="cm">// NX/XX の条件に外れた</span>
+	}
+	<span class="kw">return</span> simpleString(<span class="st">"OK"</span>)
+}</code></pre>
+
+    <p>順に追います。まず <code>len(args) &lt; 3</code> で arity チェック — <code>SET</code>・キー・値の 3 つは必須です（<code>args[0]</code> はコマンド名 <code>"SET"</code>）。次に、<strong>4 番目以降（<code>i := 3</code>）の余った引数をループで舐めます</strong>。<code>args[1]</code> がキー、<code>args[2]</code> が値と決まっているので、オプションは <code>args[3]</code> から始まります。</p>
+    <p>ループの中の <code>switch upper(args[i])</code> が振り分けの核です。<code>NX</code>／<code>XX</code> は該当フラグを立てるだけ。面白いのは <code>EX</code>／<code>PX</code> で、これらは<strong>次の引数（秒数/ミリ秒数）とペア</strong>になっています。だから <code>i+1 &gt;= len(args)</code> で「次が無い」を先にチェックし（<code>SET k v EX</code> のように数が欠けた構文エラーを弾く）、<code>args[i+1]</code> を <code>ParseInt</code> で数値化します。<code>unit</code> を <code>EX</code> なら秒、<code>PX</code> ならミリ秒に決め、最後に <code>i++</code> で<strong>ペアの片割れを読み飛ばす</strong> — これでループの次周は <code>EX</code> の次の次の引数から再開します。<code>default</code> は知らないトークン（<code>SET k v BOGUS</code>）で、<code>syntax error</code>。</p>
+    <p>TTL の検査 <code>n &lt;= 0 || n &gt; math.MaxInt64/int64(unit)</code> は、第02章で学んだ<strong>Duration オーバーフローの防波堤</strong>です。Go の <code>time.Duration</code> はナノ秒単位の <code>int64</code>。もし <code>EX 9999999999999999999</code> のような巨大な秒数を <code>time.Duration(n) * time.Second</code> で掛けると、int64 が折り返して<strong>負の期限</strong>になり、「設定した瞬間に失効済み」という誤動作を起こします。だから掛ける前に「<code>math.MaxInt64</code> を <code>unit</code> で割った上限」を超えていないか確かめる。この 1 行が無いと <code>TestExpireOverflow</code> が落ちます（第02章で作った要件がここでも効いています）。</p>
+    <p>最後の <code>nx &amp;&amp; xx</code> は「NX と XX を両方指定」という矛盾の門前払い（<code>SET k v NX XX</code> → 構文エラー）。そして <code>SetWithOptions</code> を呼び、<strong>戻り値の <code>bool</code> で応答を分岐</strong>します。<code>false</code>（NX/XX の条件に外れて書かなかった）なら <code>nullBulk()</code> の <code>$-1</code>、書けたら <code>+OK</code>。<strong>「SET したのに OK じゃなく nil が返る」</strong>のは、NX/XX で条件に外れたときだけ、と覚えておくとデバッグが早いです。</p>
+
+    <div class="gonote"><div class="box-k">GO メモ · strconv.ParseInt(s, 10, 64)</div>
+      <p><code>strconv.ParseInt(s, base, bitSize)</code> は文字列を整数に変換します。第 2 引数 <code>10</code> は「10 進数として読む」、第 3 引数 <code>64</code> は「<code>int64</code> に収まる範囲で」の意味です。<code>bitSize</code> を <code>64</code> にすると、<code>"9223372036854775808"</code>（= <code>math.MaxInt64 + 1</code>）のような範囲外の値は変換に失敗してエラーを返します。つまり <code>ParseInt(..., 10, 64)</code> は「10 進の int64 として読めるか」を<strong>パースと範囲チェックを同時に</strong>やってくれる道具。この章の <code>SET EX</code>／<code>SETEX</code>／<code>INCRBY</code> のすべてが、数値引数の受け取りにこれを使っています。<code>strconv.Atoi</code>（第00章）は int 用の簡易版で、大きくなりうる TTL や加算量には <code>ParseInt</code> の 64 ビット版を選びます。</p>
+    </div>
+
+    <p>読み側の <code>cmdGet</code> と、<code>SET</code> の便利な別名 <code>cmdSetNX</code>／<code>cmdSetEX</code> も、ここでまとめて見ます。どれも <code>SetWithOptions</code> の薄い言い換えです。</p>
+
+    <div class="file-tag">string.go（cmdGet / cmdSetNX / cmdSetEX）</div>
+    <pre><code><span class="kw">func</span> cmdGet(s *<span class="ty">Store</span>, args []<span class="ty">string</span>) <span class="ty">string</span> {
+	<span class="kw">if</span> len(args) != <span class="st">2</span> {
+		<span class="kw">return</span> errorMsg(<span class="st">"ERR wrong number of arguments for 'get' command"</span>)
+	}
+	v, ok, err := s.GetString(args[<span class="st">1</span>])
+	<span class="kw">if</span> err != <span class="kw">nil</span> {
+		<span class="kw">return</span> errorMsg(err.Error())
+	}
+	<span class="kw">if</span> !ok {
+		<span class="kw">return</span> nullBulk()
+	}
+	<span class="kw">return</span> bulkString(v)
+}
+
+<span class="kw">func</span> cmdSetNX(s *<span class="ty">Store</span>, args []<span class="ty">string</span>) <span class="ty">string</span> {
+	<span class="kw">if</span> len(args) != <span class="st">3</span> {
+		<span class="kw">return</span> errorMsg(<span class="st">"ERR wrong number of arguments for 'setnx' command"</span>)
+	}
+	<span class="kw">if</span> s.SetWithOptions(args[<span class="st">1</span>], args[<span class="st">2</span>], <span class="st">0</span>, <span class="kw">true</span>, <span class="kw">false</span>) {
+		<span class="kw">return</span> integer(<span class="st">1</span>)
+	}
+	<span class="kw">return</span> integer(<span class="st">0</span>)
+}
+
+<span class="kw">func</span> cmdSetEX(s *<span class="ty">Store</span>, args []<span class="ty">string</span>) <span class="ty">string</span> {
+	<span class="kw">if</span> len(args) != <span class="st">4</span> {
+		<span class="kw">return</span> errorMsg(<span class="st">"ERR wrong number of arguments for 'setex' command"</span>)
+	}
+	sec, err := strconv.ParseInt(args[<span class="st">2</span>], <span class="st">10</span>, <span class="st">64</span>)
+	<span class="kw">if</span> err != <span class="kw">nil</span> {
+		<span class="kw">return</span> errorMsg(<span class="st">"ERR value is not an integer or out of range"</span>)
+	}
+	<span class="kw">if</span> sec &lt;= <span class="st">0</span> || sec &gt; math.MaxInt64/int64(time.Second) {
+		<span class="kw">return</span> errorMsg(<span class="st">"ERR invalid expire time in 'setex' command"</span>)
+	}
+	s.SetWithOptions(args[<span class="st">1</span>], args[<span class="st">3</span>], time.Duration(sec)*time.Second, <span class="kw">false</span>, <span class="kw">false</span>)
+	<span class="kw">return</span> simpleString(<span class="st">"OK"</span>)
+}</code></pre>
+
+    <p><code>cmdGet</code> が、Step 1 で分けた 3 状態を<strong>正しい順で判定</strong>する見本です。<code>GetString</code> の 3 つ組を受けたら、<strong>まず <code>err</code>（型違い?）</strong>を見て、そうなら <code>errorMsg(err.Error())</code> で <code>WRONGTYPE</code> を返す。<strong>次に <code>ok</code>（有る?）</strong>を見て、無ければ <code>nullBulk()</code> の nil。両方くぐり抜けたら <code>bulkString(v)</code> で値を返す。この「err → ok → 値」の順序が崩れると、<code>list</code> のキーに <code>GET</code> したとき WRONGTYPE ではなく nil を返す例のバグ（Step 1 の落とし穴）が再発します。</p>
+    <p><code>cmdSetNX</code> は「無いときだけ SET、成否を 0/1 で返す」古い専用コマンドで、中身は <code>SetWithOptions(..., nx=true, xx=false)</code> をそのまま呼び、<code>bool</code> を <code>integer(1)</code>／<code>integer(0)</code> に翻訳するだけ。<code>SET k v NX</code> と機能は同じで、応答形式（<code>SETNX</code> は整数、<code>SET NX</code> は <code>+OK</code>/nil）が違うだけです。<code>cmdSetEX</code> も同様に「TTL 必須の SET」で、<code>cmdSet</code> の <code>EX</code> と同じ Duration オーバーフロー検査を、この専用パスにも独立して持っています（どの入口から来てもキーを壊さないため）。</p>
+
+    <div class="box do"><div class="box-k">▸ 動かして確認</div>
+      <p>NX/XX の条件分岐、EX での TTL 付与、素の SET で TTL が消えること、構文エラーをまとめて検証します。</p>
+      <pre class="term"><code><span class="ps">$</span> go test -run TestSetOptions -v
+<span class="out">=== RUN   TestSetOptions
+--- PASS: TestSetOptions (0.00s)
+PASS</span></code></pre>
+      <p>このテストの肝は 2 つ。<code>SET k a NX</code> は成功（<code>+OK</code>）するが、既に有る状態での <code>SET k b NX</code> は <code>$-1</code>（nil）で値は <code>a</code> のまま、という NX の証明。そして <code>SET tk v EX 100</code> のあと <code>SET tk v</code>（素）を打つと <code>TTL tk</code> が <code>:-1</code>（無期限）に戻る、という「素の SET は期限を消す」の証明です。</p>
+    </div>
+
+    <h2 class="step" id="step-4"><span class="step-no">Step 4</span>INCR の心臓 — 読み・計算・書きを 1 つのロックで</h2>
+    <p>この章の——いや、本書の並行設計の——<strong>核心</strong>が <code>IncrBy</code> です。<code>INCR</code>／<code>DECR</code>／<code>INCRBY</code>／<code>DECRBY</code> の 4 コマンドは、すべてこの 1 つのメソッドに集約されます。短いですが、1 行ずつに意味が詰まっています。</p>
+
+    <div class="file-tag">string.go（IncrBy・これで全文）</div>
+    <pre><code><span class="cm">// IncrBy は値を整数として n 加算する。キーが無ければ 0 から始める。</span>
+<span class="cm">// 読み→計算→書き がひとつのロックの中にあるので、並行実行でも取りこぼさない。</span>
+<span class="kw">func</span> (s *<span class="ty">Store</span>) IncrBy(key <span class="ty">string</span>, n <span class="ty">int64</span>) (<span class="ty">int64</span>, <span class="ty">error</span>) {
+	s.mu.Lock()
+	<span class="kw">defer</span> s.mu.Unlock()
+	cur, exists, err := s.getStringLocked(key)
+	<span class="kw">if</span> err != <span class="kw">nil</span> {
+		<span class="kw">return</span> <span class="st">0</span>, err
+	}
+	<span class="kw">var</span> cv <span class="ty">int64</span>
+	<span class="kw">if</span> exists {
+		cv, err = strconv.ParseInt(cur, <span class="st">10</span>, <span class="st">64</span>)
+		<span class="kw">if</span> err != <span class="kw">nil</span> {
+			<span class="kw">return</span> <span class="st">0</span>, errNotInteger
+		}
+	}
+	<span class="cm">// オーバーフロー検査（int64 の端で折り返さない）</span>
+	<span class="kw">if</span> (n &gt; <span class="st">0</span> &amp;&amp; cv &gt; math.MaxInt64-n) || (n &lt; <span class="st">0</span> &amp;&amp; cv &lt; math.MinInt64-n) {
+		<span class="kw">return</span> <span class="st">0</span>, errOverflow
+	}
+	cv += n
+	s.data[key] = strconv.FormatInt(cv, <span class="st">10</span>) <span class="cm">// 有効期限はそのまま（SET と違う）</span>
+	<span class="kw">return</span> cv, <span class="kw">nil</span>
+}</code></pre>
+
+    <p>コメントにある通り、この関数は<strong>「読み → 計算 → 書き」を 1 つのロックの中で完結</strong>させます。これが並行 INCR の正しさの全てなので、まず構造を俯瞰します。<code>s.mu.Lock()</code> と <code>defer s.mu.Unlock()</code> で関数全体を単一ロックで囲い、その内側で:</p>
+    <ol>
+      <li><strong>読み</strong>: <code>getStringLocked(key)</code> で現在値を取る（門番付き）。</li>
+      <li><strong>計算</strong>: 文字列を <code>ParseInt</code> で整数化し、<code>n</code> を足す。</li>
+      <li><strong>書き</strong>: <code>FormatInt</code> で文字列に戻して <code>data[key]</code> へ書く。</li>
+    </ol>
+    <p>1 行ずつ。まず <code>getStringLocked</code> の <code>err</code> を見て、<strong>型違いなら即 return</strong>（<code>list</code> に <code>INCR</code> → WRONGTYPE）。次に <code>exists</code> の分岐が Redis らしい親切さで、<strong>キーが無ければ <code>cv</code> は 0 のまま</strong>始めます。だから <code>INCR</code> を存在しないキーに打つと、Redis は「0 から始めて 1 足す」で <code>1</code> を返す。カウンタを事前に <code>SET counter 0</code> しておく必要が無いのはこのためです。キーが有れば <code>ParseInt</code> で整数化し、失敗したら（値が <code>"abc"</code> のような非整数）<code>errNotInteger</code>。</p>
+    <p>そして<strong>オーバーフロー検査</strong>——この本で最も注意深い 1 行です。単純に <code>cv += n</code> してから「あれ、負になった?」と後で気づくのでは<strong>手遅れ</strong>です。int64 は端を越えると静かに折り返す（<code>math.MaxInt64 + 1</code> が <code>math.MinInt64</code> になる）ので、足した結果を見ても本当に溢れたか区別できません。だから<strong>足す前に</strong>、<code>n &gt; 0</code> なら「現在値が <code>MaxInt64 - n</code> より大きいか」（正方向にはみ出す）、<code>n &lt; 0</code> なら「<code>MinInt64 - n</code> より小さいか」（負方向にはみ出す）を検査します。この形なら引き算 <code>MaxInt64 - n</code> 自体は決して溢れない（<code>n &gt; 0</code> なので結果は <code>MaxInt64</code> 未満）。溢れると分かったら計算せず <code>errOverflow</code> を返し、<strong>元の値には一切手を付けません</strong>。</p>
+    <p>検査を通ってはじめて <code>cv += n</code>、<code>FormatInt</code> で文字列化して書き込みます。最後のコメント <code>// 有効期限はそのまま（SET と違う）</code>に注目してください。<code>IncrBy</code> は <code>data[key]</code> を書き換えるだけで、<strong><code>expires</code> には触りません</strong>。だから <code>SET c 0 EX 100</code>（100 秒で失効するカウンタ）に <code>INCR c</code> しても、TTL は減り続けたまま。Step 2 の <code>SetString</code> が期限を<strong>消した</strong>のと、ここで意図的に対比しています。「値の意味を書き換える SET は期限もリセット、値を進めるだけの INCR は期限を保つ」——この非対称は本家 Redis の仕様で、レート制限のカウンタ（「100 秒間に何回」を数える）を作るときに効いてきます。</p>
+
+    <div class="box hazard"><div class="box-k">⚠ 落とし穴 — なぜ「1 つのロックの中」が命なのか</div>
+      <p><code>IncrBy</code> がロックの<strong>外</strong>で「読んで、計算して、書く」を 3 手に分けていたら、次の悲劇が起きます。クライアント A が値 <code>5</code> を読む。ほぼ同時にクライアント B も <code>5</code> を読む。A が <code>6</code> を書く。B も（自分が読んだ <code>5</code> を元に）<code>6</code> を書く。<strong>2 回 INCR したのに 7 でなく 6</strong> — これが「取りこぼし（lost update）」です。銀行口座なら残高が合わなくなる致命傷。<code>IncrBy</code> はこの読み・計算・書きの 3 手を<strong>1 つの <code>Lock()</code>〜<code>Unlock()</code> で囲う</strong>ことで、A の一連が終わるまで B は <code>getStringLocked</code> にすら入れません。だから B は必ず A が書いた <code>6</code> を読み、<code>7</code> を書く。<strong>「read-modify-write を分割不可能にする」——これがロックの本質的な仕事</strong>で、単に <code>data</code> を壊さないためだけではありません。Step 7 の <code>TestServerConcurrentIncr</code> が、8×200=1600 という数字ぴったりでこれを証明します。</p>
+    </div>
+
+    <div class="box hazard"><div class="box-k">⚠ 落とし穴 — オーバーフローは「足す前」に検査する</div>
+      <p><code>if cv+n オーバーフローしたら...</code> と、<strong>足してから</strong>判定するコードを書きたくなりますが、これは動きません。<code>cv + n</code> の時点で既に int64 が折り返しているので、結果を見ても正しく溢れたかは判別不能です（<code>MaxInt64 + 1</code> は例外を出さず、静かに <code>MinInt64</code> になる — Go に整数オーバーフローの例外は無い）。正しくは <code>IncrBy</code> のように「あといくつ足せるか（<code>MaxInt64 - n</code>）」と現在値を<strong>足す前に</strong>比べる。この「境界に触れる前に止める」は、<code>SET EX</code> の Duration オーバーフロー検査（Step 3）と同じ発想です。整数の端は、越えてから気づくのでは遅い。</p>
+    </div>
+
+    <h2 class="step" id="step-5"><span class="step-no">Step 5</span>コマンドの薄皮 — cmdIncrBy と符号反転の罠</h2>
+    <p><code>IncrBy</code> という 1 つの心臓に、4 つのコマンド（<code>INCR</code>／<code>DECR</code>／<code>INCRBY</code>／<code>DECRBY</code>）を繋ぐのが <code>cmdIncrBy</code> です。加算量と符号を引数で受け、<code>IncrBy</code> を呼ぶだけ——のはずが、1 か所だけ int64 の端に潜む罠があります。</p>
+
+    <div class="file-tag">string.go（cmdIncrBy・これで全文）</div>
+    <pre><code><span class="cm">// cmdIncrBy は INCR / DECR / INCRBY / DECRBY の共通処理。</span>
+<span class="cm">// byArg=true のときだけ第3引数（加算量）を取る。</span>
+<span class="kw">func</span> cmdIncrBy(s *<span class="ty">Store</span>, args []<span class="ty">string</span>, sign <span class="ty">int64</span>, byArg <span class="ty">bool</span>, name <span class="ty">string</span>) <span class="ty">string</span> {
+	want := <span class="st">2</span>
+	<span class="kw">if</span> byArg {
+		want = <span class="st">3</span>
+	}
+	<span class="kw">if</span> len(args) != want {
+		<span class="kw">return</span> errorMsg(<span class="st">"ERR wrong number of arguments for '"</span> + name + <span class="st">"' command"</span>)
+	}
+	<span class="kw">var</span> n <span class="ty">int64</span> = <span class="st">1</span>
+	<span class="kw">if</span> byArg {
+		<span class="kw">var</span> err <span class="ty">error</span>
+		n, err = strconv.ParseInt(args[<span class="st">2</span>], <span class="st">10</span>, <span class="st">64</span>)
+		<span class="kw">if</span> err != <span class="kw">nil</span> {
+			<span class="kw">return</span> errorMsg(<span class="st">"ERR value is not an integer or out of range"</span>)
+		}
+		<span class="cm">// DECRBY -9223372036854775808 は符号反転自体がオーバーフローする</span>
+		<span class="kw">if</span> sign &lt; <span class="st">0</span> &amp;&amp; n == math.MinInt64 {
+			<span class="kw">return</span> errorMsg(errOverflow.Error())
+		}
+	}
+	v, err := s.IncrBy(args[<span class="st">1</span>], sign*n)
+	<span class="kw">if</span> err != <span class="kw">nil</span> {
+		<span class="kw">return</span> errorMsg(err.Error())
+	}
+	<span class="kw">return</span> integer64(v)
+}</code></pre>
+
+    <p>この 1 つの関数が 4 コマンドを兼ねる仕掛けは、引数 <code>sign</code> と <code>byArg</code> にあります。<code>command.go</code> の <code>switch</code> は次のように呼び分けます（末尾で全文を確認します）: <code>INCR</code> は <code>cmdIncrBy(s, args, +1, false, "incr")</code>、<code>DECR</code> は <code>-1, false</code>、<code>INCRBY</code> は <code>+1, true</code>、<code>DECRBY</code> は <code>-1, true</code>。<strong><code>sign</code> が加算の向き、<code>byArg</code> が「加算量を引数で取るか」</strong>。<code>INCR</code>／<code>DECR</code> は暗黙に 1、<code>INCRBY</code>／<code>DECRBY</code> は第 3 引数で量を指定する、という違いをこの 2 つのフラグで吸収しています。</p>
+    <p>前半は arity。<code>byArg</code> なら引数 3 つ（コマンド・キー・量）、でなければ 2 つ（コマンド・キー）を要求します。<code>INCR n 5</code> のように <code>INCR</code> に量を渡すと <code>want=2</code> に反して <code>len(args)=3</code> になり、arity エラー。<code>name</code> 引数はエラーメッセージ用で、<code>'incr'</code>／<code>'decrby'</code> と本家そっくりの文言を組み立てます。</p>
+    <p><code>n</code> は既定 <code>1</code>（<code>INCR</code>／<code>DECR</code> 用）で、<code>byArg</code> のときだけ <code>args[2]</code> を <code>ParseInt</code> して上書きします。そして——<strong>この章で最も気づきにくい 3 行</strong>——:</p>
+    <pre><code><span class="kw">if</span> sign &lt; <span class="st">0</span> &amp;&amp; n == math.MinInt64 {
+	<span class="kw">return</span> errorMsg(errOverflow.Error())
+}</code></pre>
+    <p>これは <code>DECRBY key -9223372036854775808</code> という一見無害なコマンドに潜む罠を塞いでいます。<code>DECRBY</code> の実装は「<code>sign * n</code> を <code>IncrBy</code> に渡す」——つまり <code>-1 * n</code> で符号を反転させて加算に変換します。ところが <code>n = math.MinInt64</code>（= <code>-9223372036854775808</code>）のとき、<strong>その符号反転 <code>-n</code> 自体が int64 に収まりません</strong>。int64 の正の最大は <code>9223372036854775807</code> で、<code>MinInt64</code> の絶対値 <code>9223372036854775808</code> はそれを 1 だけ超えるからです（2 の補数表現の非対称性）。<code>sign * n</code> を計算した瞬間に静かに折り返して <code>MinInt64</code> のまま返り、「大きく減らすはずが、なぜか値が変わらない」という不可解な挙動になる。だから <code>sign * n</code> を作る<strong>前に</strong>、この特異点だけを名指しで弾いて <code>errOverflow</code> を返します。</p>
+    <p>この検査を通れば <code>s.IncrBy(args[1], sign*n)</code> を呼び、結果を <code>integer64</code>（第00章の <code>:数値\r\n</code> ヘルパー、int64 版）で返すだけ。<code>IncrBy</code> の戻り値が <code>int64</code> なので、<code>integer</code>（int 版）ではなく <code>integer64</code> を使う——第00章で 2 つ用意した理由がここで回収されます。</p>
+
+    <div class="box hazard"><div class="box-k">⚠ 落とし穴 — 失敗した演算は値を変えない</div>
+      <p><code>DECRBY n -9223372036854775808</code> が <code>errOverflow</code> で弾かれたとき、キー <code>n</code> の値は<strong>1 ビットも変わっていない</strong>ことが重要です。この検査は <code>IncrBy</code> を呼ぶ<strong>前</strong>に行われるので、辞書 <code>data</code> には一切書き込みが走りません。<code>IncrBy</code> 側のオーバーフロー検査も同様に「書く前に return」する設計でした（Step 4）。<strong>「エラーになる演算は、元の状態を壊さずに失敗する」</strong>——この不変条件（アトミック性の一種）が守られていないと、失敗したはずのコマンドが中途半端に値を汚し、リトライしたクライアントが二重に加算する、といった悪夢が起きます。テスト <code>TestDecrByMinInt64LeavesValueIntact</code> は、<code>SET n 5</code> → <code>DECRBY n -9223372036854775808</code>（失敗）→ <code>GET n</code> がなお <code>5</code> であることを、この不変条件の証拠として確かめています。</p>
+    </div>
+
+    <div class="box do"><div class="box-k">▸ 動かして確認</div>
+      <p><code>INCR</code>／<code>DECR</code>／<code>INCRBY</code>／<code>DECRBY</code> の四則、非整数エラー、オーバーフロー、arity、符号反転の罠を一気に検証します。</p>
+      <pre class="term"><code><span class="ps">$</span> go test -run TestIncrDecr -v
+<span class="out">=== RUN   TestIncrDecr
+--- PASS: TestIncrDecr (0.00s)
+PASS</span></code></pre>
+      <p>このテストが確認するのは、<code>INCR n</code>→<code>1</code>→<code>2</code>、<code>INCRBY n 10</code>→<code>12</code>、<code>DECR</code>→<code>11</code>、<code>DECRBY n 10</code>→<code>1</code> という基本の四則。加えて <code>SET s abc</code> のあと <code>INCR s</code> が <code>value is not an integer</code>、<code>SET big 9223372036854775807</code> のあと <code>INCR big</code> が <code>overflow</code>、そして <code>DECRBY n -9223372036854775808</code> が <code>overflow</code> になること。int64 の両端まで含めて守られています。</p>
+    </div>
+
+    <h2 class="step" id="step-6"><span class="step-no">Step 6</span>APPEND と STRLEN — 長さを返す 2 つ</h2>
+    <p>String の最後は、値を文字列として伸ばす <code>APPEND</code> と、その長さを測る <code>STRLEN</code> です。<code>INCR</code> が「値を数として扱う」なら、この 2 つは「値をあくまでバイト列として扱う」側。門番の使い方の良い復習になります。</p>
+
+    <div class="file-tag">string.go（Append / StrLen）</div>
+    <pre><code><span class="kw">func</span> (s *<span class="ty">Store</span>) Append(key, val <span class="ty">string</span>) (<span class="ty">int</span>, <span class="ty">error</span>) {
+	s.mu.Lock()
+	<span class="kw">defer</span> s.mu.Unlock()
+	cur, _, err := s.getStringLocked(key)
+	<span class="kw">if</span> err != <span class="kw">nil</span> {
+		<span class="kw">return</span> <span class="st">0</span>, err
+	}
+	cur += val
+	s.data[key] = cur
+	<span class="kw">return</span> len(cur), <span class="kw">nil</span>
+}
+
+<span class="kw">func</span> (s *<span class="ty">Store</span>) StrLen(key <span class="ty">string</span>) (<span class="ty">int</span>, <span class="ty">error</span>) {
+	s.mu.Lock()
+	<span class="kw">defer</span> s.mu.Unlock()
+	cur, _, err := s.getStringLocked(key)
+	<span class="kw">if</span> err != <span class="kw">nil</span> {
+		<span class="kw">return</span> <span class="st">0</span>, err
+	}
+	<span class="kw">return</span> len(cur), <span class="kw">nil</span>
+}</code></pre>
+
+    <p>どちらも <code>getStringLocked</code> で門番を通し、<code>err</code>（型違い）だけを見て——<strong><code>exists</code> は <code>_</code> で捨てている</strong>のがポイントです。<code>Append</code> は、キーが無ければ <code>cur</code> は空文字列 <code>""</code> のまま。そこに <code>val</code> を足すので、<strong>存在しないキーへの <code>APPEND</code> は「新規作成して代入」と同じ</strong>になります（<code>APPEND newkey hello</code> は <code>hello</code> を作る）。だから「有るかどうか」を気にする必要がなく、<code>exists</code> を捨てられる。返すのは<strong>連結後の長さ</strong> <code>len(cur)</code> で、本家 <code>APPEND</code> の「操作後の文字列長を返す」仕様どおりです。</p>
+    <p><code>StrLen</code> はさらに素直で、値を取って <code>len(cur)</code> を返すだけ。存在しないキーは <code>cur=""</code> なので長さ <code>0</code>——<code>STRLEN missing</code> が <code>:0</code> を返すのはこのためで、これも本家と一致します。ここで <code>len(cur)</code> が返すのは<strong>バイト数</strong>であって文字数ではない点に注意してください（Go の <code>len</code> は文字列のバイト長）。日本語のようなマルチバイト文字を入れると、<code>STRLEN</code> は見た目の文字数より大きい値を返します——本家 Redis も string をバイト列として扱うので、これが正しい挙動です。</p>
+    <p>コマンド層 <code>cmdAppend</code>／<code>cmdStrLen</code> は arity を見て上を呼び、結果を <code>integer</code> で返すだけの薄皮です。</p>
+
+    <div class="file-tag">string.go（cmdAppend / cmdStrLen・これで string.go 全文）</div>
+    <pre><code><span class="kw">func</span> cmdAppend(s *<span class="ty">Store</span>, args []<span class="ty">string</span>) <span class="ty">string</span> {
+	<span class="kw">if</span> len(args) != <span class="st">3</span> {
+		<span class="kw">return</span> errorMsg(<span class="st">"ERR wrong number of arguments for 'append' command"</span>)
+	}
+	n, err := s.Append(args[<span class="st">1</span>], args[<span class="st">2</span>])
+	<span class="kw">if</span> err != <span class="kw">nil</span> {
+		<span class="kw">return</span> errorMsg(err.Error())
+	}
+	<span class="kw">return</span> integer(n)
+}
+
+<span class="kw">func</span> cmdStrLen(s *<span class="ty">Store</span>, args []<span class="ty">string</span>) <span class="ty">string</span> {
+	<span class="kw">if</span> len(args) != <span class="st">2</span> {
+		<span class="kw">return</span> errorMsg(<span class="st">"ERR wrong number of arguments for 'strlen' command"</span>)
+	}
+	n, err := s.StrLen(args[<span class="st">1</span>])
+	<span class="kw">if</span> err != <span class="kw">nil</span> {
+		<span class="kw">return</span> errorMsg(err.Error())
+	}
+	<span class="kw">return</span> integer(n)
+}</code></pre>
+
+    <p>これで <code>string.go</code> は全文。最後に、これらを繋ぐ <code>command.go</code> の <code>switch</code> 側を見ておきます（第00章で「後の章で <code>case</code> を足す」と言った、その足された部分です）。</p>
+
+    <div class="file-tag">command.go（この章で足す case・抜粋）</div>
+    <pre><code>	<span class="cm">// --- String ---</span>
+	<span class="kw">case</span> <span class="st">"SET"</span>:
+		<span class="kw">return</span> cmdSet(s, args)
+	<span class="kw">case</span> <span class="st">"GET"</span>:
+		<span class="kw">return</span> cmdGet(s, args)
+	<span class="kw">case</span> <span class="st">"SETNX"</span>:
+		<span class="kw">return</span> cmdSetNX(s, args)
+	<span class="kw">case</span> <span class="st">"SETEX"</span>:
+		<span class="kw">return</span> cmdSetEX(s, args)
+	<span class="kw">case</span> <span class="st">"INCR"</span>:
+		<span class="kw">return</span> cmdIncrBy(s, args, +<span class="st">1</span>, <span class="kw">false</span>, <span class="st">"incr"</span>)
+	<span class="kw">case</span> <span class="st">"DECR"</span>:
+		<span class="kw">return</span> cmdIncrBy(s, args, -<span class="st">1</span>, <span class="kw">false</span>, <span class="st">"decr"</span>)
+	<span class="kw">case</span> <span class="st">"INCRBY"</span>:
+		<span class="kw">return</span> cmdIncrBy(s, args, +<span class="st">1</span>, <span class="kw">true</span>, <span class="st">"incrby"</span>)
+	<span class="kw">case</span> <span class="st">"DECRBY"</span>:
+		<span class="kw">return</span> cmdIncrBy(s, args, -<span class="st">1</span>, <span class="kw">true</span>, <span class="st">"decrby"</span>)
+	<span class="kw">case</span> <span class="st">"APPEND"</span>:
+		<span class="kw">return</span> cmdAppend(s, args)
+	<span class="kw">case</span> <span class="st">"STRLEN"</span>:
+		<span class="kw">return</span> cmdStrLen(s, args)</code></pre>
+
+    <p>第00章で作った <code>dispatch</code> の巨大な <code>switch</code> に、String の 10 コマンドがそのまま並びました。<code>INCR</code>／<code>DECR</code>／<code>INCRBY</code>／<code>DECRBY</code> の 4 行が、Step 5 で説明した <code>sign</code>／<code>byArg</code> の組み合わせで <code>cmdIncrBy</code> を呼び分けているのが見えます。1 つの実装 <code>IncrBy</code> が、<code>switch</code> の 4 つの入口を通じて 4 コマンドとして振る舞う——「本体は 1 つ、入口を増やす」という本書の設計が、String で最初に大きく実を結びます。</p>
+
+    <div class="box do"><div class="box-k">▸ 動かして確認</div>
+      <p><code>APPEND</code> の連結・長さ返却と、存在しないキーの <code>STRLEN</code> を検証します。</p>
+      <pre class="term"><code><span class="ps">$</span> go test -run TestAppendStrlen -v
+<span class="out">=== RUN   TestAppendStrlen
+--- PASS: TestAppendStrlen (0.00s)
+PASS</span></code></pre>
+      <p><code>APPEND k hello</code>（新規なので <code>:5</code>）→ <code>APPEND k " world"</code>（連結後 <code>:11</code>）→ <code>STRLEN k</code>（<code>:11</code>）→ <code>STRLEN missing</code>（<code>:0</code>）。存在しないキーが空文字列扱いになる「無いキーに優しい」設計が、そのまま通っています。</p>
+    </div>
+
+    <h2 class="step" id="step-7"><span class="step-no">Step 7</span>テストを読む — 並行 INCR が取りこぼさない証明</h2>
+    <p>この章の受け入れ基準は「並行 <code>INCR</code> で取りこぼしゼロ」。それを機械で叩き込むのが <code>TestServerConcurrentIncr</code> です。第00章で作った TCP サーバの上で、<strong>8 本のクライアントが同じキーへ一斉に <code>INCR</code> を撃ち込み</strong>、最後に合計が合うかを見ます。まず全体を読みます。</p>
+
+    <div class="file-tag">server_test.go（TestServerConcurrentIncr・これで全文）</div>
+    <pre><code><span class="cm">// 並行 INCR で取りこぼしが無い（NFR-4）</span>
+<span class="kw">func</span> TestServerConcurrentIncr(t *testing.<span class="ty">T</span>) {
+	addr := startTestServer(t)
+	<span class="kw">const</span> clients = <span class="st">8</span>
+	<span class="kw">const</span> perClient = <span class="st">200</span>
+
+	<span class="kw">var</span> wg sync.<span class="ty">WaitGroup</span>
+	<span class="kw">for</span> i := <span class="st">0</span>; i &lt; clients; i++ {
+		wg.Add(<span class="st">1</span>)
+		<span class="kw">go</span> <span class="kw">func</span>() {
+			<span class="kw">defer</span> wg.Done()
+			conn, err := net.Dial(<span class="st">"tcp"</span>, addr)
+			<span class="kw">if</span> err != <span class="kw">nil</span> {
+				t.Error(err)
+				<span class="kw">return</span>
+			}
+			<span class="kw">defer</span> conn.Close()
+			r := bufio.NewReader(conn)
+			<span class="kw">for</span> j := <span class="st">0</span>; j &lt; perClient; j++ {
+				conn.Write([]<span class="ty">byte</span>(<span class="st">"*2\r\n$4\r\nINCR\r\n$7\r\ncounter\r\n"</span>))
+				<span class="kw">if</span> _, err := r.ReadString(<span class="st">'\n'</span>); err != <span class="kw">nil</span> {
+					t.Error(err)
+					<span class="kw">return</span>
+				}
+			}
+		}()
+	}
+	wg.Wait()
+
+	c := dial(t, addr)
+	want := fmt.Sprintf(<span class="st">"%d"</span>, clients*perClient)
+	<span class="kw">if</span> got := c.do(t, <span class="st">"GET"</span>, <span class="st">"counter"</span>); got != want {
+		t.Errorf(<span class="st">"counter = %q, want %q"</span>, got, want)
+	}
+}</code></pre>
+
+    <p>仕掛けはシンプルで、だからこそ強力です。<code>clients = 8</code> 本のクライアントを、それぞれ独立した <strong>goroutine</strong>（+ 独立した TCP 接続）として起動します。各 goroutine は同じキー <code>counter</code> へ <code>perClient = 200</code> 回 <code>INCR</code> を撃ちます。送っているバイト列 <code>"*2\r\n$4\r\nINCR\r\n$7\r\ncounter\r\n"</code> は、第00章で読んだ RESP の配列そのまま——<code>*2</code>（2 要素）・<code>$4 INCR</code>・<code>$7 counter</code>。<code>redis-cli</code> が <code>INCR counter</code> で送るのと完全に同じ生バイトを、テストが手で書いています。</p>
+    <p><code>sync.WaitGroup</code> は「起こした goroutine が全部終わるまで待つ」ための待ち合わせ道具です。<code>wg.Add(1)</code> で 1 本ぶんカウントを上げ、各 goroutine が終わり際に <code>defer wg.Done()</code> で 1 減らす。<code>wg.Wait()</code> は 8 本すべてが <code>Done</code> するまでブロックします。全員が撃ち終わったあとで、別の接続から <code>GET counter</code>。</p>
+    <p>そして<strong>受け入れ基準の一撃</strong>が最後の 2 行です。<code>want = clients * perClient = 8 * 200 = 1600</code>。もし Step 4 の「読み・計算・書きを 1 つのロックで」が破れていたら、取りこぼし（lost update）が起きて合計は <code>1600</code> より<strong>少なく</strong>なります。<code>1600</code> ぴったりで一致することが、「<code>IncrBy</code> の単一ロックが read-modify-write を本当に分割不可能にしている」証明そのものです。8 本 × 200 回 = 1600 発の <code>INCR</code> が、1 発も取りこぼされずに数え上がる。数字が合う——それだけが、並行処理の正しさの、唯一信頼できる証拠です。</p>
+
+    <div class="gonote"><div class="box-k">GO メモ · sync.WaitGroup と Mutex の役割分担</div>
+      <p>このテストには 2 種類の同期が登場します。<strong><code>sync.WaitGroup</code></strong>（テスト側）は「N 本の goroutine の完了を待ち合わせる」ためのカウンタで、<code>Add</code>／<code>Done</code>／<code>Wait</code> で使います。データを守るものではありません。一方 <strong><code>sync.Mutex</code></strong>（サーバの <code>Store</code> 側、第01章）は「共有データへのアクセスを 1 度に 1 つの goroutine に限る」ためのロック。<strong>WaitGroup は「みんな終わったか」を、Mutex は「同時に触らせない」を担当</strong>する、と役割が分かれています。並行 INCR の正しさを支えているのは後者の Mutex で、WaitGroup は単に「全部終わってから答え合わせをする」ためのテストの足場です。混同しやすいので、この 2 つは別物と覚えておいてください。</p>
+    </div>
+
+    <div class="box do"><div class="box-k">▸ 動かして確認</div>
+      <p>この章のクライマックスです。並行 INCR と、型不一致（WRONGTYPE）の 2 本を走らせます。</p>
+      <pre class="term"><code><span class="ps">$</span> go test -run 'TestServerConcurrentIncr|TestTypeAndWrongType' -v
+<span class="out">=== RUN   TestServerConcurrentIncr
+--- PASS: TestServerConcurrentIncr (0.01s)
+=== RUN   TestTypeAndWrongType
+--- PASS: TestTypeAndWrongType (0.00s)
+PASS
+ok  	redisclone	0.9s</span></code></pre>
+      <p><code>TestTypeAndWrongType</code> は、<code>list</code> に <code>GET</code>、<code>list</code> に <code>INCR</code> を投げて <code>WRONGTYPE</code> が返り、しかもサーバが落ちないことを確認します（Step 1 の門番が効いている証拠）。<code>TestServerConcurrentIncr</code> の PASS は、<strong>1600 という数字がぴったり合った</strong>——並行 INCR が 1 発も取りこぼさなかった——ことの機械による証明です。</p>
+    </div>
+
+    <h2>つまずき FAQ</h2>
+    <details class="qa"><summary><code>INCR</code> のたびに文字列 ↔ 整数の変換をするのは無駄では? なぜ int64 で持たないのか</summary>
+      <div class="qa-body"><p>本書は「値はすべて文字列で持つ」という単純さを選んでいるので、<code>INCR</code> のたびに <code>ParseInt</code>（読み時）と <code>FormatInt</code>（書き時）が走ります。たしかに毎回の変換コストはありますが、この単純さの見返りは大きい——<code>SET</code>／<code>GET</code>／<code>APPEND</code>／<code>STRLEN</code> と <code>INCR</code> が同じ 1 つの格納形式を共有でき、型の分岐が要りません。本家 Redis は賢く、値が整数として表現できるときは内部的に <code>int</code> エンコーディングで保持し（<code>OBJECT ENCODING</code> で <code>int</code> と見える）、変換を省きます。この「値のエンコーディングを内容に応じて変える」最適化は、第06章の Set（intset ↔ hashtable）で本格的に扱います。String でも同じ発想は使えますが、教材としては「まず文字列一本で通す」を優先しました。</p></div>
+    </details>
+    <details class="qa"><summary><code>SET k v EX 100</code> したあと <code>INCR k</code> すると、TTL はどうなる?</summary>
+      <div class="qa-body"><p>TTL は<strong>そのまま残ります</strong>（100 秒経てば失効します）。<code>IncrBy</code> は <code>data[key]</code> だけを書き換え、<code>expires</code> には触れないからです（Step 4 のコメント <code>// 有効期限はそのまま（SET と違う）</code>）。一方、素の <code>SET k w</code> で上書きすると TTL は<strong>消えます</strong>（<code>SetString</code> が <code>delete(s.expires, key)</code> する）。この非対称は本家 Redis の仕様どおりで、「一定時間だけ数を数えるカウンタ」（例: 1 分間のアクセス回数でレート制限）を <code>SET c 1 EX 60</code> + 以降 <code>INCR c</code> で組めるようになっています。もし <code>INCR</code> が期限を消してしまうと、この用途が成り立ちません。</p></div>
+    </details>
+    <details class="qa"><summary><code>list</code> のキーに <code>GET</code> したら、なぜ <code>(nil)</code> ではなく <code>WRONGTYPE</code> なのか</summary>
+      <div class="qa-body"><p><code>(nil)</code> は「そのキーは<strong>存在しない</strong>」の意味です。しかし <code>list</code> がしまってあるキーは、<strong>存在するが型が違う</strong>——これは別の事態です。<code>getStringLocked</code> は型アサーション <code>v.(string)</code> が失敗した時点で <code>errWrongType</code> を返し、コマンド層は <code>err</code> を <code>ok</code> より先に見て <code>WRONGTYPE</code> エラーにします（Step 1・2）。もしここで <code>(nil)</code> を返してしまうと、クライアントは「キーが空だから <code>SET</code> し直そう」と誤って <code>list</code> を上書きしかねません。<strong>「無い」と「型が違う」を峻別して、後者はきっぱり断る</strong>——これが Redis のすべての型コマンドに共通する安全規律です。</p></div>
+    </details>
+
+    <h2>理解度チェック</h2>
+    <p>次の問いに<strong>自分の言葉で</strong>答えられたら、この章は卒業です。</p>
+    <details class="qa"><summary>1. 並行 <code>INCR</code> で取りこぼしが起きないのは、なぜか。ロックの外で「読み・計算・書き」を分けると何が起きるか。</summary>
+      <div class="qa-body"><p><code>IncrBy</code> が「読み → 計算 → 書き」を<strong>1 つの <code>Lock()</code>〜<code>Unlock()</code> の中で完結</strong>させているから。ロックの外で 3 手に分けると、A が値 <code>5</code> を読む → B も <code>5</code> を読む → A が <code>6</code> を書く → B も <code>6</code> を書く、で 2 回 INCR したのに <code>7</code> でなく <code>6</code> になる（lost update）。単一ロックが read-modify-write を<strong>分割不可能</strong>にすることで、B は必ず A の書いた結果を読んでから計算する。<code>TestServerConcurrentIncr</code> の <code>8×200=1600</code> ぴったりが、その証明。</p></div>
+    </details>
+    <details class="qa"><summary>2. <code>getStringLocked</code> の戻り値 <code>(string, bool, error)</code> は、それぞれ何を表すか。3 つの状態を挙げよ。</summary>
+      <div class="qa-body"><p><code>error</code> は「型が違うか」（<code>errWrongType</code> か <code>nil</code>）、<code>bool</code> は「キーが有るか」、<code>string</code> は値。3 状態は——<strong>(1) 無い</strong>: <code>"", false, nil</code>（エラーではない、正常な「無い」）／<strong>(2) 有り・文字列</strong>: <code>値, true, nil</code>／<strong>(3) 有り・別の型</strong>: <code>"", false, errWrongType</code>。呼ぶ側は必ず <strong>err → ok の順</strong>で判定する（型違いを nil と誤らせないため）。「存在しない」と「型が違う」を別チャンネルで分けているのが要点。</p></div>
+    </details>
+    <details class="qa"><summary>3. 素の <code>SET</code> と <code>INCR</code> は、既存の有効期限（TTL）に対してそれぞれどう振る舞うか。なぜ違うのか。</summary>
+      <div class="qa-body"><p>素の <code>SET</code> は<strong>TTL を消す</strong>（<code>SetString</code> の <code>delete(s.expires, key)</code>）。<code>INCR</code> は<strong>TTL を残す</strong>（<code>IncrBy</code> は <code>data</code> だけ書き、<code>expires</code> に触れない）。理由は意味の違い——<code>SET</code> は「値を丸ごと置き換える」ので期限もリセットするのが自然、<code>INCR</code> は「同じ値を進めるだけ」なので期限は保つのが自然。この非対称のおかげで、<code>SET c 1 EX 60</code> + 以降 <code>INCR c</code> で「60 秒間のカウンタ」（レート制限など）が組める。本家 Redis と同じ仕様。</p></div>
+    </details>
+
+    <h2>まとめ — 次の層へ</h2>
+    <p>この章で、キースペースの上に <strong>String 型</strong>が乗りました。<code>SET</code> は NX/XX/EX/PX の可変長オプションを解き、<code>GET</code> は「無い・有る・型違い」の 3 状態を正しく返し分ける。<code>INCR</code> は文字列を数として読み直し、<strong>読み・計算・書きを 1 つのロックで束ねて</strong>並行下でも 1 発も取りこぼさず、int64 の両端と符号反転の罠まで守り切る。そして門番 <code>getStringLocked</code> が、別の型のキーに <code>WRONGTYPE</code> をきっぱり返す——<strong>本書の型システムが、String で初めて実戦に出ました</strong>。この「ストア層で型とロックを握り、コマンド層は薄皮」という 2 段構えは、これから 4 つのデータ型で繰り返す型（テンプレート）です。</p>
+    <p>次の第04章では、初めて<strong>複数の値を順序付きで持つ型</strong> — <code>List</code> — を作ります。<code>*List</code> という新しい型がキースペースに入り、<code>getStringLocked</code> の兄弟である <code>getListLocked</code> が同じ門番の役を果たす。<code>LPUSH</code>／<code>RPUSH</code>／<code>LRANGE</code>／<code>LPOP</code> が加わり、そして本書で初めて<strong>「空になったコレクションはキーごと消える」</strong>という Redis の流儀に出会います。String で身につけた「型・ロック・薄皮」の型が、そのまま List に写し取られるのを、次章で確かめてください。</p>
+
+    <div class="chap-foot">
+      <a class="pager" href="02-expire.html"><span class="dir">← 前へ</span>第02章 · 有効期限</a>
+      <a class="pager next" href="04-list.html"><span class="dir">次へ →</span>第04章 · List</a>
+    </div>
+  </main>
+</div>
+</body>
+</html>

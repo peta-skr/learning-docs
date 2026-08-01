@@ -1,0 +1,112 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>二本目を重ねる — 指数ダッシュボードを作る</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@400;500;600;700&family=Source+Serif+4:opsz,wght@8..60,400;8..60,500;8..60,600&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<div class="shell">
+
+  <aside class="spine">
+    <a class="wordmark" href="index.html">STOCK · from scratch<span class="tick"> ↗</span></a>
+    <div class="book-title">指数ダッシュボードを<br>つくる</div>
+    <div class="book-sub">好きな指数を、好きな期間で</div>
+
+    <div class="legend-rail"><span>読む <b>↓</b></span><span>組む <b>↑</b></span></div>
+
+    <nav aria-label="目次">
+      <ul class="toc">
+        <li><a class="nav-item" href="index.html"><span class="nav-num">序</span><span class="nav-label">はじめに<span class="nav-tag">Intro</span></span></a></li>
+        <li><a class="nav-item" href="00-line.html"><span class="nav-num">00</span><span class="nav-label">一本の線を引く<span class="nav-tag">Line</span></span></a></li>
+        <li><a class="nav-item" href="01-fetch.html"><span class="nav-num">01</span><span class="nav-label">データを取ってくる<span class="nav-tag">Fetch</span></span></a></li>
+        <li><a class="nav-item" href="02-store.html"><span class="nav-num">02</span><span class="nav-label">貯めて、切り出す<span class="nav-tag">Store</span></span></a></li>
+        <li><a class="nav-item" href="03-range.html"><span class="nav-num">03</span><span class="nav-label">期間を自由にする<span class="nav-tag">Range</span></span></a></li>
+        <li><a class="nav-item current" aria-current="page" href="04-overlay.html"><span class="nav-num">04</span><span class="nav-label">二本目を重ねる<span class="nav-tag">Overlay</span></span></a></li>
+        <li><a class="nav-item" href="05-rebase.html"><span class="nav-num">05</span><span class="nav-label">100にそろえる<span class="nav-tag">Rebase</span></span></a></li>
+        <li><a class="nav-item" href="06-downsample.html"><span class="nav-num">06</span><span class="nav-label">長い期間を軽くする<span class="nav-tag">Sample</span></span></a></li>
+        <li><a class="nav-item" href="07-url.html"><span class="nav-num">07</span><span class="nav-label">URLに状態を持たせる<span class="nav-tag">URL</span></span></a></li>
+        <li><a class="nav-item" href="08-finish.html"><span class="nav-num">08</span><span class="nav-label">仕上げと、次の一歩<span class="nav-tag">Finish</span></span></a></li>
+      </ul>
+    </nav>
+
+    <div class="spine-foot">
+      各章は一段の階段。<br>前の章の「できたこと」が<br>次の章の「困りごと」を呼ぶ。
+    </div>
+  </aside>
+
+  <main class="reading">
+    <div class="progress-tag">第04章 / 全9章 · 層: OVERLAY · 読了目安 1〜2時間</div>
+    <div class="eyebrow"><span>Overlay</span><span class="depth">— 一番おもしろい問題</span></div>
+    <h1>二本目を重ねる</h1>
+    <p class="lede">複数の指数を1つのグラフに。ここで、この教材で一番おもしろい<strong>問題</strong>に出会います。</p>
+
+    <div class="box goal"><div class="box-k">◈ この章のゴール</div>
+      <p>2つ以上の指数を重ねて表示し、「素直に重ねると読めない」という壁を、自分の目で確かめる。</p>
+    </div>
+
+    <h2>同じY軸に、二つを置いてみる</h2>
+    <p>ここまでで、一本の線を本物のデータで、好きな期間で描けるようになりました。次は自然な欲求として、<strong>二本目を重ねたくなる</strong>。日経平均（約40,000円）とS&amp;P500（約6,000pt）を、同じY軸に置いてみます。すると何が起きるか。日経が上にべったり張り付き、S&amp;P500は下で潰れる。値の大きさが違いすぎて、動きが比べられないのです。</p>
+
+    <p>問題はそれだけではありません。<strong>通貨も違う</strong>（ドルと円）。そして<strong>休場日も違う</strong>——米国が動いている日に日本は休み、その逆もあります。だから重ねると、片方だけデータが無い日が現れます。二本の線を並べた瞬間に、一本のときには見えなかった問題が一気に噴き出してくる。ここが、この教材で一番おもしろいところです。</p>
+
+    <div class="box"><div class="box-k">◈ これはバグではない</div>
+      <p>スケール差・通貨差・休場日のズレは、直すべき不具合ではありません。<strong>異なる指数を並べたときの本質</strong>です。次章で、これを正面から解きます。今はまず「読めなさ」を体験してください。壁の形をはっきり見ておくほど、次章の解法が腑に落ちます。</p>
+    </div>
+
+    <h2>複数指数を返す形へ</h2>
+    <p>一本のときは「日付と終値の並び」を一つ返せば済みました。二本以上を扱うには、APIを<strong>指数ごとの並び</strong>を返す形へ広げます。系列を横に足していける、素直な入れ子にしておきます。</p>
+<pre><code><span class="cm">// 複数指数を、指数ごとの並びとして返す形へ広げる。</span>
+GET /series?symbols=SP500,N225&amp;from=…&amp;to=…
+
+=&gt; [
+  { code: <span class="st">"SP500"</span>, points: [ {date, close}, … ] },
+  { code: <span class="st">"N225"</span>,  points: [ {date, close}, … ] }
+]</code></pre>
+
+    <p>フロントは、この配列をループして系列ごとに折れ線を引くだけ。描画の作りは第00章とほとんど変わりません。変わったのは「複数を受け取れる形」にしたこと、ただそれだけ。それでもう、スケール差・通貨差・休場日ズレという三つの壁が、画面の上に姿を現します。</p>
+
+    <div class="box do"><div class="box-k">▸ 手を動かす</div>
+      <ol>
+        <li>S&amp;P500と日経平均を実データで重ね、Y軸で潰れる様子を確かめる。</li>
+        <li>両者で「片方だけデータが無い日」を実際に探す。</li>
+        <li>この二つの問題を、次章までに自分の言葉でメモしておく。</li>
+      </ol>
+    </div>
+
+    <h2>つまずき FAQ</h2>
+    <details class="qa"><summary>実数値モードで小さい方（S&amp;P500）が潰れるのは、直すべき？</summary>
+      <div class="qa-body"><p>直すべき不具合ではありません。仕様です。ドル建てのS&amp;P500（約6,000pt）と円建ての日経平均（約40,000円）は、そもそも桁が違います。同じY軸に実数値で並べれば、小さい方が下で潰れるのは当たり前。これを解くのが次章の<strong>指数化（開始=100にそろえる）</strong>です。実数値モードは「絶対値も見たい」ときのために残し、比較したいときは指数化モードに切り替える——という二段構えにします。</p></div>
+    </details>
+    <details class="qa"><summary>休場日がズレていると、線がガタガタになったり途切れたりします。どう扱う？</summary>
+      <div class="qa-body"><p>これも正しい姿です。米国と日本では営業日が違うので、片方だけ値がある日が必ず出ます。この章では「途切れる」ことをそのまま観察してください。次章以降で、全系列の日付の<strong>和集合</strong>を軸に取り、値の無い日は直前の値で埋める（フォワードフィル）ことで、なめらかに重ねられるようにします。ここで無理に自前で埋めようとせず、まず問題の形を見ておくのが大事です。</p></div>
+    </details>
+
+    <h2>理解度チェック</h2>
+    <p>次の問いに自分の言葉で答えてから、答えを開いてください。</p>
+    <details class="qa"><summary>Q1. 日経平均とS&amp;P500を同じY軸に実数値で重ねると、なぜ動きが比べられなくなるのか？</summary>
+      <div class="qa-body"><p>両者の値の大きさ（桁）が違いすぎるから。約40,000（円）と約6,000（pt）を同じ縦軸に置くと、大きい方が上に張り付き、小さい方は下で潰れて、上下動がほとんど見えなくなる。比べたいのは「絶対値」ではなく「変化率（何%動いたか）」なのに、実数値のまま重ねると変化率が読み取れない——これが次章の指数化の動機になる。</p></div>
+    </details>
+    <details class="qa"><summary>Q2. スケール差・通貨差・休場日のズレを「バグ」と呼ばないのはなぜ？</summary>
+      <div class="qa-body"><p>それらは実装の誤りではなく、性質の異なる指数を並べたときに必然的に現れる本質だから。直すべき対象ではなく、比較のために設計で吸収すべき対象。だから「素直に重ねると読めない」という壁を先に自分の目で見ておき、次章でスケール差を指数化で、休場日ズレを和集合軸＋フォワードフィルで、正面から解く。壁を不具合と誤解すると、解くべき問題を見失う。</p></div>
+    </details>
+
+    <div class="box done"><div class="box-k">✓ 完了の合図</div>
+      <p>2つ以上の指数が1つのグラフに重なって表示され、片方が潰れて読めないこと・休場日のズレで片方だけ値が無い日があること、その両方を自分の目で確認できた。この「読めなさ」を覚えておけば、第05章の解法が一気に腑に落ちます。</p>
+    </div>
+
+    <h2>まとめ — 次の層へ</h2>
+    <p>二本目が重なりました。そして、この教材で一番おもしろい壁——<strong>桁の違う指数は素直に重ねても比べられない</strong>——を、自分の目で確かめました。次章は、この教材の山場です。すべての系列を<strong>開始=100</strong>にそろえ、絶対値ではなく変化率で並べる。桁の違いが消え、日経とS&amp;P500が初めて同じ土俵で比べられるようになります。壁を越えにいきましょう。</p>
+
+    <div class="chap-foot">
+      <a class="pager" href="03-range.html"><span class="dir">← 前へ</span>第03章 · 期間を自由にする</a>
+      <a class="pager next" href="05-rebase.html"><span class="dir">次へ →</span>第05章 · 100を基準にそろえる</a>
+    </div>
+  </main>
+</div>
+</body>
+</html>

@@ -1,0 +1,519 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>第08章 Pub/Sub — Redis をつくる</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500;600&family=Source+Serif+4:opsz,wght@8..60,400;8..60,600;8..60,700&family=Noto+Serif+JP:wght@400;600;700&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<div class="shell">
+
+  <aside class="spine">
+    <a class="wordmark" href="index.html">MINI-REDIS · from scratch</a>
+    <div class="book-title">Redis を<br>つくる</div>
+    <div class="book-sub">Go で RESP から Sorted Set まで</div>
+
+    <div class="legend"><span>読む <b>↓</b></span><span>組む <b>↑</b></span></div>
+
+    <nav aria-label="目次">
+      <ul class="toc">
+        <li><a class="nav-item" href="index.html"><span class="nav-num">序</span><span class="nav-label">はじめに・準備<span class="nav-tag">Setup</span></span></a></li>
+        <li><a class="nav-item" href="00-server.html"><span class="nav-num">00</span><span class="nav-label">返事をするサーバ<span class="nav-tag">RESP</span></span></a></li>
+        <li><a class="nav-item" href="01-keyspace.html"><span class="nav-num">01</span><span class="nav-label">キーと値<span class="nav-tag">Store</span></span></a></li>
+        <li><a class="nav-item" href="02-expire.html"><span class="nav-num">02</span><span class="nav-label">有効期限<span class="nav-tag">Expire</span></span></a></li>
+        <li><a class="nav-item" href="03-string.html"><span class="nav-num">03</span><span class="nav-label">数としての文字列<span class="nav-tag">String</span></span></a></li>
+        <li><a class="nav-item" href="04-list.html"><span class="nav-num">04</span><span class="nav-label">List<span class="nav-tag">List</span></span></a></li>
+        <li><a class="nav-item" href="05-hash.html"><span class="nav-num">05</span><span class="nav-label">Hash<span class="nav-tag">Hash</span></span></a></li>
+        <li><a class="nav-item" href="06-set.html"><span class="nav-num">06</span><span class="nav-label">Set とエンコーディング<span class="nav-tag">Set</span></span></a></li>
+        <li><a class="nav-item" href="07-zset.html"><span class="nav-num">07</span><span class="nav-label">Sorted Set と skiplist<span class="nav-tag">ZSet</span></span></a></li>
+        <li><a class="nav-item current" aria-current="page" href="08-pubsub.html"><span class="nav-num">08</span><span class="nav-label">Pub/Sub<span class="nav-tag">PubSub</span></span></a></li>
+        <li><a class="nav-item" href="09-finish.html"><span class="nav-num">09</span><span class="nav-label">仕上げと設計判断<span class="nav-tag">Finish</span></span></a></li>
+      </ul>
+    </nav>
+
+    <div class="spine-foot">
+      各章は一つのデータ型・機能。<br>下（RESP）から上（Sorted Set）へ<br>積み上げて動かしていく。
+    </div>
+  </aside>
+
+  <main class="reading">
+    <div class="progress-tag">第08章 / 全10章 · 層: PUBSUB · 読了目安 2〜3時間</div>
+    <div class="eyebrow"><span>PUBSUB</span><span class="depth">— 接続そのものが主役</span></div>
+    <h1>Pub/Sub</h1>
+    <p class="lede">ここまでの8章、主役はずっと<strong>データ</strong>でした。キーに値をしまい、後で取り出す。誰が接続していようと関係なく、値はそこに在り続けます。この章は毛色が違います。主役は<strong>接続そのもの</strong>——「いま、誰が、何を聞いているか」です。<code>PUBLISH</code> したメッセージは<strong>どこにも保存されず</strong>、その瞬間つながっている購読者へだけ流れて消えます。そして本章で、第00章の伏線——「なぜ <code>send</code> は Mutex で守られていたのか」「なぜ <code>dispatch</code> は <code>""</code> を返せるのか」——を、ようやく回収します。</p>
+
+    <div class="box goal"><div class="box-k">◈ この章のゴール</div>
+      <p>次の 2 つを、自分の目と手で確認できたら達成です。</p>
+      <ol>
+        <li><code>go test -run TestServerPubSub -v</code> で、<strong>2 本の別々の接続</strong>のあいだで <code>SUBSCRIBE</code> / <code>PUBLISH</code> / <code>PSUBSCRIBE</code> が成立し、購読モード中はコマンドが制限され、解除すると元に戻ることが PASS する。</li>
+        <li>「メッセージは <code>Store</code> のどこにも書かれない」——キースペースを覗いても Pub/Sub の痕跡が無いことを、自分の言葉で説明できる。</li>
+      </ol>
+    </div>
+
+    <div class="box map"><div class="box-k">☰ この章のステップ</div>
+      <ol>
+        <li><a href="#step-1">配信モデルを絵で掴む — 保存しない放送局</a></li>
+        <li><a href="#step-2">レジストリの構造 — <code>pubsub.go</code></a></li>
+        <li><a href="#step-3"><code>SUBSCRIBE</code> / <code>UNSUBSCRIBE</code></a></li>
+        <li><a href="#step-4"><code>PSUBSCRIBE</code> / <code>PUNSUBSCRIBE</code> — パターン購読</a></li>
+        <li><a href="#step-5"><code>PUBLISH</code> — 配信と数え上げ</a></li>
+        <li><a href="#step-6"><code>dropClient</code> — 切断時の後始末</a></li>
+        <li><a href="#step-7">購読モードのコマンド制限 — <code>dispatch</code> の門番</a></li>
+        <li><a href="#step-8">テストを読む — 2 接続の会話を機械で確かめる</a></li>
+      </ol>
+    </div>
+
+    <h2>キースペースから独立した、もう一つの世界</h2>
+    <p>これまでのコマンドは、すべて <code>server.store</code>（キースペース）を触っていました。<code>SET</code> も <code>LPUSH</code> も <code>ZADD</code> も、行き着く先は同じ一つの大きな辞書です。Pub/Sub は<strong>そこに一切触れません</strong>。<code>server</code> はもう一つの独立した箱——<code>pubsub</code>——を持っていて（第00章で名前だけ用意した <code>pubsub *PubSub</code> がそれです）、Pub/Sub のコマンドはこちらだけを読み書きします。<code>SUBSCRIBE</code> した後に <code>KEYS *</code> を打っても、購読の痕跡は1バイトも見えません。「保存するデータ」と「流れて消えるメッセージ」は、Redis の中でも別の世界に住んでいます。</p>
+    <p>Pub/Sub の心得は3つに尽きます。<strong>(1) メッセージは保存しない</strong>——発行の瞬間につながっている購読者へ配信し、後から購読した人には届かない（履歴は残らない）。<strong>(2) 配信は他人の goroutine が行う</strong>——<code>PUBLISH</code> を実行するのは発行者の接続の goroutine ですが、書き込む先は<strong>購読者の接続</strong>です。<strong>(3) 購読中は世界が変わる</strong>——一度 <code>SUBSCRIBE</code> すると、その接続は「メッセージを待つモード」に入り、普通のコマンドが使えなくなります。この3つが、これから読むコードのすべての形を決めています。</p>
+
+    <h2>この章が上の層に約束すること</h2>
+    <p>Pub/Sub 層が周囲に約束するのは、次のことです。</p>
+    <ul>
+      <li><code>SUBSCRIBE ch</code> した接続を、チャネル <code>ch</code> の購読者一覧に加える。以後 <code>ch</code> へ <code>PUBLISH</code> されたメッセージを、その接続へ届ける。</li>
+      <li><code>PSUBSCRIBE pat</code> なら、<code>pat</code>（glob パターン）に<strong>マッチするチャネル</strong>すべてのメッセージを届ける。</li>
+      <li><code>PUBLISH ch msg</code> は、<code>ch</code> の購読者とマッチするパターン購読者へ <code>msg</code> を配信し、<strong>届けた総数</strong>を返す。</li>
+      <li>接続が切れたら、その接続を<strong>すべての購読一覧から必ず外す</strong>（幽霊購読者を残さない）。</li>
+    </ul>
+    <p>逆に<strong>やらない</strong>ことも明確です。メッセージを溜めない・再送しない・順序を保証する以上のことをしない。「確実に届けたい」「後から読み返したい」なら Pub/Sub ではなく List やストリームを使う——そういう割り切りの上に、この驚くほど小さなコードが成り立っています。</p>
+
+    <h2 class="step" id="step-1"><span class="step-no">Step 1</span>配信モデルを絵で掴む — 保存しない放送局</h2>
+    <p>コードの前に、データの流れを絵で掴みます。Pub/Sub は<strong>放送局</strong>です。放送局（レジストリ）は「どのチャンネルを誰が聞いているか」の一覧だけを持ち、番組（メッセージ）は録画せず、電波に乗せたら消えます。<code>PUBLISH</code> が起きた瞬間の流れはこうです。</p>
+
+    <div class="ascii">接続A（発行者）              接続B・C（購読者、別の goroutine）
+   │                             │            │
+   │  PUBLISH news "hello"       │            │
+   ▼                             │            │
+ dispatch → cmdPublish          subs["news"] = { B, C }
+   │                             │            │
+   ▼                             │            │
+ srv.pubsub.publish("news",…)    │            │
+   │  レジストリで購読者を引く    │            │
+   ├──── B.send("message news hello") ──▶ B の接続へ書き込む
+   ├──── C.send("message news hello") ──▶ C の接続へ書き込む
+   │                             ▲            ▲
+   ▼                        ここが肝: 書くのは「他人の接続」
+ :2 を発行者Aへ返す          （A の goroutine が B・C の w に書く）</div>
+
+    <p>この絵の<strong>太字にしたい一点</strong>は、右下の「A の goroutine が B・C の接続に書き込む」です。第00章までのコマンドは、必ず「自分の接続の goroutine が、自分の接続に書く」だけでした。Pub/Sub で初めて、<strong>ある接続の goroutine が、別の接続の <code>w</code>（<code>io.Writer</code>）に書き込む</strong>という越境が起きます。同じ購読者Bに対して、B 自身のコマンド応答と、A からの配信が<strong>同時に書き込まれうる</strong>——この競合を防ぐために、第00章で <code>c.send</code> に Mutex を仕込んでおいたのでした。絵を頭に置いたまま、コードへ進みます。</p>
+
+    <h2 class="step" id="step-2"><span class="step-no">Step 2</span>レジストリの構造 — pubsub.go</h2>
+    <p>まず放送局の台帳——<code>PubSub</code> レジストリを作ります。作るファイルは <code>pubsub.go</code>。中身は「チャネル名 → 購読者の集合」「パターン → 購読者の集合」という2枚のマップだけです。キースペースとは完全に独立した、この章専用の世界です。</p>
+
+    <div class="file-tag">pubsub.go</div>
+    <pre><code><span class="kw">package</span> main
+
+<span class="kw">import</span> <span class="st">"sync"</span>
+
+<span class="cm">// PubSub はチャネル/パターン → 購読クライアントのレジストリ。</span>
+<span class="cm">// キースペース（Store）とは完全に独立している。メッセージはどこにも保存されない。</span>
+<span class="kw">type</span> <span class="ty">PubSub</span> <span class="kw">struct</span> {
+	mu       sync.<span class="ty">Mutex</span>
+	channels <span class="kw">map</span>[<span class="ty">string</span>]<span class="kw">map</span>[*<span class="ty">client</span>]<span class="kw">struct</span>{} <span class="cm">// チャネル名 → 購読者</span>
+	patterns <span class="kw">map</span>[<span class="ty">string</span>]<span class="kw">map</span>[*<span class="ty">client</span>]<span class="kw">struct</span>{} <span class="cm">// glob パターン → 購読者</span>
+}
+
+<span class="kw">func</span> NewPubSub() *<span class="ty">PubSub</span> {
+	<span class="kw">return</span> &amp;<span class="ty">PubSub</span>{
+		channels: <span class="kw">make</span>(<span class="kw">map</span>[<span class="ty">string</span>]<span class="kw">map</span>[*<span class="ty">client</span>]<span class="kw">struct</span>{}),
+		patterns: <span class="kw">make</span>(<span class="kw">map</span>[<span class="ty">string</span>]<span class="kw">map</span>[*<span class="ty">client</span>]<span class="kw">struct</span>{}),
+	}
+}</code></pre>
+
+    <p>台帳の芯は2つのマップです。<code>channels</code> は「<code>news</code> というチャネルを購読している client の集合」を引く辞書。<code>patterns</code> は「<code>news.*</code> というパターンを購読している client の集合」を引く辞書。どちらも値が <code>map[*client]struct{}</code>——つまり <strong><code>client</code> ポインタをキーにした集合</strong>です。第06章の Set では「値が存在するか」を <code>map[string]struct{}</code> で表しましたが、ここではその要素が<strong>接続（<code>*client</code>）そのもの</strong>になります。「このチャネルの購読者は誰と誰か」を、client ポインタの集合で持つわけです。</p>
+    <p>そして先頭の <code>mu sync.Mutex</code>。このレジストリは、<strong>あらゆる接続の goroutine から同時に触られます</strong>——A が <code>PUBLISH</code> で読んでいる最中に、B が <code>SUBSCRIBE</code> で書き込むかもしれない。キースペースを <code>Store</code> の Mutex で守ったのと同じ理由で、この台帳も1本の Mutex で守ります。<code>channels</code> と <code>patterns</code> は必ずこの <code>mu</code> の下で読み書きする——それがこのファイルの全メソッドに共通する規律です。</p>
+
+    <div class="gonote"><div class="box-k">GO メモ · map[*client]struct{} で「集合」を作る</div>
+      <p>Go には集合型が無いので、慣習的に <code>map[要素型]struct{}</code> で代用します。<code>struct{}</code> は<strong>サイズ 0 の型</strong>（フィールドを持たない構造体）で、「キーが存在すること」だけに意味があり、値は使い捨てです。ここでは要素型がポインタ <code>*client</code>——同じ接続は必ず同じポインタなので、<code>m[c] = struct{}{}</code> で「c を集合に入れる」、<code>delete(m, c)</code> で「外す」、<code>for c := range m</code> で「全員を巡る」がすべて O(1)〜O(要素数) で書けます。<br>
+      さらにここは<strong>マップのマップ</strong>（<code>map[string]map[*client]struct{}</code>）です。外側のキーがチャネル名、内側が購読者集合。この二段構造で「チャネルごとの購読者一覧」を素直に表現しています。</p>
+    </div>
+
+    <h2 class="step" id="step-3"><span class="step-no">Step 3</span>SUBSCRIBE / UNSUBSCRIBE</h2>
+    <p>台帳ができたので、そこに購読者を出し入れするメソッドを書きます。<code>subscribe</code> は「チャネルの購読者集合に client を1人加える」、<code>unsubscribe</code> は「外す」。どちらもレジストリ側（<code>PubSub</code>）の操作で、<strong>いま解説しているのは台帳の書き換えだけ</strong>——「client 側の記録」と「応答の送信」は Step 7 で別に扱います。</p>
+
+    <div class="file-tag">pubsub.go（つづき）</div>
+    <pre><code><span class="kw">func</span> (ps *<span class="ty">PubSub</span>) subscribe(c *<span class="ty">client</span>, ch <span class="ty">string</span>) {
+	ps.mu.Lock()
+	<span class="kw">defer</span> ps.mu.Unlock()
+	<span class="kw">if</span> ps.channels[ch] == <span class="kw">nil</span> {
+		ps.channels[ch] = <span class="kw">make</span>(<span class="kw">map</span>[*<span class="ty">client</span>]<span class="kw">struct</span>{})
+	}
+	ps.channels[ch][c] = <span class="kw">struct</span>{}{}
+}
+
+<span class="kw">func</span> (ps *<span class="ty">PubSub</span>) unsubscribe(c *<span class="ty">client</span>, ch <span class="ty">string</span>) {
+	ps.mu.Lock()
+	<span class="kw">defer</span> ps.mu.Unlock()
+	<span class="kw">if</span> subs := ps.channels[ch]; subs != <span class="kw">nil</span> {
+		delete(subs, c)
+		<span class="kw">if</span> len(subs) == <span class="st">0</span> {
+			delete(ps.channels, ch)
+		}
+	}
+}</code></pre>
+
+    <p><code>subscribe</code> の勘所は<strong>内側マップの遅延生成</strong>です。<code>news</code> チャネルにまだ誰も居なければ <code>ps.channels["news"]</code> は <code>nil</code>——このまま <code>ps.channels["news"][c] = …</code> と書くと nil マップへの代入で <strong>panic します</strong>。だから「無ければ先に <code>make</code> で作る」を1行挟んでから <code>c</code> を入れます。「初めての購読者が来たときにチャネルの席を用意する」という自然な形です。</p>
+    <p><code>unsubscribe</code> は逆向きで、<strong>2段階の掃除</strong>をします。まず購読者集合から <code>c</code> を <code>delete</code> で外す。そして——ここが Redis の流儀——<strong>その集合が空になったら、チャネルごと台帳から消します</strong>（<code>len(subs) == 0</code> なら <code>delete(ps.channels, ch)</code>）。第04〜07章で「空になった list/hash/set はキーごと消す」を徹底したのと同じ考え方です。誰も聞いていないチャネル名を <code>channels</code> に残しておくと、台帳が使われないゴミで太っていく。「購読者ゼロのチャネルは存在しないのと同じ」に揃えます。<code>subs != nil</code> のガードは、そもそも存在しないチャネルを <code>unsubscribe</code> されたときに何もせず素通りするためです。</p>
+
+    <div class="box do"><div class="box-k">▸ 動かして確認</div>
+      <p>ここは<strong>振る舞いをまだ試せない</strong>ステップです。台帳（<code>subscribe</code>/<code>unsubscribe</code>）は書けましたが、配信する <code>publish</code> は Step 5、外から呼ぶための <code>SUBSCRIBE</code> コマンド（<code>cmdSubscribe</code>）は Step 7 でこれから作るので、動かす口がまだありません。いまは<strong>型と文法が正しいこと</strong>だけを確認します。</p>
+      <pre class="term"><code><span class="ps">$</span> go vet .
+<span class="out">（何も表示されなければ成功です）</span></code></pre>
+      <p>この段階の台帳操作が「本当に正しく動くか」は、Step 7 で <code>cmdSubscribe</code> が繋がったあと、<strong>Step 8 の <code>TestServerPubSub</code></strong> でまとめて検証します。この章は<strong>部品を5つ作ってから最後に一気に通す</strong>構成なので、関所が終盤に寄っていることを承知して進んでください。</p>
+    </div>
+
+    <h2 class="step" id="step-4"><span class="step-no">Step 4</span>PSUBSCRIBE / PUNSUBSCRIBE — パターン購読</h2>
+    <p>パターン購読は、チャネル購読と<strong>ほぼ双子</strong>です。違いは操作するマップが <code>patterns</code> になることだけ。<code>PSUBSCRIBE news.*</code> は「<code>news.*</code> という<strong>glob パターン</strong>を購読者集合に登録する」——実際にどのチャネルにマッチするかは、<code>PUBLISH</code> のときに毎回照合します（Step 5）。ここでは「パターンという文字列」をそのまま台帳のキーにして持つだけです。</p>
+
+    <div class="file-tag">pubsub.go（つづき）</div>
+    <pre><code><span class="kw">func</span> (ps *<span class="ty">PubSub</span>) psubscribe(c *<span class="ty">client</span>, pat <span class="ty">string</span>) {
+	ps.mu.Lock()
+	<span class="kw">defer</span> ps.mu.Unlock()
+	<span class="kw">if</span> ps.patterns[pat] == <span class="kw">nil</span> {
+		ps.patterns[pat] = <span class="kw">make</span>(<span class="kw">map</span>[*<span class="ty">client</span>]<span class="kw">struct</span>{})
+	}
+	ps.patterns[pat][c] = <span class="kw">struct</span>{}{}
+}
+
+<span class="kw">func</span> (ps *<span class="ty">PubSub</span>) punsubscribe(c *<span class="ty">client</span>, pat <span class="ty">string</span>) {
+	ps.mu.Lock()
+	<span class="kw">defer</span> ps.mu.Unlock()
+	<span class="kw">if</span> subs := ps.patterns[pat]; subs != <span class="kw">nil</span> {
+		delete(subs, c)
+		<span class="kw">if</span> len(subs) == <span class="st">0</span> {
+			delete(ps.patterns, pat)
+		}
+	}
+}</code></pre>
+
+    <p>見ての通り、Step 3 の <code>subscribe</code> / <code>unsubscribe</code> と<strong>行単位でうり二つ</strong>で、<code>ps.channels</code> が <code>ps.patterns</code> に、<code>ch</code> が <code>pat</code> に変わっただけです。遅延生成も、空パターンの掃除も同じ。「チャネルの購読」と「パターンの購読」を<strong>別の台帳で並行して持つ</strong>——それがこの4メソッドの設計です。両者を分けておくのは、<code>PUBLISH</code> のときに扱いが違うから。チャネル購読は「名前が完全一致するか」だけ、パターン購読は「glob でマッチするか」を全パターンについて試す必要があります。次のステップでその差が効いてきます。</p>
+
+    <div class="box hazard"><div class="box-k">⚠ 落とし穴 — 「パターンは購読時に展開する」わけではない</div>
+      <p><code>PSUBSCRIBE news.*</code> したとき、その瞬間に存在する <code>news.tech</code> や <code>news.sports</code> を <code>channels</code> に登録する——ような実装は<strong>間違い</strong>です。パターンはあくまで <code>patterns["news.*"]</code> という<strong>1つのパターン文字列</strong>のまま持ち、マッチ判定は <code>PUBLISH</code> の<strong>たびに</strong>行います。こうしないと、購読<strong>後</strong>に初めて登場したチャネル <code>news.world</code> へメッセージが届きません。「パターンは静的に展開せず、配信時に動的照合する」——これがパターン購読の核です。</p>
+    </div>
+
+    <h2 class="step" id="step-5"><span class="step-no">Step 5</span>PUBLISH — 配信と数え上げ</h2>
+    <p>いよいよ放送の瞬間、<code>publish</code> です。役割は2つ——<strong>(1) チャネル購読者とパターン購読者の両方へメッセージを配り、(2) 配った総数を返す</strong>。Step 1 の絵が、そのままコードになります。</p>
+
+    <div class="file-tag">pubsub.go（つづき）</div>
+    <pre><code><span class="cm">// publish はチャネル購読者とパターン購読者へ配信し、届けた数を返す。</span>
+<span class="cm">// 配信は「今つながっている購読者」だけ。あとから来た人には届かない。</span>
+<span class="kw">func</span> (ps *<span class="ty">PubSub</span>) publish(ch, msg <span class="ty">string</span>) <span class="ty">int</span> {
+	ps.mu.Lock()
+	<span class="kw">defer</span> ps.mu.Unlock()
+	n := <span class="st">0</span>
+	<span class="kw">for</span> c := <span class="kw">range</span> ps.channels[ch] {
+		c.send(array(bulkString(<span class="st">"message"</span>), bulkString(ch), bulkString(msg)))
+		n++
+	}
+	<span class="kw">for</span> pat, subs := <span class="kw">range</span> ps.patterns {
+		<span class="kw">if</span> globMatch(pat, ch) {
+			<span class="kw">for</span> c := <span class="kw">range</span> subs {
+				c.send(array(bulkString(<span class="st">"pmessage"</span>), bulkString(pat), bulkString(ch), bulkString(msg)))
+				n++
+			}
+		}
+	}
+	<span class="kw">return</span> n
+}</code></pre>
+
+    <p>2つのループを順に読みます。<strong>前半（チャネル配信）</strong>は簡単で、<code>ps.channels[ch]</code>——このチャネルの購読者集合——を <code>range</code> で巡り、一人ずつに <code>message</code> 型のメッセージを <code>c.send</code> で書き込みます。RESP で見ると <code>*3</code> の配列 <code>["message", チャネル名, 本文]</code>。購読者集合が空（あるいはチャネルが台帳に無い）なら <code>ps.channels[ch]</code> は <code>nil</code> で、<code>nil</code> マップの <code>range</code> は<strong>0 回で素通り</strong>——だから「誰も聞いていないチャネルへの <code>PUBLISH</code> は何もせず 0 を返す」が自然に成り立ちます。</p>
+    <p><strong>後半（パターン配信）</strong>が Step 4 で分けた台帳の出番です。<code>patterns</code> の<strong>全パターンを走査</strong>し、それぞれについて <code>globMatch(pat, ch)</code>——「このパターンは、いま発行されたチャネル名にマッチするか」——を判定します。マッチしたパターンの購読者にだけ、<code>pmessage</code> 型（<code>*4</code> の配列 <code>["pmessage", パターン, チャネル名, 本文]</code>）を配ります。<code>message</code> と <code>pmessage</code> で要素数が違う（3 と 4）のは、パターン購読者には「どのパターンで引っかかったか」も伝える必要があるからです。<code>news.tech</code> へ発行すると、<code>news.*</code> を購読していた人には <code>pmessage news.* news.tech …</code> が届き、「自分の <code>news.*</code> が <code>news.tech</code> にマッチした」と分かります。</p>
+    <p>そして両ループで <code>n++</code> しながら数えた <strong><code>n</code> が「配信総数」</strong>——チャネル購読者とパターン購読者の合計です。これが <code>PUBLISH</code> の戻り値になり、発行者は「何人に届いたか」を <code>:2</code> のような整数で受け取ります。1人の接続がチャネルとパターンの両方で引っかかれば<strong>2 と数えられ、2 通のメッセージを受け取る</strong>——本家 Redis もそう振る舞います。</p>
+
+    <div class="box hazard"><div class="box-k">⚠ 落とし穴 — 配信中の c.send は「他人の goroutine」からの書き込み（第00章の回収）</div>
+      <p><code>publish</code> を実行しているのは、<code>PUBLISH</code> を打った<strong>発行者の接続の goroutine</strong>です。しかし <code>c.send(...)</code> の <code>c</code> は<strong>購読者の接続</strong>——つまり「A の goroutine が、B の接続の <code>w</code> に書き込む」という越境が、まさにここで起きています。もし同じ瞬間に B 自身が別のコマンドの応答を書いていたら、2つの書き込みが混ざって RESP が壊れる。これを防ぐのが、第00章で <code>c.send</code> に仕込んだ <code>wmu.Lock()</code> です。<strong>「なぜ send が Mutex 付きだったか」の答えが、この <code>publish</code> の <code>c.send</code> にあります。</strong>第00章では「後で Pub/Sub のため」としか言えませんでしたが、いまその「後で」が来ました。</p>
+    </div>
+
+    <div class="gonote"><div class="box-k">GO メモ · goroutine 間で同じデータに書く2つのロック</div>
+      <p>この <code>publish</code> には、実は<strong>2種類のロック</strong>が絡んでいます。1つは <code>ps.mu</code>——レジストリ（<code>channels</code>/<code>patterns</code>）を「読んでいる最中に <code>SUBSCRIBE</code> で書き換えられない」ように守る、この関数自身が取るロック。もう1つは <code>c.send</code> の内部の <code>c.wmu</code>——<strong>接続への書き込み</strong>を「他の書き込みと混ざらない」ように守る、各 client が持つロック。<strong>守る対象が違う</strong>ので、ロックも別々に用意します。「共有するデータの種類ごとに、それを守るロックを1本ずつ」——これが Go の並行設計の基本の型で、<code>Store</code> の Mutex、<code>PubSub</code> の Mutex、<code>client</code> の書き込み Mutex は、それぞれ別の資源を守る別のロックです。</p>
+    </div>
+
+    <h2 class="step" id="step-6"><span class="step-no">Step 6</span>dropClient — 切断時の後始末</h2>
+    <p>放送局の仕組みができました。あと1つ、絶対に忘れてはいけない後始末があります——<strong>接続が切れたら、その接続を全レジストリから外す</strong>。これを怠ると、もう存在しない client への配信を試み続ける「幽霊購読者」が台帳に居座ります。それを掃除するのが <code>dropClient</code> です。</p>
+
+    <div class="file-tag">pubsub.go（つづき・これで全文）</div>
+    <pre><code><span class="cm">// dropClient は切断したクライアントを全レジストリから外す。</span>
+<span class="kw">func</span> (ps *<span class="ty">PubSub</span>) dropClient(c *<span class="ty">client</span>) {
+	<span class="kw">for</span> ch := <span class="kw">range</span> c.subs {
+		ps.unsubscribe(c, ch)
+	}
+	<span class="kw">for</span> pat := <span class="kw">range</span> c.psubs {
+		ps.punsubscribe(c, pat)
+	}
+}</code></pre>
+
+    <p>短いですが、ここで<strong>台帳の二重管理</strong>が効いてきます。思い出してください——購読情報は2か所に持たれています。<strong>レジストリ側</strong>（<code>ps.channels</code>/<code>ps.patterns</code>）は「チャネル → 誰が聞いているか」、<strong>client 側</strong>（<code>c.subs</code>/<code>c.psubs</code>、第00章で用意したマップ）は「自分が何を聞いているか」。<code>dropClient</code> は client 側の記録（<code>c.subs</code>/<code>c.psubs</code>）を巡り、そこに載っているチャネル・パターンについて <code>unsubscribe</code>/<code>punsubscribe</code> を呼んでレジストリ側から外します。<strong>「その接続が何を購読していたか」を client 自身が覚えているからこそ、どのチャネルから外せばいいかを O(購読数) で辿れる</strong>——全チャネルを総当たりで探さずに済むわけです。二重に持つのは冗長に見えて、切断時の掃除を安く済ませるための設計です。</p>
+    <div class="box hazard"><div class="box-k">⚠ 落とし穴 — なぜ <code>c.subs</code> にはロックが無いのか</div>
+      <p>ここで「あれ?」と思ってほしいところがあります。さきほど<strong>「共有するデータの種類ごとに、それを守るロックを1本ずつ」</strong>と型を示したのに、<code>c.subs</code>/<code>c.psubs</code> という<strong>マップにはロックが付いていません</strong>。<code>client</code> 構造体を見返すと、<code>wmu</code> が守っているのは書き込み先 <code>w</code> だけです。ルール違反でしょうか。</p>
+      <p>違反ではありません。ルールの<strong>正確な形</strong>はこうです——<strong>「複数の goroutine から触られるものにロックが要る」</strong>。裏を返せば、<strong>1つの goroutine からしか触られないものには要りません</strong>。<code>c.subs</code> がまさにそれです。書き込むのは <code>cmdSubscribe</code>/<code>cmdUnsubscribe</code> の中だけで、これらは <code>dispatch</code> 経由、つまり<strong>その接続自身の <code>handle</code> goroutine</strong> からしか呼ばれません。掃除する <code>dropClient</code> も、次に見るとおり同じ <code>handle</code> の <code>defer</code> から呼ばれます。<strong>最初から最後まで、1本の goroutine が持ち主</strong>なのです。</p>
+      <p>3つを並べると、境界がはっきりします。</p>
+      <table>
+        <tr><th>データ</th><th>誰が触るか</th><th>ロック</th></tr>
+        <tr><td><code>ps.channels</code> / <code>ps.patterns</code></td><td><strong>全接続</strong>の goroutine（発行者も購読者も）</td><td><strong>要る</strong>（<code>ps.mu</code>）</td></tr>
+        <tr><td><code>c.w</code>（書き込み先）</td><td>自分の goroutine <strong>＋ 発行者</strong>の goroutine</td><td><strong>要る</strong>（<code>c.wmu</code>）</td></tr>
+        <tr><td><code>c.subs</code> / <code>c.psubs</code></td><td><strong>自分の goroutine だけ</strong></td><td><strong>要らない</strong></td></tr>
+      </table>
+      <p>2行目と3行目が同じ <code>client</code> の中にあるのに扱いが違うのが要点です。<code>publish</code> は他人の <code>c.send</code>（＝<code>c.w</code>）を呼びますが、他人の <code>c.subs</code> は<strong>読みません</strong>——レジストリ側（<code>ps.channels</code>）を見れば誰に送るか分かるからです。だから <code>c.w</code> には鍵が要り、<code>c.subs</code> には要らない。<strong>ロックの要否は「型」や「気分」ではなく、<em>そのデータが goroutine の境界をまたぐか</em>で決まります。</strong></p>
+    </div>
+
+    <p>そして<strong>この <code>dropClient</code> が呼ばれる場所</strong>——それは第00章で見た <code>handle</code> の <code>defer</code> です。もう一度掲げます。</p>
+
+    <div class="file-tag">main.go（第00章で書いた handle の defer）</div>
+    <pre><code><span class="kw">func</span> (srv *<span class="ty">server</span>) handle(conn net.<span class="ty">Conn</span>) {
+	c := newClient(conn)
+	<span class="kw">defer</span> <span class="kw">func</span>() {
+		srv.pubsub.dropClient(c) <span class="cm">// 切断したら購読も消える（第08章）</span>
+		conn.Close()
+	}()
+	<span class="cm">// … 読む → dispatch → 書く のループ …</span>
+}</code></pre>
+
+    <p>第00章では「後で使う後始末」として素通りした <code>defer</code> の1行が、いま意味を持ちました。<code>defer</code> は「<code>handle</code> がどんな理由で終わっても——正常な <code>QUIT</code> でも、<code>EOF</code>（クライアントが黙って切断）でも、プロトコルエラーでも——<strong>必ず</strong>実行される」ことを保証します。だから「購読したまま接続がプツリと切れた」ような場合でも、<code>dropClient</code> が確実に台帳を掃除します。<strong>「切断時にレジストリから外し忘れると幽霊購読者が残る」を、<code>defer</code> の必ず実行される性質で封じている</strong>——これが第00章で <code>defer dropClient</code> を仕込んでおいた狙いでした。</p>
+
+    <div class="box hazard"><div class="box-k">⚠ 落とし穴 — 外し忘れは「幽霊購読者」を生む</div>
+      <p>もし切断時に <code>dropClient</code> を呼び忘れると、レジストリには<strong>もう死んでいる client ポインタ</strong>が残ります。次に誰かが <code>PUBLISH</code> すると、<code>publish</code> はその幽霊にも <code>c.send</code> しようとする——書き込み先の接続はすでに閉じているので、書き込みが失敗する（あるいは無駄になる）だけならまだしも、<strong>台帳が死んだ購読者で永遠に太り続けます</strong>。「集合に入れたら、必ず出す経路を用意する」——特に相手が<strong>寿命のある接続</strong>のときは、その寿命が尽きる場所（＝ <code>handle</code> の <code>defer</code>）で確実に外す。Pub/Sub のような「接続が資源」の設計では、この後始末の徹底が生命線です。</p>
+    </div>
+
+    <h2 class="step" id="step-7"><span class="step-no">Step 7</span>購読モードのコマンド制限 — dispatch の門番</h2>
+    <p>ここまでで <code>pubsub.go</code> は全文完成です。残るは<strong>コマンドハンドラ</strong>——<code>dispatch</code> と Pub/Sub が握手する部分です。ここに2つの見どころがあります。<strong>(1) Pub/Sub の応答はなぜ <code>dispatch</code> の戻り値ではなく自前 <code>send</code> なのか</strong>、<strong>(2) 購読モード中はなぜコマンドが制限されるのか</strong>。まずハンドラ本体から。</p>
+
+    <div class="file-tag">pubsub.go 内のハンドラ（cmdSubscribe / cmdUnsubscribe）</div>
+    <pre><code><span class="cm">// ---- コマンドハンドラ ----</span>
+<span class="cm">// Pub/Sub の応答は「1チャネルにつき1つの配列」を都度 send する。</span>
+<span class="cm">// dispatch の戻り値では表現しにくいので、ここだけ自前で書き込む。</span>
+
+<span class="kw">func</span> cmdSubscribe(srv *<span class="ty">server</span>, c *<span class="ty">client</span>, args []<span class="ty">string</span>) <span class="ty">string</span> {
+	<span class="kw">if</span> len(args) &lt; <span class="st">2</span> {
+		<span class="kw">return</span> errorMsg(<span class="st">"ERR wrong number of arguments for 'subscribe' command"</span>)
+	}
+	<span class="kw">for</span> _, ch := <span class="kw">range</span> args[<span class="st">1</span>:] {
+		srv.pubsub.subscribe(c, ch)
+		c.subs[ch] = <span class="kw">struct</span>{}{}
+		c.send(array(bulkString(<span class="st">"subscribe"</span>), bulkString(ch), integer(c.subCount())))
+	}
+	<span class="kw">return</span> <span class="st">""</span>
+}
+
+<span class="kw">func</span> cmdUnsubscribe(srv *<span class="ty">server</span>, c *<span class="ty">client</span>, args []<span class="ty">string</span>) <span class="ty">string</span> {
+	chans := args[<span class="st">1</span>:]
+	<span class="kw">if</span> len(chans) == <span class="st">0</span> { <span class="cm">// 引数なしは「全部やめる」</span>
+		chans = <span class="kw">make</span>([]<span class="ty">string</span>, <span class="st">0</span>, len(c.subs))
+		<span class="kw">for</span> ch := <span class="kw">range</span> c.subs {
+			chans = append(chans, ch)
+		}
+	}
+	<span class="kw">if</span> len(chans) == <span class="st">0</span> {
+		c.send(array(bulkString(<span class="st">"unsubscribe"</span>), nullBulk(), integer(c.subCount())))
+		<span class="kw">return</span> <span class="st">""</span>
+	}
+	<span class="kw">for</span> _, ch := <span class="kw">range</span> chans {
+		srv.pubsub.unsubscribe(c, ch)
+		delete(c.subs, ch)
+		c.send(array(bulkString(<span class="st">"unsubscribe"</span>), bulkString(ch), integer(c.subCount())))
+	}
+	<span class="kw">return</span> <span class="st">""</span>
+}</code></pre>
+
+    <p><code>cmdSubscribe</code> を追います。<code>SUBSCRIBE a b c</code> のように<strong>複数チャネルを一度に</strong>購読できるので、<code>args[1:]</code> をループします。各チャネルについて3つのことをします——<strong>(1)</strong> レジストリ側に登録（<code>srv.pubsub.subscribe</code>、Step 3）、<strong>(2)</strong> client 側にも記録（<code>c.subs[ch] = struct{}{}</code>、これが Step 6 の <code>dropClient</code> が辿る記録）、<strong>(3)</strong> <strong>そのチャネルごとに1つ</strong>、確認応答 <code>["subscribe", チャネル名, 現在の購読数]</code> を <code>c.send</code> で送る。ここが第00章で予告した「<code>dispatch</code> の戻り値では表現しにくい」の正体です——<code>SUBSCRIBE a b c</code> には<strong>3つの独立した配列</strong>を返す必要があり、「関数が1つの文字列を返す」という <code>dispatch</code> の形に収まりません。だから <code>cmdSubscribe</code> は<strong>自前で都度 <code>c.send</code> し、戻り値は <code>""</code></strong>。<code>handle</code> 側の <code>if reply != "" { c.send(reply) }</code>（第00章）は、この <code>""</code> を見て「書き込みをスキップ」します。<strong>「Pub/Sub が <code>""</code> を返す理由」の回収です。</strong></p>
+    <p><code>c.subCount()</code>（<code>len(c.subs) + len(c.psubs)</code>、第00章で用意）が応答の3要素目——「あなたはいま合計いくつ購読中か」を返します。<code>UNSUBSCRIBE</code> はその逆で、レジストリと client 記録の両方から外し、減った購読数を添えて確認を送ります。<strong>引数なしの <code>UNSUBSCRIBE</code> は「全部やめる」</strong>——<code>c.subs</code> の全チャネルを集めてまとめて外します（テストの <code>UNSUBSCRIBE</code> が <code>[unsubscribe news :0]</code> を返し、購読数が 0 に戻るのがこれです）。何も購読していない状態で <code>UNSUBSCRIBE</code> したときは、<code>nullBulk()</code>（チャネル名なし）を添えた確認を1つ返します。</p>
+
+    <p>パターン版 <code>cmdPSubscribe</code> / <code>cmdPUnsubscribe</code> は、これと<strong>双子</strong>です（<code>c.subs</code> が <code>c.psubs</code> に、<code>subscribe</code> が <code>psubscribe</code> に、応答の型名が <code>psubscribe</code>/<code>punsubscribe</code> に変わるだけ）。そして発行側 <code>cmdPublish</code>。</p>
+
+    <div class="file-tag">pubsub.go 内のハンドラ（cmdPSubscribe / cmdPUnsubscribe / cmdPublish）</div>
+    <pre><code><span class="kw">func</span> cmdPSubscribe(srv *<span class="ty">server</span>, c *<span class="ty">client</span>, args []<span class="ty">string</span>) <span class="ty">string</span> {
+	<span class="kw">if</span> len(args) &lt; <span class="st">2</span> {
+		<span class="kw">return</span> errorMsg(<span class="st">"ERR wrong number of arguments for 'psubscribe' command"</span>)
+	}
+	<span class="kw">for</span> _, pat := <span class="kw">range</span> args[<span class="st">1</span>:] {
+		srv.pubsub.psubscribe(c, pat)
+		c.psubs[pat] = <span class="kw">struct</span>{}{}
+		c.send(array(bulkString(<span class="st">"psubscribe"</span>), bulkString(pat), integer(c.subCount())))
+	}
+	<span class="kw">return</span> <span class="st">""</span>
+}
+
+<span class="kw">func</span> cmdPUnsubscribe(srv *<span class="ty">server</span>, c *<span class="ty">client</span>, args []<span class="ty">string</span>) <span class="ty">string</span> {
+	pats := args[<span class="st">1</span>:]
+	<span class="kw">if</span> len(pats) == <span class="st">0</span> {
+		pats = <span class="kw">make</span>([]<span class="ty">string</span>, <span class="st">0</span>, len(c.psubs))
+		<span class="kw">for</span> pat := <span class="kw">range</span> c.psubs {
+			pats = append(pats, pat)
+		}
+	}
+	<span class="kw">if</span> len(pats) == <span class="st">0</span> {
+		c.send(array(bulkString(<span class="st">"punsubscribe"</span>), nullBulk(), integer(c.subCount())))
+		<span class="kw">return</span> <span class="st">""</span>
+	}
+	<span class="kw">for</span> _, pat := <span class="kw">range</span> pats {
+		srv.pubsub.punsubscribe(c, pat)
+		delete(c.psubs, pat)
+		c.send(array(bulkString(<span class="st">"punsubscribe"</span>), bulkString(pat), integer(c.subCount())))
+	}
+	<span class="kw">return</span> <span class="st">""</span>
+}
+
+<span class="kw">func</span> cmdPublish(srv *<span class="ty">server</span>, args []<span class="ty">string</span>) <span class="ty">string</span> {
+	<span class="kw">if</span> len(args) != <span class="st">3</span> {
+		<span class="kw">return</span> errorMsg(<span class="st">"ERR wrong number of arguments for 'publish' command"</span>)
+	}
+	<span class="kw">return</span> integer(srv.pubsub.publish(args[<span class="st">1</span>], args[<span class="st">2</span>]))
+}</code></pre>
+
+    <p>ここで<strong>発行側だけは <code>dispatch</code> の戻り値で応答している</strong>ことに注目してください。<code>cmdPublish</code> は購読者へ配る仕事を <code>publish</code> に任せ、自分は<strong>発行者へ「配信数」を返すだけ</strong>——これは普通の整数応答 <code>:2</code> なので、素直に <code>integer(...)</code> を <code>return</code> できます（<code>c</code> を引数に取らないのもそのため）。「メッセージを受け取る側（<code>subscribe</code> 系）は自前 <code>send</code>、発行する側（<code>publish</code>）は普通の戻り値」——同じ Pub/Sub でも、応答の相手が違うので形も違います。</p>
+
+    <p>最後の見どころ——<strong>購読モードのコマンド制限</strong>です。これは <code>pubsub.go</code> ではなく <code>command.go</code> の <code>dispatch</code> の入口にあります（第00章で「後の章で解説する」と予告した分岐です）。</p>
+
+    <div class="file-tag">command.go（dispatch 冒頭・購読モードの門番）</div>
+    <pre><code><span class="kw">func</span> dispatch(srv *<span class="ty">server</span>, c *<span class="ty">client</span>, args []<span class="ty">string</span>) <span class="ty">string</span> {
+	<span class="kw">if</span> len(args) == <span class="st">0</span> {
+		<span class="kw">return</span> errorMsg(<span class="st">"ERR empty command"</span>)
+	}
+	name := upper(args[<span class="st">0</span>])
+	s := srv.store
+
+	<span class="cm">// 購読モード中は、使えるコマンドが制限される</span>
+	<span class="kw">if</span> c != <span class="kw">nil</span> &amp;&amp; c.subCount() &gt; <span class="st">0</span> {
+		<span class="kw">switch</span> name {
+		<span class="kw">case</span> <span class="st">"SUBSCRIBE"</span>, <span class="st">"UNSUBSCRIBE"</span>, <span class="st">"PSUBSCRIBE"</span>, <span class="st">"PUNSUBSCRIBE"</span>, <span class="st">"PING"</span>, <span class="st">"QUIT"</span>:
+			<span class="cm">// ok</span>
+		<span class="kw">default</span>:
+			<span class="kw">return</span> errorMsg(<span class="st">"ERR Can't execute '"</span> + strings.ToLower(args[<span class="st">0</span>]) +
+				<span class="st">"': only (P|S)SUBSCRIBE / (P|S)UNSUBSCRIBE / PING / QUIT / RESET are allowed in this context"</span>)
+		}
+	}
+
+	<span class="kw">switch</span> name {
+	<span class="cm">// … PING / ECHO / SET / GET … 各コマンドの case（省略）…</span>
+
+	<span class="cm">// --- Pub/Sub ---</span>
+	<span class="kw">case</span> <span class="st">"SUBSCRIBE"</span>:
+		<span class="kw">return</span> cmdSubscribe(srv, c, args)
+	<span class="kw">case</span> <span class="st">"UNSUBSCRIBE"</span>:
+		<span class="kw">return</span> cmdUnsubscribe(srv, c, args)
+	<span class="kw">case</span> <span class="st">"PSUBSCRIBE"</span>:
+		<span class="kw">return</span> cmdPSubscribe(srv, c, args)
+	<span class="kw">case</span> <span class="st">"PUNSUBSCRIBE"</span>:
+		<span class="kw">return</span> cmdPUnsubscribe(srv, c, args)
+	<span class="kw">case</span> <span class="st">"PUBLISH"</span>:
+		<span class="kw">return</span> cmdPublish(srv, args)
+
+	<span class="kw">default</span>:
+		<span class="kw">return</span> errorMsg(<span class="st">"ERR unknown command '"</span> + args[<span class="st">0</span>] + <span class="st">"'"</span>)
+	}
+}</code></pre>
+
+    <p>入口の <code>if c != nil &amp;&amp; c.subCount() &gt; 0</code> が<strong>門番</strong>です。<code>c.subCount()</code>（購読中チャネル + パターンの数）が 0 より大きい——つまり<strong>その接続が何か購読している</strong>——なら、その接続は「購読モード」に入っています。このモードでは、続く <code>switch</code> で<strong>許可リスト</strong>を照合し、<code>SUBSCRIBE</code> 系・<code>UNSUBSCRIBE</code> 系・<code>PING</code>・<code>QUIT</code> 以外はすべて <code>ERR Can't execute …</code> で拒否します。<code>GET</code> も <code>SET</code> も、購読中は打てません。</p>
+    <p>なぜこんな制限があるのか。購読者の接続には、いつ何時、他人の <code>PUBLISH</code> による <code>message …</code> が飛び込んでくるか分かりません。もしその接続で普通の <code>GET</code> を許すと、クライアントは「<code>GET</code> の応答」と「割り込んできた配信メッセージ」を<strong>区別できなくなります</strong>——どちらも同じ接続を流れてくる RESP の配列だからです。だから Redis は「一度購読したら、その接続は<strong>メッセージを待つことに専念する</strong>」というモードに切り替え、応答の意味が曖昧になるコマンドを禁じます。<code>PING</code> だけは生存確認のために許され、<code>UNSUBSCRIBE</code> で全部やめれば <code>subCount()</code> が 0 に戻り、<strong>モードから抜けて普通のコマンドが再び使える</strong>ようになります（テストの「解除後に <code>PING</code> が <code>+PONG</code> を返す」がこれです）。</p>
+
+    <div class="gonote"><div class="box-k">GO メモ · switch の case でフォールスルーしない「許可リスト」</div>
+      <p>この門番の <code>switch</code> は、<strong>許可されたものだけを列挙し、それ以外を <code>default</code> で弾く</strong>という書き方です。<code>case "SUBSCRIBE", …, "QUIT":</code> の本体は <code>// ok</code> のコメントだけ——Go の <code>switch</code> は case を実行したら<strong>自動で抜ける</strong>（C のような暗黙のフォールスルーが無い）ので、許可コマンドは「何もせず <code>switch</code> を抜けて先へ進む」。禁止コマンドだけが <code>default</code> に落ちてエラーを返します。「許可リスト方式（ホワイトリスト）」を <code>switch</code> で書くときの定石で、<strong>新しいコマンドを足しても、明示的に許可しない限り購読モードでは自動的に禁止される</strong>——安全側に倒れる書き方です。</p>
+    </div>
+
+    <h2 class="step" id="step-8"><span class="step-no">Step 8</span>テストを読む — 2 接続の会話を機械で確かめる</h2>
+    <p>この章の受け入れ基準は「<strong>別々の2本の接続</strong>のあいだで Pub/Sub が成立する」こと。これまでのテストは1本の接続で完結していましたが、<code>TestServerPubSub</code> は初めて<strong>複数の接続を同時に握って会話させます</strong>。まさに Step 1 の絵——発行者と購読者が別 goroutine——を機械で再現するテストです。</p>
+
+    <div class="file-tag">server_test.go（TestServerPubSub）</div>
+    <pre><code><span class="cm">// 2つの接続の間で PUBLISH / SUBSCRIBE が成立する（受け入れ基準5）</span>
+<span class="kw">func</span> TestServerPubSub(t *testing.<span class="ty">T</span>) {
+	addr := startTestServer(t)
+	sub := dial(t, addr)
+	pub := dial(t, addr)
+
+	<span class="kw">if</span> got := sub.do(t, <span class="st">"SUBSCRIBE"</span>, <span class="st">"news"</span>); got != <span class="st">"[subscribe news :1]"</span> {
+		t.Fatalf(<span class="st">"subscribe = %q"</span>, got)
+	}
+	<span class="cm">// 購読者が受信準備できてから発行する</span>
+	<span class="kw">if</span> got := pub.do(t, <span class="st">"PUBLISH"</span>, <span class="st">"news"</span>, <span class="st">"hello"</span>); got != <span class="st">":1"</span> {
+		t.Errorf(<span class="st">"publish = %q"</span>, got)
+	}
+	<span class="kw">if</span> got := sub.readReply(t); got != <span class="st">"[message news hello]"</span> {
+		t.Errorf(<span class="st">"message = %q"</span>, got)
+	}
+
+	<span class="cm">// 誰も聞いていないチャネルへの発行は 0</span>
+	<span class="kw">if</span> got := pub.do(t, <span class="st">"PUBLISH"</span>, <span class="st">"empty"</span>, <span class="st">"x"</span>); got != <span class="st">":0"</span> {
+		t.Errorf(<span class="st">"publish to empty = %q"</span>, got)
+	}
+
+	<span class="cm">// パターン購読</span>
+	psub := dial(t, addr)
+	<span class="kw">if</span> got := psub.do(t, <span class="st">"PSUBSCRIBE"</span>, <span class="st">"news.*"</span>); got != <span class="st">"[psubscribe news.* :1]"</span> {
+		t.Fatalf(<span class="st">"psubscribe = %q"</span>, got)
+	}
+	<span class="kw">if</span> got := pub.do(t, <span class="st">"PUBLISH"</span>, <span class="st">"news.tech"</span>, <span class="st">"go"</span>); got != <span class="st">":1"</span> {
+		t.Errorf(<span class="st">"publish news.tech = %q"</span>, got)
+	}
+	<span class="kw">if</span> got := psub.readReply(t); got != <span class="st">"[pmessage news.* news.tech go]"</span> {
+		t.Errorf(<span class="st">"pmessage = %q"</span>, got)
+	}
+
+	<span class="cm">// 購読モード中は普通のコマンドが拒否される</span>
+	sub.sendCmd(<span class="st">"GET"</span>, <span class="st">"greeting"</span>)
+	<span class="kw">if</span> got := sub.readReply(t); !strings.HasPrefix(got, <span class="st">"-ERR Can't execute"</span>) {
+		t.Errorf(<span class="st">"in-subscribe GET = %q"</span>, got)
+	}
+
+	<span class="cm">// 購読解除すると普通に戻る</span>
+	<span class="kw">if</span> got := sub.do(t, <span class="st">"UNSUBSCRIBE"</span>); got != <span class="st">"[unsubscribe news :0]"</span> {
+		t.Errorf(<span class="st">"unsubscribe = %q"</span>, got)
+	}
+	<span class="kw">if</span> got := sub.do(t, <span class="st">"PING"</span>); got != <span class="st">"+PONG"</span> {
+		t.Errorf(<span class="st">"after unsubscribe = %q"</span>, got)
+	}
+}</code></pre>
+
+    <p>このテストは、この章で作ったすべてを1本の物語で確かめます。順に読みます。<strong>(1) チャネル配信</strong>——<code>sub</code> が <code>SUBSCRIBE news</code> して <code>[subscribe news :1]</code>（購読数 1）を受け取り、別接続の <code>pub</code> が <code>PUBLISH news hello</code> すると戻り値 <code>:1</code>（1人に配信）、そして <code>sub</code> 側に <code>[message news hello]</code> が届く。Step 5 の前半ループがそのまま動いています。<strong>(2) 空チャネル</strong>——誰も聞いていない <code>empty</code> への発行は <code>:0</code>（<code>nil</code> マップの range が 0 回）。<strong>(3) パターン配信</strong>——<code>psub</code> が <code>PSUBSCRIBE news.*</code> し、<code>pub</code> が <code>news.tech</code> へ発行すると、<code>globMatch("news.*", "news.tech")</code> が真になり <code>[pmessage news.* news.tech go]</code> が届く。Step 5 の後半ループと <code>globMatch</code> の連携です。</p>
+    <p>そして<strong>(4) 購読モードの制限</strong>——購読中の <code>sub</code> が <code>GET greeting</code> を打つと <code>-ERR Can't execute</code> で拒否される（Step 7 の門番）。<strong>(5) 解除で復帰</strong>——<code>UNSUBSCRIBE</code>（引数なし＝全解除）で <code>[unsubscribe news :0]</code> が返って購読数が 0 に戻り、その直後の <code>PING</code> が <code>+PONG</code>——つまり<strong>モードから抜けて普通の接続に戻った</strong>ことが証明されます。<code>sub</code> と <code>pub</code> と <code>psub</code> という<strong>3本の独立した接続</strong>が、サーバの中で別々の goroutine として動きながら1つの放送局を共有している——これが Pub/Sub の全体像です。</p>
+
+    <div class="box do"><div class="box-k">▸ 動かして確認</div>
+      <p>この章のクライマックス。2接続間の配信・パターン購読・モード制限・復帰を、まとめて1本で検証します。パターン照合そのものを試す <code>TestGlobMatch</code> も一緒に走らせましょう。</p>
+      <pre class="term"><code><span class="ps">$</span> go test -run 'TestServerPubSub|TestGlobMatch' -v
+<span class="out">=== RUN   TestGlobMatch
+--- PASS: TestGlobMatch (0.00s)
+=== RUN   TestServerPubSub
+--- PASS: TestServerPubSub (0.00s)
+PASS
+ok  	redisclone	0.61s</span></code></pre>
+      <p><code>TestServerPubSub</code> の PASS は、「別々の接続のあいだでメッセージが流れ、購読中は世界が変わり、解除で戻る」の機械による証明です。第00章で仕込んだ <code>c.send</code> の Mutex と <code>defer dropClient</code> が、ここで初めて本来の仕事をしています。</p>
+    </div>
+
+    <h2>つまずき FAQ</h2>
+    <details class="qa"><summary><code>SUBSCRIBE</code> する<strong>前</strong>に <code>PUBLISH</code> されたメッセージは、後から購読したら受け取れる?</summary>
+      <div class="qa-body"><p>受け取れません。Pub/Sub は<strong>メッセージをどこにも保存しない</strong>——<code>publish</code> はその瞬間の <code>ps.channels[ch]</code> に居る購読者へ配って終わり、履歴は残りません。テストでも「<code>SUBSCRIBE</code> の応答を確認してから <code>PUBLISH</code> する」順で書いているのはこのためです（購読が成立する前に発行すると届かない）。「取りこぼしたくない」「後から読み返したい」なら Pub/Sub ではなく List やストリーム（本書スコープ外）を使います。この「保存しない」割り切りこそが、Pub/Sub をこれだけ小さく速く保っています。</p></div>
+    </details>
+    <details class="qa"><summary><code>message</code>（要素3個）と <code>pmessage</code>（要素4個）は、なぜ形が違うの?</summary>
+      <div class="qa-body"><p>パターン購読者には「<strong>どのパターンで引っかかったか</strong>」を伝える必要があるからです。<code>message</code> は <code>["message", チャネル, 本文]</code> の3要素。パターン購読は <code>news.*</code> のような<strong>1つのパターンが複数のチャネルにマッチしうる</strong>ので、実際に届いたチャネル名（<code>news.tech</code>）に加えて、自分の購読パターン（<code>news.*</code>）も返します——だから <code>["pmessage", パターン, チャネル, 本文]</code> の4要素。クライアントは「<code>news.*</code> への購読が <code>news.tech</code> でヒットした」と両方を知れます。1つの接続がチャネルとパターンの両方で購読していれば、同じ発行に対して <code>message</code> と <code>pmessage</code> の<strong>両方</strong>が届きます。</p></div>
+    </details>
+    <details class="qa"><summary>購読情報を<strong>レジストリ側</strong>（<code>ps.channels</code>）と <strong>client 側</strong>（<code>c.subs</code>）の<strong>二重</strong>に持つのは無駄では?</summary>
+      <div class="qa-body"><p>無駄に見えて、両方向の問いに安く答えるための設計です。<code>PUBLISH</code> は「<strong>このチャネルの購読者は誰か</strong>」を引きたい——これはレジストリ側（<code>ps.channels[ch]</code>）が得意。切断時の <code>dropClient</code> は「<strong>この接続は何を購読していたか</strong>」を引きたい——これは client 側（<code>c.subs</code>）が得意。もし片方しか持たなければ、もう片方の問いに毎回全探索が要ります（例: client 側が無いと、切断時に全チャネルを総当たりで「この client が居るか」調べる羽目に）。二重管理のぶん「登録・解除時に両方を更新する」責任が生じますが、それは <code>cmdSubscribe</code>/<code>cmdUnsubscribe</code> が確実に果たしています。</p></div>
+    </details>
+
+    <h2>理解度チェック</h2>
+    <p>次の問いに<strong>自分の言葉で</strong>答えられたら、この章は卒業です。</p>
+    <details class="qa"><summary>1. 第00章で <code>c.send</code> が Mutex 付きだったのは、この章のどの場面のためか。</summary>
+      <div class="qa-body"><p><code>publish</code> の中の <code>c.send</code> のため。<code>PUBLISH</code> を実行するのは<strong>発行者の goroutine</strong>だが、<code>c.send</code> の書き込み先は<strong>購読者の接続</strong>——つまり「ある接続の goroutine が、別の接続の <code>w</code> に書き込む」越境が起きる。同じ購読者に対し、その購読者自身のコマンド応答と、他人からの配信が<strong>同時に書き込まれうる</strong>ため、書き込みを直列化する Mutex（<code>c.wmu</code>）が要る。これを最初から仕込んでおいたのが第00章の <code>send</code> の Mutex だった。</p></div>
+    </details>
+    <details class="qa"><summary>2. Pub/Sub のコマンドが <code>dispatch</code> の戻り値でなく自前 <code>send</code>（<code>""</code> を返す）なのはなぜか。</summary>
+      <div class="qa-body"><p><code>SUBSCRIBE a b c</code> のように<strong>1つのコマンドで複数の独立した配列</strong>を返す必要があり、「関数が1つの文字列を返す」という <code>dispatch</code> の形に収まらないから。<code>cmdSubscribe</code> は<strong>1チャネルにつき1つ</strong>の確認応答を <code>c.send</code> で都度書き込み、戻り値は <code>""</code>。<code>handle</code> は <code>if reply != ""</code> の分岐でこの空文字列を見て書き込みをスキップする。配信メッセージ（<code>message</code>/<code>pmessage</code>）も他 goroutine から任意のタイミングで届くので、同じく自前 <code>send</code> で書く。（例外は <code>cmdPublish</code>——発行者へ配信数を返すだけなので普通の整数戻り値でよい。）</p></div>
+    </details>
+    <details class="qa"><summary>3. 接続が切れたとき、購読情報はどこでどう掃除されるか。掃除を怠るとどうなるか。</summary>
+      <div class="qa-body"><p><code>handle</code> の <code>defer</code> が呼ぶ <code>srv.pubsub.dropClient(c)</code> で掃除される。<code>dropClient</code> は client 側の記録（<code>c.subs</code>/<code>c.psubs</code>）を辿り、載っている各チャネル・パターンについて <code>unsubscribe</code>/<code>punsubscribe</code> を呼んでレジストリ側から外す。<code>defer</code> は <code>handle</code> がどんな理由で終わっても必ず実行されるので、正常切断でも <code>EOF</code> でも確実に掃除される。怠ると、レジストリに<strong>死んだ client ポインタが幽霊購読者として残り</strong>、以後の <code>PUBLISH</code> がその幽霊にも配信を試み、台帳が使われない購読者で太り続ける。</p></div>
+    </details>
+
+    <h2>まとめ — 次の層へ</h2>
+    <p>この章で、Redis の中に<strong>キースペースとは独立したもう一つの世界</strong>——放送局——を作りました。メッセージは保存されず、その瞬間の購読者へ流れて消える。配信は他人の goroutine が購読者の接続へ書き込み（だから <code>send</code> は Mutex で守られていた）、購読中の接続は世界が切り替わってコマンドが制限され、切断すれば <code>defer dropClient</code> が必ず台帳から外す。第00章で「後で」と素通りした3つの伏線——<code>send</code> の Mutex、<code>dispatch</code> の <code>""</code>、<code>defer dropClient</code>——が、この章ですべて回収されました。</p>
+    <p>これで本書のデータ型（String / Expire / List / Hash / Set / Sorted Set）と、接続が主役の Pub/Sub が出そろいました。残るは<strong>仕上げ</strong>です。次の第09章「仕上げと設計判断」では、ここまで積み上げた実装を俯瞰し——「<code>Store</code> を単一 Mutex で守る」「1接続1 goroutine」「本家の単一スレッド + イベントループとの違い」——本書がどの分かれ道でどちらを選び、なぜそうしたかを ADR として振り返ります。作り切ったからこそ見える設計の景色を、最後にゆっくり眺めます。</p>
+
+    <div class="chap-foot">
+      <a class="pager" href="07-zset.html"><span class="dir">← 前へ</span>第07章 · Sorted Set と skiplist</a>
+      <a class="pager next" href="09-finish.html"><span class="dir">次へ →</span>第09章 · 仕上げと設計判断</a>
+    </div>
+  </main>
+</div>
+</body>
+</html>

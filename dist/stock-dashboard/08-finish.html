@@ -1,0 +1,122 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>仕上げと、次の一歩 — 指数ダッシュボードを作る</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@400;500;600;700&family=Source+Serif+4:opsz,wght@8..60,400;8..60,500;8..60,600&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<div class="shell">
+
+  <aside class="spine">
+    <a class="wordmark" href="index.html">STOCK · from scratch<span class="tick"> ↗</span></a>
+    <div class="book-title">指数ダッシュボードを<br>つくる</div>
+    <div class="book-sub">好きな指数を、好きな期間で</div>
+
+    <div class="legend-rail"><span>読む <b>↓</b></span><span>組む <b>↑</b></span></div>
+
+    <nav aria-label="目次">
+      <ul class="toc">
+        <li><a class="nav-item" href="index.html"><span class="nav-num">序</span><span class="nav-label">はじめに<span class="nav-tag">Intro</span></span></a></li>
+        <li><a class="nav-item" href="00-line.html"><span class="nav-num">00</span><span class="nav-label">一本の線を引く<span class="nav-tag">Line</span></span></a></li>
+        <li><a class="nav-item" href="01-fetch.html"><span class="nav-num">01</span><span class="nav-label">データを取ってくる<span class="nav-tag">Fetch</span></span></a></li>
+        <li><a class="nav-item" href="02-store.html"><span class="nav-num">02</span><span class="nav-label">貯めて、切り出す<span class="nav-tag">Store</span></span></a></li>
+        <li><a class="nav-item" href="03-range.html"><span class="nav-num">03</span><span class="nav-label">期間を自由にする<span class="nav-tag">Range</span></span></a></li>
+        <li><a class="nav-item" href="04-overlay.html"><span class="nav-num">04</span><span class="nav-label">二本目を重ねる<span class="nav-tag">Overlay</span></span></a></li>
+        <li><a class="nav-item" href="05-rebase.html"><span class="nav-num">05</span><span class="nav-label">100にそろえる<span class="nav-tag">Rebase</span></span></a></li>
+        <li><a class="nav-item" href="06-downsample.html"><span class="nav-num">06</span><span class="nav-label">長い期間を軽くする<span class="nav-tag">Sample</span></span></a></li>
+        <li><a class="nav-item" href="07-url.html"><span class="nav-num">07</span><span class="nav-label">URLに状態を持たせる<span class="nav-tag">URL</span></span></a></li>
+        <li><a class="nav-item current" aria-current="page" href="08-finish.html"><span class="nav-num">08</span><span class="nav-label">仕上げと、次の一歩<span class="nav-tag">Finish</span></span></a></li>
+      </ul>
+    </nav>
+
+    <div class="spine-foot">
+      各章は一段の階段。<br>前の章の「できたこと」が<br>次の章の「困りごと」を呼ぶ。
+    </div>
+  </aside>
+
+  <main class="reading">
+    <div class="progress-tag">第08章 / 全9章 · 層: FINISH · 読了目安 1〜2時間</div>
+    <div class="eyebrow"><span>Finish</span><span class="depth">— 最後の一押しと次の種</span></div>
+    <h1>仕上げと、次の一歩</h1>
+    <p class="lede">触って気持ちいい最後の一押しと、ここから伸ばすための種。</p>
+
+    <div class="box goal"><div class="box-k">◈ この章のゴール</div>
+      <p>日々使えるダッシュボードとして仕上げ、次に何を足せるかの地図を持つ。</p>
+    </div>
+
+    <h2>仕上げ</h2>
+    <p>土台はもう動いています。ここからは「毎日使いたくなるか」を分ける、小さな最後の一押しです。大きな機能ではありません。でも、この三つがあると道具の手触りが変わります。</p>
+    <ul class="plain">
+      <li><strong>ツールチップ</strong>：ホバーで日付・値・開始比の騰落率(%)を出す。指数化の意味が、数字で腑に落ちる瞬間です。</li>
+      <li><strong>CSV出力</strong>：表示中のデータを書き出せるようにする。自分で検証したくなったとき効きます。</li>
+      <li><strong>免責の明記</strong>：投資助言ではないこと、著作権への配慮、学習用途であることを画面に書く。第01章で引いた線を、最後に見える形にします。</li>
+    </ul>
+
+    <h2>ツールチップは、思ったより難所</h2>
+    <p>三つのうち、ツールチップだけは「小さな一押し」の顔をして、実は二つの罠を抱えています。参考実装でも、ここだけコメント付きで対策が書かれている箇所です。</p>
+
+    <div class="box hazard"><div class="box-k">⚠ つまずきポイント（1）— 前回の描画の亡霊</div>
+      <p>期間や指数を変えると、グラフを描き直します。このとき<strong>前回のホバー用ハンドラを消し忘れる</strong>と、亡霊が残ります。とくに「新しい条件ではデータが0件だった」ときが危険で、早期 return して描画をやめた結果、<strong>画面には何も無いのにホバーすると古いデータのツールチップが出る</strong>という状態になります。描き直しの先頭で、ツールチップを隠し、ハンドラを外してから始めてください。</p>
+    </div>
+
+    <div class="box hazard"><div class="box-k">⚠ つまずきポイント（2）— 遅れて届いた古い応答</div>
+      <p>これは第07章の「URLが状態の正」と正面からぶつかる罠です。プリセットを素早く連打すると、リクエストが複数飛びます。ネットワークの都合で<strong>古いリクエストの応答が後から届く</strong>ことがあり、そのまま描くと——<strong>URLは新しい期間を指しているのに、グラフだけ古い期間</strong>という食い違いが起きます。せっかくURLを状態の正にしたのに、画面がそれを裏切るわけです。</p>
+      <p>直し方は素直で、リクエストに<strong>連番</strong>を振り、応答が返ったとき「自分が最新か」を確かめて、古ければ捨てる。参考実装もこの方法です。<strong>非同期を扱う限り、この「追い越し」はどこにでも出ます</strong>——覚えておくと他の場面でも効きます。</p>
+    </div>
+
+    <p>もう一つ、設計の分かれ道があります。指数化モードのとき、ツールチップに出すのは<strong>100基準の値</strong>でしょうか、それとも<strong>元の終値</strong>でしょうか。参考実装は「グラフは指数化した線を描き、ツールチップには元の終値と騰落率の両方を出す」を選びました。<strong>線では『動きを比べ』、数字では『実際にいくらか』を確かめたい</strong>——という、二つの欲求が同時に満たせるからです。そのために応答に基準値（100に対応する終値）を1つ添えてあり、画面側で実数値と％を行き来できるようにしています。</p>
+
+    <h2>次の一歩（発展演習）</h2>
+    <p>ここまでで土台は完成です。以下は、興味の向くまま伸ばすための枝。どれも必須ではありませんが、それぞれが一段深い理解へつながります。</p>
+
+    <div class="box do"><div class="box-k">▸ 手を動かす（発展演習）</div>
+      <ol>
+        <li><strong>円換算モード</strong>：ドル建て指数に為替(USD/JPY)を掛けてから指数化し、「日本人投資家目線」の比較を足す。通貨の割り切り（第05章）を、正面から扱う挑戦です。</li>
+        <li><strong>指数を増やす</strong>：NYダウ・TOPIXなどを、マスタに一行足すだけで増やせる形か確認する。（参考実装は symbols.go に1行足すだけで対応指数が増えます）</li>
+        <li><strong>対数軸</strong>：長期の比較で、下落の"率"を正しく見せる。</li>
+        <li><strong>ダークモード</strong>：配色を一つ足す。</li>
+        <li><strong>公開する</strong>：ここまでのダッシュボードは<strong>手元で動かす前提</strong>です。第07章で作ったURLは「自分の環境で同じ画面を再現する／自分の別の端末で開く」ためのもので、<code>127.0.0.1</code> のまま他人に送っても相手の手元では開きません。公開したくなったら、データ元をブラウザから直接叩けない（CORSが通らない）ため、「静的サイト＋日次バッチでJSONを焼き込む」形が第一候補になります。ただしその前に、<strong>第01章で引いた再配布の線</strong>に必ず戻って判断してください。ここは技術より先に、規約の話です。</li>
+      </ol>
+    </div>
+
+    <div class="insight"><div class="box-k">◈ 最後に</div>
+      <p>一段目で引いた一本の線が、任意区間で指数を重ねて比べられるダッシュボードになりました。既存サイトを使うだけでは見えなかった仕組みが、今は自分の手の内にあるはずです。作れたものは、理解できたもの。</p>
+    </div>
+
+    <h2>つまずき FAQ</h2>
+    <details class="qa"><summary>CSV出力は、間引いた後の点を書き出すのでいいのですか？</summary>
+      <div class="qa-body"><p>「何のために書き出すのか」で答えが変わります。参考実装は<strong>画面に表示中のデータをそのまま</strong>書き出す方針で、つまり間引き後の点です。「いま見ているこのグラフを、手元の表計算で確かめたい」という用途にはこれが正解——画面と数字が一致するからです。一方「全営業日の終値がほしい」なら間引き後では足りません。その場合は間引きを効かせない点数を指定して取得するか、書き出し専用に「間引かない経路」を用意します。<strong>第06章で「Nは上限の目安」と学んだことが、ここで効いてきます</strong>——書き出したCSVの行数が期待と違うときは、まず間引きを疑ってください。</p></div>
+    </details>
+    <details class="qa"><summary>免責の明記は、本当に必要ですか？ 個人で使うだけなのに。</summary>
+      <div class="qa-body"><p>手元で自分だけが使う限り、法的な要請として必須ではありません。それでも書くことを勧めるのは、<strong>第01章で引いた線を、自分で見える場所に残しておくため</strong>です。指数値には算出元の権利があり、取得元にも規約がある。学習用途に限る、投資助言ではない——この前提は作った当人ほど忘れます。半年後の自分や、画面を覗いた誰かが「これ公開したら？」と言い出したとき、画面に一行あるかないかで判断が変わります。<strong>制約を明文化しておくことは、将来の自分への申し送り</strong>です。</p></div>
+    </details>
+
+    <h2>この教材の振り返り</h2>
+    <p>最終章なので、つまずきFAQと理解度チェックの代わりに、越えてきた壁を全体で振り返ります。自分の言葉で答えられたら、この教材は卒業です。</p>
+    <details class="qa"><summary>この教材で越えた壁を3つ挙げられますか？</summary>
+      <div class="qa-body"><p>代表的なのはこの三つです。<strong>(1) スケール差</strong>——値の桁が違う指数は実数値のまま重ねても比べられない。開始=100にそろえる指数化で解きました（第05章）。<strong>(2) 休場日ズレ</strong>——市場ごとに営業日が違い、日付軸がそろわない。和集合軸＋フォワードフィルで、始点の違う指数も同じ土俵に載せました（第03〜04章）。<strong>(3) 長期の重さ</strong>——数十年ぶんの点をそのまま描くと重い。LTTBで見た目を保ったまま間引き、しかも指数化の後に間引く順序を守りました（第06章）。この「整列→指数化→間引き」の順序こそが、この教材の心臓部でした。<strong>ここまで言えたら満点</strong>——LTTB は先頭点を必ず残すので、実は逆順にしても<em>いまは</em>壊れません。それでも順序を固定するのは、<strong>先頭を保証しない間引きに差し替えても「基準が正しい日から取られること」を保つため</strong>。安全を道具の性質に頼らせない、という設計判断です。ただし順序が守るのは<strong>値の正しさ</strong>までで、「開始日=100 の点がグラフに残るか」は間引きの選び方が決めます——<strong>2つは別の問題</strong>で、LTTB はたまたま両方を満たしてくれる道具でした。</p></div>
+    </details>
+    <details class="qa"><summary>なぜ「表示 → 取得 → 加工」の順で積んだのか、説明できますか？</summary>
+      <div class="qa-body"><p>取得は遅く失敗し、加工は取得できたデータが無いと確かめられないからです。だから第00章でまず線を出し（表示）、第01章で本物に差し替え（取得）、そこから期間・重ね・指数化・間引きと加工を積みました。下の層ができていないと上の層は確かめようがない——飛ばせない順序で登ってきたことが、最後に効いています。</p></div>
+    </details>
+
+    <div class="box done"><div class="box-k">✓ 完了の合図</div>
+      <p>ツールチップ・CSV出力・免責を備え、日々使える状態になっている。そして「次に何を足せるか」の発展の地図を、自分の中に持っている。ここまで来たら、この教材は完了です。</p>
+    </div>
+
+    <h2>まとめ</h2>
+    <p>手で書いた一本のダミー線から始めて、好きな指数を好きな期間で重ねて比べられるダッシュボードまで登り切りました。ここから先は、あなたの興味が地図です。円換算でも、対数軸でも、まだ触れていない指数でも——土台はもうあるので、枝を伸ばすだけ。行き詰まったら、いつでも<a href="index.html">序章</a>に戻って、山頂の形をもう一度眺めてください。お疲れさまでした。</p>
+
+    <div class="chap-foot">
+      <a class="pager" href="07-url.html"><span class="dir">← 前へ</span>第07章 · URLに状態を持たせる</a>
+      <a class="pager next" href="index.html"><span class="dir">次へ →</span>序章 · はじめに戻る</a>
+    </div>
+  </main>
+</div>
+</body>
+</html>

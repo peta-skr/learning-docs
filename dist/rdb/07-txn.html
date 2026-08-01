@@ -1,0 +1,1234 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>第07章 索引とトランザクション — ディスクからつくるデータベース</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500;600&family=Source+Serif+4:opsz,wght@8..60,400;8..60,600;8..60,700&family=Noto+Serif+JP:wght@400;600;700&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="style.css">
+<style>pre{tab-size:4;-moz-tab-size:4}</style>
+</head>
+<body>
+<div class="shell">
+
+  <aside class="spine">
+    <a class="wordmark" href="index.html">MINIDB · from scratch</a>
+    <div class="book-title">ディスクから<br>つくるデータベース</div>
+    <div class="book-sub">Go で B+Tree から SQL まで</div>
+
+    <div class="legend"><span>読む <b>↓</b></span><span>組む <b>↑</b></span></div>
+
+    <nav aria-label="目次">
+      <ul class="toc">
+        <li><a class="nav-item" href="index.html"><span class="nav-num">序</span><span class="nav-label">はじめに・準備<span class="nav-tag">Setup</span></span></a></li>
+        <li><a class="nav-item" href="00-disk.html"><span class="nav-num">00</span><span class="nav-label">ディスクとページ<span class="nav-tag">Disk</span></span></a></li>
+        <li><a class="nav-item" href="01-page.html"><span class="nav-num">01</span><span class="nav-label">ページの中身<span class="nav-tag">Page</span></span></a></li>
+        <li><a class="nav-item" href="02-buffer.html"><span class="nav-num">02</span><span class="nav-label">バッファプール<span class="nav-tag">Buffer</span></span></a></li>
+        <li><a class="nav-item" href="03-btree.html"><span class="nav-num">03</span><span class="nav-label">B+Tree 索引<span class="nav-tag">Index</span></span></a></li>
+        <li><a class="nav-item" href="04-catalog.html"><span class="nav-num">04</span><span class="nav-label">表とカタログ<span class="nav-tag">Catalog</span></span></a></li>
+        <li><a class="nav-item" href="05-sql.html"><span class="nav-num">05</span><span class="nav-label">SQL を実行する<span class="nav-tag">Query</span></span></a></li>
+        <li><a class="nav-item" href="06-wal.html"><span class="nav-num">06</span><span class="nav-label">壊れない仕組み<span class="nav-tag">WAL</span></span></a></li>
+        <li><a class="nav-item current" aria-current="page" href="07-txn.html"><span class="nav-num">07</span><span class="nav-label">索引とトランザクション<span class="nav-tag">Txn</span></span></a></li>
+      </ul>
+    </nav>
+
+    <div class="spine-foot">
+      各章は一つの層。<br>下（ディスク）から上（SQL）へ<br>積み上げて動かしていく。
+    </div>
+  </aside>
+
+  <main class="reading">
+    <div class="progress-tag">第07章 / 全8章 · 層: TXN · 読了目安 4〜5時間</div>
+    <div class="eyebrow"><span>Txn</span><span class="depth">— 仕上げと、その先</span></div>
+    <h1>索引とトランザクション</h1>
+    <p class="lede">最終章です。複数の SQL 文を「まとめて全部成功か、全部なかったことにするか」の単位にするトランザクションと、非主キー列の検索を速くするセカンダリ索引 — 最後の 2 つの部品を載せて、この小さなデータベースを完成させます。</p>
+
+    <div class="box goal"><div class="box-k">◈ この章のゴール</div>
+      <p>自分の REPL で 2 つの現象を観測することがゴールです。ひとつ、<code>BEGIN → UPDATE → ROLLBACK</code> で変更した値が元に戻ること。ふたつ、<code>CREATE INDEX</code> の前後で、同じクエリの plan 表示が <code>seqscan(accounts)</code> から <code>indexscan(idx_accounts_id)</code> に変わること。そして最後に <code>go test ./...</code> が全部 <code>ok</code> になる — それが本書全体の完走の合図です。</p>
+    </div>
+
+    <div class="box map"><div class="box-k">☰ この章のステップ</div>
+      <ol>
+        <li><a href="#step-1">変更集合 — Store の三つ目の顔</a></li>
+        <li><a href="#step-2">Commit と Rollback — ログが先、データが後</a></li>
+        <li><a href="#step-3">単体テストで「漏れない」ことを観測する</a></li>
+        <li><a href="#step-4">SQL とつなぐ — BEGIN / COMMIT / ROLLBACK と自動コミット</a></li>
+        <li><a href="#step-5">CREATE INDEX — もう一本の B+Tree を植える</a></li>
+        <li><a href="#step-6">プランナ — seqscan か indexscan かを選ぶ</a></li>
+        <li><a href="#step-7">索引の維持 — UPDATE は「削除 + 挿入」</a></li>
+        <li><a href="#step-8">総仕上げ — M7 テストを読み解く</a></li>
+      </ol>
+    </div>
+
+    <h2>「全部か、無しか」が欲しくなる瞬間</h2>
+    <p>定番の例から始めましょう。alice の口座から bob の口座へ 300 円を送金します。SQL で書くと、これは 2 つの <code>UPDATE</code> 文です。</p>
+
+    <div class="ascii">「送金」は 2 文でできている — 途中で止まると、お金が消える
+
+  alice の残高 1000 円から、bob（残高 500 円）へ 300 円送る:
+
+    ① UPDATE accounts SET balance = 700 WHERE owner = 'alice'   ← 実行済み
+    ―――――――――― ここでエラー／クラッシュ ――――――――――
+    ② UPDATE accounts SET balance = 800 WHERE owner = 'bob'     ← 未実行
+
+  結果: alice は 300 円払ったのに、bob は受け取っていない。
+        世界のどこにも属さない「中途半端な状態」がディスクに残った。</div>
+
+    <p>①と②の間で何かが起きたら — プログラムのバグでも、停電でも — 300 円が消えます。逆順なら 300 円が増えます。どちらも困る。欲しいのは「①と②を<strong>ひとまとまり</strong>として扱い、全部成功するか、全部なかったことになるかのどちらかしか起きない」という保証です。このまとまりを<strong>トランザクション</strong>（transaction、以下 Tx とも書きます）と呼び、「全部か無しか」の性質を<strong>原子性</strong>（atomicity: それ以上分割できない、の意）と呼びます。</p>
+    <p>第06章で私たちは、WAL によって<strong>耐久性</strong>（コミットしたものはクラッシュしても消えない）を手に入れました。この章ではその上に、<strong>原子性</strong>（全部か、無しか）を積みます。</p>
+    <p>ここで、教科書に必ず出てくる <strong>ACID</strong> という4文字と、minidb の距離を先に測っておきます。<strong>後で「できているつもり」になるのを防ぐため、この章の最初に線を引いておきます。</strong></p>
+    <ul>
+      <li><strong>A（原子性）</strong> — この章で正面から作ります。</li>
+      <li><strong>D（耐久性）</strong> — 第06章の WAL で作りました。</li>
+      <li><strong>C（一貫性）</strong> — 実は DB 単独の機能ではありません。「送金しても合計 1500 円のまま」のような<strong>アプリが決めた不変条件</strong>のことで、A と D と制約機構が守った結果として保たれます。minidb は制約（NOT NULL など）を持たないので、この章では扱いません。</li>
+      <li><strong>I（隔離）</strong> — <strong>ここが要注意です。</strong> 本来の I は「複数のトランザクションを<em>同時に</em>走らせても、順番に1つずつ実行したのと同じ結果になる」という、並行制御の性質です。READ COMMITTED や SERIALIZABLE といった「分離レベル」は、その強さの段階を表します。<strong>minidb にそれはありません。</strong></li>
+    </ul>
+    <div class="box hazard"><div class="box-k">⚠ 落とし穴 — minidb の「隔離」は並行制御ではない</div>
+      <p>この章で手に入るのは「<strong>未コミットの変更が Tx の外に一切漏れない</strong>」という一段だけです。しかもそれは、ロックで守った結果ではなく、後で見る「変更をシートの上に隔離する」という<strong>構造から自動的にそうなる</strong>だけのものです。</p>
+      <p>minidb は<strong>単一プロセス・単一スレッド</strong>で動きます。実際、<code>src/</code> 全体を検索してもロック（<code>sync.Mutex</code>）もゴルーチンも<strong>1つも出てきません</strong>。<code>db.go</code> の <code>DB</code> のコメントにも「DB 自体はゴルーチン安全ではない」と書いてあります。複数のゴルーチンから同時に触れば、単純に壊れます。</p>
+      <p>つまり minidb には、トランザクションが同時に2つ走る状況がそもそも存在しません。だから分離レベルの話は、この実装には登場しようがないのです。<strong>本物の I は、章末の「この先へ」で挙げる MVCC の領域</strong>です。ここで作るのは、そこへ登るための土台にあたる A です。</p>
+    </div>
+
+    <h2>どこに「未コミットの変更」を置くか — オーバーレイという発想</h2>
+    <p>素朴に考えると、こう作りたくなります。「変更はいつも通りバッファプールに書いてしまい、ロールバックのときに<strong>元に戻す</strong>」。しかしこの道はすぐ険しくなります。元に戻すには「変更前の値」をどこかに控えておく必要があるし（undo 情報といいます）、もっと悪いことに、第02章で作ったバッファプールは満杯になると勝手にページをディスクへ<strong>追い出し</strong>ます。つまり未コミットの変更が、ロールバックする前にディスクへ書かれてしまうかもしれない。そうなると「戻す」作業はディスクにまで及びます。</p>
+    <p>minidb は逆の道を選びました。<strong>未コミットの変更を、最初からどこにも漏らさない。</strong>トランザクションは自分専用の「変更したページのコピー置き場」を持ち、書き込みはすべてそこへ。バッファプールにもディスクにも、コミットの瞬間まで一切触れません。この置き場を本書では<strong>変更集合</strong>と呼びます。</p>
+    <p>ここで第02章の主役、<code>Store</code> インターフェースが最後の仕事をします。<code>Read / Write / Allocate</code> の 3 メソッドを持つものは誰でも「ページ置き場」の顔になれる、という約束でした。ディスクマネージャが 1 人目、バッファプールが 2 人目。そしてトランザクションが 3 人目です。Tx は下に本物の <code>Store</code>（バッファプール）を抱え、自分も <code>Store</code> のふりをする — 透明なシートを 1 枚、プールの上に重ねるイメージです。こういう構造を<strong>オーバーレイ</strong>（overlay: 上に重ねるもの）といいます。</p>
+
+    <div class="ascii">Tx = Store の顔をしたオーバーレイ — 書きは私有、読みは 2 段
+
+            SQL 実行層（exec.go）
+             │ Read(id) / Write(id)      ← 相手が Tx だとは知らない
+             ▼
+  ┌─ Tx（internal/txn）──────────────────────────────┐
+  │  pages: 私有の変更集合                            │
+  │    ┌─────────┐  ┌─────────┐                      │
+  │    │ Page 3′ │  │ Page 7′ │  ← Write は必ずここへ │
+  │    └─────────┘  └─────────┘    （初回タッチでコピー）│
+  └────────┬─────────────────────────────────────────┘
+           │ Read: pages に無いページだけ、下へ素通し
+           ▼
+  ┌─ バッファプール（第02章）────────────────────────┐
+  │  コミット済みページのキャッシュ                    │
+  └────────┬─────────────────────────────────────────┘
+           ▼
+        ディスク（ch07.db）＋ WAL（第06章）</div>
+
+    <p>この 1 枚のシートから、欲しかった性質が<strong>全部同時に</strong>転がり出てきます。</p>
+    <ul>
+      <li><strong>ロールバック</strong> = シートを捨てるだけ。変更はシートの上にしかないので、捨てれば世界は元のまま。undo 情報は要りません。</li>
+      <li><strong>隔離</strong> = 構造から自動で成立。Tx の外にいる読み手はバッファプールしか見ないので、シートの上の未コミット変更は<em>見えようがない</em>。</li>
+      <li><strong>コミット</strong> = シートの中身を「WAL へ fsync → プールへ反映」の 2 手で下ろす。第06章の鉄則「ログが先、データが後」が、そのまま Tx のコミットになります。</li>
+    </ul>
+    <p>疑い深い読者は「そんなうまい話があるか」と思ったはずです。あります。ただし代償も。それはこの章の途中で正面から扱います。まずはコードを読みましょう。<code>internal/txn/txn.go</code> は全部で約 100 行 — 本書で最短の主役です。</p>
+
+    <h2 class="step" id="step-1"><span class="step-no">Step 1</span>変更集合 — Store の三つ目の顔</h2>
+    <p>まず Tx の骨格、つまり「変更集合を持つ構造体」と「読み・書きの 2 メソッド」を読みます。ファイル先頭のパッケージコメントには、いま説明した設計判断がそのまま書いてあります。</p>
+
+    <div class="file-tag">internal/txn/txn.go（前半）</div>
+    <pre><code><span class="cm">// Package txn はトランザクション（M7）。設計判断 A-1:</span>
+<span class="cm">// 未コミットの変更はディスクにもバッファプールにも触れさせず、</span>
+<span class="cm">// トランザクション私有の「変更集合（ページのコピー）」に閉じ込める。</span>
+<span class="cm">//</span>
+<span class="cm">//   - Commit   = 変更集合を WAL に耐久化してから、下のストアへ流し込む</span>
+<span class="cm">//   - Rollback = 変更集合を捨てるだけ（どこにも漏れていないので、それで終わり）</span>
+<span class="cm">//</span>
+<span class="cm">// この構図なら、バッファプールは常にコミット済みデータしか持たない。</span>
+<span class="cm">// 追い出しがいつ起きても、ディスクに未コミットデータが書かれることはない。</span>
+<span class="kw">package</span> txn
+
+<span class="kw">import</span> (
+	<span class="st">"minidb/internal/storage"</span>
+	<span class="st">"minidb/internal/wal"</span>
+)
+
+<span class="cm">// Tx は storage.Store として振る舞うオーバーレイ。</span>
+<span class="cm">// 読みは「自分の変更 → 下のストア」の順、書きは必ず自分の変更集合へ。</span>
+<span class="kw">type</span> <span class="ty">Tx</span> <span class="kw">struct</span> {
+	base  storage.<span class="ty">Store</span>
+	pages <span class="kw">map</span>[storage.<span class="ty">PageID</span>]*storage.<span class="ty">Page</span> <span class="cm">// 私有の変更ページ</span>
+	done  <span class="kw">bool</span>
+}
+
+<span class="kw">var</span> _ storage.<span class="ty">Store</span> = (*<span class="ty">Tx</span>)(<span class="kw">nil</span>)
+
+<span class="cm">// Begin はトランザクションを開始する。</span>
+<span class="kw">func</span> Begin(base storage.<span class="ty">Store</span>) *<span class="ty">Tx</span> {
+	<span class="kw">return</span> &amp;<span class="ty">Tx</span>{base: base, pages: <span class="kw">map</span>[storage.<span class="ty">PageID</span>]*storage.<span class="ty">Page</span>{}}
+}
+
+<span class="cm">// Read は自分の変更を優先して読む（自分の書き込みは自分に見える）。</span>
+<span class="kw">func</span> (t *<span class="ty">Tx</span>) Read(id storage.<span class="ty">PageID</span>, fn <span class="kw">func</span>(p *storage.<span class="ty">Page</span>) <span class="ty">error</span>) <span class="ty">error</span> {
+	<span class="kw">if</span> p, ok := t.pages[id]; ok {
+		<span class="kw">return</span> fn(p)
+	}
+	<span class="kw">return</span> t.base.Read(id, fn)
+}
+
+<span class="cm">// Write はページを変更集合へコピーしてから書く（元は汚さない）。</span>
+<span class="kw">func</span> (t *<span class="ty">Tx</span>) Write(id storage.<span class="ty">PageID</span>, fn <span class="kw">func</span>(p *storage.<span class="ty">Page</span>) <span class="ty">error</span>) <span class="ty">error</span> {
+	p, ok := t.pages[id]
+	<span class="kw">if</span> !ok {
+		p = &amp;storage.<span class="ty">Page</span>{}
+		<span class="kw">if</span> err := t.base.Read(id, <span class="kw">func</span>(orig *storage.<span class="ty">Page</span>) <span class="ty">error</span> {
+			*p = *orig
+			<span class="kw">return</span> <span class="kw">nil</span>
+		}); err != <span class="kw">nil</span> {
+			<span class="kw">return</span> err
+		}
+		t.pages[id] = p
+	}
+	<span class="kw">return</span> fn(p)
+}</code></pre>
+
+    <p>構造体はフィールド 3 つだけです。<code>base</code> が下の世界（実際にはバッファプールが入ります）、<code>pages</code> が変更集合 — ページ番号からページのコピーへの map です。<code>done</code> はコミット／ロールバック済みかの印で、Step 2 で使います。</p>
+    <p><code>Read</code> は 4 行で「読みは 2 段」を実現しています。まず自分の <code>pages</code> を見て、そこに変更済みコピーがあればそれを渡す。なければ下の <code>base.Read</code> へ素通し。この順序のおかげで、<strong>自分が書いた変更は自分にはちゃんと見える</strong>（トランザクション内の <code>SELECT</code> は自分の <code>UPDATE</code> を反映した結果を返す）一方、他人（Tx の外）は <code>base</code> しか見ないので何も見えません。</p>
+    <p><code>Write</code> の肝は <code>if !ok</code> ブロックです。あるページに<strong>初めて</strong>書くとき、まず下の世界から現在の中身を丸ごとコピーして（<code>*p = *orig</code>）、コピーを <code>pages</code> に登録してから、そのコピーに書きます。2 回目以降は登録済みのコピーにそのまま書くだけ。原本には最初から最後まで指一本触れません。この方式を本書では「初回タッチでコピー」と呼びます（copy-on-write の一種です）。</p>
+    <p>注意してほしいのは、<code>Write</code> が「fn がページのどこか 1 バイトでも変えるかもしれない」という前提で、<em>ページ丸ごと（4KB）</em>をコピーしている点です。行単位でもバイト単位でもなくページ単位。粗いぶん実装は簡単で、第06章の WAL がページ単位の完全イメージを記録する方式だったこととも噛み合います（コミット時に変更集合をそのまま WAL へ渡せる。Step 2 で見ます）。</p>
+
+    <div class="gonote"><div class="box-k">GO メモ · var _ Store = (*Tx)(nil) — コンパイル時の実装チェック</div>
+      <p>この 1 行は実行時には何もしません。「<code>*Tx</code> 型の nil を <code>storage.Store</code> 型の変数（名前は <code>_</code> = 捨てる）に代入せよ」という宣言で、もし <code>*Tx</code> が <code>Store</code> の 3 メソッドを揃えていなければ<strong>コンパイルが通りません</strong>。Go のインターフェースは「implements」と明示しない暗黙実装なので、「実装しているつもり」の取りこぼしをビルド時に検出するために、この慣用句をよく書きます。</p>
+    </div>
+
+    <div class="gonote"><div class="box-k">GO メモ · *p = *orig — 配列は「値」としてコピーされる</div>
+      <p><code>storage.Page</code> の正体は <code>[4096]byte</code>、つまり固定長<strong>配列</strong>です（第00章）。Go の配列は値なので、ポインタの指す先同士を代入する <code>*p = *orig</code> は、参照の付け替えではなく<strong>4096 バイト全部のコピー</strong>になります。もし <code>p = orig</code>（ポインタの代入）と書き間違えると、「私有コピー」のつもりが原本そのものを指してしまい、未コミットの変更がバッファプールに直接漏れる — この章の設計が根底から崩れます。1 文字の差が原子性の生死を分ける行です。</p>
+    </div>
+
+    <div class="box do"><div class="box-k">▸ 動かして確認</div>
+      <p>この時点で確認できるのは「<code>Tx</code> が本当に <code>Store</code> の顔をしているか」です。さっきの GO メモの通り、それは<strong>コンパイルが通ること</strong>と同義です。<code>src/</code> で:</p>
+      <pre class="term"><code><span class="ps">$</span> go build ./internal/txn
+<span class="ps">$</span> <span class="cm"># 何も表示されずにプロンプトが返れば成功です</span></code></pre>
+      <p><code>go build</code> は成功すると何も出力しません。試しに <code>txn.go</code> の <code>Read</code> メソッドの名前を一時的に <code>Read2</code> に変えてビルドすると、<code>var _ storage.Store = (*Tx)(nil)</code> の行がエラーを出して「Store になれていない」と教えてくれます（試したら戻しておいてください）。</p>
+    </div>
+
+    <h2 class="step" id="step-2"><span class="step-no">Step 2</span>Commit と Rollback — ログが先、データが後</h2>
+    <p>変更集合に溜め込んだ変更の出口は 2 つしかありません。世界に反映する（コミット）か、捨てる（ロールバック）か。<code>txn.go</code> の残り半分がその全部です。新しいページを作る <code>Allocate</code> も、ここでまとめて読みます。</p>
+
+    <div class="ascii">変更集合の行き先は 2 通りしかない
+
+           pages = { Page3′, Page7′ }   ← 未コミット。誰にも見えていない
+                 │
+      ┌──────────┴──────────┐
+   Commit(w)              Rollback()
+      │                      │
+  ① w.AppendCommit(pages)   pages = nil
+  │   WAL へ追記 + fsync。     │
+  │   返った瞬間コミット成立    └→ 捨てるだけ。undo も
+  ② base.Write で              後始末も要らない
+  │   バッファプールへ反映
+  ▼
+  プールには「コミット済み」しか入らない
+  → いつ追い出されてディスクに書かれても安全（No-Steal）</div>
+
+    <div class="file-tag">internal/txn/txn.go（後半）</div>
+    <pre><code><span class="cm">// Allocate は下のストアからページ番号だけもらい、中身は変更集合に持つ。</span>
+<span class="cm">// ロールバックするとページ番号は空のまま残る（フリーリストは発展課題）。</span>
+<span class="kw">func</span> (t *<span class="ty">Tx</span>) Allocate(fn <span class="kw">func</span>(id storage.<span class="ty">PageID</span>, p *storage.<span class="ty">Page</span>) <span class="ty">error</span>) (storage.<span class="ty">PageID</span>, <span class="ty">error</span>) {
+	id, err := t.base.Allocate(<span class="kw">func</span>(_ storage.<span class="ty">PageID</span>, _ *storage.<span class="ty">Page</span>) <span class="ty">error</span> {
+		<span class="kw">return</span> <span class="kw">nil</span> <span class="cm">// 下のストアにはゼロページのまま置く</span>
+	})
+	<span class="kw">if</span> err != <span class="kw">nil</span> {
+		<span class="kw">return</span> storage.InvalidPageID, err
+	}
+	p := &amp;storage.<span class="ty">Page</span>{}
+	t.pages[id] = p
+	<span class="kw">return</span> id, fn(id, p)
+}
+
+<span class="cm">// Dirty は変更集合が空でないかを返す。</span>
+<span class="kw">func</span> (t *<span class="ty">Tx</span>) Dirty() <span class="kw">bool</span> { <span class="kw">return</span> <span class="kw">len</span>(t.pages) &gt; <span class="st">0</span> }
+
+<span class="cm">// Commit は変更を WAL へ耐久化し（ログが先）、その後 base へ反映する（データが後）。</span>
+<span class="kw">func</span> (t *<span class="ty">Tx</span>) Commit(w *wal.<span class="ty">WAL</span>) <span class="ty">error</span> {
+	<span class="kw">if</span> t.done || <span class="kw">len</span>(t.pages) == <span class="st">0</span> {
+		t.done = <span class="kw">true</span>
+		<span class="kw">return</span> <span class="kw">nil</span>
+	}
+	<span class="cm">// 1. ログが先: ここで fsync まで済む。返った瞬間にコミット成立</span>
+	<span class="kw">if</span> err := w.AppendCommit(t.pages); err != <span class="kw">nil</span> {
+		<span class="kw">return</span> err
+	}
+	<span class="cm">// 2. データが後: バッファプールへ反映（ディスクへは追い出し or FlushAll で届く）</span>
+	<span class="kw">for</span> id, p := <span class="kw">range</span> t.pages {
+		src := p
+		<span class="kw">if</span> err := t.base.Write(id, <span class="kw">func</span>(dst *storage.<span class="ty">Page</span>) <span class="ty">error</span> {
+			*dst = *src
+			<span class="kw">return</span> <span class="kw">nil</span>
+		}); err != <span class="kw">nil</span> {
+			<span class="kw">return</span> err
+		}
+	}
+	t.pages = <span class="kw">nil</span>
+	t.done = <span class="kw">true</span>
+	<span class="kw">return</span> <span class="kw">nil</span>
+}
+
+<span class="cm">// Rollback は変更集合を捨てる。</span>
+<span class="kw">func</span> (t *<span class="ty">Tx</span>) Rollback() {
+	t.pages = <span class="kw">nil</span>
+	t.done = <span class="kw">true</span>
+}</code></pre>
+
+    <p>下から読むのが早い。<strong><code>Rollback</code> は 2 行です。</strong><code>pages</code> を捨てて、終わりの印を付ける。それだけで「全部なかったこと」になる — 変更がどこにも漏れていないという構造上の保証が、そのままコードの短さになっています。第06章で WAL の redo を書いたときの緊張感と比べてみてください。原子性の半分（中断したら消える）は、この設計ではタダで手に入るのです。</p>
+    <p><code>Commit</code> は第06章の鉄則をなぞる 2 手です。<strong>手順 1「ログが先」</strong>: <code>w.AppendCommit(t.pages)</code> は、変更ページの完全イメージ一式とコミットレコードを WAL に追記し、<code>fsync</code>（OS のバッファではなく物理ディスクまで書き切らせる操作。第00章）まで済ませてから返ります。この呼び出しが返った瞬間が「コミット成立」の瞬間です。直後に停電しても、再起動時の回復（第06章の <code>Recover</code>）がログを再生してこの変更を復元します。<strong>手順 2「データが後」</strong>: 変更集合の各ページを <code>base.Write</code> でバッファプールに流し込みます。ここで初めて、Tx の外の世界からこの変更が見えるようになります。プールからディスクへはいつも通り、追い出しか <code>FlushAll</code>（終了時）で届きます — 急ぐ必要はありません。ログに全部あるからです。</p>
+    <p>先頭の <code>if t.done || len(t.pages) == 0</code> は空コミットの早道です。1 ページも書いていないトランザクション（読むだけの Tx や、空の <code>BEGIN</code>〜<code>COMMIT</code>）のために WAL へ書きに行くのは無駄なので、何もせず成功扱いにします。</p>
+    <p><code>Allocate</code> は少し面白い折衷をしています。ページ<strong>番号</strong>の採番だけは下のストアに頼み（番号はファイル末尾の位置から決まるので、勝手に自分で決められない）、ページの<strong>中身</strong>は変更集合に持ちます。下のストアにはゼロ埋めページを置いたまま。だからロールバックしても「中身の書かれなかった空きページ」がファイルに残るだけで、データの整合性は壊れません。空きページを再利用する仕組み（フリーリスト）は持たない、と割り切っています。</p>
+
+    <h3>No-Steal — 構造が保証する安全と、その代償</h3>
+    <p>ここで立ち止まって、この設計が何を達成したかに名前を付けておきます。いま、バッファプールに入るのは「コミット済みの変更だけ」です。なぜなら <code>base.Write</code> を呼ぶ場所は <code>Commit</code> の手順 2 しかなく、そこは <code>AppendCommit</code> が成功した<em>後</em>だからです。つまり<strong>プールがいつページを追い出しても、ディスクに未コミットデータが書かれることは構造上あり得ません</strong>。教科書ではこれを <strong>No-Steal</strong>（未コミットのページをディスクに「盗み書き」しない方式）と呼びます。多くの実データベースでは No-Steal は「守るべき制約」で、追い出しのたびにコミット状態を確認する必要がありますが、minidb はそもそも未コミットデータをプールに入れないことで、<strong>制約としてではなく構造として</strong>達成しています。守る努力が要らない安全です。</p>
+
+    <div class="box hazard"><div class="box-k">⚠ 落とし穴 — タダではない: 変更集合はメモリに乗る大きさまで</div>
+      <p>代償はここにあります。未コミットの変更はすべて <code>pages</code> という map、つまり<strong>メモリ上</strong>に置かれます。1 トランザクションで 100 万ページ（4GB）を書き換えたら？ メモリが尽きます。バッファプールが「メモリより大きいデータを扱う」ために生まれた層（第02章)だったのに、トランザクションの大きさはメモリ以下に逆戻りしている — これが No-Steal の宿命です。実際のデータベース（MySQL の InnoDB など）が、未コミットページのディスク書き出しを<strong>許す</strong>（Steal 方式）代わりに、書き出す前に undo 情報（元に戻すためのログ）を記録するという複雑な道を選ぶのは、巨大トランザクションを捌くためです。PostgreSQL は同じ Steal 方式でも undo ログではなく、行の多版管理（MVCC）で巻き戻しを実現します（アボートしたトランザクションの行は古い版としてヒープに残り、状態に「中止」の印を付けるだけ）。「シートを捨てるだけ」の気楽さと引き換えに何を失うか、ここで体感しておいてください。</p>
+    </div>
+
+    <div class="box do"><div class="box-k">▸ 動かして確認</div>
+      <p>コミットが本当に下のストアへ届くことを、次のステップで読む単体テストのうち 1 本で先に確かめます。</p>
+      <pre class="term"><code><span class="ps">$</span> go test ./internal/txn -run TestCommitApplies -v
+<span class="out">=== RUN   TestCommitApplies
+--- PASS: TestCommitApplies (0.01s)
+PASS
+ok  	minidb/internal/txn	0.919s</span></code></pre>
+    </div>
+
+    <h2 class="step" id="step-3"><span class="step-no">Step 3</span>単体テストで「漏れない」ことを観測する</h2>
+    <p>Tx の価値は「未コミットが外から見えない」「ロールバックで痕跡が残らない」という<strong>見えないこと</strong>の保証なので、テストもそれを正面から検査します。<code>txn_test.go</code> は 2 本。全文を読みます。テスト自体が M7 の受け入れ基準を書き下した教材です。</p>
+
+    <div class="file-tag">internal/txn/txn_test.go</div>
+    <pre><code><span class="kw">package</span> txn
+
+<span class="kw">import</span> (
+	<span class="st">"path/filepath"</span>
+	<span class="st">"testing"</span>
+
+	<span class="st">"minidb/internal/buffer"</span>
+	<span class="st">"minidb/internal/storage"</span>
+	<span class="st">"minidb/internal/wal"</span>
+)
+
+<span class="kw">func</span> setup(t *testing.T) (*buffer.<span class="ty">Pool</span>, *wal.<span class="ty">WAL</span>) {
+	t.Helper()
+	dir := t.TempDir()
+	d, err := storage.OpenDiskManager(filepath.Join(dir, <span class="st">"test.db"</span>))
+	<span class="kw">if</span> err != <span class="kw">nil</span> {
+		t.Fatal(err)
+	}
+	t.Cleanup(<span class="kw">func</span>() { d.Close() })
+	w, err := wal.Open(filepath.Join(dir, <span class="st">"test.db.wal"</span>))
+	<span class="kw">if</span> err != <span class="kw">nil</span> {
+		t.Fatal(err)
+	}
+	t.Cleanup(<span class="kw">func</span>() { w.Close() })
+	<span class="kw">return</span> buffer.New(d, <span class="st">16</span>), w
+}
+
+<span class="cm">// M7 受け入れ基準の核: ロールバックした変更はどこにも残らない。</span>
+<span class="cm">// 未コミットの変更は Tx の外（バッファプール）から見えない。</span>
+<span class="kw">func</span> TestRollbackLeavesNoTrace(t *testing.T) {
+	pool, w := setup(t)
+
+	tx1 := Begin(pool)
+	id, err := tx1.Allocate(<span class="kw">func</span>(_ storage.<span class="ty">PageID</span>, p *storage.<span class="ty">Page</span>) <span class="ty">error</span> {
+		p[<span class="st">0</span>] = <span class="st">1</span>
+		<span class="kw">return</span> <span class="kw">nil</span>
+	})
+	<span class="kw">if</span> err != <span class="kw">nil</span> {
+		t.Fatal(err)
+	}
+	<span class="kw">if</span> err := tx1.Commit(w); err != <span class="kw">nil</span> {
+		t.Fatal(err)
+	}
+
+	tx2 := Begin(pool)
+	<span class="kw">if</span> err := tx2.Write(id, <span class="kw">func</span>(p *storage.<span class="ty">Page</span>) <span class="ty">error</span> { p[<span class="st">0</span>] = <span class="st">99</span>; <span class="kw">return</span> <span class="kw">nil</span> }); err != <span class="kw">nil</span> {
+		t.Fatal(err)
+	}
+	<span class="cm">// ロールバック前でも、Tx の外からは変更が見えない（未コミットの隔離）</span>
+	<span class="kw">if</span> err := pool.Read(id, <span class="kw">func</span>(p *storage.<span class="ty">Page</span>) <span class="ty">error</span> {
+		<span class="kw">if</span> p[<span class="st">0</span>] != <span class="st">1</span> {
+			t.Fatal(<span class="st">"未コミットの変更がバッファプールに漏れている"</span>)
+		}
+		<span class="kw">return</span> <span class="kw">nil</span>
+	}); err != <span class="kw">nil</span> {
+		t.Fatal(err)
+	}
+	<span class="cm">// Tx 自身には自分の変更が見える</span>
+	<span class="kw">if</span> err := tx2.Read(id, <span class="kw">func</span>(p *storage.<span class="ty">Page</span>) <span class="ty">error</span> {
+		<span class="kw">if</span> p[<span class="st">0</span>] != <span class="st">99</span> {
+			t.Fatal(<span class="st">"自分の書き込みが自分から見えない"</span>)
+		}
+		<span class="kw">return</span> <span class="kw">nil</span>
+	}); err != <span class="kw">nil</span> {
+		t.Fatal(err)
+	}
+	tx2.Rollback()
+
+	<span class="kw">if</span> err := pool.Read(id, <span class="kw">func</span>(p *storage.<span class="ty">Page</span>) <span class="ty">error</span> {
+		<span class="kw">if</span> p[<span class="st">0</span>] != <span class="st">1</span> {
+			t.Fatalf(<span class="st">"ロールバック後に値が %d, want 1"</span>, p[<span class="st">0</span>])
+		}
+		<span class="kw">return</span> <span class="kw">nil</span>
+	}); err != <span class="kw">nil</span> {
+		t.Fatal(err)
+	}
+}
+
+<span class="cm">// コミットで変更が下のストアへ反映される。</span>
+<span class="kw">func</span> TestCommitApplies(t *testing.T) {
+	pool, w := setup(t)
+
+	tx1 := Begin(pool)
+	id, err := tx1.Allocate(<span class="kw">func</span>(_ storage.<span class="ty">PageID</span>, p *storage.<span class="ty">Page</span>) <span class="ty">error</span> { <span class="kw">return</span> <span class="kw">nil</span> })
+	<span class="kw">if</span> err != <span class="kw">nil</span> {
+		t.Fatal(err)
+	}
+	<span class="kw">if</span> err := tx1.Commit(w); err != <span class="kw">nil</span> {
+		t.Fatal(err)
+	}
+
+	tx2 := Begin(pool)
+	<span class="kw">if</span> err := tx2.Write(id, <span class="kw">func</span>(p *storage.<span class="ty">Page</span>) <span class="ty">error</span> { p[<span class="st">0</span>] = <span class="st">42</span>; <span class="kw">return</span> <span class="kw">nil</span> }); err != <span class="kw">nil</span> {
+		t.Fatal(err)
+	}
+	<span class="kw">if</span> err := tx2.Commit(w); err != <span class="kw">nil</span> {
+		t.Fatal(err)
+	}
+	<span class="kw">if</span> err := pool.Read(id, <span class="kw">func</span>(p *storage.<span class="ty">Page</span>) <span class="ty">error</span> {
+		<span class="kw">if</span> p[<span class="st">0</span>] != <span class="st">42</span> {
+			t.Fatalf(<span class="st">"コミット後の値 = %d, want 42"</span>, p[<span class="st">0</span>])
+		}
+		<span class="kw">return</span> <span class="kw">nil</span>
+	}); err != <span class="kw">nil</span> {
+		t.Fatal(err)
+	}
+}</code></pre>
+
+    <p><code>setup</code> は本物の部品でミニチュアの世界を組み立てます。テスト用の一時ディレクトリ（<code>t.TempDir()</code> — テスト終了時に自動で消えます）にディスクマネージャ（第00章）と WAL（第06章）を作り、容量 16 ページのバッファプール（第02章）を返す。モック（偽物の部品）は使いません。全層が本物なので、このテストが通れば層の積み上げ全体が正しいという確信が持てます。</p>
+    <p><code>TestRollbackLeavesNoTrace</code> の検査の流れを追ってください。tx1 がページを作り <code>p[0] = 1</code> でコミット。次に tx2 が同じページに <code>p[0] = 99</code> と書く。ここからが本題で、テストは<strong>ロールバックする前に</strong> <code>pool.Read</code>（Tx を通さない、外の世界からの読み）で値がまだ 1 であることを確認します — これが<strong>隔離</strong>の検査です。続けて <code>tx2.Read</code> では 99 が見える — 「自分の書き込みは自分に見える」の検査。最後にロールバックして、外から読んでも 1 のまま — <strong>原子性</strong>の検査。3 つの保証が 1 本のテストに畳み込まれています。</p>
+
+    <div class="box do"><div class="box-k">▸ 動かして確認</div>
+      <p>2 本まとめて実行します。</p>
+      <pre class="term"><code><span class="ps">$</span> go test ./internal/txn -v
+<span class="out">=== RUN   TestRollbackLeavesNoTrace
+--- PASS: TestRollbackLeavesNoTrace (0.01s)
+=== RUN   TestCommitApplies
+--- PASS: TestCommitApplies (0.01s)
+PASS
+ok  	minidb/internal/txn	0.830s</span></code></pre>
+      <p>余裕があれば、<code>txn.go</code> の <code>Write</code> にある <code>t.pages[id] = p</code> を一時的にコメントアウトして再実行してみてください。コピーが変更集合に登録されなくなるので「自分の書き込みが自分から見えない」で FAIL します。壊して直すのが、一番早い理解です。</p>
+    </div>
+
+    <h2 class="step" id="step-4"><span class="step-no">Step 4</span>SQL とつなぐ — BEGIN / COMMIT / ROLLBACK と自動コミット</h2>
+    <p><code>Tx</code> という部品はできました。しかしユーザーが打つのは <code>Begin(pool)</code> ではなく <code>BEGIN</code> という SQL です。両者をつなぐのが、全層を束ねる最上位ファイル <code>db.go</code> — 第04章から使ってきた <code>Open / Exec / Close</code> の <code>Exec</code> に、トランザクションの管理が入ります。ここで決めるべきことは 2 つあります。</p>
+    <ul>
+      <li><strong>明示トランザクション</strong>: <code>BEGIN</code> が来たら Tx を開いて覚えておき、以後の文はすべてその Tx の上で実行する。<code>COMMIT</code> / <code>ROLLBACK</code> で閉じる。</li>
+      <li><strong>自動コミット</strong>: <code>BEGIN</code> の外で実行された文は、<strong>1 文 = 1 トランザクション</strong>として扱う。文ごとに Tx を作り、成功したら即コミット、失敗したらロールバック。これまでの章で REPL に打ってきた文が毎回ちゃんと永続化されていたのは、実はこの自動コミットのおかげです（PostgreSQL や MySQL も同じ既定動作です）。</li>
+    </ul>
+
+    <div class="file-tag">db.go（トランザクション管理の部分）</div>
+    <pre><code><span class="cm">// …（package 宣言・import・Close・Stats はこれまでの章で）</span>
+
+<span class="cm">// DB は開いているデータベース。並行モデルは単一ライタ・複数リーダ（NFR-07）を</span>
+<span class="cm">// 前提とし、DB 自体はゴルーチン安全ではない。</span>
+<span class="kw">type</span> <span class="ty">DB</span> <span class="kw">struct</span> {
+	disk *storage.<span class="ty">DiskManager</span>
+	wal  *wal.<span class="ty">WAL</span>
+	pool *buffer.<span class="ty">Pool</span>
+	cat  *catalog.<span class="ty">Catalog</span>
+
+	active        *txn.<span class="ty">Tx</span> <span class="cm">// BEGIN 中の明示トランザクション（なければ nil）</span>
+	activeDDL     <span class="kw">bool</span>    <span class="cm">// 明示 Tx 中に DDL を実行したか（ロールバック時にカタログ再読込が要る）</span>
+	activeAborted <span class="kw">bool</span>    <span class="cm">// 明示 Tx 中の文がエラーになったか（以後 COMMIT 不可）</span>
+	lastPlan      <span class="kw">string</span>
+}
+
+<span class="cm">// …（Open: WAL 再生 → ブートストラップ → カタログ読込、は第06章で）</span>
+
+<span class="cm">// Exec は SQL 1 文を実行する。</span>
+<span class="cm">// BEGIN〜COMMIT の外では文ごとの自動コミット（1 文 = 1 トランザクション）。</span>
+<span class="kw">func</span> (db *<span class="ty">DB</span>) Exec(sqlStr <span class="kw">string</span>) (*<span class="ty">Result</span>, <span class="ty">error</span>) {
+	stmt, err := sql.Parse(sqlStr)
+	<span class="kw">if</span> err != <span class="kw">nil</span> {
+		<span class="kw">return</span> <span class="kw">nil</span>, err
+	}
+
+	<span class="kw">switch</span> stmt.(<span class="kw">type</span>) {
+	<span class="kw">case</span> sql.<span class="ty">BeginStmt</span>:
+		<span class="kw">if</span> db.active != <span class="kw">nil</span> {
+			<span class="kw">return</span> <span class="kw">nil</span>, fmt.Errorf(<span class="st">"トランザクションが既に開始されている"</span>)
+		}
+		db.active = txn.Begin(db.pool)
+		db.activeDDL = <span class="kw">false</span>
+		db.activeAborted = <span class="kw">false</span>
+		<span class="kw">return</span> &amp;<span class="ty">Result</span>{}, <span class="kw">nil</span>
+	<span class="kw">case</span> sql.<span class="ty">CommitStmt</span>:
+		<span class="kw">if</span> db.active == <span class="kw">nil</span> {
+			<span class="kw">return</span> <span class="kw">nil</span>, fmt.Errorf(<span class="st">"トランザクションが開始されていない"</span>)
+		}
+		<span class="kw">if</span> db.activeAborted {
+			<span class="cm">// 文がエラーになった Tx は部分変更（例: ヒープには入ったが索引には</span>
+			<span class="cm">// 入っていない行）を含みうる。不整合の永続化を防ぐため COMMIT させない</span>
+			<span class="kw">if</span> err := db.rollbackActive(); err != <span class="kw">nil</span> {
+				<span class="kw">return</span> <span class="kw">nil</span>, err
+			}
+			<span class="kw">return</span> <span class="kw">nil</span>, fmt.Errorf(<span class="st">"トランザクション内の文がエラーになったため COMMIT できない（変更はロールバックした）"</span>)
+		}
+		err := db.active.Commit(db.wal)
+		db.active = <span class="kw">nil</span>
+		<span class="kw">return</span> &amp;<span class="ty">Result</span>{}, err
+	<span class="kw">case</span> sql.<span class="ty">RollbackStmt</span>:
+		<span class="kw">if</span> db.active == <span class="kw">nil</span> {
+			<span class="kw">return</span> <span class="kw">nil</span>, fmt.Errorf(<span class="st">"トランザクションが開始されていない"</span>)
+		}
+		<span class="kw">if</span> err := db.rollbackActive(); err != <span class="kw">nil</span> {
+			<span class="kw">return</span> <span class="kw">nil</span>, err
+		}
+		<span class="kw">return</span> &amp;<span class="ty">Result</span>{}, <span class="kw">nil</span>
+	}
+
+	<span class="kw">if</span> db.active != <span class="kw">nil</span> {
+		<span class="cm">// 明示トランザクション内: 変更は Tx に溜まる</span>
+		<span class="kw">if</span> db.activeAborted {
+			<span class="kw">return</span> <span class="kw">nil</span>, fmt.Errorf(<span class="st">"トランザクションはエラーで中断されている。ROLLBACK してやり直すこと"</span>)
+		}
+		<span class="kw">if</span> isDDL(stmt) {
+			db.activeDDL = <span class="kw">true</span>
+		}
+		res, err := sql.Execute(db.active, db.cat, stmt)
+		<span class="kw">if</span> err != <span class="kw">nil</span> {
+			db.activeAborted = <span class="kw">true</span>
+			<span class="kw">return</span> <span class="kw">nil</span>, err
+		}
+		db.lastPlan = res.Plan
+		<span class="kw">return</span> res, <span class="kw">nil</span>
+	}
+
+	<span class="cm">// 自動コミット: 文ごとに Tx を作り、成功したらコミット</span>
+	tx := txn.Begin(db.pool)
+	res, err := sql.Execute(tx, db.cat, stmt)
+	<span class="kw">if</span> err != <span class="kw">nil</span> {
+		tx.Rollback()
+		<span class="kw">if</span> isDDL(stmt) {
+			<span class="cm">// 失敗した DDL がメモリ上のカタログを汚した可能性に備えて読み直す</span>
+			<span class="kw">if</span> cat, lerr := catalog.Load(db.pool); lerr == <span class="kw">nil</span> {
+				db.cat = cat
+			} <span class="kw">else</span> {
+				<span class="kw">return</span> <span class="kw">nil</span>, fmt.Errorf(<span class="st">"%w（さらにカタログ再読込にも失敗: %v）"</span>, err, lerr)
+			}
+		}
+		<span class="kw">return</span> <span class="kw">nil</span>, err
+	}
+	<span class="kw">if</span> err := tx.Commit(db.wal); err != <span class="kw">nil</span> {
+		<span class="kw">return</span> <span class="kw">nil</span>, err
+	}
+	db.lastPlan = res.Plan
+	<span class="kw">return</span> res, <span class="kw">nil</span>
+}
+
+<span class="kw">func</span> isDDL(stmt sql.<span class="ty">Stmt</span>) <span class="kw">bool</span> {
+	<span class="kw">switch</span> stmt.(<span class="kw">type</span>) {
+	<span class="kw">case</span> sql.<span class="ty">CreateTableStmt</span>, sql.<span class="ty">CreateIndexStmt</span>:
+		<span class="kw">return</span> <span class="kw">true</span>
+	}
+	<span class="kw">return</span> <span class="kw">false</span>
+}
+
+<span class="cm">// rollbackActive は明示 Tx を破棄し、DDL を巻き戻した場合は</span>
+<span class="cm">// メモリ上のカタログをディスクの状態へ読み直す。</span>
+<span class="kw">func</span> (db *<span class="ty">DB</span>) rollbackActive() <span class="ty">error</span> {
+	db.active.Rollback()
+	db.active = <span class="kw">nil</span>
+	db.activeAborted = <span class="kw">false</span>
+	hadDDL := db.activeDDL
+	db.activeDDL = <span class="kw">false</span>
+	<span class="kw">if</span> hadDDL {
+		cat, err := catalog.Load(db.pool)
+		<span class="kw">if</span> err != <span class="kw">nil</span> {
+			<span class="kw">return</span> fmt.Errorf(<span class="st">"minidb: ロールバック後のカタログ再読込に失敗: %w"</span>, err)
+		}
+		db.cat = cat
+	}
+	<span class="kw">return</span> <span class="kw">nil</span>
+}</code></pre>
+
+    <p>読みどころを順に。まず全体の骨格 — <code>BEGIN / COMMIT / ROLLBACK</code> の 3 つは第05章の実行層（<code>sql.Execute</code>）には<strong>流しません</strong>。この 3 文は「どの Store の上で文を実行するか」を切り替えるスイッチであって、テーブルを触る操作ではないからです。だから <code>Exec</code> の入口の型スイッチで捕まえて、エンジン層（このファイル）が自分で処理します。</p>
+    <p>次に、<strong>Tx が <code>Store</code> であることの配当</strong>がここで支払われます。明示 Tx 内では <code>sql.Execute(db.active, …)</code>、自動コミットでは <code>sql.Execute(tx, …)</code> — 第05章で書いた実行層には<strong>一切手を入れず</strong>、第一引数を差し替えるだけでトランザクション対応が済んでいます。<code>INSERT</code> も <code>UPDATE</code> も、自分の書き込み先が本物のプールなのか私有の変更集合なのか、知らないまま動いている。第02章で <code>Store</code> を 3 メソッドに切り詰めた設計が、5 章分の時を越えてここで効いています。</p>
+    <p>3 つ目の読みどころが <code>activeAborted</code> — <strong>文エラーで Tx を「中断済み」にする</strong>仕掛けです。これは正しさに関わる重要な判断なので、少し丁寧に。明示 Tx の中で、ある文が途中まで実行されてからエラーになったとします。たとえば <code>INSERT</code> が「ヒープへの挿入は成功したのに、続く索引への挿入で失敗」したら（索引はこの章の後半で出てきます）、Tx の変更集合には<strong>ヒープには行があるのに索引には無い</strong>という不整合な中間状態が溜まっています。文単位の undo を持たないこの実装では、その文だけを巻き戻すことができません。そこで、エラーが出た瞬間に <code>activeAborted = true</code> の印を付け、以後この Tx では<strong>すべての文と <code>COMMIT</code> を拒否</strong>、受け付けるのは <code>ROLLBACK</code> だけにします。不整合を永続化する道を塞ぐわけです。PostgreSQL で文エラーの後に <code>ERROR: current transaction is aborted, commands ignored until end of transaction block</code> と言われた経験はありませんか？ あれとまったく同じ理屈が、この 3 行のフラグ管理です。</p>
+    <p>最後に <code>activeDDL</code> と <code>rollbackActive</code>。DDL（Data Definition Language: <code>CREATE TABLE</code> や <code>CREATE INDEX</code> のような定義系の文）は、ページだけでなく<strong>メモリ上のカタログ</strong>（第04章の <code>Catalog</code> 構造体）も書き換えます。Tx のロールバックが捨てられるのはページの変更だけなので、メモリのカタログには「作ったはずのテーブル」が残ってしまう。そこで DDL を含む Tx を巻き戻したときは <code>catalog.Load</code> でカタログをディスクの状態から読み直します。ページは Tx が守り、メモリはこの再読込が守る、という分担です。</p>
+
+    <div class="box do"><div class="box-k">▸ 動かして確認 — ROLLBACK で送金が巻き戻る</div>
+      <p>REPL で、章の冒頭の送金の例をそのまま再現します。作業用のデータベースファイルはどこに作っても構いません（ここでは <code>scratch/ch07.db</code> とします。この章の REPL 実演はすべて同じファイルを続けて使います）。<code>printf</code> で複数の文を流し込みます。</p>
+      <pre class="term"><code><span class="ps">$</span> printf "CREATE TABLE accounts (id INT, owner TEXT, balance INT)
+INSERT INTO accounts VALUES (1, 'alice', 1000), (2, 'bob', 500), (3, 'carol', 800)
+BEGIN
+UPDATE accounts SET balance = 700 WHERE id = 1
+UPDATE accounts SET balance = 800 WHERE id = 2
+SELECT owner, balance FROM accounts
+ROLLBACK
+SELECT owner, balance FROM accounts
+.exit
+" | go run ./cmd/minidb-repl scratch/ch07.db
+<span class="out">minidb — 単一ファイル組み込み RDBMS（.exit で終了 / .stats で統計）
+minidb&gt; OK（0 行）
+minidb&gt; OK（3 行）
+minidb&gt; OK（0 行）</span>       <span class="cm">← BEGIN</span>
+<span class="out">minidb&gt; OK（1 行）
+minidb&gt; OK（1 行）
+minidb&gt; | owner | balance |
+| ----- | ------- |
+| alice | 700     |
+| bob   | 800     |
+| carol | 800     |
+（3 行 / plan: seqscan(accounts)）</span>  <span class="cm">← Tx 内: 自分の UPDATE が見える</span>
+<span class="out">minidb&gt; OK（0 行）</span>       <span class="cm">← ROLLBACK</span>
+<span class="out">minidb&gt; | owner | balance |
+| ----- | ------- |
+| alice | 1000    |
+| bob   | 500     |
+| carol | 800     |
+（3 行 / plan: seqscan(accounts)）</span>  <span class="cm">← 2 つの UPDATE が丸ごと巻き戻った</span></code></pre>
+      <p>Tx の中の <code>SELECT</code> では alice=700・bob=800（自分の書き込みは自分に見える）、<code>ROLLBACK</code> の後は 1000 と 500 に戻っています。送金は「全部なかったこと」になりました。</p>
+      <p>続けて、文エラーで Tx が中断される様子です。2 つ目の <code>INSERT</code> はわざと <code>id</code>（INT 列）に文字列を入れて失敗させます。</p>
+      <pre class="term"><code><span class="ps">$</span> printf "BEGIN
+INSERT INTO accounts VALUES (4, 'dave', 300)
+INSERT INTO accounts VALUES ('oops', 'eve', 100)
+INSERT INTO accounts VALUES (5, 'frank', 200)
+COMMIT
+SELECT COUNT(*) FROM accounts
+.exit
+" | go run ./cmd/minidb-repl scratch/ch07.db
+<span class="out">minidb — 単一ファイル組み込み RDBMS（.exit で終了 / .stats で統計）
+minidb&gt; OK（0 行）
+minidb&gt; OK（1 行）</span>       <span class="cm">← dave は Tx に入った</span>
+<span class="out">minidb&gt; エラー: 型エラー: 列 id は INT だが TEXT が渡された
+minidb&gt; エラー: トランザクションはエラーで中断されている。ROLLBACK してやり直すこと
+minidb&gt; エラー: トランザクション内の文がエラーになったため COMMIT できない（変更はロールバックした）
+minidb&gt; | count |
+| ----- |
+| 3     |
+（1 行 / plan: seqscan(accounts)）</span>  <span class="cm">← dave も消えた。3 行のまま</span></code></pre>
+      <p>エラーの後は、正しい文（frank の INSERT）も <code>COMMIT</code> も拒否され、成功していたはずの dave の挿入ごと巻き戻っています。「一部だけコミット」への道が完全に塞がれていることを確認してください。</p>
+    </div>
+
+    <h2 class="step" id="step-5"><span class="step-no">Step 5</span>CREATE INDEX — もう一本の B+Tree を植える</h2>
+    <p>章の後半戦、セカンダリ索引に入ります。まず言葉から。第03章で作った B+Tree は、第04章以降「テーブルの行を格納するヒープ」とは別の部品として持っていましたが、テーブルの検索はずっと<strong>全走査</strong>（ヒープを先頭から全部読む）でした。<code>WHERE id = 1500</code> でも 2000 行全部を読んで 1999 行を捨てる。もったいない。</p>
+    <p><strong>セカンダリ索引</strong>（secondary index）とは、「ある列の値 → その行の TID」の対応だけを格納する、<strong>もう一本の B+Tree</strong> です。TID（Tuple ID）は第03章で出てきた行の住所 — ページ番号とスロット番号の組でした。行そのものは相変わらずヒープにあり、索引は住所録だけを、キーの順に整列した木として持ちます。検索は二段になります。</p>
+
+    <div class="ascii">セカンダリ索引 = 「キー → TID」を持つもう一本の B+Tree。検索は二段
+
+  SELECT owner FROM accounts WHERE id = 2
+
+  ① 索引の木を降りる                      ② TID で行を取りに行く
+  ┌─ idx_accounts_id（B+Tree）──┐        ┌─ accounts のヒープ ──────────┐
+  │        [内部ノード]         │        │ Page 12                      │
+  │       ／         ＼         │        │  Slot 0: (1, 'alice', 1000)  │
+  │  [葉] id=1  id=2  id=3 …   │        │  Slot 1: (2, 'bob', 500) ◀──┼─┐
+  │              │              │        │  Slot 2: (3, 'carol', 800)   │ │
+  │              └─ TID{12, 1} ─┼────────┼──────────────────────────────┼─┘
+  └─────────────────────────────┘        └──────────────────────────────┘
+   キー順に整列。木の高さぶん             行の本体はここにしかない
+   （数ページ）だけ読めば着く</div>
+
+    <p>2000 行のテーブルなら、全走査は数十ページを読みますが、索引なら木を 2〜3 ノード降りて（= ページを 2〜3 枚読んで）ヒープを 1 ページ。読む量が桁で減ります。しかも第03章の <code>SearchRange</code> がそのまま使えるので、等値だけでなく範囲検索（<code>id &gt;= 100 AND id &lt; 200</code>）も木を降りてから葉を横に歩くだけです。</p>
+    <p>では <code>CREATE INDEX idx_accounts_id ON accounts (id)</code> を実行する側のコードです。第05章で作った実行層 <code>exec.go</code> に、この章で足された関数を読みます。</p>
+
+    <div class="file-tag">internal/sql/exec.go — CREATE INDEX の実行</div>
+    <pre><code><span class="kw">func</span> execCreateIndex(st storage.<span class="ty">Store</span>, cat *catalog.<span class="ty">Catalog</span>, s <span class="ty">CreateIndexStmt</span>) (*<span class="ty">Result</span>, <span class="ty">error</span>) {
+	<span class="cm">// 検証 → 木の構築 → カタログ登録、の順を守る。</span>
+	<span class="cm">// 構築が途中で失敗したときに、メモリ上のカタログへ未完成の索引が</span>
+	<span class="cm">// 残らないよう、登録は必ず最後に行う。</span>
+	tab, ok := cat.Table(s.Table)
+	<span class="kw">if</span> !ok {
+		<span class="kw">return</span> <span class="kw">nil</span>, fmt.Errorf(<span class="st">"テーブル %s が存在しない"</span>, s.Table)
+	}
+	<span class="kw">if</span> cat.HasIndex(s.Name) {
+		<span class="kw">return</span> <span class="kw">nil</span>, fmt.Errorf(<span class="st">"索引 %s は既に存在する"</span>, s.Name)
+	}
+	colIdx := tab.Schema.ColIndex(s.Col)
+	<span class="kw">if</span> colIdx &lt; <span class="st">0</span> {
+		<span class="kw">return</span> <span class="kw">nil</span>, fmt.Errorf(<span class="st">"テーブル %s に列 %s がない"</span>, s.Table, s.Col)
+	}
+
+	meta, err := btree.Create(st)
+	<span class="kw">if</span> err != <span class="kw">nil</span> {
+		<span class="kw">return</span> <span class="kw">nil</span>, err
+	}
+	heap := catalog.OpenHeap(st, tab.HeapFirst)
+	tree := btree.Open(st, meta)
+	count := <span class="st">0</span>
+	err = heap.Scan(<span class="kw">func</span>(tid btree.<span class="ty">TID</span>, rec []<span class="kw">byte</span>) <span class="ty">error</span> {
+		vals, err := tab.Schema.Decode(rec)
+		<span class="kw">if</span> err != <span class="kw">nil</span> {
+			<span class="kw">return</span> err
+		}
+		count++
+		<span class="kw">return</span> tree.Insert(catalog.EncodeKey(vals[colIdx]), tid)
+	})
+	<span class="kw">if</span> err != <span class="kw">nil</span> {
+		<span class="kw">return</span> <span class="kw">nil</span>, err
+	}
+	<span class="kw">if</span> _, err := cat.CreateIndex(st, s.Name, s.Table, s.Col, meta); err != <span class="kw">nil</span> {
+		<span class="kw">return</span> <span class="kw">nil</span>, err
+	}
+	<span class="kw">return</span> &amp;<span class="ty">Result</span>{Affected: count}, <span class="kw">nil</span>
+}</code></pre>
+
+    <p>流れは 3 段です。<strong>検証</strong>（テーブルはあるか・同名の索引はないか・列はあるか）→ <strong>構築</strong>（<code>btree.Create</code> で空の木を作り、ヒープを <code>Scan</code> で全走査して、各行の「キー列の値 → TID」を木に入れていく）→ <strong>登録</strong>（<code>cat.CreateIndex</code> でカタログに書き込む）。キーは <code>catalog.EncodeKey</code> で順序保存エンコード — 「バイト列として比較した結果が、値として比較した結果と一致する」形式に変換してから入れます（B+Tree は <code>bytes.Compare</code> しか知らないからです。第03章）。</p>
+    <p>ここで一番大事なのは<strong>順序</strong>です。カタログへの登録を<strong>最後</strong>に置いていること。もし先に登録してから木を作り始め、構築の途中（たとえば 2000 行中 1000 行を入れたところ）でエラーになったら、カタログには「完成品の顔をした歯抜けの索引」が載ってしまいます。以後の検索がその索引を使うと、実在する行を「存在しない」と答える — データベースとして最悪の嘘です。登録が最後なら、途中で死んでも未完成の木がカタログから参照されることは決してありません（作りかけの木のページは無駄になりますが、嘘はつかない。<code>Allocate</code> のロールバックと同じ割り切りです）。「危険な操作は、完成してから公開する」— システム設計全般で使える型です。</p>
+    <p>もうひとつ、地味ですが味わい深いのは、この関数の第一引数も <code>storage.Store</code> だという点です。自動コミットで呼ばれれば、この「ヒープ全走査 + 2000 回の木への挿入」がまるごと 1 つの Tx の変更集合に溜まり、最後に原子的にコミットされます。索引構築さえもトランザクションに乗っている。</p>
+
+    <div class="box do"><div class="box-k">▸ 動かして確認 — plan が seqscan から indexscan に変わる</div>
+      <p>いよいよこの章のハイライトです。第05章で仕込んでおいた plan 表示（実行結果の末尾の <code>plan: …</code>）が、ここで初めて動きを見せます。同じクエリを、<code>CREATE INDEX</code> を挟んで 2 回打ちます。</p>
+      <pre class="term"><code><span class="ps">$</span> printf "SELECT owner FROM accounts WHERE id = 2
+CREATE INDEX idx_accounts_id ON accounts (id)
+SELECT owner FROM accounts WHERE id = 2
+.exit
+" | go run ./cmd/minidb-repl scratch/ch07.db
+<span class="out">minidb — 単一ファイル組み込み RDBMS（.exit で終了 / .stats で統計）
+minidb&gt; | owner |
+| ----- |
+| bob   |
+（1 行 / plan: seqscan(accounts)）</span>      <span class="cm">← 索引なし: 全走査</span>
+<span class="out">minidb&gt; OK（3 行）</span>                       <span class="cm">← 3 行ぶんのキーを木に取り込んだ</span>
+<span class="out">minidb&gt; | owner |
+| ----- |
+| bob   |
+（1 行 / plan: indexscan(idx_accounts_id)）</span>  <span class="cm">← 同じ SQL、同じ結果、違う経路</span></code></pre>
+      <p><strong>SQL は 1 文字も変わっていないのに、実行の経路が変わり、結果は同じ</strong>。これが宣言型言語である SQL の核心です。ユーザーは「何が欲しいか」だけを書き、「どう取るか」はデータベースが決める。その「どう取るか」を決める部品を、次のステップで読みます。</p>
+    </div>
+
+    <h2 class="step" id="step-6"><span class="step-no">Step 6</span>プランナ — seqscan か indexscan かを選ぶ</h2>
+    <p>索引は作っただけでは使われません。「このクエリのこの WHERE 句なら、この索引で行を集められる」と<strong>判断する</strong>コードが要ります。この判断部品を<strong>プランナ</strong>（planner）ないし最適化器と呼び、判断の結果 — どの経路で行を集めるか — を<strong>実行計画</strong>（plan）と呼びます。本物のデータベースではプランナが最も複雑な部品のひとつですが（統計情報とコストモデルで何十通りもの計画を比較します）、minidb のプランナは「使える索引があれば使う」だけの、素直なルールベースです。それでも骨格は本物と同じです。</p>
+
+    <div class="file-tag">internal/sql/exec.go — アクセス経路の選択</div>
+    <pre><code><span class="cm">// ---- アクセス経路の選択（プランナ）----</span>
+
+<span class="cm">// pathPlan は「どう行を集めるか」。</span>
+<span class="kw">type</span> <span class="ty">pathPlan</span> <span class="kw">struct</span> {
+	index  *catalog.<span class="ty">Index</span>
+	lo, hi []<span class="kw">byte</span> <span class="cm">// 順序保存キーでの範囲（nil = 無限端）。等値は lo == hi</span>
+	desc   <span class="kw">string</span>
+}
+
+<span class="cm">// choosePath は WHERE の AND 連言から索引が使える述語を探す。</span>
+<span class="cm">// 見つからなければ全走査。境界の厳密さ（&gt; と &gt;= の違い）は気にしない —</span>
+<span class="cm">// どのみち全行に WHERE を再評価する（残余フィルタ）ので、正しさは保たれる。</span>
+<span class="kw">func</span> choosePath(cat *catalog.<span class="ty">Catalog</span>, table <span class="kw">string</span>, where <span class="ty">Expr</span>) <span class="ty">pathPlan</span> {
+	indexes := cat.Indexes(table)
+	<span class="kw">if</span> where == <span class="kw">nil</span> || <span class="kw">len</span>(indexes) == <span class="st">0</span> {
+		<span class="kw">return</span> <span class="ty">pathPlan</span>{desc: <span class="st">"seqscan("</span> + table + <span class="st">")"</span>}
+	}
+	conjuncts := flattenAnd(where)
+	byCol := <span class="kw">map</span>[<span class="kw">string</span>]*catalog.<span class="ty">Index</span>{}
+	<span class="kw">for</span> _, ix := <span class="kw">range</span> indexes {
+		<span class="kw">if</span> _, dup := byCol[ix.Col]; !dup {
+			byCol[ix.Col] = ix
+		}
+	}
+	<span class="kw">var</span> best *<span class="ty">pathPlan</span>
+	<span class="kw">for</span> _, c := <span class="kw">range</span> conjuncts {
+		be, ok := c.(<span class="ty">BinExpr</span>)
+		<span class="kw">if</span> !ok {
+			<span class="kw">continue</span>
+		}
+		col, lit, op, ok := normalizeComparison(be)
+		<span class="kw">if</span> !ok {
+			<span class="kw">continue</span>
+		}
+		ix, ok := byCol[col]
+		<span class="kw">if</span> !ok || lit.Null {
+			<span class="kw">continue</span>
+		}
+		key := catalog.EncodeKey(lit)
+		<span class="kw">var</span> p <span class="ty">pathPlan</span>
+		<span class="kw">switch</span> op {
+		<span class="kw">case</span> OpEq:
+			p = <span class="ty">pathPlan</span>{index: ix, lo: key, hi: key}
+		<span class="kw">case</span> OpGt, OpGe:
+			p = <span class="ty">pathPlan</span>{index: ix, lo: key, hi: <span class="kw">nil</span>}
+		<span class="kw">case</span> OpLt, OpLe:
+			p = <span class="ty">pathPlan</span>{index: ix, lo: <span class="kw">nil</span>, hi: key}
+		<span class="kw">default</span>:
+			<span class="kw">continue</span>
+		}
+		p.desc = fmt.Sprintf(<span class="st">"indexscan(%s)"</span>, ix.Name)
+		<span class="kw">if</span> op == OpEq {
+			<span class="kw">return</span> p <span class="cm">// 等値が最優先</span>
+		}
+		<span class="kw">if</span> best == <span class="kw">nil</span> {
+			best = &amp;p
+		} <span class="kw">else</span> <span class="kw">if</span> best.index == ix { <span class="cm">// 同じ索引の範囲を両側から締める</span>
+			<span class="kw">if</span> p.lo != <span class="kw">nil</span> &amp;&amp; (best.lo == <span class="kw">nil</span> || bytes.Compare(p.lo, best.lo) &gt; <span class="st">0</span>) {
+				best.lo = p.lo
+			}
+			<span class="kw">if</span> p.hi != <span class="kw">nil</span> &amp;&amp; (best.hi == <span class="kw">nil</span> || bytes.Compare(p.hi, best.hi) &lt; <span class="st">0</span>) {
+				best.hi = p.hi
+			}
+		}
+	}
+	<span class="kw">if</span> best != <span class="kw">nil</span> {
+		<span class="kw">return</span> *best
+	}
+	<span class="kw">return</span> <span class="ty">pathPlan</span>{desc: <span class="st">"seqscan("</span> + table + <span class="st">")"</span>}
+}
+
+<span class="cm">// flattenAnd は AND の木を連言のリストにほどく。</span>
+<span class="kw">func</span> flattenAnd(e <span class="ty">Expr</span>) []<span class="ty">Expr</span> {
+	<span class="kw">if</span> be, ok := e.(<span class="ty">BinExpr</span>); ok &amp;&amp; be.Op == OpAnd {
+		<span class="kw">return</span> <span class="kw">append</span>(flattenAnd(be.L), flattenAnd(be.R)...)
+	}
+	<span class="kw">return</span> []<span class="ty">Expr</span>{e}
+}
+
+<span class="cm">// normalizeComparison は「列 op リテラル」の形に正規化する（リテラルが左でもよい）。</span>
+<span class="kw">func</span> normalizeComparison(be <span class="ty">BinExpr</span>) (col <span class="kw">string</span>, lit catalog.<span class="ty">Value</span>, op <span class="ty">BinOp</span>, ok <span class="kw">bool</span>) {
+	flip := <span class="kw">map</span>[<span class="ty">BinOp</span>]<span class="ty">BinOp</span>{OpEq: OpEq, OpNe: OpNe, OpLt: OpGt, OpLe: OpGe, OpGt: OpLt, OpGe: OpLe}
+	<span class="kw">if</span> c, isCol := be.L.(<span class="ty">ColRef</span>); isCol {
+		<span class="kw">if</span> l, isLit := be.R.(<span class="ty">Lit</span>); isLit {
+			<span class="kw">return</span> c.Name, l.Val, be.Op, <span class="kw">true</span>
+		}
+	}
+	<span class="kw">if</span> l, isLit := be.L.(<span class="ty">Lit</span>); isLit {
+		<span class="kw">if</span> c, isCol := be.R.(<span class="ty">ColRef</span>); isCol {
+			<span class="kw">return</span> c.Name, l.Val, flip[be.Op], <span class="kw">true</span>
+		}
+	}
+	<span class="kw">return</span> <span class="st">""</span>, catalog.<span class="ty">Value</span>{}, <span class="st">0</span>, <span class="kw">false</span>
+}</code></pre>
+
+    <p><code>choosePath</code> のやることを日本語にすると、こうです。「WHERE 句を AND で分解し（<code>flattenAnd</code>）、各断片が『索引の張られた列 と リテラル（定数値）の比較』の形か調べる（<code>normalizeComparison</code>。<code>1500 = id</code> のようにリテラルが左でも、比較の向きを反転して扱う）。等値比較が見つかったら即決 — 等値は範囲より必ず狭いので最優先。範囲比較（<code>&gt;</code> <code>&gt;=</code> <code>&lt;</code> <code>&lt;=</code>）なら下限 <code>lo</code>・上限 <code>hi</code> として持ち、同じ索引への複数の範囲条件は両側から締める。何も見つからなければ全走査」。</p>
+    <p>ここで、コメントにある<strong>残余フィルタ</strong>という考え方が効いています。プランナの選択が多少雑でも — たとえば <code>id &gt; 100</code>（100 を含まない）を <code>lo = 100</code>（100 を含む範囲）で検索してしまっても — 正しさは壊れません。なぜなら、集めた行には後段で<strong>必ず WHERE 句全体をもう一度評価する</strong>からです（次のコードで見ます）。索引はあくまで「候補の絞り込み」で、真偽の最終判定は WHERE の再評価に委ねる。この分担のおかげで、プランナは「漏らさないこと」だけ守れば「余計に拾うこと」は許され、境界条件の神経質な場合分けから解放されています。</p>
+    <p>行の収集も見ておきましょう。<code>SELECT / UPDATE / DELETE</code> が共通で使う関数です。</p>
+
+    <div class="file-tag">internal/sql/exec.go — 行の収集</div>
+    <pre><code><span class="cm">// collectRows は選択した経路で行を集め、WHERE を残余フィルタとして適用する。</span>
+<span class="kw">func</span> collectRows(st storage.<span class="ty">Store</span>, cat *catalog.<span class="ty">Catalog</span>, tab *catalog.<span class="ty">Table</span>, where <span class="ty">Expr</span>) ([]<span class="ty">row</span>, <span class="kw">string</span>, <span class="ty">error</span>) {
+	<span class="kw">if</span> where != <span class="kw">nil</span> {
+		<span class="kw">if</span> err := typeCheck(where, &amp;tab.Schema); err != <span class="kw">nil</span> {
+			<span class="kw">return</span> <span class="kw">nil</span>, <span class="st">""</span>, err
+		}
+	}
+	plan := choosePath(cat, tab.Name, where)
+	heap := catalog.OpenHeap(st, tab.HeapFirst)
+	<span class="kw">var</span> rows []<span class="ty">row</span>
+
+	appendIfMatch := <span class="kw">func</span>(tid btree.<span class="ty">TID</span>, rec []<span class="kw">byte</span>) <span class="ty">error</span> {
+		vals, err := tab.Schema.Decode(rec)
+		<span class="kw">if</span> err != <span class="kw">nil</span> {
+			<span class="kw">return</span> err
+		}
+		<span class="kw">if</span> where != <span class="kw">nil</span> {
+			ok, err := evalBool(where, &amp;tab.Schema, vals)
+			<span class="kw">if</span> err != <span class="kw">nil</span> {
+				<span class="kw">return</span> err
+			}
+			<span class="kw">if</span> !ok {
+				<span class="kw">return</span> <span class="kw">nil</span>
+			}
+		}
+		rows = <span class="kw">append</span>(rows, <span class="ty">row</span>{tid: tid, vals: vals})
+		<span class="kw">return</span> <span class="kw">nil</span>
+	}
+
+	<span class="kw">if</span> plan.index != <span class="kw">nil</span> {
+		tree := btree.Open(st, plan.index.Meta)
+		tids, err := tree.SearchRange(plan.lo, plan.hi)
+		<span class="kw">if</span> err != <span class="kw">nil</span> {
+			<span class="kw">return</span> <span class="kw">nil</span>, <span class="st">""</span>, err
+		}
+		<span class="kw">for</span> _, tid := <span class="kw">range</span> tids {
+			rec, err := heap.Get(tid)
+			<span class="kw">if</span> err != <span class="kw">nil</span> {
+				<span class="kw">return</span> <span class="kw">nil</span>, <span class="st">""</span>, err
+			}
+			<span class="kw">if</span> err := appendIfMatch(tid, rec); err != <span class="kw">nil</span> {
+				<span class="kw">return</span> <span class="kw">nil</span>, <span class="st">""</span>, err
+			}
+		}
+		<span class="kw">return</span> rows, plan.desc, <span class="kw">nil</span>
+	}
+	<span class="kw">if</span> err := heap.Scan(appendIfMatch); err != <span class="kw">nil</span> {
+		<span class="kw">return</span> <span class="kw">nil</span>, <span class="st">""</span>, err
+	}
+	<span class="kw">return</span> rows, plan.desc, <span class="kw">nil</span>
+}</code></pre>
+
+    <p>Step 5 の図の二段検索が、そのままコードになっています。索引経路なら <code>tree.SearchRange(plan.lo, plan.hi)</code> で TID の一覧を取り（①）、各 TID について <code>heap.Get(tid)</code> で行本体を取る（②）。どちらの経路でも、行は必ず <code>appendIfMatch</code> を通り、そこで WHERE 句全体が再評価されます — これがさっきの残余フィルタです。索引経路と全走査経路が<strong>同じ判定関数</strong>を通るので、「経路によって結果が違う」というバグの入り口が構造的に塞がれています。</p>
+
+    <div class="box do"><div class="box-k">▸ 動かして確認 — プランナの得手不得手</div>
+      <p>範囲検索は索引に乗り、OR は乗らない（<code>flattenAnd</code> は AND しかほどかないので、OR を含む WHERE には使える断片が見つからず全走査に落ちます）ことを確かめます。</p>
+      <pre class="term"><code><span class="ps">$</span> printf "SELECT COUNT(*) FROM accounts WHERE id &gt;= 2 AND id &lt;= 3
+SELECT owner FROM accounts WHERE id = 1 OR id = 3
+.exit
+" | go run ./cmd/minidb-repl scratch/ch07.db
+<span class="out">minidb — 単一ファイル組み込み RDBMS（.exit で終了 / .stats で統計）
+minidb&gt; | count |
+| ----- |
+| 2     |
+（1 行 / plan: indexscan(idx_accounts_id)）</span>  <span class="cm">← 範囲は両側から締めて索引で</span>
+<span class="out">minidb&gt; | owner |
+| ----- |
+| alice |
+| carol |
+（2 行 / plan: seqscan(accounts)）</span>          <span class="cm">← OR は諦めて全走査。でも結果は正しい</span></code></pre>
+      <p>「速くできないときも、正しくはある」— 残余フィルタ方式の安心感です。</p>
+    </div>
+
+    <h2 class="step" id="step-7"><span class="step-no">Step 7</span>索引の維持 — UPDATE は「削除 + 挿入」</h2>
+    <p>索引は作った瞬間だけ正しくても意味がありません。以後のすべての <code>INSERT / UPDATE / DELETE</code> が、ヒープと索引の<strong>両方</strong>を更新し続けて、初めて信用できます。これを索引の<strong>維持</strong>（maintenance）といいます。まず一番簡単な INSERT から。</p>
+
+    <div class="file-tag">internal/sql/exec.go — INSERT の索引維持</div>
+    <pre><code><span class="kw">func</span> execInsert(st storage.<span class="ty">Store</span>, cat *catalog.<span class="ty">Catalog</span>, s <span class="ty">InsertStmt</span>) (*<span class="ty">Result</span>, <span class="ty">error</span>) {
+	tab, ok := cat.Table(s.Table)
+	<span class="kw">if</span> !ok {
+		<span class="kw">return</span> <span class="kw">nil</span>, fmt.Errorf(<span class="st">"テーブル %s が存在しない"</span>, s.Table)
+	}
+	heap := catalog.OpenHeap(st, tab.HeapFirst)
+	indexes := cat.Indexes(s.Table)
+	<span class="kw">for</span> _, rowExprs := <span class="kw">range</span> s.Rows {
+		<span class="kw">if</span> <span class="kw">len</span>(rowExprs) != <span class="kw">len</span>(tab.Schema.Cols) {
+			<span class="kw">return</span> <span class="kw">nil</span>, fmt.Errorf(<span class="st">"型エラー: 値の数 %d が列数 %d と一致しない"</span>, <span class="kw">len</span>(rowExprs), <span class="kw">len</span>(tab.Schema.Cols))
+		}
+		vals := <span class="kw">make</span>([]catalog.<span class="ty">Value</span>, <span class="kw">len</span>(rowExprs))
+		<span class="kw">for</span> i, e := <span class="kw">range</span> rowExprs {
+			v, err := litValue(e, tab.Schema.Cols[i])
+			<span class="kw">if</span> err != <span class="kw">nil</span> {
+				<span class="kw">return</span> <span class="kw">nil</span>, err
+			}
+			vals[i] = v
+		}
+		rec, err := tab.Schema.Encode(vals)
+		<span class="kw">if</span> err != <span class="kw">nil</span> {
+			<span class="kw">return</span> <span class="kw">nil</span>, err
+		}
+		tid, err := heap.Insert(rec)
+		<span class="kw">if</span> err != <span class="kw">nil</span> {
+			<span class="kw">return</span> <span class="kw">nil</span>, err
+		}
+		<span class="kw">for</span> _, ix := <span class="kw">range</span> indexes {
+			tree := btree.Open(st, ix.Meta)
+			<span class="kw">if</span> err := tree.Insert(catalog.EncodeKey(vals[ix.ColIdx]), tid); err != <span class="kw">nil</span> {
+				<span class="kw">return</span> <span class="kw">nil</span>, err
+			}
+		}
+	}
+	<span class="kw">return</span> &amp;<span class="ty">Result</span>{Affected: <span class="kw">len</span>(s.Rows)}, <span class="kw">nil</span>
+}</code></pre>
+
+    <p>前半（値の検証・エンコード・<code>heap.Insert</code>）は第05章で読んだ通りで、この章で足されたのは末尾のループだけです。ヒープに入れて TID をもらったら、<strong>そのテーブルの全索引</strong>について「キー → TID」を木に入れる。素直です。ただし索引が 3 本あれば書き込みも 3 回増える — 索引は読みを速くする代わりに書きを遅くする、という普遍的なトレードオフがこのループの長さに現れています。</p>
+    <p>難所は UPDATE です。minidb の行更新は「その場で書き換え」ではなく<strong>「削除 + 挿入」</strong>で実装されています（更新後のレコードは長さが変わりうるので、同じスロットに収まる保証がないからです。第01章のスロット化ページを思い出してください）。ということは、<strong>更新のたびに行の TID が変わります</strong>。行が引っ越すのです。引っ越したのに住所録（索引）を直さなかったら？</p>
+
+    <div class="ascii">UPDATE は「削除 + 挿入」— 行が引っ越すので、索引の張り替えが要る
+
+  UPDATE accounts SET balance = 9999 WHERE id = 3
+
+  ヒープ:  Delete(旧TID)                 旧の行を消す
+           Insert(新レコード) → 新TID     別の場所に入り直す（引っ越し）
+
+  索引:    Delete(key=3, 旧TID)          旧キー + 旧TID の対を消す
+           Insert(key=3, 新TID)          新キー + 新TID の対を入れる
+
+  張り替えを忘れると…
+    索引の葉は 旧TID を指したまま
+    → heap.Get(旧TID) の先は「空きスロット」か、後から入った無関係の行
+    → 索引経由の検索だけが、エラーになるか、別人の行を返す</div>
+
+    <div class="file-tag">internal/sql/exec.go — UPDATE / DELETE の索引維持</div>
+    <pre><code><span class="kw">func</span> execUpdate(st storage.<span class="ty">Store</span>, cat *catalog.<span class="ty">Catalog</span>, s <span class="ty">UpdateStmt</span>) (*<span class="ty">Result</span>, <span class="ty">error</span>) {
+	tab, ok := cat.Table(s.Table)
+	<span class="kw">if</span> !ok {
+		<span class="kw">return</span> <span class="kw">nil</span>, fmt.Errorf(<span class="st">"テーブル %s が存在しない"</span>, s.Table)
+	}
+	<span class="cm">// SET 句の検証（型チェックは litValue が行う）</span>
+	<span class="kw">type</span> <span class="ty">setOp</span> <span class="kw">struct</span> {
+		colIdx <span class="kw">int</span>
+		val    catalog.<span class="ty">Value</span>
+	}
+	<span class="kw">var</span> ops []<span class="ty">setOp</span>
+	<span class="kw">for</span> _, sc := <span class="kw">range</span> s.Sets {
+		ci := tab.Schema.ColIndex(sc.Col)
+		<span class="kw">if</span> ci &lt; <span class="st">0</span> {
+			<span class="kw">return</span> <span class="kw">nil</span>, fmt.Errorf(<span class="st">"列 %s が存在しない"</span>, sc.Col)
+		}
+		v, err := litValue(sc.Expr, tab.Schema.Cols[ci])
+		<span class="kw">if</span> err != <span class="kw">nil</span> {
+			<span class="kw">return</span> <span class="kw">nil</span>, err
+		}
+		ops = <span class="kw">append</span>(ops, <span class="ty">setOp</span>{ci, v})
+	}
+
+	rows, plan, err := collectRows(st, cat, tab, s.Where)
+	<span class="kw">if</span> err != <span class="kw">nil</span> {
+		<span class="kw">return</span> <span class="kw">nil</span>, err
+	}
+	heap := catalog.OpenHeap(st, tab.HeapFirst)
+	indexes := cat.Indexes(s.Table)
+	<span class="kw">for</span> _, r := <span class="kw">range</span> rows {
+		newVals := <span class="kw">make</span>([]catalog.<span class="ty">Value</span>, <span class="kw">len</span>(r.vals))
+		<span class="kw">copy</span>(newVals, r.vals)
+		<span class="kw">for</span> _, op := <span class="kw">range</span> ops {
+			newVals[op.colIdx] = op.val
+		}
+		rec, err := tab.Schema.Encode(newVals)
+		<span class="kw">if</span> err != <span class="kw">nil</span> {
+			<span class="kw">return</span> <span class="kw">nil</span>, err
+		}
+		<span class="cm">// 行の移動 = 削除 + 挿入。TID が変わるので索引も張り替える</span>
+		<span class="kw">if</span> err := heap.Delete(r.tid); err != <span class="kw">nil</span> {
+			<span class="kw">return</span> <span class="kw">nil</span>, err
+		}
+		newTid, err := heap.Insert(rec)
+		<span class="kw">if</span> err != <span class="kw">nil</span> {
+			<span class="kw">return</span> <span class="kw">nil</span>, err
+		}
+		<span class="kw">for</span> _, ix := <span class="kw">range</span> indexes {
+			tree := btree.Open(st, ix.Meta)
+			<span class="kw">if</span> err := tree.Delete(catalog.EncodeKey(r.vals[ix.ColIdx]), r.tid); err != <span class="kw">nil</span> {
+				<span class="kw">return</span> <span class="kw">nil</span>, err
+			}
+			<span class="kw">if</span> err := tree.Insert(catalog.EncodeKey(newVals[ix.ColIdx]), newTid); err != <span class="kw">nil</span> {
+				<span class="kw">return</span> <span class="kw">nil</span>, err
+			}
+		}
+	}
+	<span class="kw">return</span> &amp;<span class="ty">Result</span>{Affected: <span class="kw">len</span>(rows), Plan: plan}, <span class="kw">nil</span>
+}
+
+<span class="kw">func</span> execDelete(st storage.<span class="ty">Store</span>, cat *catalog.<span class="ty">Catalog</span>, s <span class="ty">DeleteStmt</span>) (*<span class="ty">Result</span>, <span class="ty">error</span>) {
+	tab, ok := cat.Table(s.Table)
+	<span class="kw">if</span> !ok {
+		<span class="kw">return</span> <span class="kw">nil</span>, fmt.Errorf(<span class="st">"テーブル %s が存在しない"</span>, s.Table)
+	}
+	rows, plan, err := collectRows(st, cat, tab, s.Where)
+	<span class="kw">if</span> err != <span class="kw">nil</span> {
+		<span class="kw">return</span> <span class="kw">nil</span>, err
+	}
+	heap := catalog.OpenHeap(st, tab.HeapFirst)
+	indexes := cat.Indexes(s.Table)
+	<span class="kw">for</span> _, r := <span class="kw">range</span> rows {
+		<span class="kw">if</span> err := heap.Delete(r.tid); err != <span class="kw">nil</span> {
+			<span class="kw">return</span> <span class="kw">nil</span>, err
+		}
+		<span class="kw">for</span> _, ix := <span class="kw">range</span> indexes {
+			tree := btree.Open(st, ix.Meta)
+			<span class="kw">if</span> err := tree.Delete(catalog.EncodeKey(r.vals[ix.ColIdx]), r.tid); err != <span class="kw">nil</span> {
+				<span class="kw">return</span> <span class="kw">nil</span>, err
+			}
+		}
+	}
+	<span class="kw">return</span> &amp;<span class="ty">Result</span>{Affected: <span class="kw">len</span>(rows), Plan: plan}, <span class="kw">nil</span>
+}</code></pre>
+
+    <p><code>execUpdate</code> の心臓部は、行ごとのループの後半 4 操作です。<code>heap.Delete(r.tid)</code> → <code>heap.Insert(rec)</code> で行を引っ越し（ここで <code>newTid</code> をもらう）、続けて各索引で <code>tree.Delete(旧キー, 旧TID)</code> → <code>tree.Insert(新キー, 新TID)</code> と対を張り替える。キーに <code>r.vals</code>（更新前の値）と <code>newVals</code>（更新後の値）を使い分けている点に注意してください。更新された列に索引が張られていた場合、キー自体も変わるからです。<code>execDelete</code> は同じ構図の削除だけ版 — ヒープから消し、全索引から「キー + TID」の対を消します。</p>
+    <p>もうひとつ、細部に第03章の設計が効いています。索引からの削除が <code>tree.Delete(キー, TID)</code> と<strong>TID まで指定する</strong>形なのは、セカンダリ索引ではキーが重複しうる（同じ <code>balance</code> の行が複数ある）ため、キーだけでは消す対象を特定できないからです。B+Tree が内部で「キー + TID」の複合キーとして格納していたのは、この日のためでした。</p>
+
+    <div class="box hazard"><div class="box-k">⚠ 落とし穴 — 「索引が嘘をつく」バグの見え方</div>
+      <p>もし <code>execUpdate</code> の索引張り替えを忘れたら、どうなるか。<code>go build</code> は通ります。<code>seqscan</code> の検索も全部正しく動きます。壊れるのは<strong>索引を使った検索だけ</strong> — 古い TID の先にある「空きスロット」を読んでエラーになるか、そのスロットが再利用されていれば<strong>無関係の行を平然と返します</strong>。つまり「WHERE に索引列を使ったときだけ、たまに結果がおかしい」という、再現条件の見えにくい最悪の類のバグになります。データベースの索引バグが恐れられるのはこのためで、本物の PostgreSQL にも索引とヒープの一致を検査する <code>amcheck</code> という専用ツールがあるほどです。minidb では「ヒープを触るすべての場所で、必ず同じループで全索引を維持する」という規律でこれを防いでいます。</p>
+    </div>
+
+    <div class="box do"><div class="box-k">▸ 動かして確認 — 更新と削除に索引が追従する</div>
+      <p>索引の張られた <code>id</code> で検索しながら、UPDATE と DELETE を打ちます。索引の維持が壊れていれば、ここで古い値が返ったりエラーになったりするはずです。</p>
+      <pre class="term"><code><span class="ps">$</span> printf "UPDATE accounts SET balance = 9999 WHERE id = 3
+SELECT owner, balance FROM accounts WHERE id = 3
+DELETE FROM accounts WHERE id = 3
+SELECT COUNT(*) FROM accounts WHERE id = 3
+.exit
+" | go run ./cmd/minidb-repl scratch/ch07.db
+<span class="out">minidb — 単一ファイル組み込み RDBMS（.exit で終了 / .stats で統計）
+minidb&gt; OK（1 行）
+minidb&gt; | owner | balance |
+| ----- | ------- |
+| carol | 9999    |
+（1 行 / plan: indexscan(idx_accounts_id)）</span>  <span class="cm">← 引っ越し後の行に索引経由で届いた</span>
+<span class="out">minidb&gt; OK（1 行）
+minidb&gt; | count |
+| ----- |
+| 0     |
+（1 行 / plan: indexscan(idx_accounts_id)）</span>  <span class="cm">← 索引からも消えている</span></code></pre>
+      <p>UPDATE 後の <code>indexscan</code> が carol の新しい値 9999 を返し、DELETE 後は 0 件。索引はヒープに追従しています。</p>
+    </div>
+
+    <h2 class="step" id="step-8"><span class="step-no">Step 8</span>総仕上げ — M7 テストを読み解く</h2>
+    <p>この章の部品を全部つないだ姿を検収するのが、e2e テスト <code>TestM7IndexAndTransactions</code> です。2000 行のテーブルに対して、この章でやったことを一気通貫でなぞります。読んでみてください — もう全行の意味が分かるはずです。</p>
+
+    <div class="file-tag">e2e_test.go — M7 受け入れテスト</div>
+    <pre><code><span class="cm">// M7 受け入れ基準: CREATE INDEX で検索が速くなり、</span>
+<span class="cm">// UPDATE/DELETE とロールバックが有効に働く。</span>
+<span class="kw">func</span> TestM7IndexAndTransactions(t *testing.T) {
+	db := open(t, filepath.Join(t.TempDir(), <span class="st">"m7.db"</span>))
+	<span class="kw">defer</span> db.Close()
+	mustExec(t, db, <span class="st">"CREATE TABLE accounts (id INT, owner TEXT, balance INT)"</span>)
+
+	<span class="cm">// まとまった量を 1 トランザクションで入れる</span>
+	mustExec(t, db, <span class="st">"BEGIN"</span>)
+	<span class="kw">for</span> i := <span class="st">0</span>; i &lt; <span class="st">2000</span>; i++ {
+		mustExec(t, db, fmt.Sprintf(<span class="st">"INSERT INTO accounts VALUES (%d, 'owner-%04d', %d)"</span>, i, i, i*<span class="st">10</span>))
+	}
+	mustExec(t, db, <span class="st">"COMMIT"</span>)
+
+	<span class="cm">// 索引なしのプラン確認</span>
+	res := mustExec(t, db, <span class="st">"SELECT owner FROM accounts WHERE id = 1500"</span>)
+	<span class="kw">if</span> res.Plan != <span class="st">"seqscan(accounts)"</span> {
+		t.Fatalf(<span class="st">"索引なしなのにプランが %s"</span>, res.Plan)
+	}
+
+	<span class="cm">// CREATE INDEX → 同じクエリが索引経由になる</span>
+	mustExec(t, db, <span class="st">"CREATE INDEX idx_accounts_id ON accounts (id)"</span>)
+	res = mustExec(t, db, <span class="st">"SELECT owner FROM accounts WHERE id = 1500"</span>)
+	<span class="kw">if</span> res.Plan != <span class="st">"indexscan(idx_accounts_id)"</span> {
+		t.Fatalf(<span class="st">"索引が使われていない: plan=%s"</span>, res.Plan)
+	}
+	<span class="kw">if</span> <span class="kw">len</span>(res.Rows) != <span class="st">1</span> || res.Rows[<span class="st">0</span>][<span class="st">0</span>].Str != <span class="st">"owner-1500"</span> {
+		t.Fatalf(<span class="st">"索引検索の結果が不正: %+v"</span>, res.Rows)
+	}
+	<span class="cm">// 範囲も索引で</span>
+	res = mustExec(t, db, <span class="st">"SELECT COUNT(*) FROM accounts WHERE id &gt;= 100 AND id &lt; 200"</span>)
+	<span class="kw">if</span> res.Rows[<span class="st">0</span>][<span class="st">0</span>].Int != <span class="st">100</span> {
+		t.Fatalf(<span class="st">"索引範囲検索 = %d 件, want 100"</span>, res.Rows[<span class="st">0</span>][<span class="st">0</span>].Int)
+	}
+
+	<span class="cm">// UPDATE: 値が変わり、索引も追従する</span>
+	res = mustExec(t, db, <span class="st">"UPDATE accounts SET balance = 99999 WHERE id = 42"</span>)
+	<span class="kw">if</span> res.Affected != <span class="st">1</span> {
+		t.Fatalf(<span class="st">"UPDATE の対象 = %d 行, want 1"</span>, res.Affected)
+	}
+	res = mustExec(t, db, <span class="st">"SELECT balance FROM accounts WHERE id = 42"</span>)
+	<span class="kw">if</span> res.Rows[<span class="st">0</span>][<span class="st">0</span>].Int != <span class="st">99999</span> {
+		t.Fatal(<span class="st">"UPDATE が反映されていない"</span>)
+	}
+
+	<span class="cm">// DELETE: 行が消え、索引からも消える</span>
+	mustExec(t, db, <span class="st">"DELETE FROM accounts WHERE id = 42"</span>)
+	res = mustExec(t, db, <span class="st">"SELECT COUNT(*) FROM accounts WHERE id = 42"</span>)
+	<span class="kw">if</span> res.Rows[<span class="st">0</span>][<span class="st">0</span>].Int != <span class="st">0</span> {
+		t.Fatal(<span class="st">"DELETE 後も索引検索でヒットする"</span>)
+	}
+
+	<span class="cm">// ROLLBACK: まとめた変更が丸ごと巻き戻る</span>
+	mustExec(t, db, <span class="st">"BEGIN"</span>)
+	mustExec(t, db, <span class="st">"UPDATE accounts SET balance = 0 WHERE id &gt;= 0"</span>)
+	res = mustExec(t, db, <span class="st">"SELECT COUNT(*) FROM accounts WHERE balance = 0"</span>)
+	<span class="kw">if</span> res.Rows[<span class="st">0</span>][<span class="st">0</span>].Int != <span class="st">2000</span>-<span class="st">1</span> { <span class="cm">// id=0 の balance はもともと 0、id=42 は削除済み</span>
+		t.Fatalf(<span class="st">"Tx 内から自分の UPDATE が見えない: %d"</span>, res.Rows[<span class="st">0</span>][<span class="st">0</span>].Int)
+	}
+	mustExec(t, db, <span class="st">"ROLLBACK"</span>)
+	res = mustExec(t, db, <span class="st">"SELECT COUNT(*) FROM accounts WHERE balance = 0"</span>)
+	<span class="kw">if</span> res.Rows[<span class="st">0</span>][<span class="st">0</span>].Int != <span class="st">1</span> { <span class="cm">// id=0 のみ</span>
+		t.Fatalf(<span class="st">"ROLLBACK 後も変更が残っている: %d 行"</span>, res.Rows[<span class="st">0</span>][<span class="st">0</span>].Int)
+	}
+}</code></pre>
+
+    <p>読み解きのポイントを 3 つ。<strong>その 1</strong>: 冒頭の 2000 件 INSERT が <code>BEGIN</code>〜<code>COMMIT</code> で括られているのは、性能のためです。自動コミットのままだと 1 文ごとに WAL への fsync（物理ディスク往復）が走り、2000 回の fsync になります。明示 Tx なら、2000 文ぶんの変更が変更集合に溜まり、fsync は最後の <code>COMMIT</code> で 1 回だけ。</p>
+    <p>しかも<strong>節約されるのは fsync の回数だけではありません。</strong> 変更集合は <code>map[storage.PageID]*storage.Page</code> — <strong>ページ単位で畳まれる</strong>入れ物でした。同じヒープページに 100 行 INSERT しても、コミット時に WAL へ出るのは<strong>最後の 1 枚だけ</strong>です。対して自動コミットだと、1 文ごとにその時点のページ全体（4105 バイト）が WAL に書かれるので、同じページを 100 回触れば 100 枚ぶん積み上がります。第06章の FAQ「1 ページ触るたびに 4096 バイトも書くのは無駄では？」がここで回収されます — <strong>トランザクションで括ることが、その無駄を畳む仕組みそのもの</strong>だったわけです。</p>
+    <p>「大量投入はトランザクションで括れ」という実務の定石の理由が、ここまで作ってきた層の言葉でそのまま説明できます。</p>
+    <p><strong>その 2</strong>: 最後のロールバック検査は、この章の 2 つのテーマの合流点です。1999 行を UPDATE する（= 大量の行が引っ越し、索引が 1999 回張り替わる）変更を、Tx 内からは見えることを確認した上で、<code>ROLLBACK</code> 一発で巻き戻す。ヒープのページも索引のページも、変更はすべて同じ変更集合に溜まっていたので、<strong>ヒープと索引が一緒に巻き戻ります</strong>。もし索引が Tx の外で更新される作りだったら、ロールバックのたびにヒープと索引がずれる — Tx が <code>Store</code> という低い層に置かれているおかげで、上に載るものは何でも（ヒープも B+Tree もカタログも）自動的にトランザクショナルになるのです。</p>
+    <p><strong>その 3</strong>: <code>2000-1</code> や「id=42 は削除済み」のコメントのような端数の吟味は、テストを書く上での急所です。境界の 1 行を雑に数えたテストは、バグを見逃すか、正しいコードを FAIL させます。</p>
+    <p>このほか e2e には、明示 Tx のコミットが再起動後も残ることを検査する <code>TestExplicitTxPersists</code>（第06章の永続化と Tx の合流点）、Step 4 で REPL 実演した「中断 Tx は COMMIT 拒否」をコードで検査する <code>TestAbortedTxCannotCommit</code>、TEXT 列の索引を検査する <code>TestTextIndex</code> が並んでいます。ぜひ自分で開いて読んでみてください。</p>
+
+    <div class="box do"><div class="box-k">▸ 動かして確認 — M7 の受け入れ検収</div>
+      <pre class="term"><code><span class="ps">$</span> go test . -run 'TestM7IndexAndTransactions|TestExplicitTxPersists|TestAbortedTxCannotCommit|TestTextIndex' -v
+<span class="out">=== RUN   TestM7IndexAndTransactions
+--- PASS: TestM7IndexAndTransactions (0.04s)
+=== RUN   TestExplicitTxPersists
+--- PASS: TestExplicitTxPersists (0.03s)
+=== RUN   TestAbortedTxCannotCommit
+--- PASS: TestAbortedTxCannotCommit (0.01s)
+=== RUN   TestTextIndex
+--- PASS: TestTextIndex (0.01s)
+PASS
+ok  	minidb	1.085s</span></code></pre>
+      <p>2000 行の投入・索引構築・張り替え・巻き戻しまで含めて 0.04 秒。積み上げてきた層は、ちゃんと速くもあります。</p>
+    </div>
+
+    <h2>つまずき FAQ</h2>
+
+    <details class="qa"><summary>2 つのトランザクションを同時に走らせたら、隔離はどうなる？</summary>
+      <div class="qa-body"><p><strong>そもそも同時には走りません。</strong> minidb は単一プロセス・単一スレッドで動く組み込み DB で、コードのどこにもロック（<code>sync.Mutex</code>）やゴルーチンがありません。<code>db.go</code> の <code>DB</code> のコメントにも「DB 自体はゴルーチン安全ではない」と明記してあります。複数のゴルーチンから同時に触れば、隔離レベル以前に単純に壊れます。</p>
+      <p>さらに <code>DB</code> 構造体が持つ明示 Tx の置き場は <code>active</code> ただ 1 つなので、<code>BEGIN</code> 中にもう一度 <code>BEGIN</code> するとエラーになります。だからこの章の「隔離」は、<strong>並行制御ではなく</strong>「Tx の外から未コミットが見えない」という構造上の性質だけを指しています（章の冒頭で線を引いたとおりです）。</p>
+      <p>本物の分離レベル — 書き込み Tx を複数並走させ、互いの衝突を検出・調停する仕組み — には、ロックや MVCC（後述）が要ります。それが実データベースのトランザクション実装が分厚い理由です。</p></div>
+    </details>
+
+    <details class="qa"><summary>Tx の中で Allocate したページは、ロールバックするとどうなる？</summary>
+      <div class="qa-body"><p>ページ<strong>番号</strong>の採番だけは下のストアで行われるので、ロールバックしても番号は使われたまま、中身が書かれなかった空のページがファイルに残ります。データの正しさは壊れません（どこからも参照されないページなので）が、ファイルは少しずつ太ります。空きページを回収・再利用する仕組みをフリーリストといい、minidb では発展課題として割り切りました。<code>txn.go</code> の <code>Allocate</code> のコメントに書いてある通りです。</p></div>
+    </details>
+
+    <details class="qa"><summary>Commit の手順 2（プールへの反映）の途中でクラッシュしたら、中途半端にならない？</summary>
+      <div class="qa-body"><p>なりません。手順 1 の <code>AppendCommit</code> が返った時点で、変更ページの<strong>完全な</strong>イメージ一式とコミットレコードが WAL 上で fsync 済みです。手順 2 の途中（半分だけプールに反映した状態）でクラッシュしても、再起動時の <code>Recover</code>（第06章）がログからコミット済みバッチを丸ごと再生するので、必ず「全部反映された状態」に戻ります。逆に手順 1 の<strong>前</strong>にクラッシュすれば、ログには何もないので「全部なかった状態」。どちらに転んでも中間はない — これが「ログが先、データが後」の順序が原子性の耐クラッシュ版まで担保してくれる理由です。</p></div>
+    </details>
+
+    <details class="qa"><summary>変更集合がメモリに収まらないほど大きなトランザクションはどうすればいい？</summary>
+      <div class="qa-body"><p>この実装では実行できません（メモリが尽きます）。これは Step 2 で述べた No-Steal 方式の構造的な限界です。実データベースは、未コミットページのディスク書き出しを許す Steal 方式を採り、その代わり「書き出す前に undo 情報（変更前の値）をログへ書く」という規律（WAL の undo 側）でロールバック可能性を守ります。redo と undo の両方を持つ本格的な回復アルゴリズムとしては ARIES が有名です。minidb の redo-only WAL + No-Steal は、その簡略版に位置づけられます。</p></div>
+    </details>
+
+    <details class="qa"><summary>BEGIN の中で CREATE INDEX して ROLLBACK したら、索引はどうなる？</summary>
+      <div class="qa-body"><p>ちゃんと消えます — ただし 2 段構えで。索引の木とカタログの<strong>ページ上</strong>の変更は Tx の変更集合にあるので、ロールバックで捨てられます。問題は<strong>メモリ上</strong>の <code>Catalog</code> 構造体で、<code>execCreateIndex</code> が呼んだ <code>cat.CreateIndex</code> はこれも書き換えています。ページと違ってメモリの変更は Tx が守ってくれないので、<code>db.go</code> は DDL を実行した Tx に <code>activeDDL</code> の印を付け、ロールバック時に <code>catalog.Load</code> でカタログをディスクの状態から読み直します（<code>rollbackActive</code>）。「トランザクションが守るのはページだけ。メモリ上のキャッシュは自分で面倒を見る」— 実データベースでも DDL のトランザクション対応が特別扱いになりがちな理由の入り口です。</p></div>
+    </details>
+
+    <h2>理解度チェック</h2>
+    <p>次の問いに自分の言葉で答えてから、答えを開いてください。</p>
+
+    <details class="qa"><summary>Q1. Rollback が実質 <code>t.pages = nil</code> の 1 行で済むのはなぜ？ どんな設計上の決定がこれを可能にしている？</summary>
+      <div class="qa-body"><p>未コミットの変更が、Tx 私有の変更集合（<code>pages</code>）の<strong>外に一切存在しない</strong>からです。<code>Tx.Write</code> は必ず変更集合内のコピーにだけ書き、バッファプール（<code>base</code>）への書き込みは <code>Commit</code> の中にしかありません。変更がどこにも漏れていないので、「元に戻す」作業（undo）が不要で、置き場を捨てるだけで世界が元のままになります。漏らしてから拭くのではなく、最初から漏らさない — 構造で問題を消す設計です。</p></div>
+    </details>
+
+    <details class="qa"><summary>Q2. Commit の 2 手順「WAL へ fsync → プールへ反映」を逆の順にすると、何が壊れる？</summary>
+      <div class="qa-body"><p>先にプールへ反映すると、その瞬間からページは「ダーティページ」としてプールの追い出し対象になり、<strong>WAL に記録される前にディスクへ書かれる</strong>可能性が生まれます。そこでクラッシュすると、①ログにないのでコミット済みとして回復できず、②かといってディスクには変更の一部（追い出された数ページだけ）が書かれている — 「全部か無しか」のどちらでもない状態がディスク上に発生します。原子性と耐久性が同時に壊れる。第06章の鉄則「ログが先、データが後」は、順序そのものが保証の本体です。</p></div>
+    </details>
+
+    <details class="qa"><summary>Q3.（シナリオ問題）同僚が <code>execUpdate</code> を「修正」して、索引の張り替えループを削除してしまった。テーブル <code>users</code> の <code>name</code> 列に索引がある状態で、このバグはどんな症状として現れる？ 発見が難しいのはなぜ？</summary>
+      <div class="qa-body"><p>UPDATE された行の TID が変わるのに、索引は旧 TID を指したままになります。症状は「<code>WHERE name = …</code> のような<strong>索引の使われる検索だけ</strong>が、更新済みの行について、<code>heap.Get</code> のエラーを返すか（旧スロットが空のまま）、旧スロットが別の行に再利用されていれば<strong>無関係の行を返す</strong>」。発見が難しい理由は 3 つ — ①コンパイルは通る。②<code>seqscan</code> になるクエリ（索引のない列の検索、WHERE なしの SELECT）はすべて正常なので、「基本機能は動いている」ように見える。③壊れるのは「更新された行」×「索引経由の検索」の組み合わせだけで、再現条件が見えにくい。対策は、索引経由と全走査の結果一致を検査するテスト（<code>TestM7IndexAndTransactions</code> の UPDATE 後の索引検索がまさにそれ）を持つことです。</p></div>
+    </details>
+
+    <details class="qa"><summary>Q4. <code>execCreateIndex</code> で、カタログ登録を最初に（木の構築より前に）行うとどんな危険がある？</summary>
+      <div class="qa-body"><p>木の構築が途中で失敗したとき（2000 行中 1000 行だけ入れてエラー、など）、カタログには登録済みの「歯抜けの索引」が残ります。以後のプランナはその索引を正当な経路として選び、実在する行を「存在しない」と答えるようになります。しかも残余フィルタは「余計に拾った行」は落とせても「索引が拾い損ねた行」は救えません — 候補に入らなかった行は WHERE の再評価まで届かないからです。「未完成のものをカタログ（公開名簿）に載せない。公開は完成後、必ず最後」が正解の順序です。</p></div>
+    </details>
+
+    <details class="qa"><summary>Q5. 文エラーの後の Tx が COMMIT を拒否する（aborted になる）のはなぜ？ 「エラーになった文の変更だけ捨てて続行」ではだめ？</summary>
+      <div class="qa-body"><p>「その文の変更だけ」を特定して捨てる手段がないからです。文は複数ページ（ヒープ + 複数の索引）にまたがって書き進み、途中で失敗すると「ヒープには入ったが索引には入っていない行」のような不整合な中間状態が変更集合に残ります。文単位で巻き戻すには文の開始時点のスナップショットや undo 記録が必要ですが、この実装は持っていません。持っているのは Tx 全体を捨てる <code>Rollback</code> だけ。だから、不整合を含むかもしれない Tx にはもう COMMIT の資格がない、と印を付けて全部やり直させます。PostgreSQL の <code>current transaction is aborted, commands ignored until end of transaction block</code> と同じ理屈です（PostgreSQL で文単位の巻き戻しをしたい場合は SAVEPOINT を明示的に使います）。</p></div>
+    </details>
+
+    <details class="qa"><summary>Q6. 「バッファプールには未コミットデータが決して入らない」— この主張の根拠を、txn.go のコードの行を挙げて説明してください。</summary>
+      <div class="qa-body"><p><code>txn.go</code> の中で <code>t.base.Write</code>（プールへの書き込み）を呼ぶ場所は <code>Commit</code> のループの 1 か所だけで、そこは <code>w.AppendCommit(t.pages)</code> が成功した<strong>後</strong>にしか到達しません。<code>Tx.Write</code> と <code>Allocate</code> は <code>t.pages</code>（私有 map）にしか書きません（<code>Allocate</code> が base に置くのはゼロページのみ）。つまり「プールに入る変更は WAL 上でコミット成立済みのものだけ」がコードの構造から言えます。よってプールがいつページを追い出しても、ディスクに未コミットデータは書かれない — No-Steal を制約としてではなく<strong>構造として</strong>達成している、というのが Step 2 の結論でした。</p></div>
+    </details>
+
+    <div class="box done"><div class="box-k">✓ 完了の合図 — そして、本書全体の検収</div>
+      <p><code>CREATE INDEX</code> で plan が変わり、UPDATE / DELETE に索引が追従し、ROLLBACK が効き、中断された Tx が COMMIT を拒否する。M7 — 最後のマイルストーンの完了です。仕上げに、第00章からの全部の層の「完了の合図」を一度に鳴らします。</p>
+      <pre class="term"><code><span class="ps">$</span> go test . -run TestM7IndexAndTransactions -v
+<span class="out">=== RUN   TestM7IndexAndTransactions
+--- PASS: TestM7IndexAndTransactions (0.04s)
+PASS
+ok  	minidb	1.085s</span>
+<span class="ps">$</span> go test ./...
+<span class="out">ok  	minidb	2.164s
+?   	minidb/cmd/minidb-repl	[no test files]
+ok  	minidb/internal/btree	1.854s
+ok  	minidb/internal/buffer	1.611s
+ok  	minidb/internal/catalog	1.816s
+?   	minidb/internal/sql	[no test files]
+ok  	minidb/internal/storage	1.678s
+ok  	minidb/internal/txn	1.585s
+ok  	minidb/internal/wal	1.654s</span></code></pre>
+      <p>全部 <code>ok</code>。序章で「準備完了」の確認に使ったのと同じコマンドが、いまは意味の分かる 8 つの層の検収として読めるはずです。おつかれさまでした — 完走です。</p>
+    </div>
+
+    <h2>この先へ — 地図はもう、手の中にある</h2>
+    <p>振り返ってみてください。ファイルを 4KB に区切るところから始めて（第00章）、ページに行を詰め（第01章）、メモリでキャッシュし（第02章）、B+Tree で並べ（第03章）、表とカタログで名前を付け（第04章）、SQL を解釈して実行し（第05章）、クラッシュに耐え（第06章）、そしてこの章で、トランザクションと索引を載せました。<code>SELECT</code> が返るまでに何が起きているのか — もうあなたは、自分の書いたコードを指差しながら、1 ページ単位で説明できます。</p>
+    <p>ここから広げられる道はたくさんあります。どれも、いま手にした部品の延長線上にあります。</p>
+    <ul>
+      <li><strong>JOIN</strong> — 2 つのテーブルの行を突き合わせる。まずは二重ループ（ネストループ結合）で動かし、片側をハッシュ表に載せるハッシュ結合へ。<code>collectRows</code> を 2 回呼ぶところから始められます。</li>
+      <li><strong>GROUP BY と集計</strong> — <code>COUNT(*)</code> しかない集計を、キーごとの map に畳み込む形へ一般化する。</li>
+      <li><strong>EXPLAIN</strong> — <code>plan:</code> の 1 行表示を、実行せずに計画だけ返す文へ昇格させる。プランナに「推定行数」を持たせれば、コストベース最適化の入り口です。</li>
+      <li><strong>MVCC</strong> — 行に複数の版を持たせ、読み手と書き手がブロックし合わない並行制御へ。この章の「単一ライタ」の制約を破る鍵で、PostgreSQL の心臓部です。</li>
+      <li><strong>LSM-Tree</strong> — まったく別の土台で作り直してみる。書き込みに強い log-structured merge-tree で同じ SQL 層を支え、B+Tree との得手不得手を体で比べる。RocksDB や LevelDB の世界です。</li>
+    </ul>
+    <p>どれを選んでもいいし、選ばなくてもいい。確かなのは、次にドキュメントで「バッファプール」「WAL」「インデックスが効かない」という言葉に出会ったとき、それがもう暗記した用語ではなく、<strong>自分で作って、壊して、直したことのある実物</strong>を指しているということです。</p>
+    <p>出発点は、もう手の中にあります。<strong>あなたは、データベースを作れる人になりました。</strong></p>
+
+    <div class="chap-foot">
+      <a class="pager" href="06-wal.html"><span class="dir">← 前へ</span>第06章 · 壊れない仕組み</a>
+      <span></span>
+    </div>
+  </main>
+</div>
+</body>
+</html>

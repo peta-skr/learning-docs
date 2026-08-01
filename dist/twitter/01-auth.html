@@ -1,0 +1,598 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>第01章 ユーザーという存在（認証） — Twitter をつくる</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500;600&family=Source+Serif+4:opsz,wght@8..60,400;8..60,600;8..60,700&family=Noto+Serif+JP:wght@400;600;700&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<div class="shell">
+
+  <aside class="spine">
+    <a class="wordmark" href="index.html">CHIRP · from scratch</a>
+    <div class="book-title">Twitter を<br>つくる</div>
+    <div class="book-sub">Go + PostgreSQL + React で認証からタイムラインまで</div>
+
+    <div class="legend"><span>読む <b>↓</b></span><span>組む <b>↑</b></span></div>
+
+    <nav aria-label="目次">
+      <ul class="toc">
+        <li><a class="nav-item" href="index.html"><span class="nav-num">序</span><span class="nav-label">はじめに・準備<span class="nav-tag">Setup</span></span></a></li>
+        <li><a class="nav-item" href="00-setup.html"><span class="nav-num">00</span><span class="nav-label">土台をつくる<span class="nav-tag">Setup</span></span></a></li>
+        <li><a class="nav-item current" aria-current="page" href="01-auth.html"><span class="nav-num">01</span><span class="nav-label">ユーザーという存在（認証）<span class="nav-tag">Auth</span></span></a></li>
+        <li><a class="nav-item" href="02-post.html"><span class="nav-num">02</span><span class="nav-label">投稿する<span class="nav-tag">Post</span></span></a></li>
+        <li><a class="nav-item" href="03-follow.html"><span class="nav-num">03</span><span class="nav-label">つながる（フォロー）<span class="nav-tag">Follow</span></span></a></li>
+        <li><a class="nav-item" href="04-timeline.html"><span class="nav-num">04</span><span class="nav-label">タイムラインという難問<span class="nav-tag">Timeline</span></span></a></li>
+        <li><a class="nav-item" href="05-reply.html"><span class="nav-num">05</span><span class="nav-label">会話する（リプライ）<span class="nav-tag">Reply</span></span></a></li>
+        <li><a class="nav-item" href="06-like.html"><span class="nav-num">06</span><span class="nav-label">反応する（いいね）<span class="nav-tag">Like</span></span></a></li>
+        <li><a class="nav-item" href="07-perf.html"><span class="nav-num">07</span><span class="nav-label">速くする（N+1と索引）<span class="nav-tag">Perf</span></span></a></li>
+        <li><a class="nav-item" href="08-web.html"><span class="nav-num">08</span><span class="nav-label">画面をつける（React）<span class="nav-tag">Web</span></span></a></li>
+        <li><a class="nav-item" href="09-beyond.html"><span class="nav-num">09</span><span class="nav-label">さらに先へ（発展）<span class="nav-tag">Beyond</span></span></a></li>
+      </ul>
+    </nav>
+
+    <div class="spine-foot">
+      各章は SNS の一つの機能。<br>下（土台）から上（画面）へ<br>積み上げて動かしていく。
+    </div>
+  </aside>
+
+  <main class="reading">
+    <div class="progress-tag">第01章 / 全10章 · 層: Auth · 読了目安 2〜3時間</div>
+    <div class="eyebrow"><span>Auth</span><span class="depth">— 土台のすぐ上</span></div>
+    <h1>ユーザーという存在（認証）</h1>
+    <p class="lede">第00章で空の <code>users</code> テーブルを用意しました。ここに<strong>最初の一人</strong>を住まわせます。ユーザーを登録し（パスワードは <strong>bcrypt</strong> でハッシュ化して保存し、生パスワードは決して残さない）、ログインすると<strong>JWT</strong> という「改ざんできない身分証」を発行し、それを<strong>スクリプトから触れない Cookie</strong>（HttpOnly）にしまう。そして以後のリクエストでは、その Cookie を検証して「この人は誰か」を毎回確かめる。終えたとき、あなたのサーバは <code>signup</code> と <code>login</code> を受け付け、ログイン済みの人だけが自分の情報（<code>/api/auth/me</code>）を引けるようになります。SNS が「あなた」を認識する、最初の一歩です。</p>
+
+    <div class="box goal"><div class="box-k">◈ この章のゴール</div>
+      <p>次の 2 つを、自分の目と手で確認できたら達成です。</p>
+      <ol>
+        <li><code>curl</code> でサインアップ → ログイン → <code>/api/auth/me</code> の流れが通り、ログインで受け取った Cookie を付けたときだけ自分の情報が返る（Cookie 無しなら <code>401 unauthorized</code>）。</li>
+        <li><code>cd src/backend &amp;&amp; go test ./...</code> が PASS する。とくに <code>TestPasswordHashRoundTrip</code>（ハッシュが平文でないこと）と <code>TestTokenTamperDetection</code>（改ざんトークンを弾くこと）を目で確かめる。</li>
+      </ol>
+    </div>
+
+    <div class="box map"><div class="box-k">☰ この章のステップ</div>
+      <ol>
+        <li><a href="#step-1">認証とは「毎回、身元を確かめ直す」こと</a></li>
+        <li><a href="#step-2">パスワードを元に戻せなくする — <code>password.go</code></a></li>
+        <li><a href="#step-3">改ざんできない身分証をつくる — <code>token.go</code></a></li>
+        <li><a href="#step-4">身分証をどこにしまうか — HttpOnly / SameSite Cookie</a></li>
+        <li><a href="#step-5">毎リクエストで身元を確かめる — <code>middleware.go</code></a></li>
+        <li><a href="#step-6">サインアップとログイン — <code>auth_handlers.go</code></a></li>
+        <li><a href="#step-7">動かして確認する — curl とテスト</a></li>
+      </ol>
+    </div>
+
+    <h2 class="step" id="step-1"><span class="step-no">Step 1</span>認証とは「毎回、身元を確かめ直す」こと</h2>
+    <p>まず言葉を整理します。似ているが違う2つがあります。<strong>認証（authentication）</strong>は「あなたは誰か」を確かめること。<strong>認可（authorization）</strong>は「その人にこの操作を許すか」を決めること。ログイン画面でパスワードを照合するのが認証、「この投稿を消せるのは書いた本人だけ」と判断するのが認可です。この章では主に<strong>認証</strong>を作り、認可の骨組み（ログイン中のユーザーIDを後続の処理へ渡す仕組み）まで用意します。</p>
+    <p>ここで、Web の認証がやっかいな理由を一つ押さえます。HTTP は<strong>ステートレス</strong> — サーバはリクエストとリクエストの間に「さっきの人」を覚えていません。1回目でログインが通っても、2回目のリクエストが来たとき、サーバにとってそれは<strong>まっさらな他人</strong>です。だから「一度ログインしたら、以後のリクエストにも身元の証拠を毎回添えてもらう」必要があります。その「毎回添える証拠」が<strong>身分証（トークン）</strong>で、Chirp では JWT を使います。</p>
+    <p>この章で用意するのは4つの部品です。<strong>(1) パスワードを安全にしまう仕組み</strong>（bcrypt / Step 2）、<strong>(2) 身分証を発行・検証する仕組み</strong>（JWT / Step 3）、<strong>(3) 身分証を安全にしまう入れ物</strong>（HttpOnly Cookie / Step 4）、<strong>(4) 毎リクエストで身元を確かめる関門</strong>（ミドルウェア / Step 5）。この4つが揃うと、Step 6 のサインアップ・ログインが組み上がります。</p>
+
+    <div class="box map"><div class="box-k">☰ この章のファイルと役割</div>
+      <ul>
+        <li><code>src/backend/internal/auth/password.go</code> — パスワードを bcrypt でハッシュ化・照合する（Step 2）</li>
+        <li><code>src/backend/internal/auth/token.go</code> — JWT を発行・検証する（Step 3）</li>
+        <li><code>src/backend/internal/api/middleware.go</code> — Cookie の読み書きと認証の関門（Step 4・5）</li>
+        <li><code>src/backend/internal/api/auth_handlers.go</code> — サインアップ・ログイン・ログアウトのハンドラ（Step 6）</li>
+        <li><code>src/backend/internal/store/users.go</code> — <code>users</code> テーブルへの読み書き（Step 6 で参照）</li>
+      </ul>
+    </div>
+
+    <h2 class="step" id="step-2"><span class="step-no">Step 2</span>パスワードを元に戻せなくする — password.go</h2>
+    <p>最初の部品は、パスワードの扱いです。ここには一つ、絶対に破ってはいけない鉄則があります。<strong>ユーザーの生パスワードを、DB に保存しない</strong>。もし平文で保存すれば、DB が漏れた瞬間に全員のパスワードが流出します。ユーザーは同じパスワードを他のサービスでも使い回していることが多いので、被害はあなたのサービスの外にまで及びます。だから保存するのは、パスワードそのものではなく、そこから計算した<strong>ハッシュ</strong>です。</p>
+    <p>ハッシュとは<strong>一方通行の変換</strong>です。パスワードからハッシュは計算できるが、ハッシュからパスワードは（現実的な時間では）戻せない。ログイン時は「入力パスワードを同じ手順でハッシュ化して、保存済みハッシュと一致するか」を見ます。DB に生パスワードは一度も現れません。この一方通行を担う道具が <strong>bcrypt</strong> です。全文は驚くほど短い。</p>
+
+    <div class="file-tag">src/backend/internal/auth/password.go</div>
+    <pre><code><span class="cm">// Package auth はパスワードハッシュとセッショントークンを担う。</span>
+<span class="kw">package</span> auth
+
+<span class="kw">import</span> <span class="st">"golang.org/x/crypto/bcrypt"</span>
+
+<span class="cm">// HashPassword はパスワードを元に戻せない形にする（教材 Chapter 2「一方通行の粉砕機」）。</span>
+<span class="kw">func</span> HashPassword(password <span class="ty">string</span>) (<span class="ty">string</span>, <span class="ty">error</span>) {
+	b, err := bcrypt.GenerateFromPassword([]<span class="ty">byte</span>(password), bcrypt.DefaultCost)
+	<span class="kw">return</span> <span class="ty">string</span>(b), err
+}
+
+<span class="cm">// VerifyPassword は入力パスワードが保存済みハッシュと一致するか照合する。</span>
+<span class="kw">func</span> VerifyPassword(hash, password <span class="ty">string</span>) <span class="ty">bool</span> {
+	<span class="kw">return</span> bcrypt.CompareHashAndPassword([]<span class="ty">byte</span>(hash), []<span class="ty">byte</span>(password)) == <span class="kw">nil</span>
+}</code></pre>
+
+    <p>2つの関数だけです。<code>HashPassword</code> は登録時に呼びます。<code>bcrypt.GenerateFromPassword([]byte(password), bcrypt.DefaultCost)</code> が、生パスワードのバイト列からハッシュ文字列を作ります。第2引数の <code>bcrypt.DefaultCost</code> が<strong>コスト係数</strong> — 「どれだけ手間をかけてハッシュを作るか」の強さです（後述）。返ってきた <code>b</code> は <code>[]byte</code> なので <code>string(b)</code> に変換して返します。これが DB の <code>password_hash</code> 列に入る値です。</p>
+    <p><code>VerifyPassword</code> はログイン時に呼びます。<code>bcrypt.CompareHashAndPassword([]byte(hash), []byte(password))</code> は、保存済みハッシュ <code>hash</code> と入力パスワード <code>password</code> が対応するかを調べ、<strong>一致すれば <code>nil</code>、不一致なら非 nil のエラー</strong>を返します。だから <code>== nil</code> で「一致したか（true/false）」に畳んでいます。</p>
+
+    <div class="gonote"><div class="box-k">GO メモ · なぜ自分で「入力をハッシュ化して <code>==</code> で比べる」としないのか</div>
+      <p>素朴に考えると「入力を <code>HashPassword</code> して、保存済みと <code>==</code> で比べればいい」と思うかもしれません。しかし bcrypt のハッシュは<strong>毎回ソルト（乱数）が変わる</strong>ため、同じパスワードでも作るたびに違う文字列になります。だから単純な <code>==</code> では絶対に一致しません。<code>CompareHashAndPassword</code> は、保存済みハッシュの中に埋め込まれたソルトとコストを<strong>読み出して</strong>、それを使って入力を計算し直し、一致を判定します。照合は必ずこの専用関数に任せる、が鉄則です。</p>
+    </div>
+
+    <div class="box hazard"><div class="box-k">⚠ なぜ SHA-256 ではなく bcrypt なのか — 「わざと遅い」が正義</div>
+      <p>「ハッシュなら SHA-256 でいいのでは?」と思うかもしれません。ダメです。SHA-256 は<strong>速すぎる</strong>のが問題です。攻撃者が DB を盗んだあと、よくあるパスワードを1秒間に何十億回もハッシュ化して総当たり（ブルートフォース）できてしまう。bcrypt は<strong>意図的に遅く</strong>作られていて、しかも <code>DefaultCost</code>（コスト係数）で「1回のハッシュにどれだけ計算を積むか」を調整できます。コストを上げれば1回が遅くなり、総当たりの単価が跳ね上がる。マシンが速くなったらコストを上げて追随できる。<strong>パスワード保存には「速いハッシュ」ではなく「調整可能に遅いハッシュ」を使う</strong> — これが bcrypt（や scrypt / Argon2）を選ぶ理由です。加えて bcrypt はソルトを自動で付けるので、「同じパスワードは同じハッシュ」になる弱点（レインボーテーブル攻撃）も塞げます。</p>
+    </div>
+
+    <h2 class="step" id="step-3"><span class="step-no">Step 3</span>改ざんできない身分証をつくる — token.go</h2>
+    <p>パスワードの照合ができました。しかし Step 1 で見たとおり、HTTP はステートレスで、サーバはリクエストの間に「さっきログインした人」を覚えていません。かといって、毎リクエストでパスワードを送らせるのは論外です（漏洩の機会が増える）。そこで、ログインが通った瞬間に<strong>「この人は確かにユーザーID 42 だ」と国（サーバ）が保証した身分証</strong>を発行し、以後はそれを提示してもらいます。その身分証が <strong>JWT（JSON Web Token）</strong> です。</p>
+    <p>JWT の勘所は一つ。<strong>中身は誰でも読めるが、改ざんはできない</strong>。JWT には「私はユーザーID 42 です」という主張（クレーム）が書かれていて、それ自体は暗号化されていません（読める）。しかし末尾に<strong>サーバの秘密鍵で作った署名</strong>が付いていて、中身を1文字でも書き換えると署名が合わなくなる。だから攻撃者が「ID 42」を「ID 1」に書き換えても、署名が壊れてサーバに即座に見破られます。秘密鍵を持つサーバだけが、正しい署名を作れる。これを担うのが <code>token.go</code> です。</p>
+
+    <div class="file-tag">src/backend/internal/auth/token.go</div>
+    <pre><code><span class="kw">package</span> auth
+
+<span class="kw">import</span> (
+	<span class="st">"errors"</span>
+	<span class="st">"fmt"</span>
+	<span class="st">"strconv"</span>
+	<span class="st">"time"</span>
+
+	<span class="st">"github.com/golang-jwt/jwt/v5"</span>
+)
+
+<span class="cm">// TokenIssuer は「改ざんできない身分証」（JWT）を発行・検証する（教材 Chapter 2）。</span>
+<span class="kw">type</span> <span class="ty">TokenIssuer</span> <span class="kw">struct</span> {
+	secret []<span class="ty">byte</span>
+	ttl    time.<span class="ty">Duration</span>
+}
+
+<span class="kw">func</span> NewTokenIssuer(secret <span class="ty">string</span>, ttl time.<span class="ty">Duration</span>) *<span class="ty">TokenIssuer</span> {
+	<span class="kw">return</span> &amp;<span class="ty">TokenIssuer</span>{secret: []<span class="ty">byte</span>(secret), ttl: ttl}
+}
+
+<span class="cm">// Issue はユーザーIDを主体とするトークンを発行する。</span>
+<span class="kw">func</span> (t *<span class="ty">TokenIssuer</span>) Issue(userID <span class="ty">int64</span>) (<span class="ty">string</span>, <span class="ty">error</span>) {
+	claims := jwt.<span class="ty">RegisteredClaims</span>{
+		Subject:   strconv.FormatInt(userID, <span class="st">10</span>),
+		ExpiresAt: jwt.NewNumericDate(time.Now().Add(t.ttl)),
+		IssuedAt:  jwt.NewNumericDate(time.Now()),
+	}
+	<span class="kw">return</span> jwt.NewWithClaims(jwt.SigningMethodHS256, claims).SignedString(t.secret)
+}
+
+<span class="cm">// Verify はトークンを検証し、ユーザーIDを取り出す。</span>
+<span class="cm">// 署名が一致しない＝中身が書き換えられている場合は必ず失敗する。</span>
+<span class="kw">func</span> (t *<span class="ty">TokenIssuer</span>) Verify(tokenStr <span class="ty">string</span>) (<span class="ty">int64</span>, <span class="ty">error</span>) {
+	token, err := jwt.ParseWithClaims(tokenStr, &amp;jwt.<span class="ty">RegisteredClaims</span>{}, <span class="kw">func</span>(tok *jwt.<span class="ty">Token</span>) (<span class="ty">any</span>, <span class="ty">error</span>) {
+		<span class="kw">if</span> _, ok := tok.Method.(*jwt.<span class="ty">SigningMethodHMAC</span>); !ok {
+			<span class="kw">return</span> <span class="kw">nil</span>, fmt.Errorf(<span class="st">"unexpected signing method: %v"</span>, tok.Header[<span class="st">"alg"</span>])
+		}
+		<span class="kw">return</span> t.secret, <span class="kw">nil</span>
+	})
+	<span class="kw">if</span> err != <span class="kw">nil</span> {
+		<span class="kw">return</span> <span class="st">0</span>, err
+	}
+	claims, ok := token.Claims.(*jwt.<span class="ty">RegisteredClaims</span>)
+	<span class="kw">if</span> !ok || !token.Valid {
+		<span class="kw">return</span> <span class="st">0</span>, errors.New(<span class="st">"invalid token"</span>)
+	}
+	<span class="kw">return</span> strconv.ParseInt(claims.Subject, <span class="st">10</span>, <span class="st">64</span>)
+}</code></pre>
+
+    <p>上から読みます。<code>TokenIssuer</code> は2つのフィールドを持つ構造体です。<code>secret []byte</code> が<strong>署名に使う秘密鍵</strong>（第00章の <code>main.go</code> で <code>JWT_SECRET</code> から渡した値）、<code>ttl time.Duration</code> が<strong>トークンの有効期間</strong>（同じく <code>main.go</code> の <code>TokenTTL: 7 * 24 * time.Hour</code> = 7日）です。<code>NewTokenIssuer</code> はそれを受け取って構造体を組み立てるだけ。<code>secret</code> を <code>[]byte</code> に変換して持っておくのは、署名関数がバイト列を要求するからです。</p>
+
+    <p>次に発行、<code>Issue</code> です。ここが「身分証を作る」本体。</p>
+    <pre><code>	claims := jwt.<span class="ty">RegisteredClaims</span>{
+		Subject:   strconv.FormatInt(userID, <span class="st">10</span>),
+		ExpiresAt: jwt.NewNumericDate(time.Now().Add(t.ttl)),
+		IssuedAt:  jwt.NewNumericDate(time.Now()),
+	}</code></pre>
+    <p><strong>クレーム（claims）</strong>とは、トークンに書き込む「主張」の集まりです。<code>jwt.RegisteredClaims</code> は JWT 標準が定めた定番の項目を持つ構造体で、Chirp は3つを使います。<code>Subject</code> は「このトークンは誰のものか」— ユーザーIDを入れます。<code>strconv.FormatInt(userID, 10)</code> は <code>int64</code> のユーザーIDを 10進数の文字列にする変換です（<code>Subject</code> は文字列型なので）。<code>ExpiresAt</code> は<strong>有効期限</strong>で、<code>time.Now().Add(t.ttl)</code> = 「今から7日後」。<code>IssuedAt</code> は<strong>発行時刻</strong>です。有効期限を入れておくと、万一トークンが漏れても<strong>7日で自動的に無効</strong>になり、被害を時間で区切れます。</p>
+    <pre><code>	<span class="kw">return</span> jwt.NewWithClaims(jwt.SigningMethodHS256, claims).SignedString(t.secret)</code></pre>
+    <p>そして署名です。<code>jwt.NewWithClaims(jwt.SigningMethodHS256, claims)</code> で「HS256 という方式で署名する予定のトークン」を組み立て、<code>.SignedString(t.secret)</code> で<strong>秘密鍵を使って実際に署名し、最終的な文字列</strong>にします。この一行の戻り値が、クライアントに渡す身分証です。</p>
+
+    <div class="gonote"><div class="box-k">GO メモ · HS256 とは — 「共通鍵で署名する」方式</div>
+      <p><code>HS256</code> は「<strong>HMAC + SHA-256</strong>」の略で、<strong>1つの秘密鍵で署名も検証も行う</strong>方式です（共通鍵署名）。同じ <code>secret</code> を知っているサーバだけが、正しい署名を作れて、かつ検証もできる。個人開発の「サーバ1台が発行も検証もする」構成にはこれで十分で、実装も設定もいちばん簡単です。<br>
+      対になる方式に <code>RS256</code>（公開鍵署名）があります。こちらは「発行は秘密鍵、検証は公開鍵」と鍵を分けられるので、<strong>複数のサービスが同じトークンを検証し合う</strong>ような大規模構成で使います。Chirp は単一サーバなので、余計な鍵管理の要らない HS256 を選んでいます。</p>
+    </div>
+
+    <p>最後に検証、<code>Verify</code> です。受け取ったトークン文字列を調べ、正当ならユーザーIDを取り出します。</p>
+    <pre><code>	token, err := jwt.ParseWithClaims(tokenStr, &amp;jwt.<span class="ty">RegisteredClaims</span>{}, <span class="kw">func</span>(tok *jwt.<span class="ty">Token</span>) (<span class="ty">any</span>, <span class="ty">error</span>) {
+		<span class="kw">if</span> _, ok := tok.Method.(*jwt.<span class="ty">SigningMethodHMAC</span>); !ok {
+			<span class="kw">return</span> <span class="kw">nil</span>, fmt.Errorf(<span class="st">"unexpected signing method: %v"</span>, tok.Header[<span class="st">"alg"</span>])
+		}
+		<span class="kw">return</span> t.secret, <span class="kw">nil</span>
+	})</code></pre>
+    <p><code>jwt.ParseWithClaims</code> は、トークン文字列を解析しつつ署名を検証します。第3引数に渡している関数（<strong>キー関数</strong>）は、「このトークンを検証するのにどの鍵を使うか」をライブラリに教える<strong>コールバック</strong>です。単に鍵を返すだけでなく、その手前で重要なチェックを1つしています。</p>
+    <p><code>if _, ok := tok.Method.(*jwt.SigningMethodHMAC); !ok</code> は、<strong>トークンが本当に HMAC 系（HS256）で署名されているかを確認</strong>しています。これを怠ると危険です。JWT には <code>alg: none</code>(署名なし)という指定や、鍵を取り違えさせる攻撃（アルゴリズム混同攻撃）が知られていて、「送られてきたトークンが自称する方式」を鵜呑みにすると、署名なしのトークンや別方式のトークンを通してしまう。だから「HMAC でなければ、鍵を返さずエラーにする」と明示的に門を閉じています。想定と違う方式なら <code>fmt.Errorf("unexpected signing method: ...")</code> でエラーを返し、正当なら <code>t.secret</code>（署名に使ったのと同じ鍵）を返して検証させます。</p>
+
+    <div class="box hazard"><div class="box-k">⚠ 落とし穴 — 署名方式のチェックを省いてはいけない</div>
+      <p>キー関数の中の <code>if _, ok := tok.Method.(*jwt.SigningMethodHMAC); !ok { ... }</code> は、面倒に見えて<strong>絶対に省けない防御</strong>です。もしこのチェックを外して常に <code>return t.secret, nil</code> とだけ書くと、攻撃者が「<code>alg</code> を別方式に差し替えたトークン」を送ってきたとき、ライブラリが誤って通してしまう余地が生まれます。<strong>「トークンが自称する署名方式」を信用せず、サーバが期待する方式（HMAC）であることを自分で確かめる</strong> — これが JWT 検証の定石です。</p>
+    </div>
+
+    <pre><code>	<span class="kw">if</span> err != <span class="kw">nil</span> {
+		<span class="kw">return</span> <span class="st">0</span>, err
+	}
+	claims, ok := token.Claims.(*jwt.<span class="ty">RegisteredClaims</span>)
+	<span class="kw">if</span> !ok || !token.Valid {
+		<span class="kw">return</span> <span class="st">0</span>, errors.New(<span class="st">"invalid token"</span>)
+	}
+	<span class="kw">return</span> strconv.ParseInt(claims.Subject, <span class="st">10</span>, <span class="st">64</span>)</code></pre>
+    <p><code>ParseWithClaims</code> が返す <code>err</code> は、<strong>署名が合わない・有効期限が切れている・書式が壊れている</strong>といった不正をまとめて表します。ここで非 nil なら即座に <code>return 0, err</code> で撥ねます（<strong>期限切れの検知もここに含まれます</strong> — <code>ExpiresAt</code> を入れておいたのが効いています）。続く <code>token.Claims.(*jwt.RegisteredClaims)</code> は<strong>型アサーション</strong>で、解析結果を期待した型に取り出せるか確認します。<code>!ok || !token.Valid</code> で「取り出せない、または妥当でない」なら <code>invalid token</code>。すべて通ったら、<code>claims.Subject</code>（文字列で入れたユーザーID）を <code>strconv.ParseInt(..., 10, 64)</code> で <code>int64</code> に戻して返します。これで「トークン → ユーザーID」の変換が完成です。</p>
+
+    <h2 class="step" id="step-4"><span class="step-no">Step 4</span>身分証をどこにしまうか — HttpOnly / SameSite Cookie</h2>
+    <p>身分証（JWT）を作れるようになりました。次の問いは地味に見えて、<strong>認証設計で最も間違いが起きやすい</strong>ところです。「発行した JWT を、ブラウザのどこに保管させるか」。選択肢は主に2つ — <strong>localStorage</strong> に置いて JavaScript が読む方式と、<strong>Cookie</strong> にサーバがしまう方式。Chirp は後者、それも <strong>HttpOnly / SameSite=Lax な Cookie</strong> を選びます。まずその Cookie を組み立てるコードを見ます。</p>
+
+    <div class="file-tag">src/backend/internal/api/middleware.go（前半）</div>
+    <pre><code><span class="kw">package</span> api
+
+<span class="kw">import</span> (
+	<span class="st">"context"</span>
+	<span class="st">"net/http"</span>
+)
+
+<span class="kw">type</span> <span class="ty">ctxKey</span> <span class="ty">int</span>
+
+<span class="kw">const</span> userIDKey <span class="ty">ctxKey</span> = <span class="st">0</span>
+
+<span class="kw">const</span> sessionCookie = <span class="st">"session"</span>
+
+<span class="cm">// setSessionCookie は身分証（トークン）をスクリプトから触れない引き出しにしまう</span>
+<span class="cm">// （HttpOnly Cookie、教材 Chapter 2）。</span>
+<span class="kw">func</span> (s *<span class="ty">Server</span>) setSessionCookie(w http.<span class="ty">ResponseWriter</span>, token <span class="ty">string</span>) {
+	http.SetCookie(w, &amp;http.<span class="ty">Cookie</span>{
+		Name:     sessionCookie,
+		Value:    token,
+		Path:     <span class="st">"/"</span>,
+		HttpOnly: <span class="kw">true</span>,
+		SameSite: http.SameSiteLaxMode,
+		Secure:   s.secureCookie,
+		MaxAge:   <span class="ty">int</span>(s.tokenTTL.Seconds()),
+	})
+}
+
+<span class="kw">func</span> (s *<span class="ty">Server</span>) clearSessionCookie(w http.<span class="ty">ResponseWriter</span>) {
+	http.SetCookie(w, &amp;http.<span class="ty">Cookie</span>{
+		Name:     sessionCookie,
+		Value:    <span class="st">""</span>,
+		Path:     <span class="st">"/"</span>,
+		HttpOnly: <span class="kw">true</span>,
+		SameSite: http.SameSiteLaxMode,
+		Secure:   s.secureCookie,
+		MaxAge:   <span class="st">-1</span>,
+	})
+}</code></pre>
+
+    <p><code>setSessionCookie</code> は、発行した JWT を <code>session</code> という名前の Cookie に入れてブラウザに返します。<code>http.SetCookie(w, ...)</code> で、レスポンスに <code>Set-Cookie</code> ヘッダを1つ足します。フィールドを1つずつ読むと、そのまま Chirp の認証方針の宣言になっています。</p>
+    <ul>
+      <li><code>Name: sessionCookie</code> / <code>Value: token</code> — Cookie の名前は <code>"session"</code>、中身が JWT です。</li>
+      <li><code>Path: "/"</code> — サイトのどの URL へのリクエストにもこの Cookie が付く、の意味。</li>
+      <li><code>HttpOnly: true</code> — <strong>JavaScript からこの Cookie を読めなくする</strong>（後述の主役）。</li>
+      <li><code>SameSite: http.SameSiteLaxMode</code> — <strong>他サイト由来のリクエストには原則付けない</strong>（CSRF 対策、後述）。</li>
+      <li><code>Secure: s.secureCookie</code> — HTTPS のときだけ送る設定。第00章の <code>SECURE_COOKIE=1</code> でオンになります（本番用）。</li>
+      <li><code>MaxAge: int(s.tokenTTL.Seconds())</code> — Cookie の寿命を秒で指定。JWT の有効期間（7日）と揃えています。</li>
+    </ul>
+    <p><code>clearSessionCookie</code> はログアウト用です。同じ名前の Cookie を<strong>空の値</strong>で、しかも <code>MaxAge: -1</code>（= 即座に期限切れ）で送り直します。ブラウザは「この Cookie はもう捨てろ」と受け取り、<code>session</code> Cookie を削除します。ログアウトの実体は「Cookie を消させる」だけ、というのがポイントです。</p>
+
+    <div class="box hazard"><div class="box-k">⚠ なぜ localStorage ではなく HttpOnly Cookie なのか — XSS でトークンを盗ませない</div>
+      <p>JWT を <strong>localStorage</strong> に置くと、<code>localStorage.getItem("token")</code> の一行で JavaScript が読めます。普段は便利ですが、これが<strong>致命的な穴</strong>になります。もしサイトのどこかに <strong>XSS（クロスサイトスクリプティング）</strong>の隙 — 攻撃者が仕込んだスクリプトがページ上で動いてしまう欠陥 — があると、そのスクリプトが <code>localStorage</code> からトークンを読み出し、外部へ送信できてしまう。トークンを盗まれれば、攻撃者はそのユーザーになりすませます。<br>
+      対して <code>HttpOnly: true</code> を付けた Cookie は、<strong>JavaScript から一切読めません</strong>（<code>document.cookie</code> にも現れない）。ブラウザが自動でリクエストに添えてはくれるが、スクリプトの手は届かない。だから仮に XSS を踏まれても、<strong>トークンそのものは盗み出せない</strong>。「認証トークンは、スクリプトから触れない引き出し（HttpOnly Cookie）にしまう」— これが Chirp の根本方針です。コード上のコメント「スクリプトから触れない引き出しにしまう」は、まさにこの意図です。</p>
+    </div>
+
+    <div class="box hazard"><div class="box-k">⚠ なぜ SameSite=Lax なのか — CSRF を封じる</div>
+      <p>Cookie は「ブラウザが自動で添える」のが便利な反面、危険の種でもあります。攻撃者が用意した悪意あるサイトに、あなたがログイン中のまま訪れたとします。そのページに <code>&lt;img src="https://chirp.example/api/... "&gt;</code> のような仕掛けがあると、ブラウザは<strong>あなたの Chirp の Cookie を勝手に添えて</strong>そのリクエストを送ってしまう。これが <strong>CSRF（クロスサイトリクエストフォージェリ）</strong> — 本人の意図しない操作を、本人の認証情報で実行させる攻撃です。<br>
+      <code>SameSite: http.SameSiteLaxMode</code> は、この自動添付に制限をかけます。<strong>別サイトから発生したリクエストには、原則この Cookie を付けない</strong>（例外は、リンクを踏んでページ遷移する GET など、副作用の少ないもの）。だから他サイトからの <code>POST</code>（投稿・削除など状態を変える操作）には Cookie が付かず、CSRF が成立しません。<code>Strict</code> という更に厳しい設定もありますが、それだと「外部リンクから Chirp に来た初回」でもログイン状態が切れて不便なので、実用と安全のバランスが良い <code>Lax</code> を選んでいます。</p>
+    </div>
+
+    <div class="gonote"><div class="box-k">GO メモ · ctxKey という「自分専用の鍵型」</div>
+      <p>ファイル冒頭の <code>type ctxKey int</code> と <code>const userIDKey ctxKey = 0</code> は、次の Step 5 で使う小道具です。認証済みのユーザーIDを、後続の処理へ <code>context</code> に載せて渡すのですが、その「引き出しの鍵」を<strong>専用の型 <code>ctxKey</code></strong>で作っています。もし鍵を単なる文字列（例 <code>"userID"</code>）にすると、別のパッケージがたまたま同じ文字列を鍵に使ったとき<strong>衝突</strong>しかねません。<code>ctxKey</code> という自作の型にしておけば、他所の値と型が違うので絶対に混ざらない。「<code>context</code> のキーには非公開の専用型を使う」は Go の定番作法です。</p>
+    </div>
+
+    <h2 class="step" id="step-5"><span class="step-no">Step 5</span>毎リクエストで身元を確かめる — middleware.go</h2>
+    <p>Cookie の出し入れができました。残る部品は<strong>関門</strong>です。認証が必要なエンドポイント（例:「自分の情報を返す」）に来たリクエストを、処理の手前で捕まえ、<strong>Cookie から JWT を取り出して検証し、正当ならユーザーIDを後続へ渡す</strong>。不正なら <code>401</code> で撥ねる。この関門を <strong>ミドルウェア</strong>と呼びます。<code>middleware.go</code> の後半です。</p>
+
+    <div class="file-tag">src/backend/internal/api/middleware.go（後半）</div>
+    <pre><code><span class="cm">// requireAuth は認証必須のハンドラを包む。検証に通ればユーザーIDをctxに載せる。</span>
+<span class="kw">func</span> (s *<span class="ty">Server</span>) requireAuth(next http.<span class="ty">HandlerFunc</span>) http.<span class="ty">HandlerFunc</span> {
+	<span class="kw">return</span> <span class="kw">func</span>(w http.<span class="ty">ResponseWriter</span>, r *http.<span class="ty">Request</span>) {
+		c, err := r.Cookie(sessionCookie)
+		<span class="kw">if</span> err != <span class="kw">nil</span> {
+			writeError(w, http.<span class="ty">StatusUnauthorized</span>, <span class="st">"unauthorized"</span>, <span class="st">"ログインが必要です。"</span>)
+			<span class="kw">return</span>
+		}
+		userID, err := s.tokens.Verify(c.Value)
+		<span class="kw">if</span> err != <span class="kw">nil</span> {
+			writeError(w, http.<span class="ty">StatusUnauthorized</span>, <span class="st">"unauthorized"</span>, <span class="st">"セッションが無効です。再度ログインしてください。"</span>)
+			<span class="kw">return</span>
+		}
+		next(w, r.WithContext(context.WithValue(r.Context(), userIDKey, userID)))
+	}
+}
+
+<span class="cm">// currentUserID はctxからログイン中ユーザーIDを取り出す（requireAuth 配下でのみ有効）。</span>
+<span class="kw">func</span> currentUserID(r *http.<span class="ty">Request</span>) <span class="ty">int64</span> {
+	id, _ := r.Context().Value(userIDKey).(<span class="ty">int64</span>)
+	<span class="kw">return</span> id
+}
+
+<span class="cm">// optionalUserID は未ログインなら 0 を返す（公開ページでの「自分がいいね済みか」用）。</span>
+<span class="kw">func</span> (s *<span class="ty">Server</span>) optionalUserID(r *http.<span class="ty">Request</span>) <span class="ty">int64</span> {
+	c, err := r.Cookie(sessionCookie)
+	<span class="kw">if</span> err != <span class="kw">nil</span> {
+		<span class="kw">return</span> <span class="st">0</span>
+	}
+	id, err := s.tokens.Verify(c.Value)
+	<span class="kw">if</span> err != <span class="kw">nil</span> {
+		<span class="kw">return</span> <span class="st">0</span>
+	}
+	<span class="kw">return</span> id
+}</code></pre>
+
+    <p>主役は <code>requireAuth</code> です。シグネチャをよく見てください。<code>func (s *Server) requireAuth(next http.HandlerFunc) http.HandlerFunc</code> — <strong>ハンドラを受け取って、ハンドラを返す</strong>。これがミドルウェアの形です。「本来の処理 <code>next</code> を、認証チェックで包んだ新しいハンドラ」を作って返す。ルーティング側で <code>requireAuth(s.handleMe)</code> のように包めば、<code>handleMe</code> は<strong>認証を通った後にしか呼ばれない</strong>ようになります。</p>
+    <p>返している関数の中身を追います。</p>
+    <pre><code>		c, err := r.Cookie(sessionCookie)
+		<span class="kw">if</span> err != <span class="kw">nil</span> {
+			writeError(w, http.<span class="ty">StatusUnauthorized</span>, <span class="st">"unauthorized"</span>, <span class="st">"ログインが必要です。"</span>)
+			<span class="kw">return</span>
+		}</code></pre>
+    <p>まず <code>r.Cookie(sessionCookie)</code> で <code>session</code> Cookie を取り出します。無ければ（そもそもログインしていない）<code>err</code> が返るので、<code>writeError</code> で <strong><code>401 Unauthorized</code></strong> と「ログインが必要です。」を返して<code>return</code>。ここで <code>next</code> は呼ばれないので、本来の処理には一切到達しません。</p>
+    <pre><code>		userID, err := s.tokens.Verify(c.Value)
+		<span class="kw">if</span> err != <span class="kw">nil</span> {
+			writeError(w, http.<span class="ty">StatusUnauthorized</span>, <span class="st">"unauthorized"</span>, <span class="st">"セッションが無効です。再度ログインしてください。"</span>)
+			<span class="kw">return</span>
+		}</code></pre>
+    <p>Cookie があったら、その中身（<code>c.Value</code> = JWT 文字列）を Step 3 の <code>s.tokens.Verify</code> に渡します。ここで<strong>署名・有効期限・書式のすべてが検証</strong>されます。改ざんされていたり期限切れなら <code>err</code> が返り、<code>401</code>＋「セッションが無効です。再度ログインしてください。」で撥ねる。通れば <code>userID</code>（<code>int64</code>）が手に入ります。</p>
+    <pre><code>		next(w, r.WithContext(context.WithValue(r.Context(), userIDKey, userID)))</code></pre>
+    <p>そしてこの1行が関門の出口です。<code>context.WithValue(r.Context(), userIDKey, userID)</code> で、<strong>認証済みユーザーIDを <code>context</code> に載せた新しいリクエスト</strong>を作り、それを <code>next</code>（本来の処理）へ渡します。鍵は Step 4 の <code>gonote</code> で作った専用型 <code>userIDKey</code>。こうして「誰からのリクエストか」が、後続のハンドラへ安全に受け渡されます。ハンドラ側は <code>currentUserID(r)</code> でそれを取り出します（<code>r.Context().Value(userIDKey).(int64)</code> で <code>int64</code> にアサーションして返すだけ）。<strong>認証は関門で一度だけ行い、結果を <code>context</code> で運ぶ</strong> — この分業が、各ハンドラを「もうログイン済みのユーザーIDが手元にある」前提で単純に書ける理由です。</p>
+
+    <div class="gonote"><div class="box-k">GO メモ · optionalUserID — 「ログインしていてもしていなくてもいい」ページ用</div>
+      <p><code>optionalUserID</code> は <code>requireAuth</code> の緩い版です。認証を<strong>必須にしない</strong>ページ — 例えば「公開タイムラインは誰でも見られるが、ログインしていれば『自分がいいね済みか』も表示したい」— で使います。Cookie が無ければ、あるいは検証に失敗すれば、エラーにせず<strong>単に <code>0</code> を返す</strong>（＝「未ログイン」を意味する番号）。呼び出し側は <code>0</code> なら「ゲスト向け表示」、<code>0</code> 以外なら「そのユーザー向け表示」と分岐できます。<code>requireAuth</code>（門前払い）と <code>optionalUserID</code>（居れば分かる）を使い分けることで、ページごとに認証の厳しさを変えられます。第06章・07章で効いてきます。</p>
+    </div>
+
+    <h2 class="step" id="step-6"><span class="step-no">Step 6</span>サインアップとログイン — auth_handlers.go</h2>
+    <p>4つの部品（bcrypt / JWT / Cookie / ミドルウェア）が揃いました。最後に、それらを組み合わせて<strong>実際のエンドポイント</strong>を作ります。<code>auth_handlers.go</code> には4つのハンドラ — サインアップ・ログイン・ログアウト・自分の情報取得 — が入ります。まず登録から。</p>
+
+    <div class="file-tag">src/backend/internal/api/auth_handlers.go（サインアップ）</div>
+    <pre><code><span class="kw">type</span> <span class="ty">signupRequest</span> <span class="kw">struct</span> {
+	Username    <span class="ty">string</span> <span class="st">`json:"username"`</span>
+	DisplayName <span class="ty">string</span> <span class="st">`json:"display_name"`</span>
+	Email       <span class="ty">string</span> <span class="st">`json:"email"`</span>
+	Password    <span class="ty">string</span> <span class="st">`json:"password"`</span>
+}
+
+<span class="cm">// POST /api/auth/signup</span>
+<span class="kw">func</span> (s *<span class="ty">Server</span>) handleSignup(w http.<span class="ty">ResponseWriter</span>, r *http.<span class="ty">Request</span>) {
+	<span class="kw">var</span> req signupRequest
+	<span class="kw">if</span> !decodeBody(w, r, &amp;req) {
+		<span class="kw">return</span>
+	}
+	username, ok := validateUsername(req.Username)
+	<span class="kw">if</span> !ok {
+		writeError(w, http.<span class="ty">StatusBadRequest</span>, <span class="st">"invalid_username"</span>, <span class="st">"ユーザー名は3〜20文字の英小文字・数字・アンダースコアで入力してください。"</span>)
+		<span class="kw">return</span>
+	}
+	displayName, ok := validateDisplayName(req.DisplayName)
+	<span class="kw">if</span> !ok {
+		writeError(w, http.<span class="ty">StatusBadRequest</span>, <span class="st">"invalid_display_name"</span>, <span class="st">"表示名は1〜50文字で入力してください。"</span>)
+		<span class="kw">return</span>
+	}
+	email, ok := validateEmail(req.Email)
+	<span class="kw">if</span> !ok {
+		writeError(w, http.<span class="ty">StatusBadRequest</span>, <span class="st">"invalid_email"</span>, <span class="st">"メールアドレスの形式が正しくありません。"</span>)
+		<span class="kw">return</span>
+	}
+	<span class="kw">if</span> !validatePassword(req.Password) {
+		writeError(w, http.<span class="ty">StatusBadRequest</span>, <span class="st">"weak_password"</span>, <span class="st">"パスワードは8文字以上で設定してください。"</span>)
+		<span class="kw">return</span>
+	}
+
+	hash, err := auth.HashPassword(req.Password)
+	<span class="kw">if</span> err != <span class="kw">nil</span> {
+		writeStoreError(w, err)
+		<span class="kw">return</span>
+	}
+	u, err := s.store.CreateUser(r.Context(), username, displayName, email, hash)
+	<span class="kw">if</span> err != <span class="kw">nil</span> {
+		writeStoreError(w, err)
+		<span class="kw">return</span>
+	}
+
+	<span class="cm">// 登録後はログイン状態になる（FR-1）</span>
+	token, err := s.tokens.Issue(u.ID)
+	<span class="kw">if</span> err != <span class="kw">nil</span> {
+		writeStoreError(w, err)
+		<span class="kw">return</span>
+	}
+	s.setSessionCookie(w, token)
+	writeJSON(w, http.<span class="ty">StatusCreated</span>, toUserJSON(u))
+}</code></pre>
+
+    <p>まず <code>signupRequest</code> は、受け取る JSON の形です。各フィールドの <code>`json:"username"`</code> はタグで、「JSON の <code>username</code> キーをこのフィールドに入れる」対応づけ。<code>handleSignup</code> の流れは<strong>「検証 → ハッシュ化 → 保存 → ログイン化」</strong>の4段です。</p>
+    <p><code>decodeBody(w, r, &amp;req)</code> でリクエストボディの JSON を <code>req</code> に読み込みます（失敗時は中でエラーを返し <code>false</code>、なので <code>if !... { return }</code>）。続く4つの <code>validate...</code> が<strong>入力検証</strong>です。ユーザー名は3〜20文字の英小文字・数字・アンダースコア、表示名は1〜50文字、メールは形式チェック、パスワードは8文字以上。どれか外れたら、それぞれ専用のエラーコードと日本語メッセージで <strong><code>400 Bad Request</code></strong> を返します。<strong>入力の妥当性を、DB に触る前にサーバ側で必ず確かめる</strong> — 画面（フロント）の検証はすり抜けられうるので、サーバでもう一度守るのが鉄則です。</p>
+    <p>検証を抜けたら、<code>auth.HashPassword(req.Password)</code> で<strong>パスワードをハッシュ化</strong>（Step 2）。そして <code>s.store.CreateUser(...)</code> で <code>users</code> テーブルに保存します。渡すのは <code>username, displayName, email, hash</code> — <strong>生パスワードは渡さず、ハッシュだけ</strong>を渡しているのに注目してください。ここが「生パスワードを DB に残さない」の実装点です。最後に、登録が済んだユーザーの <code>u.ID</code> で <code>s.tokens.Issue</code> して JWT を発行し、<code>s.setSessionCookie</code> で Cookie にしまい、<code>201 Created</code> でユーザー情報（<code>toUserJSON</code> はパスワードハッシュを含まない公開用の形に変換）を返す。<strong>登録した瞬間からログイン済み</strong>になる、という親切な作りです。</p>
+
+    <div class="gonote"><div class="box-k">GO メモ · CreateUser は重複を「DB の一意制約」で検知する</div>
+      <p>保存を担う <code>store.CreateUser</code>（<code>internal/store/users.go</code>）は、重複ユーザー名・重複メールをアプリ側で事前チェックせず、<strong>DB の <code>UNIQUE</code> 制約に判定を任せて</strong>います。</p>
+      <pre><code><span class="cm">// CreateUser はユーザーを登録する。username/email の重複は一意制約で検出する。</span>
+<span class="kw">func</span> (s *<span class="ty">Store</span>) CreateUser(ctx context.<span class="ty">Context</span>, username, displayName, email, passwordHash <span class="ty">string</span>) (*<span class="ty">User</span>, <span class="ty">error</span>) {
+	row := s.pool.QueryRow(ctx, <span class="st">`
+		INSERT INTO users (username, display_name, email, password_hash)
+		VALUES ($1, $2, $3, $4)
+		RETURNING `</span>+userCols,
+		username, displayName, email, passwordHash)
+	u, err := scanUser(row)
+	<span class="kw">if</span> err != <span class="kw">nil</span> {
+		<span class="kw">var</span> pgErr *pgconn.<span class="ty">PgError</span>
+		<span class="kw">if</span> errors.As(err, &amp;pgErr) &amp;&amp; pgErr.Code == <span class="st">"23505"</span> { <span class="cm">// unique_violation</span>
+			<span class="kw">if</span> strings.Contains(pgErr.ConstraintName, <span class="st">"email"</span>) {
+				<span class="kw">return</span> <span class="kw">nil</span>, ErrEmailTaken
+			}
+			<span class="kw">return</span> <span class="kw">nil</span>, ErrUsernameTaken
+		}
+		<span class="kw">return</span> <span class="kw">nil</span>, err
+	}
+	<span class="kw">return</span> u, <span class="kw">nil</span>
+}</code></pre>
+      <p><code>INSERT</code> が第00章で見た <code>UNIQUE</code> 制約に触れると、PostgreSQL は<strong>エラーコード <code>23505</code>（unique_violation）</strong>を返します。それを <code>errors.As</code> で捕まえ、制約名に <code>email</code> が含まれれば <code>ErrEmailTaken</code>、そうでなければ <code>ErrUsernameTaken</code> に変換して返す。「先に <code>SELECT</code> で存在確認してから <code>INSERT</code>」より、<strong>DB の制約に一発で判定させる方が、競合（同時登録）にも強く確実</strong>です。<code>$1..$4</code> のプレースホルダを使っているのは SQL インジェクション対策で、値を SQL 文に文字列連結しないためです（第02章以降でも一貫します）。</p>
+    </div>
+
+    <p>次はログインです。ここに、この章で最も繊細なセキュリティ配慮が入っています。</p>
+
+    <div class="file-tag">src/backend/internal/api/auth_handlers.go（ログイン）</div>
+    <pre><code><span class="kw">type</span> <span class="ty">loginRequest</span> <span class="kw">struct</span> {
+	Identifier <span class="ty">string</span> <span class="st">`json:"identifier"`</span> <span class="cm">// ユーザー名またはメールアドレス</span>
+	Password   <span class="ty">string</span> <span class="st">`json:"password"`</span>
+}
+
+<span class="cm">// POST /api/auth/login</span>
+<span class="kw">func</span> (s *<span class="ty">Server</span>) handleLogin(w http.<span class="ty">ResponseWriter</span>, r *http.<span class="ty">Request</span>) {
+	<span class="kw">var</span> req loginRequest
+	<span class="kw">if</span> !decodeBody(w, r, &amp;req) {
+		<span class="kw">return</span>
+	}
+
+	<span class="cm">// どちらが誤りか特定させない汎用エラーを返す（FR-2）</span>
+	genericFail := <span class="kw">func</span>() {
+		writeError(w, http.<span class="ty">StatusUnauthorized</span>, <span class="st">"invalid_credentials"</span>, <span class="st">"ユーザー名またはパスワードが正しくありません。"</span>)
+	}
+
+	u, err := s.store.GetUserByLogin(r.Context(), req.Identifier)
+	<span class="kw">if</span> err != <span class="kw">nil</span> {
+		<span class="cm">// ユーザー不在でもパスワード照合と同等の時間を消費し、応答時間差からの推測を防ぐ</span>
+		auth.VerifyPassword(<span class="st">"$2a$10$0123456789012345678901uZOJvDsvDhGKW0dQ1eVX8dW3Q0Zx3Fa"</span>, req.Password)
+		genericFail()
+		<span class="kw">return</span>
+	}
+	<span class="kw">if</span> !auth.VerifyPassword(u.PasswordHash, req.Password) {
+		genericFail()
+		<span class="kw">return</span>
+	}
+
+	token, err := s.tokens.Issue(u.ID)
+	<span class="kw">if</span> err != <span class="kw">nil</span> {
+		writeStoreError(w, err)
+		<span class="kw">return</span>
+	}
+	s.setSessionCookie(w, token)
+	writeJSON(w, http.<span class="ty">StatusOK</span>, toUserJSON(u))
+}</code></pre>
+
+    <p>ログインは <code>identifier</code>（ユーザー名 <strong>または</strong> メール）と <code>password</code> を受け取ります。<code>GetUserByLogin</code>（<code>users.go</code>）は <code>WHERE username = $1 OR email = $1</code> で、どちらでも引けるようにしています。処理は「ユーザーを引く → パスワード照合 → 通れば JWT 発行」ですが、その各所に<strong>2つの防御</strong>が織り込まれています。</p>
+
+    <div class="box hazard"><div class="box-k">⚠ なぜ「ユーザー名が違う」と「パスワードが違う」を区別しないのか — ユーザー列挙攻撃の防止</div>
+      <p>コードを見ると、ユーザー不在（<code>err != nil</code>）でもパスワード不一致（<code>!VerifyPassword</code>）でも、返すのは<strong>まったく同じ <code>genericFail()</code></strong> — 「ユーザー名またはパスワードが正しくありません。」だけです。これは意図的です。<br>
+      もし「そのユーザーは存在しません」と「パスワードが違います」を<strong>区別して返す</strong>と、攻撃者はログイン画面を使って「どのユーザー名・メールが<strong>登録済みか</strong>」を1件ずつ確かめられます（これを<strong>ユーザー列挙</strong>と言います）。登録済みアカウントの一覧が割れれば、標的を絞った攻撃やパスワード総当たりの足がかりになる。だから「どちらが間違っているか」を漏らさず、常に同じ汎用メッセージで撥ねる。<strong>認証失敗のエラーは、あえて情報を与えない</strong>のが正解です。</p>
+    </div>
+
+    <div class="box hazard"><div class="box-k">⚠ なぜ存在しないユーザーでも「ダミー照合」を走らせるのか — タイミング攻撃の防止</div>
+      <p>メッセージを揃えるだけでは、実は不十分です。もう一つ、<strong>応答が返ってくるまでの時間</strong>という漏れ口があります。<br>
+      素朴に書くと、ユーザーが<strong>存在しない</strong>ときは <code>GetUserByLogin</code> が失敗した時点で即 <code>return</code> でき、パスワード照合（bcrypt）を<strong>走らせません</strong>。一方ユーザーが<strong>存在する</strong>ときは、<code>VerifyPassword</code> が bcrypt の（わざと遅い）計算を走らせます。すると、<strong>存在しないユーザー名は速く、存在するユーザー名は遅く</strong>応答が返る。攻撃者はこの<strong>応答時間の差</strong>を測るだけで、パスワードを知らなくても「そのユーザー名は登録済みか」を推測できてしまう。これが<strong>タイミング攻撃</strong>です。<br>
+      対策がこの一行です。</p>
+      <pre><code>		<span class="cm">// ユーザー不在でもパスワード照合と同等の時間を消費し、応答時間差からの推測を防ぐ</span>
+		auth.VerifyPassword(<span class="st">"$2a$10$0123456789012345678901uZOJvDsvDhGKW0dQ1eVX8dW3Q0Zx3Fa"</span>, req.Password)</code></pre>
+      <p>ユーザーが見つからなかった分岐でも、<strong>あらかじめ用意したダミーの bcrypt ハッシュ</strong>に対して <code>VerifyPassword</code> を<strong>わざと走らせて</strong>から失敗を返します。この照合は当然一致しません（結果は捨てます）が、目的は<strong>結果ではなく時間</strong>。存在するユーザーのときと同じだけ bcrypt の計算を消費するので、<strong>応答時間の差が消え</strong>、時間からユーザーの存在を推測できなくなります。「メッセージを揃える」＋「時間を揃える」の<strong>両輪</strong>で、初めてユーザー列挙が塞がれます。</p>
+    </div>
+
+    <p>2つの防御を通ったあとは素直です。<code>VerifyPassword(u.PasswordHash, req.Password)</code> が <code>true</code>（保存ハッシュと入力が一致）なら、<code>s.tokens.Issue(u.ID)</code> で JWT を発行、<code>s.setSessionCookie</code> で Cookie にしまい、<code>200 OK</code> でユーザー情報を返します。これでログイン完了。以後のリクエストには、この Cookie が自動で添えられ、Step 5 のミドルウェアが検証します。</p>
+
+    <p>残る2つのハンドラは短いので一緒に見ます。</p>
+    <div class="file-tag">src/backend/internal/api/auth_handlers.go（ログアウト・自分の情報）</div>
+    <pre><code><span class="cm">// POST /api/auth/logout</span>
+<span class="kw">func</span> (s *<span class="ty">Server</span>) handleLogout(w http.<span class="ty">ResponseWriter</span>, _ *http.<span class="ty">Request</span>) {
+	s.clearSessionCookie(w)
+	w.WriteHeader(http.<span class="ty">StatusNoContent</span>)
+}
+
+<span class="cm">// GET /api/auth/me</span>
+<span class="kw">func</span> (s *<span class="ty">Server</span>) handleMe(w http.<span class="ty">ResponseWriter</span>, r *http.<span class="ty">Request</span>) {
+	u, err := s.store.GetUserByID(r.Context(), currentUserID(r))
+	<span class="kw">if</span> err != <span class="kw">nil</span> {
+		writeStoreError(w, err)
+		<span class="kw">return</span>
+	}
+	writeJSON(w, http.<span class="ty">StatusOK</span>, toUserJSON(u))
+}</code></pre>
+    <p><code>handleLogout</code> は Step 4 の <code>clearSessionCookie</code> を呼んで Cookie を消させ、<code>204 No Content</code>（本文なしの成功）を返すだけ。第2引数の <code>_ *http.Request</code> の <code>_</code> は「リクエストは使わない」という印です。<code>handleMe</code> は<strong>Step 5 のミドルウェア（<code>requireAuth</code>）で包まれる</strong>前提のハンドラで、<code>currentUserID(r)</code> で <code>context</code> から認証済みユーザーIDを取り出し、そのIDで <code>GetUserByID</code> して自分の情報を返します。<code>handleMe</code> 自身の中には認証コードが一切ないことに注目してください。<strong>認証はミドルウェアに任せ、ハンドラは「もう誰か分かっている」前提で本業に専念する</strong> — Step 5 で仕込んだ分業が、ここで効いています。</p>
+
+    <h2 class="step" id="step-7"><span class="step-no">Step 7</span>動かして確認する — curl とテスト</h2>
+    <p>4つのファイルが揃いました。認証が本当に機能するかを、実際に叩いて確かめます。第00章の手順で DB とサーバを起動しておいてください（<code>docker compose up -d</code> → <code>go run ./cmd/server</code>）。</p>
+
+    <div class="box do"><div class="box-k">▸ 動かして確認 — サインアップ → ログイン → 自分の情報</div>
+      <p>Cookie を <code>-c</code>（保存）と <code>-b</code>（送信）でファイルに出し入れしながら、3つのエンドポイントを順に叩きます。</p>
+      <pre class="term"><code><span class="cm"># 1. サインアップ（登録と同時にログイン状態になり、Cookie が cookies.txt に保存される）</span>
+<span class="ps">$</span> curl -sS -c cookies.txt -X POST http://localhost:8080/api/auth/signup \
+    -H <span class="st">"Content-Type: application/json"</span> -d @- &lt;&lt;'JSON'
+{"username":"alice","display_name":"Alice","email":"alice@example.com","password":"correct horse battery staple"}
+JSON
+<span class="out">{"id":1,"username":"alice","display_name":"Alice","bio":"","created_at":"2026-07-14T10:00:00Z"}</span>
+
+<span class="cm"># 2. ログイン（別クライアントを想定して Cookie を取り直す）</span>
+<span class="ps">$</span> curl -sS -c cookies.txt -X POST http://localhost:8080/api/auth/login \
+    -H <span class="st">"Content-Type: application/json"</span> -d @- &lt;&lt;'JSON'
+{"identifier":"alice","password":"correct horse battery staple"}
+JSON
+<span class="out">{"id":1,"username":"alice","display_name":"Alice","bio":"","created_at":"2026-07-14T10:00:00Z"}</span>
+
+<span class="cm"># 3. Cookie を付けて自分の情報を引く（-b で cookies.txt を送る）</span>
+<span class="ps">$</span> curl -sS -b cookies.txt http://localhost:8080/api/auth/me
+<span class="out">{"id":1,"username":"alice","display_name":"Alice","bio":"","created_at":"2026-07-14T10:00:00Z"}</span>
+
+<span class="cm"># 4. Cookie を付けないと 401（認証が効いている証拠）</span>
+<span class="ps">$</span> curl -sS http://localhost:8080/api/auth/me
+<span class="out">{"error":{"code":"unauthorized","message":"ログインが必要です。"}}</span></code></pre>
+      <p>3が返り、4で <code>unauthorized</code> になれば、認証は正しく機能しています。返ってきた JSON に <code>password</code> も <code>password_hash</code> も<strong>含まれていない</strong>ことも確認してください（<code>toUserJSON</code> が公開用に絞っています）。</p>
+    </div>
+
+    <div class="box hazard"><div class="box-k">⚠ 落とし穴（このプロジェクト固有）— 日本語ボディは必ず <code>-d @-</code> で stdin から渡す</div>
+      <p>上の <code>curl</code> で、JSON を <code>-d '...'</code> と<strong>引数に直接書かず</strong>、<code>-d @-</code> と<strong>ヒアドキュメント（stdin）</strong>で渡しているのには理由があります。この環境（Windows の git-bash からネイティブの <code>curl.exe</code> を呼ぶ）では、<strong>日本語を含むボディを引数で渡すと cp932 に化けて</strong>サーバに壊れた JSON が届きます。表示名や自己紹介に日本語を入れて試すときは、必ず <code>-d @-</code> で標準入力から流し込んでください。英数字だけなら引数でも通りますが、<strong>癖として常に <code>-d @-</code></strong> にしておくのが安全です（Python から叩くなら <code>PYTHONUTF8=1</code> を立てる）。</p>
+    </div>
+
+    <div class="box do"><div class="box-k">▸ 動かして確認 — テストを通す</div>
+      <p>この章の受け入れ基準（ハッシュが平文でない・改ざんトークンを弾く）は、テストが機械で確かめます。</p>
+      <pre class="term"><code><span class="ps">$</span> cd src/backend
+<span class="ps">$</span> go test ./...
+<span class="out">?   	twitter-sns/cmd/server	[no test files]
+?   	twitter-sns/frontend_dist	[no test files]
+ok  	twitter-sns/internal/api	0.402s
+ok  	twitter-sns/internal/auth	0.612s
+?   	twitter-sns/internal/store	[no test files]</span>
+
+<span class="cm"># 認証まわりだけ詳しく見る</span>
+<span class="ps">$</span> go test ./internal/auth/ -v
+<span class="out">=== RUN   TestPasswordHashRoundTrip
+--- PASS: TestPasswordHashRoundTrip (0.14s)
+=== RUN   TestTokenRoundTrip
+--- PASS: TestTokenRoundTrip (0.00s)
+=== RUN   TestTokenTamperDetection
+--- PASS: TestTokenTamperDetection (0.00s)
+=== RUN   TestTokenExpiry
+--- PASS: TestTokenExpiry (0.00s)
+PASS
+ok      twitter-sns/internal/auth     0.612s</span></code></pre>
+      <p>この4つのテストが、この章のコードの要を突いています。<code>TestPasswordHashRoundTrip</code> は「<strong>ハッシュが平文のままでないこと</strong>」（<code>if hash == "correct horse battery staple"</code> を弾く）と「正しいパスワードなら照合成功・誤りなら失敗」を確認。<code>TestTokenRoundTrip</code> は「発行 → 検証で同じユーザーID(42)が戻る」。<code>TestTokenTamperDetection</code> は「<strong>末尾を書き換えたトークンと、別シークレットで署名したトークンは、必ず検証で落ちる</strong>」— Step 3 の署名検証が効いている証拠。<code>TestTokenExpiry</code> は「有効期限を <code>-time.Minute</code>（発行時点で期限切れ）にしたトークンは通らない」— <code>ExpiresAt</code> が効いている証拠です。<code>api</code> パッケージ側の <code>TestValidateUsername</code> / <code>TestValidateEmail</code> / <code>TestValidatePassword</code> は、Step 6 の入力検証を裏で支えます。</p>
+    </div>
+
+    <h2>つまずき FAQ</h2>
+    <details class="qa"><summary>JWT は「暗号化」されていないの? 中身が読めてしまうけど大丈夫?</summary>
+      <div class="qa-body"><p>大丈夫です。JWT は<strong>暗号化ではなく署名</strong>です。中身（<code>Subject</code>=ユーザーID や有効期限）は Base64 で符号化されているだけで、誰でも復号して読めます。しかし<strong>読めることは問題になりません</strong> — Chirp が JWT に入れているのは「ユーザーID」と「期限」だけで、秘密の情報は入れていないからです。守りたいのは「中身の秘匿」ではなく「<strong>改ざんの検知</strong>」で、それは末尾の署名が担います。だから JWT には<strong>パスワードやクレジットカード番号のような秘密を絶対に入れない</strong>のが鉄則。ID のような「知られても困らないが、書き換えられては困る」情報を入れる、が正しい使い方です。</p></div>
+    </details>
+    <details class="qa"><summary>ログアウトしても、発行済みの JWT は7日間有効なままでは? サーバ側で無効化しなくていいの?</summary>
+      <div class="qa-body"><p>鋭い指摘です。Chirp のログアウトは <code>clearSessionCookie</code> で<strong>ブラウザの Cookie を消させる</strong>だけで、JWT 自体をサーバ側で無効化はしません。JWT は「サーバが状態を持たない（ステートレス）」のが利点である反面、<strong>発行済みトークンを途中で取り消しにくい</strong>のが弱点です。通常のログアウトでは Cookie が消えてトークンが提示されなくなるので実用上は十分ですが、「盗まれたトークンを即座に失効させたい」ような要件では、失効リストをサーバに持つ・有効期間を短くして頻繁に再発行する（リフレッシュトークン）などの追加設計が要ります。学習スコープでは「短めの期限（7日）＋ Cookie 削除」で割り切っています。発展は第09章で触れます。</p></div>
+    </details>
+    <details class="qa"><summary>ログイン失敗のメッセージを揃えるだけでは足りず、ダミー照合まで要るのはなぜ?</summary>
+      <div class="qa-body"><p>メッセージを揃えても、<strong>応答時間の差</strong>という漏れ口が残るからです。ユーザーが存在しなければ bcrypt を走らせず即座に失敗を返せてしまい、存在すれば（わざと遅い）bcrypt が走る。この<strong>数十ミリ秒の差</strong>を測るだけで、攻撃者はパスワードを知らなくても「そのユーザー名は登録済みか」を推測できます（タイミング攻撃）。だから存在しない分岐でも、あらかじめ用意したダミーの bcrypt ハッシュに対して <code>VerifyPassword</code> を<strong>わざと走らせて</strong>時間を揃えます。「メッセージ（内容）」と「時間」の両方を揃えて、初めてユーザー列挙が塞がれます。</p></div>
+    </details>
+
+    <h2>理解度チェック</h2>
+    <p>次の問いに<strong>自分の言葉で</strong>答えられたら、この章は卒業です。</p>
+    <details class="qa"><summary>1. パスワードを SHA-256 ではなく bcrypt でハッシュ化するのはなぜか。</summary>
+      <div class="qa-body"><p>SHA-256 は<strong>速すぎる</strong>のが問題。DB が漏れたとき、攻撃者が毎秒何十億回も総当たりでハッシュ化してパスワードを割り出せてしまう。bcrypt は<strong>意図的に遅く</strong>、しかも <code>DefaultCost</code>（コスト係数）で「1回の計算量」を調整でき、マシンの高速化にコストを上げて追随できる。総当たりの単価を高く保てるのが選ぶ理由。加えて bcrypt はソルトを自動で付けるので、「同じパスワードは同じハッシュ」になる弱点（レインボーテーブル）も塞げる。パスワード保存には「速いハッシュ」ではなく「調整可能に遅いハッシュ」を使う。</p></div>
+    </details>
+    <details class="qa"><summary>2. JWT を localStorage ではなく HttpOnly Cookie に入れる利点は何か。SameSite=Lax は何を防ぐか。</summary>
+      <div class="qa-body"><p><strong>HttpOnly</strong>: localStorage のトークンは <code>localStorage.getItem</code> の一行で JavaScript が読めるため、<strong>XSS</strong>（悪意あるスクリプトがページ上で動く欠陥）を踏むと盗み出される。<code>HttpOnly: true</code> の Cookie は JavaScript から一切読めない（<code>document.cookie</code> にも出ない）ので、XSS を踏んでもトークン自体は盗めない。<br><strong>SameSite=Lax</strong>: <strong>CSRF</strong>（他サイトに仕込まれたリクエストが、ブラウザの Cookie 自動添付を悪用して本人の意図しない操作を実行する攻撃）を防ぐ。別サイト由来のリクエストには原則 Cookie を付けないので、他サイトからの <code>POST</code>（状態変更）には認証情報が乗らず CSRF が成立しない。</p></div>
+    </details>
+    <details class="qa"><summary>3. ログイン失敗時に「ユーザー名が違う／パスワードが違う」を区別せず、存在しないユーザーでもダミー照合を走らせるのはなぜか。</summary>
+      <div class="qa-body"><p>両方とも<strong>ユーザー列挙攻撃</strong>を防ぐため。区別して返すと、攻撃者はログイン画面で「どのユーザー名・メールが登録済みか」を1件ずつ確かめられる。だから常に同じ汎用メッセージ（<code>invalid_credentials</code>）で撥ねて<strong>内容の差</strong>を消す。さらに、存在しないユーザーで即 <code>return</code> すると bcrypt を走らせず応答が速くなり、存在するユーザー（bcrypt が走って遅い）との<strong>時間の差</strong>で存在を推測されうる（タイミング攻撃）。これを防ぐため、存在しない分岐でもダミーの bcrypt ハッシュで <code>VerifyPassword</code> をわざと走らせ、応答時間を揃える。「内容」と「時間」の両方を揃えて列挙を封じる。</p></div>
+    </details>
+
+    <h2>まとめ — 次の層へ</h2>
+    <p>この章で、Chirp は初めて「あなた」を認識できるようになりました。パスワードは <strong>bcrypt</strong> で一方通行にハッシュ化して保存し（生パスワードは DB に一度も現れない）、ログインが通ると <strong>JWT(HS256)</strong> の身分証を発行、それを <strong>HttpOnly / SameSite=Lax の Cookie</strong>（XSS でも盗まれず、CSRF にも強い引き出し）にしまう。以後のリクエストは<strong>ミドルウェア</strong>が関門で検証し、認証済みユーザーIDを <code>context</code> で後続へ渡す。ログイン失敗は<strong>汎用エラー＋ダミー照合</strong>で、内容も時間もユーザー存在を漏らさない。認証と認可の骨格が、空だった <code>users</code> テーブルの上に立ちました。</p>
+    <p>次の第02章では、この「認識できるようになったユーザー」に<strong>声</strong>を与えます。ログイン中の人が投稿を書き（第00章で見た280文字の <code>CHECK</code> がここで効きます）、それを <code>posts</code> テーブルに保存し、読み出す。<code>requireAuth</code> で「誰が書いたか」を確かめ、その投稿に <code>user_id</code> を刻む。SNS が「つぶやき」で満たされ始める章です。</p>
+
+    <div class="chap-foot">
+      <a class="pager" href="00-setup.html"><span class="dir">← 前へ</span>第00章 · 土台をつくる</a>
+      <a class="pager next" href="02-post.html"><span class="dir">次へ →</span>第02章 · 投稿する</a>
+    </div>
+  </main>
+</div>
+</body>
+</html>

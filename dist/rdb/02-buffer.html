@@ -1,0 +1,752 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>第02章 バッファプール — ディスクからつくるデータベース</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500;600&family=Source+Serif+4:opsz,wght@8..60,400;8..60,600;8..60,700&family=Noto+Serif+JP:wght@400;600;700&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<div class="shell">
+
+  <aside class="spine">
+    <a class="wordmark" href="index.html">MINIDB · from scratch</a>
+    <div class="book-title">ディスクから<br>つくるデータベース</div>
+    <div class="book-sub">Go で B+Tree から SQL まで</div>
+
+    <div class="legend"><span>読む <b>↓</b></span><span>組む <b>↑</b></span></div>
+
+    <nav aria-label="目次">
+      <ul class="toc">
+        <li><a class="nav-item" href="index.html"><span class="nav-num">序</span><span class="nav-label">はじめに・準備<span class="nav-tag">Setup</span></span></a></li>
+        <li><a class="nav-item" href="00-disk.html"><span class="nav-num">00</span><span class="nav-label">ディスクとページ<span class="nav-tag">Disk</span></span></a></li>
+        <li><a class="nav-item" href="01-page.html"><span class="nav-num">01</span><span class="nav-label">ページの中身<span class="nav-tag">Page</span></span></a></li>
+        <li><a class="nav-item current" aria-current="page" href="02-buffer.html"><span class="nav-num">02</span><span class="nav-label">バッファプール<span class="nav-tag">Buffer</span></span></a></li>
+        <li><a class="nav-item" href="03-btree.html"><span class="nav-num">03</span><span class="nav-label">B+Tree 索引<span class="nav-tag">Index</span></span></a></li>
+        <li><a class="nav-item" href="04-catalog.html"><span class="nav-num">04</span><span class="nav-label">表とカタログ<span class="nav-tag">Catalog</span></span></a></li>
+        <li><a class="nav-item" href="05-sql.html"><span class="nav-num">05</span><span class="nav-label">SQL を実行する<span class="nav-tag">Query</span></span></a></li>
+        <li><a class="nav-item" href="06-wal.html"><span class="nav-num">06</span><span class="nav-label">壊れない仕組み<span class="nav-tag">WAL</span></span></a></li>
+        <li><a class="nav-item" href="07-txn.html"><span class="nav-num">07</span><span class="nav-label">索引とトランザクション<span class="nav-tag">Txn</span></span></a></li>
+      </ul>
+    </nav>
+
+    <div class="spine-foot">
+      各章は一つの層。<br>下（ディスク）から上（SQL）へ<br>積み上げて動かしていく。
+    </div>
+  </aside>
+
+  <main class="reading">
+    <div class="progress-tag">第02章 / 全8章 · 層: BUFFER · 読了目安 3〜4時間</div>
+    <div class="eyebrow"><span>Buffer</span><span class="depth">— 速さの心臓</span></div>
+    <h1>バッファプール</h1>
+    <p class="lede">ディスクは遅い。一度読んだページはメモリに置いておき、次からはそこから使う。メモリの枠が足りなくなったら、どれを手放すか賢く選ぶ — データベースの体感速度は、この章で作る 170 行で決まります。</p>
+
+    <div class="box goal"><div class="box-k">◈ この章のゴール</div>
+      <p>ページのメモリキャッシュ「バッファプール」を作ります。完成の基準は2つとも<strong>観測可能</strong>です。（1）容量 8 ページのプールに 32 ページを書き込んでも、追い出しをはさんで全内容が正しく読み戻せる。（2）同じページの再読込ではディスク I/O（ミス）が増えないことを、ヒット／ミス／追い出しの統計カウンタで確かめられる。</p>
+    </div>
+
+    <div class="box map"><div class="box-k">☰ この章のステップ</div>
+      <ol>
+        <li><a href="#step-1">Store インターフェース — ページを「貸し出し」にする</a></li>
+        <li><a href="#step-2">フレームとプール — 枠・台帳・針のデータ構造</a></li>
+        <li><a href="#step-3">fetch — ヒットとミスの分かれ道</a></li>
+        <li><a href="#step-4">victim — Clock アルゴリズムが犠牲を選ぶ</a></li>
+        <li><a href="#step-5">Read / Write / Allocate — Store の顔をかぶる</a></li>
+        <li><a href="#step-6">FlushAll と統計 — 書き戻して、観測する</a></li>
+      </ol>
+    </div>
+
+    <h2>なぜキャッシュが必要か — 1,000倍の速度差</h2>
+    <p>第00章と第01章で、minidb は「ファイルを 4KB のページに切って番号で読み書きし、1枚のページに複数のレコードを詰める」ところまで来ました。機能としては、もうレコードを永続化できます。では何が問題なのか。<strong>速度</strong>です。いまの作りでは、レコードに触るたびに毎回ディスクへ読みに行きます。そしてディスクは、メモリに比べて絶望的に遅いのです。</p>
+
+    <div class="ascii">1回のアクセスにかかる時間（おおよその目安）
+
+  メモリ (DRAM)   約 100 ナノ秒          ▏
+  SSD             約 100 マイクロ秒       ██████████   ← メモリの約 1,000 倍
+  HDD             約 10 ミリ秒            ████████████████████████████
+                                                       ← メモリの約 100,000 倍
+
+  人間の時間感覚に直すと（メモリの1回 = 1秒 とすると）
+
+  メモリ = 1 秒 / SSD = 約 17 分 / HDD = 約 28 時間</div>
+
+    <p>机の上のメモ（メモリ）を見るのに1秒、倉庫（SSD）まで取りに行くと17分。もし同じメモを1日に100回見るなら、毎回倉庫に行く人はいません。<strong>一度取ってきたら机の上に置いておく</strong> — これが<strong>キャッシュ</strong>（cache: 遅い置き場のデータの写しを、速い置き場に置いておく仕組み）の発想のすべてです。</p>
+    <p>キャッシュが効くのは、データへのアクセスに偏りがあるからです。データベースでは同じページが繰り返し読まれる場面がとても多い。たとえば次章で作る B+Tree では、<strong>どんな検索も必ず木の根（ルート）のページから始まる</strong>ので、ルートページは事実上すべてのクエリで読まれます。これを毎回ディスクから読むか、メモリから読むかで、体感速度は文字どおり桁で変わります。</p>
+    <p>探しているページがキャッシュにあることを<strong>ヒット</strong>（hit）、なくてディスクまで読みに行くことを<strong>ミス</strong>（miss）と呼びます。キャッシュの性能は「ヒット率」でほぼ決まります。この章の実装には最初からヒット／ミスのカウンタを埋め込んで、あとで実際に数字を観測します。</p>
+
+    <h3>バッファプールの居場所</h3>
+    <p>データベースの世界では、このページ用キャッシュを<strong>バッファプール</strong>（buffer pool）と呼びます。層の絵で見ると、ちょうどディスクマネージャの真上、これから作る B+Tree や表の真下に入ります。</p>
+
+    <div class="ascii">バッファプールの居場所 — 上と下のあいだに割り込む
+
+        B+Tree / ヒープ / カタログ（第03章〜）
+              │
+              │ Read / Write / Allocate   ← Store インターフェース（Step 1）
+              ▼
+     ┌───────────────────────────────┐
+     │ バッファプール（この章）           │
+     │                               │
+     │  フレーム: [p12][p3][ 空 ][p40] │ ← ページを載せる固定数の枠
+     │  台帳:     {12→0, 3→1, 40→3}   │ ← どのページがどの枠にあるか
+     └───────────────────────────────┘
+              │
+              │ ReadPage / WritePage      ← ミスしたときだけ発生
+              ▼
+        ディスクマネージャ（第00章） ──→ mydata.db</div>
+
+    <p>ポイントは、上の層から見ると<strong>ディスクの存在が消える</strong>ことです。上の層は「ページ 12 番を読みたい」と言うだけで、それがいまメモリにあるのか、ディスクから運ばれてくるのかを知りません。この「知らなくていい」を作るのが Step 1 のインターフェースです。</p>
+
+    <h3>どれを追い出すか — 置換ポリシー</h3>
+    <p>キャッシュには必ず容量の上限があります（メモリは有限なので）。枠が全部埋まった状態でミスが起きたら、<strong>誰かを枠から降ろして（追い出して）空きを作る</strong>しかありません。誰を降ろすかを決める規則を<strong>置換ポリシー</strong>（replacement policy）と呼びます。</p>
+    <p>理論上の最適解は「この先もっとも長く使われないページを追い出す」ことですが、未来は読めません。そこで現実のシステムは「<strong>最近使われていないページは、この先も使われにくいだろう</strong>」という経験則に頼ります。これを素直に実装したのが LRU（Least Recently Used: 最も長く使われていないものを追い出す）で、minidb が採用する <strong>Clock</strong> は、LRU をさらに安く近似したアルゴリズムです。フレームを時計の文字盤に見立て、針を回しながら「最近使った印」を確かめていく — 詳しくは Step 4 で、針の動きを1コマずつ追います。</p>
+    <p>もうひとつ、キャッシュ一般にはない、バッファプール特有の難しさが2つあります。この章の主役はむしろこちらです。</p>
+    <ul>
+      <li><strong>ピン留め</strong>（pin）— 上の層がいままさに触っているページを追い出してはいけません。「使用中だから動かすな」という印がピンです。</li>
+      <li><strong>ダーティ管理</strong>（dirty）— メモリ上で書き換えたページは、ディスク上の内容より新しくなります。この状態を「ダーティ（汚れている）」と呼び、<strong>追い出す前に必ずディスクへ書き戻す</strong>必要があります。逆に言えば、書き戻しをその時まで遅らせられる（<strong>遅延書き戻し</strong>）ので、書き込みも速くなります。</li>
+    </ul>
+    <p>それでは、上の層との「契約」から作り始めましょう。</p>
+
+    <!-- ================================================================ -->
+    <h2 class="step" id="step-1"><span class="step-no">Step 1</span>Store インターフェース — ページを「貸し出し」にする</h2>
+    <p>最初に作るのはバッファプール本体ではなく、上の層がページに触るときの<strong>約束ごと</strong>です。序章で一度だけ顔を出した <code>Store</code> インターフェース — 本書の設計の背骨 — を、今度は主役としてきちんと読みます。ファイルは <code>buffer</code> パッケージではなく <code>storage</code> パッケージにあります。契約は使う側・使われる側の両方から見える場所に置くのが自然だからです。</p>
+    <p>なぜインターフェースが要るのか。教科書的なバッファプールの API は、こういう形をしています。</p>
+    <pre><code><span class="cm">// 古典的な設計（minidb では採用しない）</span>
+page := pool.FetchPage(id)   <span class="cm">// ページを取得してピン留め</span>
+<span class="cm">// ... page を読み書き ...</span>
+pool.UnpinPage(id)           <span class="cm">// 使い終わったら必ず返す（忘れたら事故）</span></code></pre>
+    <p>取得と返却が別の呼び出しになっている、いわゆる「貸出カウンター方式」です。この設計には有名な事故がつきまといます。<strong>返し忘れ</strong>です。エラーで途中 return したとき、分岐が増えたとき、半年後に他人（未来の自分）がコードを触ったとき — <code>UnpinPage</code> を呼び損ねると、そのページは永遠に「使用中」のまま枠に居座ります。返し忘れが積もると全部の枠が使用中になり、プールは新しいページを載せられなくなって停止します。しかもこのバグは、プールが満杯になるまで症状が出ないので発見が遅れます。</p>
+    <p>minidb はこの事故を、注意力ではなく<strong>構造で</strong>殺します。ページを渡すのではなく、「ページを触る関数」を受け取って、こちらの管理下で実行するのです。それでは全文です。といっても、わずか15行です。</p>
+
+    <div class="file-tag">internal/storage/store.go</div>
+    <pre><code><span class="kw">package</span> storage
+
+<span class="cm">// Store はページ読み書きの抽象。バッファプール（M2）と</span>
+<span class="cm">// トランザクションのオーバーレイ（M7）が同じ顔で差し替えられるようにする（NFR-03）。</span>
+<span class="cm">//</span>
+<span class="cm">// コールバック方式なのは、ページへの参照を呼び出し側に持ち出させないため。</span>
+<span class="cm">// fn の実行中だけページは固定（ピン）され、抜けたら解放される。</span>
+<span class="kw">type</span> <span class="ty">Store</span> <span class="kw">interface</span> {
+    <span class="cm">// Read はページを読み取り専用で参照する。</span>
+    Read(id <span class="ty">PageID</span>, fn <span class="kw">func</span>(p *<span class="ty">Page</span>) <span class="ty">error</span>) <span class="ty">error</span>
+    <span class="cm">// Write はページを更新する。実装はダーティ管理（または変更集合への退避）を行う。</span>
+    Write(id <span class="ty">PageID</span>, fn <span class="kw">func</span>(p *<span class="ty">Page</span>) <span class="ty">error</span>) <span class="ty">error</span>
+    <span class="cm">// Allocate は新しいページを確保して初期化コールバックを呼ぶ。</span>
+    Allocate(fn <span class="kw">func</span>(id <span class="ty">PageID</span>, p *<span class="ty">Page</span>) <span class="ty">error</span>) (<span class="ty">PageID</span>, <span class="ty">error</span>)
+}</code></pre>
+
+    <p>3つのメソッドはどれも、引数に <code>fn func(p *Page) error</code> — <strong>関数</strong> — を取っています。使う側はこう書くことになります。</p>
+    <pre><code><span class="cm">// ページ 3 番の先頭バイトを読みたい、と思ったら</span>
+<span class="kw">var</span> first <span class="kw">byte</span>
+err := store.Read(<span class="st">3</span>, <span class="kw">func</span>(p *storage.<span class="ty">Page</span>) <span class="ty">error</span> {
+    first = p[<span class="st">0</span>]   <span class="cm">// この中でだけ p に触れる</span>
+    <span class="kw">return</span> <span class="kw">nil</span>
+})</code></pre>
+    <p>呼び出しの流れを言葉にすると、「ページ 3 番を<em>貸してくれ</em>」ではなく「ページ 3 番に<em>この用事を頼む</em>」です。実装（バッファプール）側は、ページを枠に用意し、ピンを掛け、渡された <code>fn</code> を呼び、<code>fn</code> が終わったらピンを外す。<strong>ピンの掛け外しが常にペアで、しかも実装側の1か所に書かれる</strong>ので、呼び出し側がどれだけ増えても返し忘れは起こりようがありません。ページへのポインタ <code>p</code> は <code>fn</code> の引数としてしか手に入らないため、「関数の外に持ち出して後で触る」というルール違反も書きにくくなっています。</p>
+
+    <div class="gonote"><div class="box-k">GO メモ · 関数を引数に取る（コールバックとクロージャ）</div>
+      <p>Go では関数も <code>int</code> や <code>string</code> と同じ「値」です。変数に入れられるし、<strong>他の関数の引数として渡せます</strong>。<code>fn func(p *Page) error</code> という引数宣言は「<code>*Page</code> を受け取って <code>error</code> を返す関数を、<code>fn</code> という名前で受け取る」という意味です。渡された側は好きなタイミングで <code>fn(&amp;page)</code> のように呼べます。このように「あとで呼び返してもらう関数」を<strong>コールバック</strong>と呼びます。</p>
+      <p>渡す側は、その場で名前のない関数（関数リテラル）を書くのが普通です。上の例の <code>func(p *storage.Page) error { first = p[0]; return nil }</code> がそれです。注目してほしいのは、この関数が外側で宣言された変数 <code>first</code> に代入していることです。<strong>関数リテラルは、自分の外側にある変数をそのまま読み書きできます</strong>。この性質を持つ関数を<strong>クロージャ</strong>（closure: 外の変数を「閉じ込めた」関数）と呼びます。「コールバックの中で結果を外の変数に書き出す」は本書で何十回も使うパターンなので、ここで手に馴染ませてください。</p>
+      <p>なぜこんな回りくどい設計が強いのか。<strong>「準備 → 本題 → 後片付け」の準備と後片付けを実装側が独占できる</strong>からです。ピン留めのほかにも、ファイルのクローズ、ロックの解放など、「後片付けを忘れると事故になる」場面全般で使えます。</p>
+    </div>
+
+    <p>3つのメソッドの役割分担も確認しておきます。<code>Read</code> は読むだけ、<code>Write</code> は書き換え（実装はダーティ管理などの後処理を行う）、<code>Allocate</code> は「新しいページを1枚増やして、初期化する」です。<code>Allocate</code> のコールバックだけ <code>id</code> も受け取るのは、新しいページの番号は呼んでみるまで分からないからです。</p>
+    <p>そしてコメントの1行目にこの設計の野望が書かれています。「バッファプール（M2）と<strong>トランザクションのオーバーレイ（M7）</strong>が同じ顔で差し替えられるようにする」。第07章で、書き換えをいきなり本体に反映せず「変更の下書き」に溜めるトランザクション実装が登場しますが、それもこの <code>Store</code> の顔をします。上の層（B+Tree・表）は相手がキャッシュか下書きかを知らずに動く — インターフェースを1枚挟んだ配当は、5章あとに回収されます。</p>
+
+    <div class="gonote"><div class="box-k">GO メモ · インターフェースを「満たす」とは（暗黙的実装）</div>
+      <p>Go のインターフェースは「メソッドの一覧表」です。そして Java などと違い、<code>implements Store</code> のような宣言は<strong>書きません</strong>。ある型が一覧表のメソッドを全部持っていれば、その瞬間から自動的に <code>Store</code> として扱えます（暗黙的実装）。つまり <code>storage</code> パッケージは、将来誰が実装するかを知らないまま契約だけ定義でき、実装側（この章の <code>buffer</code>、第07章の <code>txn</code>）は <code>storage</code> に一切手を入れずに参加できます。「契約を先に置き、実装があとから黙って満たす」— この章の構成そのものが Go の流儀です。</p>
+    </div>
+
+    <div class="box do"><div class="box-k">▸ 動かして確認</div>
+      <p>コードを書く前でも、契約は読めます。<code>go doc</code> は指定した型の定義とコメントを整形して表示するコマンドです。<code>src/</code> の中で実行してください。</p>
+      <pre class="term"><code><span class="ps">$</span> go doc ./internal/storage Store
+<span class="out">package storage // import "minidb/internal/storage"
+
+type Store interface {
+        // Read はページを読み取り専用で参照する。
+        Read(id PageID, fn func(p *Page) error) error
+        // Write はページを更新する。実装はダーティ管理（または変更集合への退避）を行う。
+        Write(id PageID, fn func(p *Page) error) error
+        // Allocate は新しいページを確保して初期化コールバックを呼ぶ。
+        Allocate(fn func(id PageID, p *Page) error) (PageID, error)
+}
+    Store はページ読み書きの抽象。バッファプール（M2）と トランザクションのオーバーレイ（M7）が同じ顔で差し替えられるようにする（NFR-03）。
+
+    コールバック方式なのは、ページへの参照を呼び出し側に持ち出させないため。 fn の実行中だけページは固定（ピン）され、抜けたら解放される。</span></code></pre>
+      <p>この3メソッドが、これ以降のすべての章から見た「ページ置き場」の全機能です。</p>
+    </div>
+
+    <!-- ================================================================ -->
+    <h2 class="step" id="step-2"><span class="step-no">Step 2</span>フレームとプール — 枠・台帳・針のデータ構造</h2>
+    <p>ここから <code>internal/buffer</code> パッケージを作ります。まずはデータ構造から。バッファプールに必要なものを日本語で棚卸しすると、こうなります。</p>
+    <ul>
+      <li>ページを載せる<strong>固定数の枠</strong>（フレームと呼びます）。枠にはページ本体のほかに「使用中か」「汚れているか」などの管理札が付く</li>
+      <li>「ページ 12 番はどの枠にいるか」を一発で引ける<strong>台帳</strong></li>
+      <li>追い出し先を選ぶ Clock アルゴリズムの<strong>針</strong>（いまどの枠を見ているかの位置）</li>
+      <li>ミスしたときに実際にディスクを読み書きする、第00章の <code>DiskManager</code></li>
+      <li>観測用の<strong>統計カウンタ</strong></li>
+    </ul>
+    <p>これをそのまま Go の構造体に写します。ファイル先頭から <code>New</code> まで、buffer.go の前半全文です。</p>
+
+    <div class="file-tag">internal/buffer/buffer.go</div>
+    <pre><code><span class="cm">// Package buffer はディスクページのメモリキャッシュ（バッファプール）。</span>
+<span class="cm">// 上位層は storage.Store インターフェースを通じてページに触り、</span>
+<span class="cm">// 「いまディスクにあるかメモリにあるか」を意識しない。</span>
+<span class="kw">package</span> buffer
+
+<span class="kw">import</span> (
+    <span class="st">"errors"</span>
+    <span class="st">"fmt"</span>
+
+    <span class="st">"minidb/internal/storage"</span>
+)
+
+<span class="cm">// frame はプール内の 1 枠。ページ本体と管理情報（ピン数・ダーティ・参照ビット）を持つ。</span>
+<span class="kw">type</span> <span class="ty">frame</span> <span class="kw">struct</span> {
+    id    storage.<span class="ty">PageID</span>
+    data  storage.<span class="ty">Page</span>
+    valid <span class="kw">bool</span> <span class="cm">// この枠にページが載っているか</span>
+    dirty <span class="kw">bool</span> <span class="cm">// ディスクより新しい内容を持つか</span>
+    pins  <span class="kw">int</span>  <span class="cm">// 使用中カウント。0 になるまで追い出せない</span>
+    ref   <span class="kw">bool</span> <span class="cm">// Clock 用の参照ビット（最近使われたか）</span>
+}
+
+<span class="cm">// Stats は観測用の統計（NFR-05）。</span>
+<span class="kw">type</span> <span class="ty">Stats</span> <span class="kw">struct</span> {
+    Hits      <span class="kw">uint64</span> <span class="cm">// プール内で見つかった回数</span>
+    Misses    <span class="kw">uint64</span> <span class="cm">// ディスクから読んだ回数</span>
+    Evictions <span class="kw">uint64</span> <span class="cm">// 追い出した回数</span>
+}
+
+<span class="cm">// Pool は Clock（セカンドチャンス）置換のバッファプール。</span>
+<span class="kw">type</span> <span class="ty">Pool</span> <span class="kw">struct</span> {
+    disk   *storage.<span class="ty">DiskManager</span>
+    frames []<span class="ty">frame</span>
+    table  <span class="kw">map</span>[storage.<span class="ty">PageID</span>]<span class="kw">int</span> <span class="cm">// PageID → frame index</span>
+    hand   <span class="kw">int</span>                    <span class="cm">// Clock の針</span>
+    stats  <span class="ty">Stats</span>
+}
+
+<span class="kw">var</span> _ storage.<span class="ty">Store</span> = (*<span class="ty">Pool</span>)(<span class="kw">nil</span>)
+
+<span class="cm">// ErrPoolExhausted は全枠がピン留めされていて追い出せないことを示す。</span>
+<span class="kw">var</span> ErrPoolExhausted = errors.New(<span class="st">"buffer: すべての枠が使用中で追い出せない"</span>)
+
+<span class="cm">// New は容量 capacity ページのプールを作る。</span>
+<span class="cm">// capacity は B+Tree の高さ＋α より大きいこと（入れ子アクセス中の枠はピンされるため）。</span>
+<span class="kw">func</span> New(disk *storage.<span class="ty">DiskManager</span>, capacity <span class="kw">int</span>) *<span class="ty">Pool</span> {
+    <span class="kw">if</span> capacity &lt; <span class="st">8</span> {
+        capacity = <span class="st">8</span>
+    }
+    <span class="kw">return</span> &amp;<span class="ty">Pool</span>{
+        disk:   disk,
+        frames: <span class="kw">make</span>([]<span class="ty">frame</span>, capacity),
+        table:  <span class="kw">make</span>(<span class="kw">map</span>[storage.<span class="ty">PageID</span>]<span class="kw">int</span>, capacity),
+    }
+}</code></pre>
+
+    <p><code>frame</code> の4つの管理札は、この章の残り全部で主役を張るので、いま丸暗記してしまいましょう。</p>
+    <table>
+      <tr><th>フィールド</th><th>意味</th><th>誰が立て、誰が消すか</th></tr>
+      <tr><td><code>valid</code></td><td>この枠にページが載っているか。<code>false</code> なら空き枠</td><td>ページを載せるとき立て、追い出しで消す</td></tr>
+      <tr><td><code>dirty</code></td><td>メモリ上の内容がディスクより新しいか</td><td><code>Write</code>／<code>Allocate</code> で立て、書き戻しで消す</td></tr>
+      <tr><td><code>pins</code></td><td>いま使用中の数。<strong>0 になるまで絶対に追い出せない</strong></td><td>コールバック開始で +1、終了で −1</td></tr>
+      <tr><td><code>ref</code></td><td>参照ビット。「最近使われた」の印</td><td>ページに触るたび立て、Clock の針が消す</td></tr>
+    </table>
+    <p><code>pins</code> だけ <code>bool</code> ではなく <code>int</code> なのは、同じページが同時に複数の用事で使われることがあるからです（たとえば B+Tree が親ノードを押さえたまま子ノードを触るとき）。「使用中の人数」を数えて、全員が離れて 0 になったら追い出し候補に戻ります。</p>
+    <p><code>Pool</code> 本体で目を引くのは <code>frames []frame</code> と <code>table map[storage.PageID]int</code> の<strong>二本立て</strong>です。枠の実体はスライス <code>frames</code> ですが、「ページ 40 番はどこ?」と聞かれるたびに枠を端から探していては、枠が増えたとき遅くなります。そこで逆引き用の台帳 <code>table</code> を別に持ち、ページ番号から枠番号を一発で引けるようにします。二重管理になるぶん、載せるとき・降ろすときに両方を必ず更新する規律が要ります（Step 3・4 で確認します）。</p>
+
+    <div class="gonote"><div class="box-k">GO メモ · map — 連想配列</div>
+      <p><code>map[K]V</code> は「キー K で値 V を引く」表です（連想配列、ハッシュテーブルとも呼びます）。<code>map[storage.PageID]int</code> なら「ページ番号 → 枠番号」。使う前に <code>make</code> で作る必要があり、<code>New</code> の中の <code>make(map[storage.PageID]int, capacity)</code> の第2引数は「だいたいこれくらい入る」というヒントです（性能のための予約で、上限ではありません）。</p>
+      <p>読み出しには2つの形があります。<code>v := m[k]</code> はキーがないとき V のゼロ値（<code>int</code> なら 0）を黙って返すので、「0 番の枠」と「見つからない」の区別がつきません。そこで <code>v, ok := m[k]</code> という<strong>カンマ ok イディオム</strong>を使うと、存在の有無が <code>ok</code>（bool）で分かります。Step 3 の1行目がまさにこの形です。削除は <code>delete(m, k)</code>。Step 4 で登場します。</p>
+    </div>
+
+    <p>もうひとつ、初見だと意味不明な1行があります。</p>
+    <pre><code><span class="kw">var</span> _ storage.<span class="ty">Store</span> = (*<span class="ty">Pool</span>)(<span class="kw">nil</span>)</code></pre>
+    <p>これは実行時には何もしない、<strong>コンパイラへの宣誓書</strong>です。「<code>*Pool</code> 型の値（中身は nil でいい）を <code>storage.Store</code> 型の変数に代入せよ。変数名は <code>_</code>（捨てる）」と読みます。Go のインターフェースは暗黙的に満たされる（Step 1 の GO メモ）ぶん、「満たしたつもりが、メソッド名を1文字打ち間違えていて満たせていなかった」というミスが起きえます。この1行を書いておくと、<code>*Pool</code> が <code>Store</code> の3メソッドを正しく備えていない限り<strong>コンパイルが通りません</strong>。実行するまでもなくビルドの時点で契約違反を検出する、Go の定番イディオムです。</p>
+    <p>最後に <code>New</code>。<code>capacity &lt; 8</code> なら黙って 8 に切り上げています。コメントにある理由 —「入れ子アクセス中の枠はピンされるため」— は第03章への伏線です。B+Tree は根から葉まで数枚のページを<strong>同時にピンしたまま</strong>降りていくので、枠がその枚数より少ないと、全枠ピン留め → 追い出し不能（<code>ErrPoolExhausted</code>）が正常動作中に起きてしまいます。最低 8 枠は、その保険です。</p>
+
+    <div class="box do"><div class="box-k">▸ 動かして確認</div>
+      <p>この時点のパッケージの「外から見える形」を眺めておきます。<code>Pool</code> のフィールドがすべて小文字（非公開）で、公開されているのはメソッドだけ — 内部状態を外から直接いじれない作りになっていることが分かります。</p>
+      <pre class="term"><code><span class="ps">$</span> go doc ./internal/buffer Pool
+<span class="out">package buffer // import "minidb/internal/buffer"
+
+type Pool struct {
+        // Has unexported fields.
+}
+    Pool は Clock（セカンドチャンス）置換のバッファプール。
+
+func New(disk *storage.DiskManager, capacity int) *Pool
+func (b *Pool) Allocate(fn func(id storage.PageID, p *storage.Page) error) (storage.PageID, error)
+func (b *Pool) FlushAll() error
+func (b *Pool) Read(id storage.PageID, fn func(p *storage.Page) error) error
+func (b *Pool) Stats() Stats
+func (b *Pool) Write(id storage.PageID, fn func(p *storage.Page) error) error</span></code></pre>
+      <p><code>Read</code> / <code>Write</code> / <code>Allocate</code> のシグネチャが Step 1 の契約とぴったり同じ形をしていることを見比べてください。これから中身を埋めていきます。</p>
+    </div>
+
+    <!-- ================================================================ -->
+    <h2 class="step" id="step-3"><span class="step-no">Step 3</span>fetch — ヒットとミスの分かれ道</h2>
+    <p>プールの心臓部を作ります。<code>fetch</code> は「ページ <code>id</code> をメモリ上に用意して、ピンを掛けて、枠番号を返す」内部関数で、<code>Read</code> / <code>Write</code> の両方がここを通ります。キャッシュの教科書どおり、道はヒットとミスの2本に分かれます。</p>
+
+    <div class="ascii">fetch(id) の分かれ道
+
+  台帳 table に id がある?
+    ├─ ある  → ヒット
+    │          pins++ / ref=true / 枠番号を返す（ディスク I/O ゼロ）
+    │
+    └─ ない  → ミス
+               victim() で枠をひとつ空けてもらい（Step 4）、
+               ディスクから読み込む（I/O 1回）→ 札を付けて台帳に記帳</div>
+
+    <div class="file-tag">internal/buffer/buffer.go</div>
+    <pre><code><span class="cm">// fetch はページをプールに載せ、ピンして枠番号を返す。</span>
+<span class="kw">func</span> (b *<span class="ty">Pool</span>) fetch(id storage.<span class="ty">PageID</span>) (<span class="kw">int</span>, <span class="ty">error</span>) {
+    <span class="kw">if</span> idx, ok := b.table[id]; ok {
+        b.stats.Hits++
+        b.frames[idx].pins++
+        b.frames[idx].ref = <span class="kw">true</span>
+        <span class="kw">return</span> idx, <span class="kw">nil</span>
+    }
+    b.stats.Misses++
+    idx, err := b.victim()
+    <span class="kw">if</span> err != <span class="kw">nil</span> {
+        <span class="kw">return</span> <span class="st">0</span>, err
+    }
+    f := &amp;b.frames[idx]
+    <span class="kw">if</span> err := b.disk.ReadPage(id, &amp;f.data); err != <span class="kw">nil</span> {
+        <span class="kw">return</span> <span class="st">0</span>, err
+    }
+    f.id, f.valid, f.dirty, f.pins, f.ref = id, <span class="kw">true</span>, <span class="kw">false</span>, <span class="st">1</span>, <span class="kw">true</span>
+    b.table[id] = idx
+    <span class="kw">return</span> idx, <span class="kw">nil</span>
+}</code></pre>
+
+    <p>ヒット側（最初の <code>if</code> ブロック）は3行の帳簿仕事だけです。統計の <code>Hits</code> を数え、<code>pins</code> を1増やして「いまから使うので追い出すな」を宣言し、<code>ref</code> を立てて「最近使われた」と記録する。ディスクには一切触りません。これがキャッシュの速さの正体です。</p>
+    <p>ミス側は、まず <code>victim()</code> に「どこか1枠空けてくれ」と頼みます（中身は次のステップ）。空いた枠 <code>idx</code> を得たら、第00章で作った <code>b.disk.ReadPage(id, &amp;f.data)</code> でディスクからページ 4,096 バイトを枠に読み込みます。ここが、この関数で唯一ディスク I/O が発生する行です。</p>
+    <p>読み込めたら札を付け直します。<code>f.id, f.valid, f.dirty, f.pins, f.ref = id, true, false, 1, true</code> — 意味を1枚ずつめくると「この枠は <code>id</code> のページを載せていて（valid）、まだディスクと同じ内容で（dirty=false）、いま1人が使用中（pins=1）、たった今使われた（ref=true）」。最後に台帳 <code>table</code> に記帳して、枠のスライスと台帳の2つが同期した状態で返ります。</p>
+
+    <div class="gonote"><div class="box-k">GO メモ · 複数代入と、&amp;b.frames[idx] の意味</div>
+      <p><code>a, b, c = 1, 2, 3</code> のように、Go は複数の変数に1行でまとめて代入できます。<code>fetch</code> では frame の5フィールドの初期化を1行に畳んでいます。縦に5行並べるのと意味は同じですが、「この5枚の札はワンセットで更新するもの」という意図が読み取れます。</p>
+      <p>もう1つ、<code>f := &amp;b.frames[idx]</code> の <code>&amp;</code> を忘れると何が起きるかは知っておく価値があります。<code>f := b.frames[idx]</code>（&amp; なし）だと frame 構造体が<strong>丸ごとコピー</strong>され、以後の <code>f.pins = 1</code> などはコピーに書くだけで、プール本体には反映されません。ページ本体 <code>data</code> は 4KB の配列なのでコピー自体も高くつきます。「構造体は値、ポインタで指せば本体」— 序章のスライスと配列の話と同根の、Go で最も踏みやすい罠のひとつです。</p>
+    </div>
+
+    <div class="box do"><div class="box-k">▸ 動かして確認</div>
+      <p>ヒットが本当にディスク I/O を減らしているかは、統計で観測できます。テスト <code>TestPoolHitReducesIO</code> は「同じページを10回読んだら、ミスは増えずヒットがちょうど10増える」ことを検証します。抜粋で読んでみましょう。</p>
+      <div class="file-tag">internal/buffer/buffer_test.go（抜粋）</div>
+      <pre><code><span class="cm">// M2 受け入れ基準: 再読込時のディスク I/O が減ることを観測できる。</span>
+<span class="kw">func</span> TestPoolHitReducesIO(t *testing.<span class="ty">T</span>) {
+    pool, _ := newPool(t, <span class="st">16</span>)
+
+    id, err := pool.Allocate(<span class="kw">func</span>(_ storage.<span class="ty">PageID</span>, p *storage.<span class="ty">Page</span>) <span class="ty">error</span> {
+        p[<span class="st">0</span>] = <span class="st">42</span>
+        <span class="kw">return</span> <span class="kw">nil</span>
+    })
+    <span class="cm">// …（エラー処理は省略）</span>
+    before := pool.Stats()
+    <span class="kw">for</span> i := <span class="st">0</span>; i &lt; <span class="st">10</span>; i++ {
+        <span class="kw">if</span> err := pool.Read(id, <span class="kw">func</span>(p *storage.<span class="ty">Page</span>) <span class="ty">error</span> { <span class="kw">return</span> <span class="kw">nil</span> }); err != <span class="kw">nil</span> {
+            t.Fatal(err)
+        }
+    }
+    after := pool.Stats()
+    <span class="kw">if</span> after.Misses != before.Misses {
+        t.Fatalf(<span class="st">"キャッシュ済みページの再読込でミスが増えた: %d → %d"</span>, before.Misses, after.Misses)
+    }
+    <span class="kw">if</span> after.Hits-before.Hits != <span class="st">10</span> {
+        t.Fatalf(<span class="st">"ヒット数 = %d, want 10"</span>, after.Hits-before.Hits)
+    }
+}</code></pre>
+      <p>「読む前に統計を控え、10回読み、差分を確かめる」という構図です。<code>pool.Read(id, func(p *storage.Page) error { return nil })</code> は「何もしない用事」を頼むことでピンとカウンタの動きだけを起こす、テストならではの書き方です。実行します。</p>
+      <pre class="term"><code><span class="ps">$</span> go test ./internal/buffer -run TestPoolHitReducesIO -v
+<span class="out">=== RUN   TestPoolHitReducesIO
+--- PASS: TestPoolHitReducesIO (0.00s)
+PASS
+ok  	minidb/internal/buffer	0.732s</span></code></pre>
+      <p>なお、テスト冒頭の <code>newPool</code> はテスト用の小さな共通部品で、<code>t.TempDir()</code>（テスト終了後に自動で消える一時ディレクトリ）に DB ファイルを作って <code>DiskManager</code> を開き、<code>t.Cleanup</code> で後始末を予約しています。</p>
+    </div>
+
+    <!-- ================================================================ -->
+    <h2 class="step" id="step-4"><span class="step-no">Step 4</span>victim — Clock アルゴリズムが犠牲を選ぶ</h2>
+    <p>ミスのたびに呼ばれる <code>victim</code>（犠牲者、の意）は「次にページを載せる枠」をひとつ返します。空き枠があればそれでよし。なければ、載っている誰かを<strong>追い出し</strong>（eviction）ます。誰を追い出すか — ここが置換ポリシーの出番です。</p>
+    <p>章の冒頭で触れたとおり、経験則の王道は LRU「最も長く使われていないページを追い出す」です。ただし LRU を正確にやるには、<strong>ページに触るたびに</strong>「使用順のリスト」をつなぎ替える必要があります（そのページを今いる場所からリストごと外し、先頭に付け直す）。ヒットはこのプールで最頻の操作なので、その1回1回にポインタの付け替えを乗せるのは嬉しくありません。そこで実務では、精度を少し諦めて劇的に安くした近似が好まれます。それが <strong>Clock</strong>（時計）、別名<strong>セカンドチャンス</strong>アルゴリズムです。PostgreSQL のバッファ置換（clock sweep）も同じ系統です。</p>
+    <p>仕組みはこうです。各枠に<strong>参照ビット</strong> <code>ref</code> を1個だけ持たせ、ページに触るたびに立てます（Step 3 でやりました）。追い出したくなったら、枠の列を時計の文字盤に見立てて<strong>針</strong>（<code>hand</code>）を進めながら順に見ていき、</p>
+    <ul>
+      <li><code>ref</code> が立っている枠 → 「最近使われたな」と見逃す。ただし <code>ref</code> を消す（<strong>これがセカンドチャンス</strong>。次に針が来るまでにまた使われなければ、もう庇わない）</li>
+      <li><code>ref</code> が消えている枠 → 針が一周する間、一度も使われなかった。<strong>追い出し確定</strong></li>
+    </ul>
+    <p>タイムスタンプも整列も要らず、ヒット時の仕事は「ビットを1個立てる」だけ。それでいて「最近使われたものは生き残る」という LRU の心は保たれます。コードを見ましょう。</p>
+
+    <div class="file-tag">internal/buffer/buffer.go</div>
+    <pre><code><span class="cm">// victim は空き枠を返す。なければ Clock で犠牲を選び、ダーティなら書き戻して空ける。</span>
+<span class="kw">func</span> (b *<span class="ty">Pool</span>) victim() (<span class="kw">int</span>, <span class="ty">error</span>) {
+    <span class="cm">// 一周目: 未使用枠を探しつつ参照ビットを消す。二周目: ref=false を追い出す。</span>
+    <span class="kw">for</span> turn := <span class="st">0</span>; turn &lt; <span class="st">2</span>*<span class="kw">len</span>(b.frames); turn++ {
+        f := &amp;b.frames[b.hand]
+        idx := b.hand
+        b.hand = (b.hand + <span class="st">1</span>) % <span class="kw">len</span>(b.frames)
+
+        <span class="kw">if</span> !f.valid {
+            <span class="kw">return</span> idx, <span class="kw">nil</span>
+        }
+        <span class="kw">if</span> f.pins &gt; <span class="st">0</span> {
+            <span class="kw">continue</span>
+        }
+        <span class="kw">if</span> f.ref {
+            f.ref = <span class="kw">false</span> <span class="cm">// セカンドチャンス</span>
+            <span class="kw">continue</span>
+        }
+        <span class="cm">// 追い出し確定</span>
+        <span class="kw">if</span> f.dirty {
+            <span class="kw">if</span> err := b.disk.WritePage(f.id, &amp;f.data); err != <span class="kw">nil</span> {
+                <span class="kw">return</span> <span class="st">0</span>, fmt.Errorf(<span class="st">"buffer: evict flush: %w"</span>, err)
+            }
+        }
+        <span class="kw">delete</span>(b.table, f.id)
+        f.valid = <span class="kw">false</span>
+        b.stats.Evictions++
+        <span class="kw">return</span> idx, <span class="kw">nil</span>
+    }
+    <span class="kw">return</span> <span class="st">0</span>, ErrPoolExhausted
+}</code></pre>
+
+    <p>針の1手ごとの判定は、優先順位つきの4段です。上から、<strong>空き枠なら即採用</strong>（追い出し不要）。<strong>ピン留め中（<code>pins &gt; 0</code>）なら絶対に触らない</strong> — ここが冒頭で予告した最重要の不変条件で、<code>ref</code> の状態すら見ずに素通りします。<strong><code>ref</code> が立っていれば消して見逃す</strong>。どれでもなければ<strong>追い出し確定</strong>です。</p>
+    <p>追い出しの本番では、まず <code>dirty</code> を確かめます。ダーティなら、この枠の内容はディスクより新しい世界で唯一の版なので、<strong>消す前に <code>WritePage</code> でディスクへ書き戻します</strong>。これを怠ると更新が黙って消えます（このステップの検収テストがまさにそれを見張ります）。そのあと台帳から <code>delete</code> し、<code>valid</code> を落として枠を空け、統計 <code>Evictions</code> を数えて返す。<strong><code>table</code> の削除と <code>valid=false</code> はワンセット</strong>です。片方を忘れると「台帳には居るのに枠は空」という幽霊が生まれます。</p>
+    <p>ループの上限 <code>2*len(b.frames)</code>（針が最大2周）にも意味があります。最悪ケースを考えると、1周目は「全枠の <code>ref</code> が立っていて全員セカンドチャンスで見逃す」ことがありえますが、そのとき針は全部の <code>ref</code> を消しながら回っています。だから2周目では、ピン留めされていない枠が1つでもあれば必ず捕まります。2周しても捕まらないのは<strong>全枠が <code>pins &gt; 0</code></strong> のときだけで、それは追い出しでは解決できない状況なので、無限に回らず <code>ErrPoolExhausted</code> で諦めて報告します（Step 2 で見た「容量最低 8」は、これを正常運転中に起こさないための保険でした）。</p>
+
+    <p>文章だけでは針の動きは掴みにくいので、具体例を1コマずつ追います。<strong>容量4のプール</strong>に p10〜p13 が載った状態で、プールにない p20 を読んだ（ミスした）としましょう。</p>
+
+    <div class="ascii">Clock の動き — p20 のための枠を空ける（容量 4）
+
+【開始】 victim() 呼び出し。p11 は B+Tree が使用中（pins=2）とする
+   フレーム   [0]      [1]      [2]      [3]
+   ページ     p10      p11      p12      p13
+   ref         1        1        0        1
+   pins        0        2        0        0
+   針 hand     ▼
+
+【1手目】 [0] p10: ref=1 → セカンドチャンス。ref を消して見逃す
+   ページ     p10      p11      p12      p13
+   ref         0 ←消えた  1        0        1
+   針 hand             ▼
+
+【2手目】 [1] p11: pins=2 → 使用中。ref も見ずに素通り
+   ページ     p10      p11      p12      p13
+   ref         0        1        0        1
+   針 hand                      ▼
+
+【3手目】 [2] p12: ref=0 かつ pins=0 → 追い出し確定！
+   ここまでが victim の仕事。p12 が dirty ならディスクへ書き戻し、
+   枠 [2] を空にして（table から p12 を削除）、その枠番号を返す。
+   ページ     p10      p11      (空)     p13
+   ref         0        1        -        1
+   針 hand                               ▼ ← 次回はここから再開
+
+   このあと呼び出し元の fetch が、空いた枠 [2] に p20 を読み込んで札を付ける:
+   ページ     p10      p11     [p20]     p13
+   ref         0        1        1        1   ← この ref=1 は fetch が立てたもの</div>
+
+    <p>p12 が追い出されたのは「針が前回通過してから、一度も使われなかった」からです。p10 は直前に使われていたので一度は庇われました（ref が消えただけ）。もし p10 がこの先も使われないまま針がもう一周してくれば、次は p10 が犠牲になります。「使われ続ける限り生き残り、使われなくなったら一周の猶予ののち追い出される」— LRU の近似になっている感覚が掴めたでしょうか。針が止まった位置 <code>hand</code> が次回の開始点になることも大事です。毎回 0 から始めると、若い番号の枠ばかりが狙われてしまいます。</p>
+
+    <div class="gonote"><div class="box-k">GO メモ · fmt.Errorf と %w — エラーの包み直し</div>
+      <p><code>fmt.Errorf("buffer: evict flush: %w", err)</code> は、下の層から来たエラー <code>err</code> に「バッファ層の追い出し書き戻しで起きた」という文脈を書き添えて包み直します。動詞 <code>%w</code>（wrap）を使うと元のエラーが中に保存され、受け取った側は <code>errors.Is</code> で「元は何のエラーだったか」を調べられます。層が積み重なる本書では、「どの層を通過したか」がエラーメッセージに残るこの作法が、デバッグの命綱になります。</p>
+    </div>
+
+    <div class="box hazard"><div class="box-k">⚠ 落とし穴 · ピン留め中の枠を追い出したら</div>
+      <p><code>if f.pins &gt; 0 { continue }</code> を1行消しても、テストはしばらく通ってしまうかもしれません。しかし起きることは凶悪です。上の層のコールバックが <code>*Page</code> のポインタ越しにページを読んでいる最中、その枠に<strong>別のページが読み込まれて中身がすり替わる</strong>のです。ポインタは同じ場所を指したままなので、エラーにはならず、<strong>別ページのバイト列を正しいデータとして読み進めてしまいます</strong>。クラッシュしてくれる方がまだ親切な、静かなデータ破壊です。「使用中は絶対に追い出さない」は交渉の余地がない不変条件だと覚えてください。</p>
+    </div>
+
+    <div class="box do"><div class="box-k">▸ 動かして確認</div>
+      <p>この章の最重要テスト <code>TestPoolCorrectUnderEviction</code> を動かします。<strong>容量 8 のプールに 32 ページ</strong>を書き込み（=大半が追い出される）、全ページを読み戻して1バイト残らず正しいことを確かめる、M2 の受け入れ基準そのものです。</p>
+      <div class="file-tag">internal/buffer/buffer_test.go（抜粋）</div>
+      <pre><code><span class="cm">// M2 受け入れ基準: キャッシュ容量の上限を超えても正しく動作する。</span>
+<span class="cm">// 容量 8 のプールに 32 ページを書き、追い出しを挟んでも全内容が正しいこと。</span>
+<span class="kw">func</span> TestPoolCorrectUnderEviction(t *testing.<span class="ty">T</span>) {
+    pool, _ := newPool(t, <span class="st">8</span>)
+
+    <span class="kw">const</span> n = <span class="st">32</span>
+    ids := <span class="kw">make</span>([]storage.<span class="ty">PageID</span>, n)
+    <span class="kw">for</span> i := <span class="st">0</span>; i &lt; n; i++ {
+        id, err := pool.Allocate(<span class="kw">func</span>(_ storage.<span class="ty">PageID</span>, p *storage.<span class="ty">Page</span>) <span class="ty">error</span> {
+            <span class="kw">for</span> j := <span class="kw">range</span> p {
+                p[j] = <span class="kw">byte</span>(i)
+            }
+            <span class="kw">return</span> <span class="kw">nil</span>
+        })
+        <span class="cm">// …（エラー処理は省略）</span>
+        ids[i] = id
+    }
+    <span class="cm">// 全ページ読み直し（大半は追い出し済み → ディスクから戻る）</span>
+    <span class="kw">for</span> i, id := <span class="kw">range</span> ids {
+        err := pool.Read(id, <span class="kw">func</span>(p *storage.<span class="ty">Page</span>) <span class="ty">error</span> {
+            <span class="kw">for</span> j := <span class="kw">range</span> p {
+                <span class="kw">if</span> p[j] != <span class="kw">byte</span>(i) {
+                    t.Fatalf(<span class="st">"page %d byte %d = %d, want %d（追い出し・再読込で内容が壊れた）"</span>, id, j, p[j], i)
+                }
+            }
+            <span class="kw">return</span> <span class="kw">nil</span>
+        })
+        <span class="cm">// …（エラー処理は省略）</span>
+    }
+    <span class="kw">if</span> pool.Stats().Evictions == <span class="st">0</span> {
+        t.Fatal(<span class="st">"容量超過なのに追い出しが発生していない"</span>)
+    }
+}</code></pre>
+      <p>ページごとに違う値（i 枚目は全バイト i）で塗りつぶしておくのが工夫どころです。もし追い出し・再読込のどこかで枠の取り違えや書き戻し漏れがあれば、値のずれとして必ず露見します。最後の <code>Evictions == 0</code> チェックは「そもそも追い出しが起きるシナリオになっているか」というテスト自身の健全性確認です。</p>
+      <pre class="term"><code><span class="ps">$</span> go test ./internal/buffer -run TestPoolCorrectUnderEviction -v
+<span class="out">=== RUN   TestPoolCorrectUnderEviction
+--- PASS: TestPoolCorrectUnderEviction (0.00s)
+PASS
+ok  	minidb/internal/buffer	0.838s</span></code></pre>
+      <p>容量の4倍を出し入れしても壊れない。「上限を超えても正しい」が観測できました。</p>
+    </div>
+
+    <!-- ================================================================ -->
+    <h2 class="step" id="step-5"><span class="step-no">Step 5</span>Read / Write / Allocate — Store の顔をかぶる</h2>
+    <p>部品が揃いました。<code>fetch</code>（載せてピン）と <code>victim</code>（枠を空ける）を組み合わせて、Step 1 の契約 <code>storage.Store</code> の3メソッドを実装します。ここまで来ると、各メソッドは驚くほど短くなります。まずピンを外す小さな相棒から。</p>
+
+    <div class="file-tag">internal/buffer/buffer.go</div>
+    <pre><code><span class="kw">func</span> (b *<span class="ty">Pool</span>) unpin(idx <span class="kw">int</span>) { b.frames[idx].pins-- }
+
+<span class="cm">// Read は storage.Store 実装。fn 実行中だけページをピンする。</span>
+<span class="kw">func</span> (b *<span class="ty">Pool</span>) Read(id storage.<span class="ty">PageID</span>, fn <span class="kw">func</span>(p *storage.<span class="ty">Page</span>) <span class="ty">error</span>) <span class="ty">error</span> {
+    idx, err := b.fetch(id)
+    <span class="kw">if</span> err != <span class="kw">nil</span> {
+        <span class="kw">return</span> err
+    }
+    <span class="kw">defer</span> b.unpin(idx)
+    <span class="kw">return</span> fn(&amp;b.frames[idx].data)
+}
+
+<span class="cm">// Write は storage.Store 実装。fn 実行後にダーティを立てる（書き戻しは追い出し時か FlushAll）。</span>
+<span class="kw">func</span> (b *<span class="ty">Pool</span>) Write(id storage.<span class="ty">PageID</span>, fn <span class="kw">func</span>(p *storage.<span class="ty">Page</span>) <span class="ty">error</span>) <span class="ty">error</span> {
+    idx, err := b.fetch(id)
+    <span class="kw">if</span> err != <span class="kw">nil</span> {
+        <span class="kw">return</span> err
+    }
+    <span class="kw">defer</span> b.unpin(idx)
+    <span class="kw">if</span> err := fn(&amp;b.frames[idx].data); err != <span class="kw">nil</span> {
+        <span class="kw">return</span> err
+    }
+    b.frames[idx].dirty = <span class="kw">true</span>
+    <span class="kw">return</span> <span class="kw">nil</span>
+}</code></pre>
+
+    <p><code>Read</code> は3手です。<code>fetch</code> でページを枠に用意し（このときピンが掛かる）、<code>defer b.unpin(idx)</code> で「この関数を抜けるとき必ずピンを外す」を予約し、コールバック <code>fn</code> にページ本体へのポインタ <code>&amp;b.frames[idx].data</code> を渡して実行する。Step 1 で約束した「<code>fn</code> の実行中だけページは固定され、抜けたら解放される」が、この <code>fetch</code> → <code>defer unpin</code> → <code>fn</code> という3行の並びで実現されています。返し忘れ事故を構造的に防ぐ仕掛けの正体は、たったこれだけです。</p>
+
+    <div class="gonote"><div class="box-k">GO メモ · defer — 後片付けの予約</div>
+      <p><code>defer f()</code> は「<strong>いまは実行せず、この関数を抜ける直前に f() を実行せよ</strong>」という予約です。素直に最後の行へ <code>b.unpin(idx)</code> と書くのと違い、途中の <code>return</code> で抜けても、<code>fn</code> がエラーを返しても、さらには <code>fn</code> の中でパニック（実行時の強制中断）が起きても、予約した後片付けは必ず実行されます。「取得した直後の行で解放を defer 予約する」は、ファイルの <code>Close</code> やロック解除にも共通する Go の基本作法です。ピンの +1（fetch 内）と −1（unpin）が必ず対で走ることが、これで文法レベルで保証されます。</p>
+    </div>
+
+    <p><code>Write</code> は <code>Read</code> とほぼ同じで、違いは最後の1行 — <code>fn</code> が成功したら <code>dirty = true</code> を立てる — だけです。ここで立ち止まる価値があります。<strong><code>Write</code> はディスクに書きません。</strong>メモリ上の枠を書き換えて、「ディスクより新しい」の札を付けるだけです。実際にディスクへ書かれるのは、Step 4 で見た追い出しのとき、またはこの後の <code>FlushAll</code> のとき。これが<strong>遅延書き戻し</strong>（write-back）方式です。おかげで書き込みの主戦場はメモリになり、同じページへの100回の更新はディスクへの（最大でも）1回の書き込みにまとまります。速い。ただし、この速さには代金があります — それは Step 6 の最後で請求書として届きます。</p>
+    <p>なお <code>fn</code> がエラーを返した場合は <code>dirty</code> を立てずに戻ります。第01章のスロット付きページの操作は「失敗時はページを変更しない」よう作られているので、「fn 失敗 = ページは元のまま = ダーティではない」という対応が成り立っています。</p>
+    <p>3つ目の <code>Allocate</code> は「新しいページを1枚増やす」です。</p>
+
+    <div class="file-tag">internal/buffer/buffer.go</div>
+    <pre><code><span class="cm">// Allocate は storage.Store 実装。新規ページをゼロ初期化状態でプールに載せる。</span>
+<span class="kw">func</span> (b *<span class="ty">Pool</span>) Allocate(fn <span class="kw">func</span>(id storage.<span class="ty">PageID</span>, p *storage.<span class="ty">Page</span>) <span class="ty">error</span>) (storage.<span class="ty">PageID</span>, <span class="ty">error</span>) {
+    id := b.disk.AllocatePage()
+    idx, err := b.victim()
+    <span class="kw">if</span> err != <span class="kw">nil</span> {
+        <span class="kw">return</span> storage.InvalidPageID, err
+    }
+    f := &amp;b.frames[idx]
+    f.data = storage.<span class="ty">Page</span>{} <span class="cm">// ゼロクリア（前の住人の内容を消す）</span>
+    f.id, f.valid, f.dirty, f.pins, f.ref = id, <span class="kw">true</span>, <span class="kw">true</span>, <span class="st">1</span>, <span class="kw">true</span>
+    b.table[id] = idx
+    <span class="kw">defer</span> b.unpin(idx)
+    <span class="kw">if</span> err := fn(id, &amp;f.data); err != <span class="kw">nil</span> {
+        <span class="kw">return</span> storage.InvalidPageID, err
+    }
+    <span class="kw">return</span> id, <span class="kw">nil</span>
+}</code></pre>
+
+    <p><code>fetch</code> を通らない理由は明快です。生まれたてのページはディスクに存在しないので、<code>ReadPage</code> で読んではいけません（第00章の <code>AllocatePage</code> がやるのは新しいページ番号の採番だけです）。代わりに <code>victim</code> で枠だけもらい、<code>f.data = storage.Page{}</code> でゼロ値の <code>Page</code>（4,096 バイトすべて 0）を代入して枠を白紙にします。この枠には直前まで別のページ（前の住人）が載っていたかもしれないので、ゼロクリアを省くと古いデータが新ページに混入します。</p>
+    <p>札の付け方が <code>fetch</code> のミス側と1か所だけ違うことに気づいたでしょうか。<strong><code>dirty</code> が最初から <code>true</code></strong> です。当然で、このページの内容（たとえゼロでも）はディスク上にまだ一度も書かれていません。ダーティを立てておかないと、追い出し時に「ディスクと同じだから書き戻し不要」と誤判定され、ページが跡形もなく消えます。</p>
+
+    <div class="box do"><div class="box-k">▸ 動かして確認</div>
+      <p>「ダーティページは追い出されても更新が残る」を検証するのが <code>TestPoolDirtyPageSurvivesEviction</code> です。手口が面白いので抜粋します。</p>
+      <div class="file-tag">internal/buffer/buffer_test.go（抜粋）</div>
+      <pre><code><span class="cm">// ダーティページは追い出し時に書き戻され、更新が失われない。</span>
+<span class="kw">func</span> TestPoolDirtyPageSurvivesEviction(t *testing.<span class="ty">T</span>) {
+    pool, disk := newPool(t, <span class="st">8</span>)
+    <span class="cm">// …（id を Allocate し、p[100] = 2 に Write で更新。省略）</span>
+
+    <span class="cm">// 別ページを大量に触って id を追い出させる</span>
+    <span class="kw">for</span> i := <span class="st">0</span>; i &lt; <span class="st">20</span>; i++ {
+        <span class="kw">if</span> _, err := pool.Allocate(<span class="kw">func</span>(_ storage.<span class="ty">PageID</span>, p *storage.<span class="ty">Page</span>) <span class="ty">error</span> { <span class="kw">return</span> <span class="kw">nil</span> }); err != <span class="kw">nil</span> {
+            t.Fatal(err)
+        }
+    }
+    <span class="cm">// プールを介さず直接ディスクを見る（追い出し時に書き戻されたか）</span>
+    <span class="kw">var</span> p storage.<span class="ty">Page</span>
+    <span class="kw">if</span> err := disk.ReadPage(id, &amp;p); err != <span class="kw">nil</span> {
+        t.Fatal(err)
+    }
+    <span class="kw">if</span> p[<span class="st">100</span>] != <span class="st">2</span> {
+        t.Fatalf(<span class="st">"追い出されたダーティページの更新が失われた: byte=%d, want 2"</span>, p[<span class="st">100</span>])
+    }
+}</code></pre>
+      <p>ページを更新したあと、容量 8 のプールで20枚を新規確保して<strong>わざと追い出しを起こし</strong>、検証は <code>pool.Read</code> ではなく <code>disk.ReadPage</code> — つまり<strong>プールを素通りしてディスクの生の内容</strong>を見ます。プール経由で読むと「プール内では正しいがディスクには書かれていない」ケースを見逃すからです。テストの説得力は、どこを観測するかで決まります。</p>
+      <pre class="term"><code><span class="ps">$</span> go test ./internal/buffer -run TestPoolDirtyPageSurvivesEviction -v
+<span class="out">=== RUN   TestPoolDirtyPageSurvivesEviction
+--- PASS: TestPoolDirtyPageSurvivesEviction (0.00s)
+PASS
+ok  	minidb/internal/buffer	0.817s</span></code></pre>
+    </div>
+
+    <!-- ================================================================ -->
+    <h2 class="step" id="step-6"><span class="step-no">Step 6</span>FlushAll と統計 — 書き戻して、観測する</h2>
+    <p>最後の2つのメソッドで buffer.go が完成します。遅延書き戻しを採用した以上、「いまダーティな全ページを、まとめてディスクへ書き戻す」操作がどこかに必要です。DB を閉じるとき、そして第06章のチェックポイント（回復の起点をディスクに固める処理）で呼ばれます。</p>
+
+    <div class="file-tag">internal/buffer/buffer.go</div>
+    <pre><code><span class="cm">// FlushAll はダーティページをすべて書き戻し、ディスクへ同期する。</span>
+<span class="kw">func</span> (b *<span class="ty">Pool</span>) FlushAll() <span class="ty">error</span> {
+    <span class="kw">for</span> i := <span class="kw">range</span> b.frames {
+        f := &amp;b.frames[i]
+        <span class="kw">if</span> f.valid &amp;&amp; f.dirty {
+            <span class="kw">if</span> err := b.disk.WritePage(f.id, &amp;f.data); err != <span class="kw">nil</span> {
+                <span class="kw">return</span> err
+            }
+            f.dirty = <span class="kw">false</span>
+        }
+    }
+    <span class="kw">return</span> b.disk.Sync()
+}
+
+<span class="cm">// Stats は統計のスナップショットを返す。</span>
+<span class="kw">func</span> (b *<span class="ty">Pool</span>) Stats() <span class="ty">Stats</span> { <span class="kw">return</span> b.stats }</code></pre>
+
+    <p>全枠を巡回し、<code>valid &amp;&amp; dirty</code> の枠だけ <code>WritePage</code> で書き戻して <code>dirty</code> を消す。素直な実装ですが、最後の <code>b.disk.Sync()</code> を見逃さないでください。序章で触れたとおり、<code>WritePage</code> が返ってきても、データは OS のキャッシュに居るだけで物理ディスクに届いた保証はありません。<code>Sync</code>（fsync）を呼んで初めて「電源が落ちても残る」と言えます。<strong>ループの中で毎回ではなく、全ページ書き終えてから1回だけ</strong> Sync するのも大事な点です。fsync は高価な操作なので、まとめ払いにしています。</p>
+    <p><code>Stats()</code> は統計のコピーを返すだけの1行ですが、「<strong>内部状態を観測できるようにしておく</strong>」のは本書の設計方針（NFR-05）そのものです。性能の話は、数字で見ない限り全部が想像になってしまいます。</p>
+
+    <div class="box hazard"><div class="box-k">⚠ 落とし穴 · メモリにしかない変更は、クラッシュで消える</div>
+      <p>遅延書き戻しの代金の話をします。<code>Write</code> が成功して上の層が「保存できた」と思った瞬間、その変更はまだ<strong>メモリの中にしかありません</strong>。追い出しか <code>FlushAll</code> より前にプロセスが落ちたり停電したりすれば、その変更は跡形もなく消えます。さらに悪いことに、<code>FlushAll</code> の途中（10枚中3枚だけ書けた時点）で落ちれば、ディスクには新旧が混ざった<strong>中途半端な状態</strong>が残ります。「速さのためにすぐ書かない。でも書かないと消える」— この矛盾は、バッファプールの中では解決できません。解くのは第06章の WAL（先行書き込みログ）です。この請求書の存在を覚えたまま、読み進めてください。</p>
+    </div>
+
+    <div class="box do"><div class="box-k">▸ 動かして確認（1）— FlushAll のテスト</div>
+      <p><code>TestPoolFlushAll</code> は「Allocate → FlushAll → プールを介さずディスクを直接読む」で、書き戻しと同期を検証します（観測点をディスク側に置く手口は Step 5 のテストと同じです）。</p>
+      <pre class="term"><code><span class="ps">$</span> go test ./internal/buffer -run TestPoolFlushAll -v
+<span class="out">=== RUN   TestPoolFlushAll
+--- PASS: TestPoolFlushAll (0.00s)
+PASS
+ok  	minidb/internal/buffer	0.761s</span></code></pre>
+    </div>
+
+    <div class="box do"><div class="box-k">▸ 動かして確認（2）— 完成品の REPL で統計を覗く</div>
+      <p>仕上げに、この章のカウンタが完成品の中で動いているところを見ます。REPL の <code>.stats</code> コマンドは、いま作った <code>Stats()</code> の値をそのまま表示します。まず新しい DB ファイルで表を作ってみます。</p>
+      <pre class="term"><code><span class="ps">$</span> go run ./cmd/minidb-repl buffdemo.db
+<span class="out">minidb — 単一ファイル組み込み RDBMS（.exit で終了 / .stats で統計）</span>
+<span class="ps">minidb&gt;</span> CREATE TABLE users (id INT, name TEXT, age INT)
+<span class="out">OK（0 行）</span>
+<span class="ps">minidb&gt;</span> INSERT INTO users VALUES (1, 'alice', 30)
+<span class="out">OK（1 行）</span>
+<span class="ps">minidb&gt;</span> INSERT INTO users VALUES (2, 'bob', 25)
+<span class="out">OK（1 行）</span>
+<span class="ps">minidb&gt;</span> .stats
+<span class="out">buffer: hits=10 misses=0 evictions=0 / last plan: </span>
+<span class="ps">minidb&gt;</span> .exit</code></pre>
+      <p><code>misses=0</code> — 作ったばかりの DB では、すべてのページが <code>Allocate</code> でメモリ上に生まれるので、ディスクから読むページが1枚もないのです（<code>Allocate</code> はヒットでもミスでもないことをコードで確認してください）。<code>hits=10</code> は、CREATE や INSERT の処理がカタログや表のページを繰り返し触った回数です。では一度終了したので、<strong>同じファイルを開き直して</strong>読んでみます。</p>
+      <pre class="term"><code><span class="ps">$</span> go run ./cmd/minidb-repl buffdemo.db
+<span class="out">minidb — 単一ファイル組み込み RDBMS（.exit で終了 / .stats で統計）</span>
+<span class="ps">minidb&gt;</span> SELECT name FROM users WHERE age &gt; 28
+<span class="out">| name  |
+| ----- |
+| alice |
+（1 行 / plan: seqscan(users)）</span>
+<span class="ps">minidb&gt;</span> .stats
+<span class="out">buffer: hits=0 misses=3 evictions=0 / last plan: seqscan(users)</span>
+<span class="ps">minidb&gt;</span> SELECT name FROM users WHERE age &gt; 28
+<span class="out">| name  |
+| ----- |
+| alice |
+（1 行 / plan: seqscan(users)）</span>
+<span class="ps">minidb&gt;</span> .stats
+<span class="out">buffer: hits=1 misses=3 evictions=0 / last plan: seqscan(users)</span>
+<span class="ps">minidb&gt;</span> .exit</code></pre>
+      <p>今度はプールが空の状態から始まるので、最初の SELECT はカタログと表のページ計3枚をディスクから読みました（<code>misses=3</code>）。そして2回目の同じ SELECT では <strong><code>misses</code> は 3 のまま増えず、<code>hits</code> だけが増えています</strong>。2回目のクエリは一度もディスクに行っていない — 章の冒頭で予告した「体感速度はここで決まる」が、数字で観測できました。</p>
+    </div>
+
+    <!-- ================================================================ -->
+    <h2>つまずき FAQ</h2>
+
+    <details class="qa"><summary>本物の LRU ではなく Clock を使うのはなぜですか?</summary>
+      <div class="qa-body"><p>コストの置き場所が違うからです。LRU を正確にやるには、キャッシュで最も頻繁に起きる操作である「ヒット」のたびに、使用順リストの並べ替え（リストからの取り外しと先頭への付け直し）が必要です。Clock はヒット時の仕事を「<code>ref = true</code> と書く」だけに削り、順序の判定は追い出しが必要になったときに針を回してまとめて行います。ヒットは毎秒何万回も起きるが追い出しは時々 — という実際の頻度に合わせて、コストを安い側に寄せた設計です。精度は LRU より落ちますが（「最近使われた/使われていない」の2値しか区別しない）、実用上の差は小さく、PostgreSQL も同系統の clock sweep を使っています。</p>
+      <p><strong>ここは誤解しやすいので、はっきりさせておきます。</strong> 「LRU は遅い」わけではありません。LRU も双方向連結リストとハッシュ表を組み合わせれば、<strong>ヒットもミスも O(1)</strong> で実装できます。並べ替え（ソート）が走るわけではないのです。Clock が勝るのは計算量ではなく<strong>定数倍</strong>です — ヒットのたびにポインタを4本書き換える代わりに、Clock は<strong>1ビット書くだけ</strong>で済みます。</p>
+      <p>そしてもう一つ、本物の DB では<strong>並行性</strong>のほうが効いてきます。複数のスレッドが同時にヒットすると、LRU では全員が同じ1本のリストの先頭を奪い合うので、そこが唯一の<strong>ロックの競合点</strong>になります。一方 Clock の参照ビットは枠ごとに独立しているので、別々の枠に触るスレッド同士はぶつかりません。minidb は単一スレッドなのでこの利点は効きませんが、Clock が実務で選ばれ続けている理由の大きな部分がここにあります。</p></div>
+    </details>
+
+    <details class="qa"><summary>unpin のし忘れ（pins が減らないバグ）は本当に起きないのですか?</summary>
+      <div class="qa-body"><p>このパッケージの外からは起こせません。<code>pins</code> を立てるのは <code>fetch</code>（ヒット/ミスで既存ページをピンする経路）と <code>Allocate</code>（新規ページを載せて <code>f.pins</code> に 1 を立てる経路）の2か所だけで、減らすのは <code>unpin</code> だけです。どちらの経路も直後に <code>defer unpin</code> とペアで書かれています。<code>defer</code> は途中 return やコールバックのエラーでも必ず実行されるので、ペアが崩れる経路が文法上ありません。逆に言うと、将来このファイルに新しいメソッドを足すときにこのペアを崩すと事故になります。守るべき場所が集約されている、というのがこの設計の価値です。</p></div>
+    </details>
+
+    <details class="qa"><summary>コールバックの中で、同じプールの Read や Write を呼んでもいいのですか?</summary>
+      <div class="qa-body"><p>構いません。むしろ第03章の B+Tree はそれを常用します（親ページの <code>Read</code> の中から子ページを <code>Read</code> する）。そのあいだ外側のページはピンされたままなので、内側の <code>fetch</code> がミスして追い出しが起きても、外側のページは <code>pins &gt; 0</code> で守られます。ただし同時にピンされる枚数ぶん枠を消費するので、容量が入れ子の深さより小さいと <code>ErrPoolExhausted</code> になります。<code>New</code> が容量を最低 8 に切り上げているのは、このためです。</p></div>
+    </details>
+
+    <details class="qa"><summary>Write のたびにディスクにも書けば（write-through）、クラッシュで消える問題は消えるのでは?</summary>
+      <div class="qa-body"><p>消えますが、速さも消えます。書き込みのたびにディスク I/O が発生するので、同じページを100回更新すれば100回書くことになり、キャッシュの意味が半減します。しかも安全性も実は不完全です。1つの論理操作（たとえば B+Tree の分割）が複数ページの更新でできているとき、その途中で電源が落ちれば、write-through でも「半分だけ書けた」壊れた状態が残ります。結局、順序と回復の仕組み（第06章の WAL）が別に必要で、WAL があるなら write-through の遅さを受け入れる理由がなくなる — というのが多くの DB が遅延書き戻しを選ぶ理屈です。</p></div>
+    </details>
+
+    <details class="qa"><summary>table（map）と frames（スライス）の二重管理が気持ち悪いです。map だけにできないのですか?</summary>
+      <div class="qa-body"><p>それぞれ別の質問に答えるための構造です。<code>table</code> は「ページ X はどこ?」（ページ番号→枠）に O(1) で答え、<code>frames</code> は「針の次の枠は?」（位置→枠、順番に一周する）に答えます。map だけだと Clock の「文字盤を順に回る」が書けず（Go の map は巡回順序が毎回変わります）、スライスだけだとページ検索が毎回全枠走査になります。二重管理のコストは「載せる/降ろすの2か所で両方更新する」規律だけなので、引き受ける価値があります。</p></div>
+    </details>
+
+    <!-- ================================================================ -->
+    <h2>理解度チェック</h2>
+    <p>次の問いに自分の言葉で答えてから、答えを開いてください。</p>
+
+    <details class="qa"><summary>Q1. ヒット・ミス・追い出しはそれぞれ何のことですか。コードのどの行でカウントされますか。</summary>
+      <div class="qa-body"><p>ヒット=探しているページがプール内にあった（<code>fetch</code> 冒頭、<code>table</code> に見つかった側で <code>Hits++</code>）。ミス=なくてディスクから読んだ（<code>fetch</code> の後半に入った時点で <code>Misses++</code>）。追い出し=枠を空けるために載っていたページを降ろした（<code>victim</code> の追い出し確定ブロックで <code>Evictions++</code>）。ミスは必ず <code>victim</code> を呼びますが、空き枠が見つかれば追い出しは起きないので、ミス数 ≧ 追い出し数になります。</p></div>
+    </details>
+
+    <details class="qa"><summary>Q2.【紙上トレース】容量4のプールで、針は枠[0]を指しています。各枠の状態が [0]=p8(ref=1, pins=0) / [1]=p9(ref=0, pins=3) / [2]=p10(ref=1, pins=0) / [3]=p11(ref=0, pins=0) のとき、次に追い出されるのはどのページですか。その直後にもう1枠必要になったら、次はどれですか。</summary>
+      <div class="qa-body"><p><strong>1枚目: p11</strong>。針の動き — [0] p8 は ref=1 なのでセカンドチャンス（ref を 0 に消して素通り）。[1] p9 は ref=0 ですが <code>pins=3</code> なので判定以前に素通り（ピンが最優先）。[2] p10 は ref=1 → ref を消して素通り。[3] p11 は ref=0 かつ pins=0 → 追い出し確定。針は [0] に戻った位置で止まります。</p>
+      <p><strong>2枚目: p8</strong>。続けて victim が呼ばれると、針は [0] から再開します。p8 の ref はさっきの一周で 0 に消されているので、pins=0 なら即追い出しです。「一度目は庇われ、次に針が来るまでに使われなければ追い出される」というセカンドチャンスの動きそのものです。</p></div>
+    </details>
+
+    <details class="qa"><summary>Q3. ピン留め中のページを追い出してしまうと、具体的に何が壊れますか。エラーになりますか。</summary>
+      <div class="qa-body"><p>エラーには<strong>なりません</strong>。それが恐ろしい点です。上の層のコールバックは <code>*storage.Page</code> のポインタで枠のメモリを直接見ています。その枠に別ページが読み込まれると、ポインタは同じ場所を指したまま中身だけがすり替わり、コールバックは別ページのバイト列を正しいデータとして読み書きし続けます。読み取りなら誤った結果、書き込みなら無関係なページの破壊につながる、静かなデータ破壊です。だから <code>victim</code> は <code>pins &gt; 0</code> の枠を、ref を見るまでもなく無条件に飛ばします。</p></div>
+    </details>
+
+    <details class="qa"><summary>Q4. dirty=false のページは書き戻さずに捨てていいのはなぜですか。</summary>
+      <div class="qa-body"><p><code>dirty=false</code> は「メモリ上の内容がディスク上の内容と一致している」という意味だからです。同じものがディスクに既にあるのだから、メモリ側の写しは捨てても情報は失われず、必要になればまた読めばよい。逆に <code>dirty=true</code> の枠は「その内容が世界にここしかない」状態なので、捨てる前に必ず <code>WritePage</code> で書き戻します。この判定を逆にすると（dirty を書き戻さない）、更新が黙って消えます — <code>TestPoolDirtyPageSurvivesEviction</code> が見張っているのはまさにそこです。</p></div>
+    </details>
+
+    <details class="qa"><summary>Q5. Write に渡したコールバック fn がエラーを返した場合、dirty は立ちますか。コードのどこで分かりますか。</summary>
+      <div class="qa-body"><p>立ちません。<code>Write</code> の中で <code>if err := fn(...); err != nil { return err }</code> が <code>b.frames[idx].dirty = true</code> より<strong>前</strong>にあり、エラー時はダーティを立てずに return します（<code>defer</code> したピン外しは実行されます）。「失敗した操作はページを変更していない」という第01章側の作りとセットで成り立っている点にも注意してください。もし fn が途中までページを書き換えてから失敗する作りだと、変更があるのにダーティなし、という不整合になります。</p></div>
+    </details>
+
+    <details class="qa"><summary>Q6. Allocate が成功した直後、そのページはディスク上に存在しますか。その直後に電源が落ちたらどうなりますか。</summary>
+      <div class="qa-body"><p>存在しません。<code>disk.AllocatePage()</code> はページ番号を採番するだけで、実体はプールの枠の上（メモリ）にしかありません。だからこそ <code>Allocate</code> は札を <code>dirty=true</code> で付けます。直後に電源が落てば、そのページは跡形もなく消えます。追い出しか <code>FlushAll</code> が起きて初めてディスクに書かれる — 「メモリにしかない変更はクラッシュで消える」問題の最も分かりやすい形で、第06章の WAL がこれを解決します。</p></div>
+    </details>
+
+    <div class="box done"><div class="box-k">✓ 完了の合図</div>
+      <p>buffer パッケージの4つのテストがすべて PASS すること。すなわち、容量超過でも内容が正しく（Eviction）、再読込でミスが増えず（Hit）、ダーティページが追い出しでも生き残り、FlushAll 後のディスクが最新である — この章のゴールがすべて機械検証されます。</p>
+      <pre class="term"><code><span class="ps">$</span> go test ./internal/buffer -v
+<span class="out">=== RUN   TestPoolCorrectUnderEviction
+--- PASS: TestPoolCorrectUnderEviction (0.00s)
+=== RUN   TestPoolHitReducesIO
+--- PASS: TestPoolHitReducesIO (0.00s)
+=== RUN   TestPoolDirtyPageSurvivesEviction
+--- PASS: TestPoolDirtyPageSurvivesEviction (0.00s)
+=== RUN   TestPoolFlushAll
+--- PASS: TestPoolFlushAll (0.00s)
+PASS
+ok  	minidb/internal/buffer	0.845s</span></code></pre>
+    </div>
+
+    <h2>まとめ — 次の層へ</h2>
+    <p>この章で、minidb は「速さの心臓」を手に入れました。ページはメモリの枠（フレーム）にキャッシュされ、使用中の枠はピンで守られ、あふれたら Clock の針がいちばん見込みのない住人を選んで追い出し、書き換えはダーティ札を付けてディスクへの支払いを先送りする。そしてそのすべてが、上の層からは <code>Store</code> という3メソッドの顔の裏に隠れました。以後の章のコードには、ディスクという言葉すらほとんど出てきません。</p>
+    <p>ただし、速くなったのは「<strong>同じページをもう一度読む</strong>」ことだけです。REPL の実演で <code>plan: seqscan(users)</code> という表示に気づいたでしょうか。いまの minidb は、たった1行を探すのにも表の全ページを端から読む（sequential scan）しかありません。プールがどれだけ優秀でも、100万行の表で「id = 42 の1行」を探すために全ページを触るのでは勝負になりません。必要なのは「<strong>目的のレコードのあるページへ、数回のページ読みでたどり着く</strong>」ための地図 — 索引です。次章では、データベース索引のデファクトスタンダードである B+Tree を、いま作った <code>Store</code> の上に組み上げます。ルートページが毎回キャッシュにヒットするありがたみも、そこで実感できるはずです。</p>
+
+    <div class="chap-foot">
+      <a class="pager" href="01-page.html"><span class="dir">← 前へ</span>第01章 · ページの中身</a>
+      <a class="pager next" href="03-btree.html"><span class="dir">次へ →</span>第03章 · B+Tree 索引</a>
+    </div>
+  </main>
+</div>
+</body>
+</html>

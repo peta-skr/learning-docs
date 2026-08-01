@@ -1,0 +1,420 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>第05章 時間とメモリを断ち切る — 手を動かして作るオンラインジャッジ</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500;600&family=Source+Serif+4:opsz,wght@8..60,400;8..60,600;8..60,700&family=Noto+Serif+JP:wght@400;600;700&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<div class="shell">
+
+  <aside class="spine">
+    <a class="wordmark" href="index.html">JUDGE · from scratch</a>
+    <div class="book-title">手を動かして作る<br>オンラインジャッジ</div>
+    <div class="book-sub">Go で サンドボックスから Web まで</div>
+
+    <div class="legend"><span>読む <b>↓</b></span><span>組む <b>↑</b></span></div>
+
+    <nav aria-label="目次">
+      <ul class="toc">
+        <li><a class="nav-item" href="index.html"><span class="nav-num">序</span><span class="nav-label">はじめに・準備<span class="nav-tag">Setup</span></span></a></li>
+        <li><a class="nav-item" href="00-smallest.html"><span class="nav-num">00</span><span class="nav-label">いちばん小さいジャッジ<span class="nav-tag">Judge</span></span></a></li>
+        <li><a class="nav-item" href="01-process.html"><span class="nav-num">01</span><span class="nav-label">プロセスと標準入出力<span class="nav-tag">IO</span></span></a></li>
+        <li><a class="nav-item" href="02-verdict.html"><span class="nav-num">02</span><span class="nav-label">verdict — 判定の種類<span class="nav-tag">Verdict</span></span></a></li>
+        <li><a class="nav-item" href="03-threat.html"><span class="nav-num">03</span><span class="nav-label">なぜ他人のコードは危険か<span class="nav-tag">Threat</span></span></a></li>
+        <li><a class="nav-item" href="04-sandbox.html"><span class="nav-num">04</span><span class="nav-label">コンテナに閉じ込める<span class="nav-tag">Sandbox</span></span></a></li>
+        <li><a class="nav-item current" aria-current="page" href="05-limits.html"><span class="nav-num">05</span><span class="nav-label">時間とメモリを断ち切る<span class="nav-tag">Limits</span></span></a></li>
+        <li><a class="nav-item" href="06-lang.html"><span class="nav-num">06</span><span class="nav-label">いろんな言語で<span class="nav-tag">Lang</span></span></a></li>
+        <li><a class="nav-item" href="07-store.html"><span class="nav-num">07</span><span class="nav-label">問題とテストケースを持つ<span class="nav-tag">Store</span></span></a></li>
+        <li><a class="nav-item" href="08-queue.html"><span class="nav-num">08</span><span class="nav-label">提出を「あとで」捌く<span class="nav-tag">Queue</span></span></a></li>
+        <li><a class="nav-item" href="09-web.html"><span class="nav-num">09</span><span class="nav-label">画面をつける<span class="nav-tag">Web</span></span></a></li>
+      </ul>
+    </nav>
+
+    <div class="spine-foot">
+      各章は「実行の心臓部」から<br>始めて「Web」へ登る。<br>下（採点の核）から上（画面）へ<br>積み上げて動かしていく。
+    </div>
+  </aside>
+
+  <main class="reading">
+    <div class="progress-tag">第05章 / 全10章 · 層: LIMITS · 読了目安 2〜3時間</div>
+    <div class="eyebrow"><span>LIMITS</span><span class="depth">— サンドボックス層・暴走を断つ</span></div>
+    <h1>時間とメモリを断ち切る</h1>
+    <p class="lede">前章でコードを Docker の檻に閉じ込めました。しかし檻に入れただけでは、提出コードが<strong>無限ループで CPU を回し続けたり、巨大な配列でメモリを食い潰したり</strong>する暴走を止められません。この章では、暴走を「断ち切る側」——制限時間とメモリ上限——をどう設け、それが発火したことを「検出する側」——終了コード <code>124</code> と <code>137</code>——でどう <code>TLE</code> / <code>MLE</code> に確定させるかを、二段構えの止め方まで含めて組み上げます。第02章で覚えた終了コードの意味を、今度は<strong>実装の現場</strong>で使い切ります。</p>
+
+    <div class="box goal"><div class="box-k">◈ この章のゴール</div>
+      <p>次の 3 つを、自分の言葉で説明できたら達成です。</p>
+      <ol>
+        <li>時間の断ち切りが<strong>二段構え</strong>である理由を説明できる。コンテナ内の <code>timeout</code> コマンド（<code>exit 124</code>）と、host 側の <code>WallTimeout</code>（<code>context.WithTimeout</code>）が、なぜ両方要るのか。</li>
+        <li><code>runCases</code> の壁時計計算式（<code>perCase = TL + margin</code> → <code>×ケース数 + 30s</code> → <code>maxRunWall</code> で cap）を追え、なぜ「ケース数 × TL の青天井」にしてはいけないかを言える。</li>
+        <li>メモリ超過を <code>137</code>（OOM killer）で検出する設計と、<strong>なぜ <code>ulimit -v</code> を使わないか</strong>を説明できる。あわせて <code>137</code> が MLE か TLE か曖昧になる場面と、その切り分けを追える。</li>
+      </ol>
+    </div>
+
+    <div class="box map"><div class="box-k">☰ この章のステップ</div>
+      <ol>
+        <li><a href="#step-1">暴走を止める2つの壁 — 時間とメモリ</a></li>
+        <li><a href="#step-2">コンテナ内 <code>timeout</code> と exit 124 — <code>loop.sh</code></a></li>
+        <li><a href="#step-3">host 側 <code>WallTimeout</code> の二段構え — <code>sandbox.go</code></a></li>
+        <li><a href="#step-4">壁時計を計算する — <code>runCases</code> と <code>maxRunWall</code></a></li>
+        <li><a href="#step-5"><code>--memory</code> と OOM killer の exit 137 — <code>sandbox.go</code></a></li>
+        <li><a href="#step-6">node の heap 自死と、<code>ulimit -v</code> を避ける設計判断</a></li>
+        <li><a href="#step-7">137 は MLE か TLE か — 曖昧さを切り分ける — <code>decideCase</code></a></li>
+      </ol>
+    </div>
+
+    <h2>断ち切る側と、検出する側</h2>
+    <p>この章の主題は2語に凝縮できます。<strong>「断ち切る」と「検出する」</strong>。提出コードが制限を破ったとき、まずそれを<strong>物理的に止め</strong>（断ち切る）、次に「なぜ止まったのか」を<strong>終了コードから読み取って verdict にする</strong>（検出する）。この2つは別の仕事で、別の場所が担当します。</p>
+    <ul>
+      <li><strong>断ち切る側</strong>は、実行を包む仕掛けです。時間なら「N 秒でプロセスにシグナルを送って殺す」<code>timeout</code> コマンドと <code>context</code>、メモリなら「M メガを超えたらカーネルがプロセスを殺す」Docker の <code>--memory</code>。<strong>止めるだけ</strong>で、それが何だったかは判断しません。</li>
+      <li><strong>検出する側</strong>は、止まった後に残る<strong>終了コード</strong>を読む仕掛けです。<code>124</code> なら時間切れ（<code>TLE</code>）、<code>137</code> ならメモリ超過（<code>MLE</code>）——第00章で作った <code>decideCase</code> がこれをやります。断ち切る側が「証拠（終了コード）」をきれいに残してくれるから、検出する側は迷わず verdict を出せます。</li>
+    </ul>
+    <p>この章は「断ち切る側」を Step 2〜6 で組み、「検出する側」との接続を Step 7 で締めます。第02章では終了コードの<strong>意味</strong>を覚えました。この章はその終了コードが<strong>どこで、どう作られるか</strong>——時間超過に <code>124</code> が、メモリ超過に <code>137</code> が確実に立つように、実行をどう包むか——を実装します。「制限をどう設け、どう検出するか」。角度を変えて同じ景色に登ります。</p>
+
+    <h2>暴走の2つの顔 — 時間とメモリ</h2>
+    <p>他人のコードが檻の中で暴れる形は、大きく2つです。図で押さえます。</p>
+
+    <div class="ascii">提出コードの暴走 → 断ち切る仕掛け → 残る終了コード
+
+  ┌─ 時間の暴走 ──────────────┐        ┌─ メモリの暴走 ────────────┐
+  │ 無限ループ                 │        │ 巨大配列 / 無限確保        │
+  │ 遅すぎるアルゴリズム        │        │ 再帰でスタック膨張         │
+  └────────────┬──────────────┘        └────────────┬──────────────┘
+               │ 断ち切る                            │ 断ち切る
+      ┌────────▼─────────┐                  ┌────────▼─────────┐
+      │ timeout コマンド   │ 内側(コンテナ)    │ docker --memory   │
+      │  → SIGTERM/KILL   │                  │  → OOM killer     │
+      │ context.WithTimeout│ 外側(host)       │  → SIGKILL        │
+      └────────┬─────────┘                  └────────┬─────────┘
+               │ 残す                                │ 残す
+        ┌──────▼──────┐                       ┌──────▼──────┐
+        │ exit 124    │──→ TLE                │ exit 137    │──→ MLE
+        └─────────────┘                       └─────────────┘</div>
+
+    <p>右と左で「断ち切る仕掛け」も「残る終了コード」も違います。<strong>時間は <code>timeout</code>（と host 側の締め切り）で断ち切り <code>124</code> を残す。メモリは <code>--memory</code> 上限に達したカーネルの OOM killer が断ち切り <code>137</code> を残す。</strong> ただし現実はこの絵ほどきれいには割れません。<code>137</code>（SIGKILL）は<strong>時間超過でも起こりうる</strong>し、node は <code>--memory</code> に達する前に自死します。この「にじみ」をどう切り分けるかが、章の後半（Step 6・7）の勘所です。まずはきれいな部分から。</p>
+
+    <h2 class="step" id="step-1"><span class="step-no">Step 1</span>時間の制限は、なぜ「二段構え」なのか</h2>
+    <p>時間切れを断ち切る仕掛けは、本書では<strong>2つ</strong>あります。コンテナの<strong>内側</strong>で走る <code>timeout</code> コマンドと、host（Go プロセス）の<strong>外側</strong>から掛ける <code>context.WithTimeout</code>。なぜ1つでは足りないのか。役割が違うからです。</p>
+    <table>
+      <tr><th>断ち切る仕掛け</th><th>どこで</th><th>何を守るか</th><th>残る証拠</th></tr>
+      <tr><td><code>timeout</code> コマンド</td><td>コンテナ内（<code>loop.sh</code>）</td><td><strong>1ケースぶんの制限時間（TL）</strong>。問題ごとの「2秒以内」を、ケース単位で正確に断つ。</td><td><code>exit 124</code>（TLE の直接証拠）</td></tr>
+      <tr><td><code>WallTimeout</code>（<code>context</code>）</td><td>host 側（<code>sandbox.go</code>）</td><td><strong>提出1件の実行段ぜんたい</strong>。コンテナ自体がハングした・<code>timeout</code> すら効かない異常を、host から強制的に断つ最終防衛線。</td><td>コンテナ強制削除・<code>TimedOut</code> フラグ</td></tr>
+    </table>
+    <p>内側の <code>timeout</code> は<strong>細かく正確</strong>——ケース1件ごとに TL を測り、超えた瞬間に <code>124</code> を残します。これが TLE 判定の主役です。しかし内側だけに頼ると、<strong>コンテナそのものが応答しなくなった</strong>ときに詰みます。<code>timeout</code> は提出プロセスを殺せても、その <code>timeout</code> を含むシェル全体が Docker のバグやカーネルの都合で固まったら、誰も止められません。そこで外側から、host の Go プロセスが「この提出は何分経っても終わらない、コンテナごと消す」という<strong>粗いが確実な最終防衛線</strong>を張ります。これが <code>WallTimeout</code> です。</p>
+    <p>細かい正確さ（内側）と、確実な最終防衛（外側）。この二段構えが、「1件の暴走した提出が、ジャッジのワーカーを永久に占有してキュー全体を止める」という最悪の事故を防ぎます。以降、内側（Step 2）→外側（Step 3）→両者を繋ぐ壁時計計算（Step 4）の順に組みます。</p>
+
+    <h2 class="step" id="step-2"><span class="step-no">Step 2</span>コンテナ内 timeout と exit 124 — loop.sh</h2>
+    <p>まず内側から。提出コードは、コンテナの中で <code>loop.sh</code> という小さなシェルスクリプトに包まれて走ります（この <code>loop.sh</code> の<strong>全文はこの Step 2 で読みます</strong>。第06章では、この <code>loop.sh</code> を言語ごとの実行コマンドと組み合わせて呼び出す側を扱います）。ケースを1つずつ回し、各ケースを <code>timeout</code> コマンドで包んでいます。ファイルは <code>images/common/loop.sh</code>。</p>
+
+    <div class="file-tag">images/common/loop.sh</div>
+    <pre><code><span class="cm">#!/bin/sh</span>
+<span class="cm"># 実行段ランナー（judge-go / judge-node 共通）。judge-sql は sqlloop.sh。</span>
+<span class="cm"># stdin の tar から提出物と cases/*.in を受け取り、ケースごとに</span>
+<span class="cm">#   ___CASE___ &lt;name&gt; &lt;exit&gt; &lt;elapsed_sec&gt; &lt;maxrss_kb&gt;</span>
+<span class="cm">#   ___OUT___ / base64(stdout 先頭1MB) / ___END___</span>
+<span class="cm">#   ___ERR___ / base64(stderr 先頭4KB) / ___END___</span>
+<span class="cm"># を出力する。非0終了のケースで打ち切り、最後に ___DONE___。</span>
+<span class="cm"># 使い方: loop.sh &lt;time_limit_sec&gt; &lt;cmd...&gt;</span>
+<span class="cm">#</span>
+<span class="cm"># verdict 判定の要となる終了コードの出所を一意にする:</span>
+<span class="cm">#   - 時間超過 → timeout が SIGTERM（→ 効かなければ 3s 後 SIGKILL）を送り、ec=124</span>
+<span class="cm">#     （124 は「時間超過」専用。TLE を elapsed に頼らず exit コードだけで確定できる）</span>
+<span class="cm">#   - メモリ超過 → カーネル OOM killer が SIGKILL、ec=137</span>
+<span class="cm">#   - それ以外の非0 → 提出プロセスの終了コードを time が透過</span>
+<span class="cm"># time を timeout の外側に置くことで、TLE でも MaxRSS を回収できる。</span>
+<span class="cm"># metrics の "%e %M" はロケール非依存にするため LC_ALL=C を固定。</span>
+<span class="kw">set</span> -u
+<span class="kw">export</span> LC_ALL=C
+mkdir -p /tmp/box &amp;&amp; cd /tmp/box || <span class="kw">exit</span> <span class="st">3</span>
+tar -xf - || <span class="kw">exit</span> <span class="st">3</span>
+[ -f prog ] &amp;&amp; chmod +x prog 2&gt;/dev/null || <span class="kw">true</span>
+tl=<span class="st">"$1"</span>; <span class="kw">shift</span>
+<span class="kw">for</span> f <span class="kw">in</span> cases/*.in; <span class="kw">do</span>
+  [ -e <span class="st">"$f"</span> ] || <span class="kw">break</span>
+  name=$(basename <span class="st">"$f"</span> .in)
+  /usr/bin/time -q -f <span class="st">"%e %M"</span> -o /tmp/case.time \
+    timeout -k <span class="st">3</span> -s TERM <span class="st">"$tl"</span> <span class="st">"$@"</span> &lt; <span class="st">"$f"</span> &gt; /tmp/case.out 2&gt; /tmp/case.err
+  ec=$?
+  <span class="cm"># elapsed が空/負値（SIGTERM 時に time が負を書くことがある）なら 0 に正規化。</span>
+  <span class="cm"># 位置パラメータ $@（実行コマンド）を壊さないよう read で分解する。</span>
+  elapsed=<span class="st">0</span>; maxrss=<span class="st">0</span>
+  read elapsed maxrss _ &lt; /tmp/case.time 2&gt;/dev/null || <span class="kw">true</span>
+  <span class="kw">case</span> <span class="st">"${elapsed:-}"</span> <span class="kw">in</span> -*|<span class="st">""</span>) elapsed=<span class="st">0</span> ;; <span class="kw">esac</span>
+  <span class="kw">case</span> <span class="st">"${maxrss:-}"</span> <span class="kw">in</span> -*|<span class="st">""</span>) maxrss=<span class="st">0</span> ;; <span class="kw">esac</span>
+  <span class="kw">echo</span> <span class="st">"___CASE___ $name $ec $elapsed $maxrss"</span>
+  <span class="kw">echo</span> <span class="st">"___OUT___"</span>
+  head -c <span class="st">1048576</span> /tmp/case.out | base64
+  <span class="kw">echo</span> <span class="st">"___END___"</span>
+  <span class="kw">echo</span> <span class="st">"___ERR___"</span>
+  head -c <span class="st">4096</span> /tmp/case.err | base64
+  <span class="kw">echo</span> <span class="st">"___END___"</span>
+  rm -f /tmp/case.out /tmp/case.err /tmp/case.time
+  <span class="kw">if</span> [ <span class="st">"$ec"</span> -ne <span class="st">0</span> ]; <span class="kw">then</span> <span class="kw">break</span>; <span class="kw">fi</span>
+<span class="kw">done</span>
+<span class="kw">echo</span> <span class="st">"___DONE___"</span>
+<span class="kw">exit</span> <span class="st">0</span></code></pre>
+
+    <p>時間の断ち切りは、真ん中のこの1行に凝縮されています。ここを逐語で読みます。</p>
+    <pre><code>/usr/bin/time -q -f <span class="st">"%e %M"</span> -o /tmp/case.time \
+  timeout -k <span class="st">3</span> -s TERM <span class="st">"$tl"</span> <span class="st">"$@"</span> &lt; <span class="st">"$f"</span> &gt; /tmp/case.out 2&gt; /tmp/case.err</code></pre>
+    <p><strong><code>timeout -s TERM "$tl" "$@"</code> が断ち切りの本体です。</strong> <code>timeout</code> は「指定コマンドを実行し、<code>$tl</code> 秒（＝その問題の制限時間）を超えたらシグナルを送って殺す」GNU coreutils のコマンド。<code>"$@"</code> が提出コードの実行コマンド（実際は <code>/tmp/box/prog</code> や <code>node /tmp/box/main.js</code>。<code>loop.sh</code> は冒頭で <code>cd /tmp/box</code> しているので動作は等価です）で、<code>&lt; "$f"</code> でそのケースの入力を stdin に流し込んでいます。制限時間内に終われば提出プロセスの終了コードがそのまま <code>ec</code> に入り、<strong>超えれば <code>timeout</code> が <code>124</code> を返します</strong>。この <code>124</code> こそが、第00章の <code>decideCase</code> が <code>TLE</code> と確定する<strong>唯一の確実な証拠</strong>です。</p>
+    <p><strong><code>-s TERM</code> は「まず SIGTERM を送る」</strong>という指定です。いきなり SIGKILL で叩き殺すのではなく、まず「終わってくれ」という穏当なシグナル（SIGTERM）を送り、プロセスに後始末の隙を与えます。多くのプロセスは SIGTERM で素直に終わります。</p>
+    <p><strong><code>-k 3</code> は「殺しの猶予」</strong>です。<code>-k</code>（kill-after）は「SIGTERM を送ってもなお 3 秒以内に死ななかったら、今度は SIGKILL（<code>kill -9</code>、握りつぶせない絶対の死）を送る」という保険。行儀の悪い提出が SIGTERM を<strong>握りつぶして</strong>居座っても、3 秒後には確実に殺されます。<strong>この <code>-k 3</code> の存在が、Step 7 で扱う「137 が TLE に化ける」曖昧さの正体</strong>です。SIGTERM を握りつぶして SIGKILL で殺された提出は、<code>124</code> ではなく <code>137</code>（<code>128 + 9</code>）を残すからです。今は「猶予切れの SIGKILL は 137 を残す」とだけ覚えておいてください。</p>
+    <p><strong><code>/usr/bin/time -f "%e %M"</code> を <code>timeout</code> の<em>外側</em>に置く</strong>のも意図的です。<code>time</code> は「<code>%e</code>＝経過秒」「<code>%M</code>＝最大常駐メモリ(KB)」を計測して <code>/tmp/case.time</code> に書きます。<code>timeout</code> を <code>time</code> の内側に置くことで、<strong>TLE で殺されたケースでも、その時点までのメモリ使用量（MaxRSS）を回収できる</strong>——コメントが「time を timeout の外側に置くことで、TLE でも MaxRSS を回収できる」と明言している通りです。もし順序が逆なら、<code>timeout</code> が <code>time</code> ごと殺してしまい計測値が失われます。</p>
+    <p>そしてループの最後、<strong><code>if [ "$ec" -ne 0 ]; then break; fi</code></strong>。あるケースが非0終了（TLE・RE・OOM など何であれ）した瞬間に、残りのケースを実行せず<strong>ループを抜けます</strong>。第00章で見た「最初の非 AC で打ち切り」を、コンテナ<em>内側</em>でも先取りしている——無駄なケースを走らせて時間を溶かさない工夫です。ここで打ち切っても、<code>break</code> でループを抜けた後にスクリプト末尾の <code>echo "___DONE___"</code> は<strong>無条件に実行される</strong>ので、<code>___DONE___</code> は「打ち切りも含め、ランナースクリプトが末尾まで正常に到達した」証です（＝コンテナごと殺されると出ない）。逆に <code>___DONE___</code> が来ないのは、壁時計超過や OOM で<strong>コンテナ自体が途中で断たれた</strong>ときで、第02章の <code>outcome.Done</code> がこれを読んで「採点が最後まで到達したか」を判断します。</p>
+
+    <div class="gonote"><div class="box-k">GO メモ · timeout の exit 124 と、シグナルと終了コードの関係</div>
+      <p><code>timeout</code> の <code>124</code> は POSIX/coreutils の約束で「時間切れで対象を打ち切った」を意味する<strong>専用コード</strong>です。だから <code>elapsed</code>（経過時間）を測って「TL を超えたか」を後から判定するより、<code>124</code> という<strong>終了コードそのもの</strong>を見る方が確実です。時計は誤差やタイミングでブレますが、終了コードはブレません。<br>
+      Unix では「シグナルで殺されたプロセスの終了コードは <code>128 + シグナル番号</code>」という規約があります。SIGKILL はシグナル番号 <code>9</code> なので <code>128 + 9 = 137</code>、SIGTERM は <code>15</code> なので <code>128 + 15 = 143</code>。<code>137</code> という数字を見たら「SIGKILL で殺された」と即座に読めるのはこのためです。OOM killer も、<code>timeout -k</code> の猶予切れも、どちらも SIGKILL を使うので<strong>同じ 137 を残す</strong>——これが Step 7 の曖昧さの根っこです。</p>
+    </div>
+
+    <h2 class="step" id="step-3"><span class="step-no">Step 3</span>host 側 WallTimeout の二段構え — sandbox.go</h2>
+    <p>内側の <code>timeout</code> は「1ケースの TL」を断ちますが、コンテナ<strong>そのもの</strong>が固まったら効きません。そこで host 側（Go プロセス）から、コンテナの実行全体に<strong>締め切り</strong>を掛けます。これが第04章で作った <code>DockerSandbox.Run</code> の中の <code>WallTimeout</code> です。時間・締め切りに関わる部分だけを、もう一度取り出して読みます。ファイルは <code>internal/judge/sandbox.go</code>。</p>
+
+    <div class="file-tag">internal/judge/sandbox.go（WallTimeout に関わる骨格・抜粋）</div>
+    <pre><code><span class="kw">func</span> (d *<span class="ty">DockerSandbox</span>) Run(ctx context.<span class="ty">Context</span>, spec <span class="ty">RunSpec</span>) (*<span class="ty">RunResult</span>, <span class="ty">error</span>) {
+	name := containerName()
+	args := []<span class="ty">string</span>{
+		<span class="st">"run"</span>, <span class="st">"--rm"</span>, <span class="st">"-i"</span>,
+		<span class="st">"--name"</span>, name,
+		<span class="cm">// …（--network none / --cap-drop ALL などの隔離指定は第04章）</span>
+	}
+	<span class="cm">// …（--read-only / --tmpfs / イメージ・コマンドを args に積む。第04章）</span>
+
+	runCtx, cancel := context.WithTimeout(ctx, spec.WallTimeout)
+	<span class="kw">defer</span> cancel()
+
+	cmd := exec.CommandContext(runCtx, d.DockerPath, args...)
+	cmd.Stdin = spec.Stdin
+	<span class="cm">// …（stdout/stderr を上限つきバッファ capWriter に繋ぐ。第04章）</span>
+
+	err := cmd.Run()
+
+	res := &amp;<span class="ty">RunResult</span>{
+		Stdout:    stdout.Bytes(),
+		Stderr:    stderr.Bytes(),
+		Truncated: stdout.Truncated(),
+	}
+
+	<span class="cm">// context が切れて docker CLI が殺された場合、コンテナは生き残るので必ず後始末する。</span>
+	<span class="cm">// タイムアウト（DeadlineExceeded）だけでなく、クライアント切断（Canceled）も回収する。</span>
+	<span class="kw">if</span> runCtx.Err() != <span class="kw">nil</span> {
+		res.TimedOut = runCtx.Err() == context.DeadlineExceeded
+		d.forceRemove(name)
+		<span class="kw">return</span> res, <span class="kw">nil</span>
+	}
+	<span class="cm">// …（exit code の取り出し・125/126/127 の IE 化は第04章）</span>
+	<span class="kw">return</span> res, <span class="kw">nil</span>
+}</code></pre>
+
+    <p>host 側の断ち切りの要は、次の3行の連携です。時間の観点だけを追います。</p>
+    <p><strong>① <code>context.WithTimeout(ctx, spec.WallTimeout)</code> で締め切りを作る。</strong> <code>spec.WallTimeout</code> は「このコンテナ実行に許す最長の壁時計時間」（Step 4 で計算します）。<code>context.WithTimeout</code> は「この時間が経ったら自動でキャンセルされる <code>runCtx</code>」を返します。<code>defer cancel()</code> は、関数を抜けるとき（正常終了でもエラーでも）に必ずタイマーを解放するための定石で、忘れるとタイマーが漏れます。</p>
+    <p><strong>② <code>exec.CommandContext(runCtx, ...)</code> で締め切りをプロセスに紐づける。</strong> <code>CommandContext</code> は「<code>runCtx</code> がキャンセル（＝締め切り到達）されたら、起動した <code>docker</code> CLI プロセスを自動で kill する」を保証します。序章の GO メモで触れた「締め切りを渡す」の実物です。これで、<code>WallTimeout</code> を過ぎたら host 側から <code>docker</code> プロセスが強制的に断たれます。</p>
+    <p><strong>③ <code>if runCtx.Err() != nil</code> で「締め切りで死んだ」を検出し、後始末する。</strong> ここが host 側の断ち切りの<strong>最も重要な後片付け</strong>です。<code>runCtx.Err()</code> が <code>nil</code> でなければ、<code>docker</code> CLI は締め切り or 切断で殺されたことを意味します。しかし——<strong><code>docker</code> CLI を殺しても、その先で走っているコンテナ本体は生き残る</strong>のです。CLI はコンテナへの「窓口」にすぎず、窓口を閉じてもコンテナは動き続ける。だから <code>d.forceRemove(name)</code> で、名前を頼りにコンテナを <code>docker rm -f</code> で明示的に消します。これを怠ると、暴走したコンテナがゾンビとして居残り、host のリソースを食い続けます。<code>res.TimedOut = runCtx.Err() == context.DeadlineExceeded</code> は「締め切り到達（<code>DeadlineExceeded</code>）なら真の TLE、クライアント切断（<code>Canceled</code>）なら TLE ではない」を区別するフラグで、第02章の <code>runRes.TimedOut</code> がこれを読んで TLE に倒します。</p>
+
+    <div class="box hazard"><div class="box-k">⚠ 落とし穴 — docker CLI を殺してもコンテナは死なない</div>
+      <p>host 側で <code>docker run</code> を起動した Go プロセスに <code>context</code> の締め切りを掛けて kill しても、<strong>コンテナ本体は生き残ります</strong>。<code>docker run</code> はコンテナを操る「クライアント」であって、コンテナの「親プロセス」ではないからです。クライアントを殺しただけで満足すると、暴走コンテナが CPU とメモリを食い続け、ジャッジ全体を蝕みます。<code>runCtx.Err() != nil</code> のときに <code>forceRemove(name)</code> で<strong>名前指定の <code>docker rm -f</code></strong> を必ず打つこと——これが二段構えの外側を「本当に断ち切る」ための必須の後始末です。だからこそコンテナに <code>--name judge-xxxx</code> という一意な名前を付けていた（Step 2 の外側、第04章）わけです。</p>
+    </div>
+
+    <h2 class="step" id="step-4"><span class="step-no">Step 4</span>壁時計を計算する — runCases と maxRunWall</h2>
+    <p>Step 3 の <code>WallTimeout</code> には、いくらの時間を渡すべきでしょうか。ここが「断ち切る側」の設計でいちばん頭を使うところです。<strong>短すぎれば正当な提出を途中で切ってしまい、長すぎれば1件の暴走がワーカーを何十分も占有してキュー全体を止めます。</strong> この壁時計を計算するのが <code>runCases</code> です。ファイルは <code>internal/judge/judge.go</code>。時間計算に関わる部分を抜き出します。</p>
+
+    <div class="file-tag">internal/judge/judge.go（runCases・壁時計計算の抜粋）</div>
+    <pre><code>	tlSec := fmt.Sprintf(<span class="st">"%.3f"</span>, float64(p.TimeLimitMS)/<span class="st">1000.0</span>)
+	perCase := float64(p.TimeLimitMS)/<span class="st">1000.0</span> + casePauseMarginSec
+	wall := time.Duration(perCase*float64(len(cases)))*time.Second + <span class="st">30</span>*time.Second
+	<span class="cm">// ケース数×TL で青天井にならないよう絶対上限を被せる（1提出が長時間キューを止めない）。</span>
+	<span class="kw">if</span> wall &gt; maxRunWall {
+		wall = maxRunWall
+	}
+
+	res, err := j.Sandbox.Run(ctx, <span class="ty">RunSpec</span>{
+		Image:       spec.Image,
+		Cmd:         spec.RunCmd(tlSec),
+		<span class="cm">// …（Stdin の tar・隔離指定は第04章）</span>
+		MemoryMB:    p.MemoryLimitMB,
+		PidsLimit:   runPidsLimit,
+		CPUs:        <span class="st">"1"</span>,
+		ReadOnly:    <span class="kw">true</span>,
+		Tmpfs:       []<span class="ty">string</span>{<span class="st">"/tmp:rw,exec,size=256m"</span>},
+		WallTimeout: wall,
+		StdoutLimit: <span class="st">32</span> &lt;&lt; <span class="st">20</span>,
+	})</code></pre>
+    <p>関係する定数はファイル冒頭で定義されています。</p>
+    <div class="file-tag">internal/judge/judge.go（定数・抜粋）</div>
+    <pre><code><span class="kw">const</span> (
+	<span class="cm">// …</span>
+	casePauseMarginSec = <span class="st">1.0</span>              <span class="cm">// ケースごとのコンテナ内オーバーヘッド見込み</span>
+	maxRunWall         = <span class="st">10</span> * time.Minute <span class="cm">// 1提出の実行段の壁時計上限</span>
+	<span class="cm">// …</span>
+)</code></pre>
+
+    <p>壁時計 <code>wall</code> の計算は3段で組み上がります。式を分解して読みます。</p>
+    <p><strong>① 1ケースあたりの見込み時間 <code>perCase</code>。</strong> <code>perCase = TL(秒) + casePauseMarginSec</code>。TL（問題の制限時間、例 2 秒）そのものだけでは足りません。<code>timeout</code> の起動、<code>time</code> の計測、入力の読み込みといった<strong>コンテナ内のオーバーヘッド</strong>が1ケースごとに乗るからです。<code>casePauseMarginSec = 1.0</code> の 1 秒マージンが、この「実際の TL より少し余分にかかる分」を吸収します。もしマージンなしで <code>wall = TL × ケース数</code> ちょうどにすると、正当な提出でもオーバーヘッドの積み重ねで host 側の <code>WallTimeout</code> に先に引っかかり、<strong>本来 AC の提出が理不尽に切られます</strong>。</p>
+    <p><strong>② 全ケース分に、固定の余裕 30 秒を足す。</strong> <code>wall = perCase × ケース数 + 30秒</code>。<code>perCase × ケース数</code> が「全ケースを順に走らせる見込み時間」。そこへ<strong>コンテナ自体の起動・tar 展開・コンパイル済みバイナリの配置・結果の集約</strong>といった、ケース数に比例しない一回きりのオーバーヘッドを、固定の 30 秒で吸収します。これで <code>wall</code> は「この提出を最後まで採点するのに、常識的に見て十分な壁時計」になります。</p>
+    <p><strong>③ 絶対上限 <code>maxRunWall</code>（10分）で cap する。</strong> ここが設計の肝です。<code>wall &gt; maxRunWall</code> なら <code>wall = maxRunWall</code> に丸めます。②までの式は<strong>ケース数に比例して <code>wall</code> が伸びる</strong>——TL が 5 秒でケースが 200 個ある問題なら、素朴には <code>(5+1)×200 + 30 = 1230 秒</code>（20分超）になります。もしこの値をそのまま <code>WallTimeout</code> に使うと、無限ループする1件の提出が<strong>20分間ワーカーを独占</strong>し、その間に積まれた他の提出は一切採点されません。<code>maxRunWall = 10分</code> の絶対上限は、「どんな問題でも、1提出の実行段は最長10分で必ず断ち切る」という<strong>キュー保護のための天井</strong>です。10分で終わらない採点は諦める——これは「正確な採点」より「ジャッジ全体が生き続けること」を優先する、意図的なトレードオフです。</p>
+
+    <div class="box hazard"><div class="box-k">⚠ 落とし穴 — 壁時計を「TL × ケース数」の青天井にしてはいけない</div>
+      <p><code>WallTimeout</code> を素朴に <code>TL × ケース数</code> でそのまま計算すると、ケース数の多い問題や TL の長い問題で壁時計が<strong>青天井に伸びます</strong>。すると1件の暴走した提出が、内側の <code>timeout</code> をすり抜けて（例えばコンテナごとハングして）ワーカーを何十分も占有し、<strong>キューに積まれた後続の全提出が採点されないまま待たされます</strong>。単一ユーザーのセルフホストでも、複数の問題を続けて解いているときにこれは効きます。<code>maxRunWall</code> の絶対上限（10分）は、この「1件の暴走がジャッジ全体を人質に取る」事故を防ぐ最後のブレーキです。<strong>個々の採点の完璧さより、ジャッジという仕組みが止まらないことを優先する</strong>——これはジョブを扱うシステム全般の鉄則で、第08章のキュー設計にも通じます。</p>
+    </div>
+
+    <div class="gonote"><div class="box-k">GO メモ · time.Duration の掛け算と、float 秒からの変換</div>
+      <p><code>time.Duration(perCase*float64(len(cases)))*time.Second</code> は少し目が慣れないかもしれません。<code>perCase</code> は <code>float64</code>（秒）、<code>len(cases)</code> は <code>int</code>。<code>float64(len(cases))</code> で型を合わせて掛け、<strong>秒数（float）を得てから <code>time.Duration(...)</code> で整数に丸め、<code>*time.Second</code> で「秒」の単位を掛ける</strong>——という順序です。<code>time.Duration</code> は内部的にはナノ秒の <code>int64</code> なので、<code>数値 * time.Second</code> で初めて「その数値秒」を表す <code>Duration</code> になります。<code>time.Duration(perCase) * time.Second</code> のように先に <code>Duration</code> 化してから掛けるのが、Go で「N 秒」を作る定石です。<code>tlSec</code> の <code>fmt.Sprintf("%.3f", ...)</code> は、この秒数を<strong>コンテナ内の <code>timeout</code> コマンドに渡す文字列</strong>（例 <code>"2.000"</code>）に整形するもので、Step 2 の <code>loop.sh</code> の <code>$tl</code> がこれを受け取ります。host 側の壁時計（<code>wall</code>）と、コンテナ内の1ケース TL（<code>tlSec</code>）が、同じ <code>p.TimeLimitMS</code> から別々に作られているのが見て取れます。</p>
+    </div>
+
+    <h2 class="step" id="step-5"><span class="step-no">Step 5</span>--memory と OOM killer の exit 137 — sandbox.go</h2>
+    <p>時間の断ち切りが済みました。次はメモリです。メモリの断ち切りは、時間よりむしろ<strong>単純</strong>です。Docker にメモリ上限を渡すだけで、あとは<strong>カーネルの OOM killer が勝手に断ち切ってくれる</strong>からです。第04章で作った <code>DockerSandbox.Run</code> の <code>docker run</code> 引数のうち、メモリに関わる2行を取り出します。</p>
+
+    <div class="file-tag">internal/judge/sandbox.go（メモリ上限の指定・抜粋）</div>
+    <pre><code>	args := []<span class="ty">string</span>{
+		<span class="st">"run"</span>, <span class="st">"--rm"</span>, <span class="st">"-i"</span>,
+		<span class="st">"--name"</span>, name,
+		<span class="st">"--network"</span>, <span class="st">"none"</span>,
+		<span class="st">"--memory"</span>, strconv.Itoa(spec.MemoryMB) + <span class="st">"m"</span>,
+		<span class="st">"--memory-swap"</span>, strconv.Itoa(spec.MemoryMB) + <span class="st">"m"</span>,
+		<span class="st">"--pids-limit"</span>, strconv.Itoa(spec.PidsLimit),
+		<span class="cm">// …（--cpus / --cap-drop ALL / --user などは第04章）</span>
+	}</code></pre>
+
+    <p>メモリの断ち切りは、この<strong>2つのフラグの組</strong>で完成します。</p>
+    <p><strong><code>--memory M m</code> はメモリ上限。</strong> コンテナ内の全プロセスが使える物理メモリを M メガバイトに制限します（<code>spec.MemoryMB</code> は問題ごとの <code>p.MemoryLimitMB</code>）。コンテナ内のプロセス群がこの上限に達すると、<strong>Linux カーネルの OOM（Out Of Memory）killer が発火し</strong>、メモリを食っているプロセスに SIGKILL を送って強制終了します。ここで GO メモの規約を思い出してください——SIGKILL で殺されたプロセスの終了コードは <code>128 + 9 = 137</code>。だから「メモリ超過＝<code>137</code>」が成立します。<strong>ジャッジ側は何も測っていません</strong>。上限を設定するだけで、断ち切りも証拠（<code>137</code>）の生成も、すべてカーネルがやってくれる。これがメモリ制限の美しさです。</p>
+    <p><strong><code>--memory-swap M m</code> を <code>--memory</code> と<strong>同じ値</strong>にするのが要点です。</strong> <code>--memory-swap</code> は「メモリ ＋ スワップの合計上限」を指します。もしこれを指定しないと、Docker は既定で <code>--memory</code> と同量のスワップ（ディスクへの退避）を許してしまい（合計で上限の 2 倍）、<strong>提出コードが上限の 2 倍のメモリを使えてしまう</strong>。それでは MLE 判定が甘くなるうえ、遅いスワップで実行時間まで狂います。<code>--memory-swap</code> を <code>--memory</code> と同値（＝スワップ増分ゼロ）にすることで、「物理メモリ M メガを超えたら即 OOM」という厳格な線を引いています。この一手間がないと、メモリ制限は<strong>実質2倍にゆるむ</strong>——見落としがちですが、正しく MLE を出すために欠かせない指定です。</p>
+    <p>この <code>137</code> は、第01章のプロトコル解釈テスト <code>TestParseRunOutput</code> にも実例として現れます。<code>___CASE___ c002 137 1.95 261120</code>——終了コード <code>137</code>、経過 1.95 秒、MaxRSS 261120 KB（約 255 MB）のケースが、プロトコルを通じて host 側に運ばれ、<code>decideCase</code> で MLE に落ちる、という流れがテストで固定されています。</p>
+
+    <h2 class="step" id="step-6"><span class="step-no">Step 6</span>node の heap 自死と、ulimit -v を避ける設計判断</h2>
+    <p>Step 5 の「上限を設定すればカーネルが 137 で断ち切る」は、コンパイル言語（Go）ではきれいに成り立ちます。しかし現実には、この理想が<strong>崩れる2つの事情</strong>があります。どちらも、この章の<strong>最も重要な設計判断</strong>に繋がります。</p>
+
+    <h3>事情1 — node は上限に達する前に自死する</h3>
+    <p>Node.js（V8 エンジン）は、コンテナの <code>--memory</code> 上限に達する<strong>前に</strong>、V8 自身が持つ「ヒープ上限」に先に突き当たって<strong>自死</strong>します。このとき OOM killer は発火せず、node は自分で <code>FATAL ERROR: ... heap out of memory</code> というメッセージを stderr に吐いて異常終了します。つまり <strong>node の MLE は 137 ではなく、別の（非0の）終了コード＋特定の文字列</strong>で現れる。これを検出するのが、第00章で見た <code>decideCase</code> の次の分岐です。</p>
+    <div class="file-tag">internal/judge/judge.go（decideCase・node の MLE 分岐）</div>
+    <pre><code>	<span class="kw">case</span> c.ExitCode != <span class="st">0</span> &amp;&amp; bytes.Contains(c.Stderr, []<span class="ty">byte</span>(<span class="st">"heap out of memory"</span>)):
+		<span class="cm">// node はコンテナ上限より先に V8 ヒープ上限で自死する。</span>
+		<span class="cm">// 正常終了(exit 0)の提出が偶然この文字列を出力しても MLE にしないよう、</span>
+		<span class="cm">// 異常終了を条件に加える。</span>
+		<span class="kw">return</span> MLE</code></pre>
+    <p><strong><code>ExitCode != 0 &amp;&amp; Stderr に "heap out of memory"</code></strong> という<strong>2条件の AND</strong> が肝です。単に文字列だけを見ると、正常終了（exit 0）した提出が<em>たまたま</em> <code>"heap out of memory"</code> という<strong>文字列を出力しただけ</strong>で MLE に化けてしまう誤爆が起きます。「異常終了している」を条件に加えることで、「本当にヒープ枯渇で落ちた node」だけを MLE と見なす。証拠を1つに頼らず「異常終了」と「特徴的なエラー文言」を重ねて確度を上げる——検出の定石です。</p>
+
+    <h3>事情2 — Go ランタイムは仮想メモリを大きく予約する</h3>
+    <p>メモリ制限のもう一つの手段に <strong><code>ulimit -v</code></strong>（仮想メモリの上限）があります。多くのジャッジは <code>ulimit -v</code> で「プロセスの仮想アドレス空間」を制限してメモリを縛ります。しかし本書は、<strong>あえて <code>ulimit -v</code> を使いません</strong>。理由は Go ランタイムの性質にあります。</p>
+    <p>Go のランタイムは、起動時に<strong>実際に使う量よりはるかに大きな仮想メモリを予約</strong>します（アドレス空間の予約であって、物理メモリを消費するわけではない）。この予約は「使うかもしれない領域を先に確保しておく」だけの<strong>害のない先取り</strong>ですが、<code>ulimit -v</code> は「仮想メモリの予約量」を見て制限をかけるため、<strong>Go プログラムがまだ 1 バイトも実メモリを使っていないのに、起動しただけで <code>ulimit -v</code> に引っかかって死ぬ</strong>——という誤爆が起きます。CLAUDE.md の設計メモがこれを明記しています:</p>
+    <blockquote>MLE 判定はコンテナの OOMKilled で行う。Go ランタイムは仮想メモリを大きく予約するため ulimit -v は使わない。
+      <cite>CLAUDE.md — 落とし穴・環境注意</cite></blockquote>
+    <p>そこで本書は <code>ulimit -v</code>（仮想メモリ）ではなく、Docker の <code>--memory</code>（＝<strong>実際に使った物理メモリ</strong>を見る OOM killer）で MLE を判定します。OOM killer が見るのは「実際に触ったページ（RSS）」であって「予約しただけの仮想アドレス空間」ではないので、Go の大きな仮想メモリ予約に<strong>誤爆しません</strong>。「仮想メモリ量ではなく、実使用メモリ量で縛る」——この選択が、Go を含む複数言語を1つの制限方式で公平に扱うための鍵です。</p>
+
+    <div class="box hazard"><div class="box-k">⚠ 落とし穴 — ulimit -v は Go ランタイムの仮想メモリ予約で誤爆する</div>
+      <p>「メモリ制限といえば <code>ulimit -v</code>」と反射的に選ぶと、Go の提出が<strong>実メモリをほとんど使っていないのに、起動しただけで殺される</strong>という理不尽な MLE を量産します。Go ランタイムが起動時に確保する巨大な仮想アドレス空間を、<code>ulimit -v</code> が「そんなに使うのか」と誤解するからです。仮想メモリ（予約）と物理メモリ（実使用）は別物で、MLE で縛りたいのは<strong>後者</strong>。だから本書は <code>--memory</code> ＋ OOM killer（実使用メモリを見る）で判定し、<code>ulimit -v</code> は使いません。言語ごとにランタイムのメモリの使い方が違うので、「どのメモリを測って制限するか」を間違えると、特定言語だけが不当に落ちる不公平なジャッジになります。</p>
+    </div>
+
+    <h2 class="step" id="step-7"><span class="step-no">Step 7</span>137 は MLE か TLE か — 曖昧さを切り分ける — decideCase</h2>
+    <p>ここまでで、「時間 → 124」「メモリ → 137」という証拠が揃いました。しかし Step 2 で予告した通り、<strong><code>137</code> は必ずしもメモリ超過とは限りません</strong>。SIGKILL は OOM killer も、<code>timeout -k</code> の猶予切れも使うからです。この曖昧さを切り分けるのが、第00章で読んだ <code>decideCase</code> の <code>137</code> 分岐です。時間・メモリに関わる分岐だけを取り出して、今度は「なぜこの切り分けが正しいか」に集中して読みます。</p>
+
+    <div class="file-tag">internal/judge/judge.go（decideCase・124 と 137 の分岐）</div>
+    <pre><code>	<span class="kw">switch</span> {
+	<span class="cm">// …（ExitCode == 111 の IE 分岐は第00章）</span>
+	<span class="kw">case</span> c.ExitCode == <span class="st">124</span>:
+		<span class="cm">// timeout コマンドが時間超過で発火した専用コード（ランナーが -s TERM で送る）。</span>
+		<span class="cm">// TLE を elapsed に頼らず exit コードだけで確定できる。</span>
+		<span class="kw">return</span> TLE
+	<span class="kw">case</span> c.ExitCode != <span class="st">0</span> &amp;&amp; bytes.Contains(c.Stderr, []<span class="ty">byte</span>(<span class="st">"heap out of memory"</span>)):
+		<span class="cm">// node はコンテナ上限より先に V8 ヒープ上限で自死する。</span>
+		<span class="cm">// 正常終了(exit 0)の提出が偶然この文字列を出力しても MLE にしないよう、</span>
+		<span class="cm">// 異常終了を条件に加える。</span>
+		<span class="kw">return</span> MLE
+	<span class="kw">case</span> c.ExitCode == <span class="st">137</span>:
+		<span class="cm">// SIGKILL(128+9)。時間超過は 124 で捕捉済みなので、ここに来る 137 は</span>
+		<span class="cm">// 原則カーネル OOM killer による停止（＝メモリ超過）とみなす。</span>
+		<span class="cm">// 例外: 提出が SIGTERM を握りつぶし timeout の -k(3s猶予) で KILL された場合も 137。</span>
+		<span class="cm">// その場合 elapsed は必ず制限時間を超えるので、制限超過のときだけ TLE に倒す</span>
+		<span class="cm">// （制限時間内で 137 になったものは真の OOM なので MLE のまま）。</span>
+		<span class="kw">if</span> c.ElapsedMS &gt; p.TimeLimitMS {
+			<span class="kw">return</span> TLE
+		}
+		<span class="kw">return</span> MLE
+	<span class="cm">// …（ExitCode != 0 の RE 分岐は第00章）</span>
+	}</code></pre>
+
+    <p>順序と条件に、断ち切る側の設計がそのまま映っています。上から読みます。</p>
+    <p><strong><code>124</code> を最初に確定する。</strong> <code>timeout</code> が「時間切れ」専用に返す <code>124</code> は、<strong>疑いようのない TLE</strong> です。Step 2 で見た通り、<code>timeout -s TERM</code> が制限時間内に SIGTERM で殺せた（提出が素直に死んだ）場合、この <code>124</code> が立ちます。<code>elapsed</code>（経過時間）を測って比べる必要すらありません。「TLE を elapsed に頼らず exit コードだけで確定できる」——時計より終了コードが確実だという Step 2 の設計思想が、ここで報われます。</p>
+    <p><strong><code>137</code> は「原則 MLE、ただし時間超過なら TLE」。</strong> なぜ <code>137</code> が曖昧かを、断ち切る側から辿り直します。<code>137</code>（SIGKILL）が立つ経路は2つあります。</p>
+    <ul>
+      <li><strong>経路A（真の OOM）</strong>: <code>--memory</code> 上限に達し、カーネルの OOM killer が SIGKILL を送った。これは<strong>メモリ超過＝MLE</strong>。</li>
+      <li><strong>経路B（TLE の化けた姿）</strong>: 提出が <code>timeout</code> の SIGTERM を握りつぶして居座り、Step 2 の <code>-k 3</code> の猶予（3秒）が切れて SIGKILL で殺された。これは<strong>本当は時間超過＝TLE</strong>。<code>124</code> にならず <code>137</code> になってしまった「化けた TLE」。</li>
+    </ul>
+    <p>この2つを、<strong>経過時間で切り分けます</strong>。<code>if c.ElapsedMS &gt; p.TimeLimitMS</code> ——経路B（SIGTERM 握りつぶし）で殺された提出は、<strong>必ず制限時間を超えている</strong>（TL 経過 → SIGTERM → 3秒猶予 → SIGKILL、なので確実に <code>TL + 3秒</code> 以上かかっている）。だから「経過時間が制限時間を超えている 137」だけを <code>TLE</code> に倒し、それ以外の（＝制限時間内で殺された）<code>137</code> は<strong>真の OOM とみなして <code>MLE</code> のまま</strong>にします。制限時間内にメモリを食い潰して OOM killed されたなら、それは間違いなくメモリの問題だからです。<strong>同じ 137 という終了コードでも、経過時間という文脈を1つ足すことで、MLE と TLE を正しく分ける</strong>——これが判定の機微です。</p>
+    <p><strong>node の分岐が 137 より<em>前</em>にある</strong>のも、順序の妙です。node のヒープ自死（Step 6・事情1）は <code>137</code> ではない終了コードで来ることが多いですが、仮に <code>137</code> と重なっても、<code>"heap out of memory"</code> を含む分岐が先に評価されて MLE に落ちます。特殊で確実な証拠（エラー文言）を先に、一般的で曖昧な証拠（<code>137</code>）を後に——第00章の「落とし穴 — 判定の順序を入れ替えてはいけない」がここでも効いています。</p>
+
+    <div class="box hazard"><div class="box-k">⚠ 落とし穴 — 137 を一律 MLE にすると、握りつぶし提出が MLE に誤判定される</div>
+      <p><code>137</code> を見て機械的に「SIGKILL ＝ OOM ＝ MLE」と決めつけると、<strong>SIGTERM を握りつぶして時間切れで殺された提出（経路B）が MLE に誤判定されます</strong>。提出者は「メモリなんて使っていないのに MLE と言われた」と混乱します。逆に、経過時間だけを頼りに verdict を出そうとすると、<code>137</code> という「SIGKILL で殺された」証拠そのものを捨ててしまい、握りつぶし TLE（経路B）と真の OOM（経路A）を区別する足場を失います。実際 <code>decideCase</code> は、まず <code>137</code> で「SIGKILL された」ことを掴んでから、経過時間で経路 A/B を切り分けています——順序が逆では成立しません。<strong><code>137</code> は終了コード単独でも経過時間単独でも verdict を確定できない</strong>——両方を必ず併せて読む。この「終了コード＋経過時間」の合わせ技が、0〜255 の 256 通りある終了コードの中で <code>137</code> だけが要求する、ひと手間です。第02章で「終了コードの意味」を学びましたが、実務では<strong>意味が一意に定まらない終了コードがある</strong>ことこそが、この章のいちばんの学びです。</p>
+    </div>
+
+    <div class="gonote"><div class="box-k">GO メモ · bytes.Contains と、証拠を重ねる判定</div>
+      <p><code>bytes.Contains(c.Stderr, []byte("heap out of memory"))</code> は「バイト列 <code>c.Stderr</code> の中に、指定したバイト列が含まれるか」を <code>bool</code> で返します。<code>c.Stderr</code> は <code>[]byte</code>（stderr の生バイト）なので、比較対象の文字列も <code>[]byte("...")</code> に変換しています。<code>strings.Contains</code> の <code>[]byte</code> 版だと思えば十分です。<br>
+      注目すべきは<strong>この文字列検査を単独では使わず、<code>ExitCode != 0</code> と <code>&amp;&amp;</code> で重ねている</strong>設計です。「特徴的なエラー文言」も「異常終了」も、それぞれ単独では誤判定の余地があります（文言は偶然の出力かもしれず、異常終了は MLE 以外の理由かもしれない）。2つを AND で重ねることで、どちらか片方の偽陽性を打ち消し、確度を上げる。同じ発想が <code>137</code> 分岐の <code>ElapsedMS &gt; TimeLimitMS</code> にもあります。<strong>1つの証拠で断定せず、複数の証拠を重ねて verdict を絞る</strong>——曖昧な終了コードを扱うジャッジの、地味だが本質的な作法です。</p>
+    </div>
+
+    <div class="box do"><div class="box-k">▸ 動かして確認</div>
+      <p>時間・メモリの実際の断ち切りは Docker が要りますが、<strong>その終了コードを host 側が正しく受け取り、verdict に落とす</strong>部分は Docker 不要で検証できます。<code>137</code>（メモリ超過）のケースがプロトコルを通って parse される様子を、<code>TestParseRunOutput</code> で確かめます。</p>
+      <pre class="term"><code><span class="ps">$</span> cd backend
+<span class="ps">$</span> go test ./internal/judge/ -run TestParseRunOutput -v
+<span class="out">=== RUN   TestParseRunOutput
+--- PASS: TestParseRunOutput (0.00s)
+=== RUN   TestParseRunOutputIncomplete
+--- PASS: TestParseRunOutputIncomplete (0.00s)
+=== RUN   TestParseRunOutputMalformed
+--- PASS: TestParseRunOutputMalformed (0.00s)
+PASS
+ok      judge/internal/judge    1.300s</span></code></pre>
+      <p><code>TestParseRunOutput</code> のテストデータには <code>___CASE___ c002 137 1.95 261120</code> という行が含まれています。終了コード <code>137</code>、経過 <code>1.95</code> 秒、MaxRSS <code>261120</code> KB。これがランナー（<code>loop.sh</code>）の出力を模したもので、host 側の <code>ParseRunOutput</code> が <code>ExitCode=137, ElapsedMS=1950</code> として取り出せることを検証しています。この <code>CaseOutcome</code> が Step 7 の <code>decideCase</code> に渡ると——<code>137</code> かつ経過 1950ms（もし TL がそれ以下なら TLE、超えていなければ MLE）——として verdict が決まります。残り2つのテストは、断ち切りの結果がプロトコルの隙間から漏れたときの扱いを、それぞれ別の形で固定しています。<code>TestParseRunOutputIncomplete</code> は「<code>___DONE___</code> が来ずコンテナごと落ちた」（＝壁時計や OOM でコンテナ自体が断たれた）ケースで、<code>ParseRunOutput</code> が<strong>エラーは返さず</strong>（<code>err = nil</code>）に <code>Done = false</code> で返ることを固定します——後段の <code>!outcome.Done</code> チェックがこれを拾って IE に落とすので、ここではまだ error にしません。一方 <code>TestParseRunOutputMalformed</code> は「終了コード欄が数字でない壊れた出力」で、<code>ParseRunOutput</code> がその場で <strong>error を返す</strong>ことを固定します（壊れたフレームを握りつぶさず、上位で IE 化するため）。<code>Done = false</code> と error という2つの経路で、断ち切りの結果がどこで漏れても<strong>最終的に IE に落ちる</strong>安全網が担保されています。</p>
+    </div>
+
+    <div class="box do"><div class="box-k">▸ さらに手を動かすなら（Docker が要る）</div>
+      <p>Docker Desktop を起動していれば、実際の断ち切りを体感できます（第04章で環境が整っている前提）。</p>
+      <ol>
+        <li><strong>TLE を出す。</strong> 制限時間 2 秒の問題に、無限ループする提出（Go なら <code>for {}</code>）を出す。内側の <code>timeout</code> が 2 秒で SIGTERM を送り、<code>124</code> ＝ <code>TLE</code> が返るはず。</li>
+        <li><strong>MLE を出す。</strong> メモリ上限 256MB の問題に、巨大スライスを確保し続ける提出（Go なら <code>make([]byte, 1&lt;&lt;30)</code> を何度も append）を出す。<code>--memory</code> 上限で OOM killer が発火し、<code>137</code> ＝ <code>MLE</code> が返るはず。制限時間内なら MLE のまま、というのを elapsed で確認する。</li>
+        <li><strong>握りつぶしを試す（上級）。</strong> SIGTERM を無視して回り続ける提出を書き、<code>-k 3</code> の猶予切れ SIGKILL で <code>137</code> になり、かつ経過が <code>TL + 3秒</code> を超えるので Step 7 の分岐で <code>TLE</code> に倒れることを確かめる。「137 が TLE に化ける」経路Bを自分の目で見る。</li>
+      </ol>
+    </div>
+
+    <h2>つまずき FAQ</h2>
+    <details class="qa"><summary>なぜ時間の制限に、内側の <code>timeout</code> と外側の <code>WallTimeout</code> の両方が要るの? 片方では足りない?</summary>
+      <div class="qa-body"><p>役割が違うからです。内側の <code>timeout</code>（コンテナ内）は<strong>1ケースの制限時間を正確に</strong>断ち、TLE の直接証拠 <code>124</code> を残します。しかしコンテナ<strong>そのもの</strong>がハングしたり、<code>timeout</code> を含むシェルごと固まったりすると、内側では止められません。そこで外側の <code>WallTimeout</code>（host の <code>context.WithTimeout</code>）が「提出1件の実行段が何分経っても終わらないなら、コンテナごと <code>docker rm -f</code> で消す」という<strong>粗いが確実な最終防衛線</strong>を張ります。細かく正確な内側 ＋ 確実な外側。この二段構えで、1件の暴走がワーカーを永久占有してキューを止める事故を防ぎます。</p></div>
+    </details>
+    <details class="qa"><summary>壁時計 <code>wall</code> を「TL × ケース数」ちょうどにしないのはなぜ? <code>maxRunWall</code> の 10 分は何を守っているの?</summary>
+      <div class="qa-body"><p>2つの理由があります。第一に、<code>TL × ケース数</code> ちょうどだと<strong>オーバーヘッドを吸収できません</strong>。コンテナ起動・tar 展開・<code>timeout</code> の起動など、TL に含まれない時間が乗るので、正当な提出でも host の締め切りに先に引っかかって不当に切られます。だから <code>perCase = TL + 1秒マージン</code>、さらに全体に <code>+30秒</code> の余裕を足します。第二に、<code>TL × ケース数</code> は<strong>ケース数に比例して青天井に伸びます</strong>。ケースの多い問題で壁時計が 20 分にもなると、1件の暴走が 20 分ワーカーを独占し、後続の提出が全部待たされます。<code>maxRunWall = 10分</code> は「どんな問題でも1提出は最長10分で断ち切る」というキュー保護の天井で、個々の採点の完璧さより<strong>ジャッジ全体が止まらないこと</strong>を優先する意図的なトレードオフです。</p></div>
+    </details>
+    <details class="qa"><summary>メモリ制限に <code>ulimit -v</code> を使わず、Docker の <code>--memory</code>（OOM killer）で MLE を判定するのはなぜ?</summary>
+      <div class="qa-body"><p>Go ランタイムが起動時に<strong>実使用よりはるかに大きな仮想メモリを予約</strong>するからです。<code>ulimit -v</code> は「仮想アドレス空間の予約量」を見て制限するので、Go プログラムが実メモリを 1 バイトも使っていなくても、<strong>起動しただけで <code>ulimit -v</code> に引っかかって死ぬ</strong>という誤爆が起きます。一方 Docker の <code>--memory</code> ＋ カーネル OOM killer は<strong>実際に触った物理メモリ（RSS）</strong>を見るので、仮想メモリの予約には反応せず、Go の大きな予約に誤爆しません。「仮想メモリ量ではなく実使用メモリ量で縛る」——これが Go を含む複数言語を公平に扱うための設計判断です（CLAUDE.md 記載）。あわせて <code>--memory-swap</code> を <code>--memory</code> と同値にして、スワップで上限が実質2倍にゆるむのも防いでいます。</p></div>
+    </details>
+    <details class="qa"><summary><code>137</code> なのに MLE ではなく TLE になることがあるのはなぜ? どう見分けるの?</summary>
+      <div class="qa-body"><p><code>137</code>（<code>128+9</code>）は「SIGKILL で殺された」を意味しますが、SIGKILL を送る主体が2つあるからです。ひとつはメモリ超過時のカーネル OOM killer（＝<strong>真の MLE</strong>）、もうひとつは <code>timeout -k 3</code> の猶予切れ——提出が SIGTERM を握りつぶして居座り、3秒後に SIGKILL で殺された場合（＝<strong>本当は TLE</strong>、<code>124</code> にならず <code>137</code> に化けた姿）。見分けは<strong>経過時間</strong>で行います。握りつぶし提出は必ず「制限時間 ＋ 3秒」以上かかっているので、<code>ElapsedMS &gt; TimeLimitMS</code> なら TLE、そうでない（＝制限時間内に殺された）なら真の OOM とみなして MLE のまま。<code>137</code> は終了コード単独では verdict を確定できず、経過時間という文脈を必ず併せて読む必要がある、という点が実務の学びです。</p></div>
+    </details>
+
+    <h2>理解度チェック</h2>
+    <p>次の問いに<strong>自分の言葉で</strong>答えられたら、この章は卒業です。</p>
+    <details class="qa"><summary>1. 時間の断ち切りが「二段構え」である理由と、各段が残す証拠を説明せよ。</summary>
+      <div class="qa-body"><p>内側（コンテナ内 <code>loop.sh</code> の <code>timeout -s TERM -k 3</code>）は<strong>1ケースの制限時間を正確に</strong>断ち、TLE の直接証拠 <code>exit 124</code> を残す（握りつぶされて猶予切れ SIGKILL なら <code>137</code>）。外側（host の <code>context.WithTimeout(ctx, WallTimeout)</code> ＋ <code>exec.CommandContext</code>）は<strong>提出1件の実行段ぜんたい</strong>を最終防衛線として断ち、締め切り到達なら <code>TimedOut</code> フラグを立てて <code>docker rm -f</code> でコンテナを後始末する。内側は細かく正確、外側は粗いが確実。片方だけでは「コンテナ自体のハング」（内側で止まらない）や「1件の暴走のキュー占有」（外側がないと防げない）を取りこぼす。</p></div>
+    </details>
+    <details class="qa"><summary>2. <code>runCases</code> の壁時計計算式を3段で述べ、<code>maxRunWall</code> が何を守るかを説明せよ。</summary>
+      <div class="qa-body"><p>① <code>perCase = TL(秒) + casePauseMarginSec(1秒)</code> —— 1ケースあたりのコンテナ内オーバーヘッドを吸収。② <code>wall = perCase × ケース数 + 30秒</code> —— ケース数に比例しないコンテナ起動・tar 展開等を固定30秒で吸収。③ <code>if wall &gt; maxRunWall { wall = maxRunWall }</code> —— 絶対上限 10 分で cap。<code>maxRunWall</code> は「ケース数 × TL の青天井」を断ち、<strong>1件の暴走した提出がワーカーを何十分も占有して後続の全提出を止める事故</strong>を防ぐ、キュー保護の天井。個々の採点の完璧さよりジャッジ全体が止まらないことを優先する意図的なトレードオフ。</p></div>
+    </details>
+    <details class="qa"><summary>3. メモリ超過を <code>137</code> で判定する設計と、<code>ulimit -v</code> を避ける理由、および <code>137</code> が MLE か TLE か曖昧な場面の切り分けを説明せよ。</summary>
+      <div class="qa-body"><p>Docker の <code>--memory</code>（＋ 同値の <code>--memory-swap</code>）で上限を設定すると、達したときカーネル OOM killer が SIGKILL を送り <code>128+9=137</code> が残る——ジャッジ側は測らず、断ち切りも証拠生成もカーネルに任せる。<code>ulimit -v</code> を避けるのは、Go ランタイムが<strong>実使用より大きな仮想メモリを予約</strong>し、仮想メモリを見る <code>ulimit -v</code> が起動しただけで誤爆するから。実使用（RSS）を見る OOM killer は誤爆しない。<code>137</code> の曖昧さ（OOM killer と <code>timeout -k</code> 猶予切れの両方が SIGKILL を使う）は<strong>経過時間</strong>で切り分ける: <code>ElapsedMS &gt; TimeLimitMS</code> なら握りつぶし TLE、そうでなければ真の OOM の MLE。node は例外で、<code>--memory</code> 到達前に V8 ヒープ上限で自死し、<code>ExitCode != 0 &amp;&amp; Stderr に "heap out of memory"</code> の2条件で MLE 検出する。</p></div>
+    </details>
+
+    <h2>まとめ — 次の層へ</h2>
+    <p>この章で、サンドボックスに「暴走を断ち切る力」が備わりました。時間は<strong>コンテナ内 <code>timeout</code>（<code>124</code>）＋ host 側 <code>WallTimeout</code></strong> の二段構えで断ち、壁時計は <code>perCase × ケース数 + 30秒</code> を <code>maxRunWall</code>（10分）で cap してキューを守る。メモリは <code>--memory</code>（＋同値の <code>--memory-swap</code>）に達したカーネル OOM killer が <code>137</code> を残し、<code>ulimit -v</code> の Go 誤爆を避けて実使用メモリで判定する。そして曖昧な <code>137</code> を、経過時間という文脈で MLE と TLE に切り分ける。<strong>「断ち切る側」と「検出する側」が、終了コードという証拠で繋がっている</strong>——第02章で覚えた verdict の語彙が、ここで完全に実装に接地しました。</p>
+    <p>ただし、ここまで暗黙に「Go の提出」を前提にしてきた部分があります。<code>timeout</code> が包む <code>"$@"</code> は <code>/tmp/box/prog</code> かもしれないし <code>node /tmp/box/main.js</code> かもしれない。<code>heap out of memory</code> は node 特有の文言でした。<strong>言語が違えば、コンパイルの仕方も、実行コマンドも、メモリの食い方も、エラーの出し方も違う</strong>。次の第06章では、この章までに作った実行・制限・判定の仕組みを、Go / JavaScript / TypeScript / SQL の<strong>4言語</strong>で回すために、言語ごとの差異を <code>LanguageSpec</code> という1枚の表に畳み込みます。1つのジャッジで、いろんな言語を採点する——その仕掛けを解きに行きます。</p>
+
+    <div class="chap-foot">
+      <a class="pager" href="04-sandbox.html"><span class="dir">← 前へ</span>第04章 · コンテナに閉じ込める</a>
+      <a class="pager next" href="06-lang.html"><span class="dir">次へ →</span>第06章 · いろんな言語で</a>
+    </div>
+  </main>
+</div>
+</body>
+</html>

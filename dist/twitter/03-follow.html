@@ -1,0 +1,759 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>第03章 つながる（フォロー） — Twitter をつくる</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500;600&family=Source+Serif+4:opsz,wght@8..60,400;8..60,600;8..60,700&family=Noto+Serif+JP:wght@400;600;700&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<div class="shell">
+
+  <aside class="spine">
+    <a class="wordmark" href="index.html">CHIRP · from scratch</a>
+    <div class="book-title">Twitter を<br>つくる</div>
+    <div class="book-sub">Go + PostgreSQL + React で認証からタイムラインまで</div>
+
+    <div class="legend"><span>読む <b>↓</b></span><span>組む <b>↑</b></span></div>
+
+    <nav aria-label="目次">
+      <ul class="toc">
+        <li><a class="nav-item" href="index.html"><span class="nav-num">序</span><span class="nav-label">はじめに・準備<span class="nav-tag">Setup</span></span></a></li>
+        <li><a class="nav-item" href="00-setup.html"><span class="nav-num">00</span><span class="nav-label">土台をつくる<span class="nav-tag">Setup</span></span></a></li>
+        <li><a class="nav-item" href="01-auth.html"><span class="nav-num">01</span><span class="nav-label">ユーザーという存在（認証）<span class="nav-tag">Auth</span></span></a></li>
+        <li><a class="nav-item" href="02-post.html"><span class="nav-num">02</span><span class="nav-label">投稿する<span class="nav-tag">Post</span></span></a></li>
+        <li><a class="nav-item current" aria-current="page" href="03-follow.html"><span class="nav-num">03</span><span class="nav-label">つながる（フォロー）<span class="nav-tag">Follow</span></span></a></li>
+        <li><a class="nav-item" href="04-timeline.html"><span class="nav-num">04</span><span class="nav-label">タイムラインという難問<span class="nav-tag">Timeline</span></span></a></li>
+        <li><a class="nav-item" href="05-reply.html"><span class="nav-num">05</span><span class="nav-label">会話する（リプライ）<span class="nav-tag">Reply</span></span></a></li>
+        <li><a class="nav-item" href="06-like.html"><span class="nav-num">06</span><span class="nav-label">反応する（いいね）<span class="nav-tag">Like</span></span></a></li>
+        <li><a class="nav-item" href="07-perf.html"><span class="nav-num">07</span><span class="nav-label">速くする（N+1と索引）<span class="nav-tag">Perf</span></span></a></li>
+        <li><a class="nav-item" href="08-web.html"><span class="nav-num">08</span><span class="nav-label">画面をつける（React）<span class="nav-tag">Web</span></span></a></li>
+        <li><a class="nav-item" href="09-beyond.html"><span class="nav-num">09</span><span class="nav-label">さらに先へ（発展）<span class="nav-tag">Beyond</span></span></a></li>
+      </ul>
+    </nav>
+
+    <div class="spine-foot">
+      各章は SNS の一つの機能。<br>下（土台）から上（画面）へ<br>積み上げて動かしていく。
+    </div>
+  </aside>
+
+  <main class="reading">
+    <div class="progress-tag">第03章 / 全10章 · 層: Follow · 読了目安 2〜3時間</div>
+    <div class="eyebrow"><span>Follow</span><span class="depth">— 関係を設計する</span></div>
+    <h1>つながる（フォロー）</h1>
+    <p class="lede">第02章までで、ユーザーは自分の投稿を持つようになりました。しかし SNS の本質は「一人ひとりが投稿を持つこと」ではなく、<strong>人と人がつながること</strong>にあります。alice が bob を<strong>フォロー</strong>すると、bob の投稿が alice のタイムラインに流れ込む——その「つながり」を、この章で作ります。作るのは <code>follows</code> という1枚のテーブルと、それを冪等に張ったり外したりする関数、プロフィール（表示名・自己紹介・フォロワー数）、そして<strong>フォロー一覧を途切れなくページ送りする仕組み</strong>です。最後の「ページ送り」で、本書で何度も使う<strong>共通ヘルパー</strong>を初めて導入します。終えたとき、curl で誰かをフォローすると相手のフォロワー数が増え、フォロー一覧に現れ、解除すれば消える——SNS が「関係」を持ちはじめます。</p>
+
+    <div class="box goal"><div class="box-k">◈ この章のゴール</div>
+      <p>次の 4 つを、自分の目と手で確認できたら達成です。</p>
+      <ol>
+        <li><code>curl</code> で alice のトークンを使って bob をフォローすると、bob のプロフィールの <code>followers_count</code> が 1 増える。</li>
+        <li>bob のフォロワー一覧（<code>/api/users/bob/followers</code>）に alice が現れ、alice のフォロー一覧（<code>/api/users/alice/following</code>）に bob が現れる。</li>
+        <li>フォローを解除すると、両方の一覧から消え、<code>followers_count</code> が元に戻る。もう一度同じ相手をフォローしても<strong>二重にはならず</strong>、自分自身はフォローできない。</li>
+        <li><code>cd src/backend &amp;&amp; go test ./...</code> が PASS する。</li>
+      </ol>
+    </div>
+
+    <div class="box map"><div class="box-k">☰ この章のステップ</div>
+      <ol>
+        <li><a href="#step-1">「誰が誰を」の1行 — <code>follows</code> と関係テーブル</a></li>
+        <li><a href="#step-2">プロフィールの数字 — <code>users.go</code> の集計</a></li>
+        <li><a href="#step-3">一覧の「続き」をどう取るか — ページネーション共通ヘルパー</a></li>
+        <li><a href="#step-4">フォロー一覧を引く — 列の修飾とキーセット</a></li>
+        <li><a href="#step-5">ハンドラを組む — <code>user_handlers.go</code></a></li>
+        <li><a href="#step-6">動かして確認する — curl とテスト</a></li>
+      </ol>
+    </div>
+
+    <h2>「フォロー」とは、users と users の関係である</h2>
+    <p>ここで一歩引いて、フォローとは何かを考えます。ユーザーは <code>users</code> テーブルにいます。フォローは「あるユーザーが、別のユーザーを」フォローすること——つまり <strong><code>users</code> と <code>users</code> のあいだの関係</strong>です。同じテーブル同士の関係、と言い換えてもいい。alice も bob も同じ <code>users</code> の行であり、フォローはその2行を「フォローする側 → される側」の向きで結ぶ線です。</p>
+    <p>こういう「多対多の関係」を RDB で表す定石が、<strong>関係テーブル（中間テーブル・結合テーブル）</strong>です。ユーザーは何人でもフォローでき、何人からもフォローされうる——alice が bob・carol・dave をフォローし、同時に bob・eve からフォローされる、という「多対多」を、<code>users</code> テーブルの中だけでは表せません。そこで、<strong>関係そのものを1つのテーブルにして、1つの関係を1行で表す</strong>。それが <code>follows</code> です。第00章で俯瞰したこのテーブルを、この章でようやく主役として使います。</p>
+    <p>関係テーブルの発想は、この本の後半でも繰り返し現れます。第06章の <code>likes</code>（ユーザーと投稿の関係）も同じ形です。「関係を行にする」という考え方に、ここで慣れておいてください。</p>
+
+    <h2 class="step" id="step-1"><span class="step-no">Step 1</span>「誰が誰を」の1行 — follows と関係テーブル</h2>
+    <p>まず、フォローの本体を作ります。第00章で見た <code>follows</code> テーブルの定義を、設計判断の部分だけ抜き出して再確認します（全文は第00章 Step 3 にあります）。</p>
+
+    <div class="file-tag">src/backend/internal/store/schema.sql（抜粋）</div>
+    <pre><code><span class="kw">CREATE TABLE IF NOT EXISTS</span> follows (
+    id          <span class="ty">BIGSERIAL</span>,
+    follower_id <span class="ty">BIGINT</span>      <span class="kw">NOT NULL REFERENCES</span> users(id) <span class="kw">ON DELETE CASCADE</span>,
+    followee_id <span class="ty">BIGINT</span>      <span class="kw">NOT NULL REFERENCES</span> users(id) <span class="kw">ON DELETE CASCADE</span>,
+    created_at  <span class="ty">TIMESTAMPTZ</span> <span class="kw">NOT NULL DEFAULT</span> now(),
+    <span class="kw">PRIMARY KEY</span> (follower_id, followee_id),
+    <span class="kw">CHECK</span> (follower_id &lt;&gt; followee_id)
+);</code></pre>
+
+    <p>この短い定義に、フォローの設計が凝縮されています。3つの決定を順に読みます。</p>
+    <p><strong>(1) <code>follower_id</code> と <code>followee_id</code> ——「誰が」「誰を」</strong>。<code>follower_id</code> がフォローする側、<code>followee_id</code> がされる側です。両方とも <code>REFERENCES users(id)</code> で <code>users</code> を指す外部キーで、<code>ON DELETE CASCADE</code> により「ユーザーが退会したら、その人が張った・受けたフォロー関係も一緒に消える」ようになっています。alice が bob をフォローする、は <code>(follower_id=alice, followee_id=bob)</code> という1行です。</p>
+    <p><strong>(2) <code>PRIMARY KEY (follower_id, followee_id)</code> —— 複合主キーで二重フォローを1件に</strong>。主キーが <code>id</code> 単独ではなく、<strong>2列の組み合わせ</strong>になっています。主キーは「同じ値の組は1つしか存在できない」を保証するので、この複合主キーによって <strong>「同じ人が同じ相手を2回フォローする」ことが物理的にできなく</strong>なります。alice → bob の行がすでにあれば、同じ組をもう一度入れようとしても DB が拒みます。フォローは「している / していない」の2値であって「3回フォロー」に意味はないので、これを DB のレベルで1件に畳んでいるのです。</p>
+    <p><strong>(3) <code>CHECK (follower_id &lt;&gt; followee_id)</code> —— 自己フォロー禁止</strong>。<code>&lt;&gt;</code> は SQL で「等しくない」を表す演算子です。この <code>CHECK</code> 制約により、<code>follower_id</code> と <code>followee_id</code> が同じ行——つまり<strong>自分で自分をフォローする行</strong>——は挿入できません。「自分をフォローする」はユーザー体験上も集計上も意味がなく、放置するとフォロワー数が水増しされるので、DB が門前払いします。</p>
+
+    <div class="gonote"><div class="box-k">RDB メモ · 複合主キーと「自然キー」</div>
+      <p><code>follows</code> の主キー <code>(follower_id, followee_id)</code> は、<strong>データそのものが持つ意味</strong>で一意性を決めています（このような主キーを「自然キー」と呼びます）。一方 <code>users</code> や <code>posts</code> の <code>id BIGSERIAL</code> は、意味を持たない連番を後付けで振った「代理キー」です。<code>follows</code> にも <code>id</code> 列はありますが、それは<strong>主キーではなく、並び順の目印</strong>としての役割（後述）。「一意性は自然キーで、並び順は連番で」と役割を分けているのがこのテーブルの特徴です。二重フォロー防止という<strong>ビジネスルールを、アプリではなく主キー制約に語らせている</strong>点に注目してください。</p>
+    </div>
+
+    <p>テーブルの構造を確認したら、次は Go 側でこの関係を表す型です。第00章で全体を俯瞰した <code>models.go</code> から、この章で使う2つの構造体を見ます。</p>
+
+    <div class="file-tag">src/backend/internal/store/models.go（抜粋）</div>
+    <pre><code><span class="cm">// UserStats はプロフィール表示用の集計値。</span>
+<span class="kw">type</span> <span class="ty">UserStats</span> <span class="kw">struct</span> {
+	Posts     <span class="ty">int</span>
+	Followers <span class="ty">int</span>
+	Following <span class="ty">int</span>
+}
+
+<span class="cm">// FollowEdge はフォロー一覧の1行。EdgeID (follows.id) がページネーションの目印になる。</span>
+<span class="kw">type</span> <span class="ty">FollowEdge</span> <span class="kw">struct</span> {
+	<span class="ty">User</span>
+	EdgeID <span class="ty">int64</span>
+}</code></pre>
+
+    <p><code>UserStats</code> は、プロフィールに出す3つの数字——投稿数・フォロワー数・フォロー数——をまとめた小さな構造体です（Step 2 で使います）。<code>Post</code> や <code>PostMeta</code> といった他の構造体は第02章で導入済みなのでここでは省きます。</p>
+    <p>注目してほしいのは <code>FollowEdge</code> です。フォロー一覧の1行を表す型で、2つの特徴があります。</p>
+    <p><strong>(1) <code>User</code> を埋め込んでいる</strong>。<code>FollowEdge</code> の1行目は、フィールド名のない <code>User</code>——これは Go の<strong>埋め込み（embedding）</strong>です。<code>FollowEdge</code> は <code>User</code> の全フィールド（<code>ID</code>, <code>Username</code>, <code>DisplayName</code>, ...）を<strong>自分のもののように</strong>持ちます。フォロー一覧に出すのは結局「ユーザーの情報」なので、<code>User</code> をそのまま抱え込んでいるわけです。</p>
+    <p><strong>(2) <code>EdgeID int64</code> を追加で持つ</strong>。これがこの章の鍵です。<code>EdgeID</code> は「その関係（エッジ）の <code>follows.id</code>」——つまり関係テーブルの連番です。<strong>ユーザーの <code>ID</code>（<code>User.ID</code>）とは別物</strong>である点が重要です。フォロー一覧を「新しくフォローした順」に並べ、途中から続きを取るとき、目印にするのは<strong>関係の <code>follows.id</code></strong> であって、ユーザーの id ではありません。だから <code>User</code> とは別に <code>EdgeID</code> を持つ必要があります。なぜユーザー id や時刻ではなく <code>follows.id</code> なのかは Step 4 でじっくり掘り下げます。</p>
+
+    <div class="gonote"><div class="box-k">GO メモ · 構造体の埋め込み（embedding）</div>
+      <p>Go の <code>struct</code> にフィールド名なしで別の型を書くと、その型が<strong>埋め込まれ</strong>ます。<code>FollowEdge</code> に <code>User</code> を埋め込むと、<code>e.User.Username</code> だけでなく <code>e.Username</code> と<strong>昇格した名前</strong>でもアクセスできます（Step 4 の <code>Scan</code> で <code>&amp;e.Username</code> と直接書けるのはこのため）。継承ではなく「合成」です——<code>FollowEdge</code> は「<code>User</code> であり、さらに <code>EdgeID</code> を足したもの」。API 層でユーザー情報が欲しいときは <code>toUserJSON(&amp;edges[i].User)</code> のように、埋め込んだ <code>User</code> だけを取り出して渡せます（Step 5）。</p>
+    </div>
+
+    <p>いよいよフォローの操作を作ります。<code>follows.go</code> の全文です。フォローを張る <code>Follow</code>、外す <code>Unfollow</code>、状態を問う <code>IsFollowing</code>、そして一覧の <code>ListFollowers</code> / <code>ListFollowing</code> まで、この1ファイルに収まっています。</p>
+
+    <div class="file-tag">src/backend/internal/store/follows.go</div>
+    <pre><code><span class="kw">package</span> store
+
+<span class="kw">import</span> (
+	<span class="st">"context"</span>
+	<span class="st">"errors"</span>
+
+	<span class="st">"github.com/jackc/pgx/v5"</span>
+	<span class="st">"github.com/jackc/pgx/v5/pgconn"</span>
+)
+
+<span class="cm">// Follow はフォロー関係を作る。二重フォローは1件扱い（ON CONFLICT DO NOTHING）。</span>
+<span class="kw">func</span> (s *<span class="ty">Store</span>) Follow(ctx context.<span class="ty">Context</span>, followerID, followeeID <span class="ty">int64</span>) <span class="ty">error</span> {
+	<span class="kw">if</span> followerID == followeeID {
+		<span class="kw">return</span> ErrSelfFollow
+	}
+	_, err := s.pool.Exec(ctx, <span class="st">`
+		INSERT INTO follows (follower_id, followee_id) VALUES ($1, $2)
+		ON CONFLICT DO NOTHING`</span>,
+		followerID, followeeID)
+	<span class="kw">var</span> pgErr *pgconn.<span class="ty">PgError</span>
+	<span class="kw">if</span> errors.As(err, &amp;pgErr) &amp;&amp; pgErr.Code == <span class="st">"23503"</span> { <span class="cm">// 相手が存在しない</span>
+		<span class="kw">return</span> ErrNotFound
+	}
+	<span class="kw">return</span> err
+}
+
+<span class="cm">// Unfollow はフォロー解除。存在しない関係の解除も成功扱い（冪等）。</span>
+<span class="kw">func</span> (s *<span class="ty">Store</span>) Unfollow(ctx context.<span class="ty">Context</span>, followerID, followeeID <span class="ty">int64</span>) <span class="ty">error</span> {
+	_, err := s.pool.Exec(ctx,
+		<span class="st">`DELETE FROM follows WHERE follower_id = $1 AND followee_id = $2`</span>,
+		followerID, followeeID)
+	<span class="kw">return</span> err
+}
+
+<span class="kw">func</span> (s *<span class="ty">Store</span>) IsFollowing(ctx context.<span class="ty">Context</span>, followerID, followeeID <span class="ty">int64</span>) (<span class="ty">bool</span>, <span class="ty">error</span>) {
+	<span class="kw">var</span> exists <span class="ty">bool</span>
+	err := s.pool.QueryRow(ctx,
+		<span class="st">`SELECT EXISTS (SELECT 1 FROM follows WHERE follower_id = $1 AND followee_id = $2)`</span>,
+		followerID, followeeID).Scan(&amp;exists)
+	<span class="kw">return</span> exists, err
+}
+
+<span class="kw">func</span> scanFollowEdges(rows pgx.<span class="ty">Rows</span>) ([]<span class="ty">FollowEdge</span>, <span class="ty">error</span>) {
+	<span class="kw">defer</span> rows.Close()
+	edges := []<span class="ty">FollowEdge</span>{}
+	<span class="kw">for</span> rows.Next() {
+		<span class="kw">var</span> e <span class="ty">FollowEdge</span>
+		<span class="kw">if</span> err := rows.Scan(&amp;e.ID, &amp;e.Username, &amp;e.DisplayName, &amp;e.Email, &amp;e.PasswordHash, &amp;e.Bio, &amp;e.CreatedAt, &amp;e.EdgeID); err != <span class="kw">nil</span> {
+			<span class="kw">return</span> <span class="kw">nil</span>, err
+		}
+		edges = append(edges, e)
+	}
+	<span class="kw">return</span> edges, rows.Err()
+}
+
+<span class="cm">// follows と users の両方に id / created_at があるため、列は必ず修飾する</span>
+<span class="kw">const</span> followUserCols = <span class="st">"u.id, u.username, u.display_name, u.email, u.password_hash, u.bio, u.created_at, f.id"</span>
+
+<span class="cm">// ListFollowers は userID をフォローしているユーザー一覧（フォローが新しい順）。</span>
+<span class="cm">// beforeEdgeID はキーセットの目印（投稿一覧と同じ方式）。</span>
+<span class="cm">// created_at はクロック補正で逆転しうるため、並び順には follows.id（連番）を使う。</span>
+<span class="kw">func</span> (s *<span class="ty">Store</span>) ListFollowers(ctx context.<span class="ty">Context</span>, userID <span class="ty">int64</span>, beforeEdgeID *<span class="ty">int64</span>, limit <span class="ty">int</span>) ([]<span class="ty">FollowEdge</span>, <span class="ty">error</span>) {
+	rows, err := s.pool.Query(ctx, <span class="st">`
+		SELECT `</span>+followUserCols+<span class="st">` FROM users u
+		JOIN follows f ON f.follower_id = u.id
+		WHERE f.followee_id = $1
+		  AND ($2::bigint IS NULL OR f.id &lt; $2)
+		ORDER BY f.id DESC LIMIT $3`</span>,
+		userID, beforeEdgeID, limit)
+	<span class="kw">if</span> err != <span class="kw">nil</span> {
+		<span class="kw">return</span> <span class="kw">nil</span>, err
+	}
+	<span class="kw">return</span> scanFollowEdges(rows)
+}
+
+<span class="cm">// ListFollowing は userID がフォローしているユーザー一覧（フォローが新しい順）。</span>
+<span class="kw">func</span> (s *<span class="ty">Store</span>) ListFollowing(ctx context.<span class="ty">Context</span>, userID <span class="ty">int64</span>, beforeEdgeID *<span class="ty">int64</span>, limit <span class="ty">int</span>) ([]<span class="ty">FollowEdge</span>, <span class="ty">error</span>) {
+	rows, err := s.pool.Query(ctx, <span class="st">`
+		SELECT `</span>+followUserCols+<span class="st">` FROM users u
+		JOIN follows f ON f.followee_id = u.id
+		WHERE f.follower_id = $1
+		  AND ($2::bigint IS NULL OR f.id &lt; $2)
+		ORDER BY f.id DESC LIMIT $3`</span>,
+		userID, beforeEdgeID, limit)
+	<span class="kw">if</span> err != <span class="kw">nil</span> {
+		<span class="kw">return</span> <span class="kw">nil</span>, err
+	}
+	<span class="kw">return</span> scanFollowEdges(rows)
+}</code></pre>
+
+    <p>この章では上半分（<code>Follow</code>・<code>Unfollow</code>・<code>IsFollowing</code>）を先に読み、一覧の <code>ListFollowers</code> / <code>ListFollowing</code> は Step 4 で改めて掘り下げます。</p>
+
+    <h3>Follow — ON CONFLICT DO NOTHING の冪等 INSERT</h3>
+    <p><code>Follow</code> は「<code>followerID</code> が <code>followeeID</code> をフォローする」1行を挿入します。最初のガードを見てください。</p>
+    <pre><code>	<span class="kw">if</span> followerID == followeeID {
+		<span class="kw">return</span> ErrSelfFollow
+	}</code></pre>
+    <p>自己フォローは、SQL に投げる前に Go 側でも弾いています。DB の <code>CHECK (follower_id &lt;&gt; followee_id)</code> があるのに、なぜ二重に? ——理由は2つ。<strong>(1) 意図の明確化</strong>: <code>ErrSelfFollow</code> という専用エラーを返すことで、API 層は「自己フォローという特定の失敗」を認識し、適切なメッセージを返せます（DB の CHECK 違反エラーは汎用的すぎて意味を読み取りにくい）。<strong>(2) 早期リターン</strong>: DB に無駄な問い合わせを投げずに済みます。DB の CHECK は「最後の砦」、Go のガードは「意味のある門番」——役割が違うので両方置きます（このFAQは後述）。</p>
+    <p>本体の INSERT がこの章の核心の1つです。</p>
+    <pre><code>	_, err := s.pool.Exec(ctx, <span class="st">`
+		INSERT INTO follows (follower_id, followee_id) VALUES ($1, $2)
+		ON CONFLICT DO NOTHING`</span>,
+		followerID, followeeID)</code></pre>
+    <p><strong><code>ON CONFLICT DO NOTHING</code></strong> がポイントです。もし alice → bob のフォローがすでに存在する状態でもう一度この INSERT を投げると、複合主キー <code>(follower_id, followee_id)</code> と衝突（conflict）します。通常なら「主キー重複」エラーになるところを、<code>ON CONFLICT DO NOTHING</code> は<strong>「衝突したら、何もしない（エラーにもしない）」</strong>と指示します。結果、この <code>Follow</code> は<strong>何度呼んでも安全</strong>——1回目で行が作られ、2回目以降は静かに無視されます。これが<strong>冪等（idempotent）</strong>な操作です。</p>
+    <p>なぜ冪等が嬉しいのか。フォローボタンは、ユーザーが連打したり、通信が不安定でリトライされたりします。もし「すでにフォロー済みなのに再度フォローするとエラー」だと、UI 側で「フォロー済みかどうか」を毎回気にしなければなりません。<code>ON CONFLICT DO NOTHING</code> なら、クライアントは「とにかくフォロー状態にしたい」と投げるだけでよく、結果は常に「フォロー済み」に収束します。<strong>「操作の結果の状態」を保証し、「何回呼んだか」を気にしなくてよくする</strong>——これが冪等設計の価値です。</p>
+    <pre><code>	<span class="kw">var</span> pgErr *pgconn.<span class="ty">PgError</span>
+	<span class="kw">if</span> errors.As(err, &amp;pgErr) &amp;&amp; pgErr.Code == <span class="st">"23503"</span> { <span class="cm">// 相手が存在しない</span>
+		<span class="kw">return</span> ErrNotFound
+	}
+	<span class="kw">return</span> err</code></pre>
+    <p>エラー処理は<strong>外部キー違反</strong>を見分けています。<code>follower_id</code> / <code>followee_id</code> は <code>REFERENCES users(id)</code> なので、存在しないユーザー id を入れようとすると PostgreSQL は<strong>エラーコード <code>23503</code>（foreign_key_violation）</strong>を返します。<code>errors.As(err, &amp;pgErr)</code> で pgx のエラーを <code>*pgconn.PgError</code> に取り出し、<code>Code == "23503"</code> なら「相手が存在しない」と判断して <code>ErrNotFound</code> に翻訳します。API 層はこれを 404 に変換できます。それ以外のエラー（や <code>nil</code>）はそのまま返します。<code>ON CONFLICT DO NOTHING</code> のおかげで「二重フォロー」はここに到達しない（エラーにならない）ので、ここで見るべき残りの主なエラーが「相手不在」だけになっている、という構造です。</p>
+
+    <div class="gonote"><div class="box-k">GO メモ · errors.As で「エラーの正体」を取り出す</div>
+      <p><code>errors.As(err, &amp;pgErr)</code> は、<code>err</code>（あるいはそれが <code>%w</code> で包んでいる中身）が <code>*pgconn.PgError</code> 型なら、それを <code>pgErr</code> に取り出して <code>true</code> を返します。これで「DB 由来の構造化エラー」に手が届き、<code>pgErr.Code</code> で PostgreSQL の<strong>エラーコード</strong>を数値で判定できます。<code>"23503"</code> は外部キー違反、<code>"23505"</code> は一意制約違反（第01章の username 重複で使いました）。エラーメッセージの文字列を <code>strings.Contains</code> で探すより、<strong>コードで判定する方が言語設定やバージョンに左右されず堅牢</strong>です。</p>
+    </div>
+
+    <h3>Unfollow — 「無い関係を消す」も成功にする冪等</h3>
+    <pre><code><span class="kw">func</span> (s *<span class="ty">Store</span>) Unfollow(ctx context.<span class="ty">Context</span>, followerID, followeeID <span class="ty">int64</span>) <span class="ty">error</span> {
+	_, err := s.pool.Exec(ctx,
+		<span class="st">`DELETE FROM follows WHERE follower_id = $1 AND followee_id = $2`</span>,
+		followerID, followeeID)
+	<span class="kw">return</span> err
+}</code></pre>
+    <p><code>Unfollow</code> は単純な <code>DELETE</code> です。注目すべきは、<strong>「消す対象が無くてもエラーにしない」</strong>こと。SQL の <code>DELETE</code> は、条件に合う行が0件でも<strong>エラーにはならず、0行削除で成功</strong>します。<code>Exec</code> の戻り値（削除件数）を <code>_</code> で捨てているのはそのためで、「1件消えたか、0件だったか」を気にしません。</p>
+    <p>これも <code>Follow</code> と同じ<strong>冪等</strong>の設計です。ユーザーが「フォロー解除」を連打しても、通信がリトライされても、結果は常に「フォローしていない状態」に収束します。「まだフォローしているか確認してから消す」といった手順を挟まず、「とにかくフォロー解除状態にしたい」と一発投げれば済む。フォローを<strong>張るのも外すのも冪等</strong>にすることで、クライアント側のロジックが「押されたボタンに応じて Follow か Unfollow を投げるだけ」というシンプルさに保たれます。</p>
+
+    <h3>IsFollowing — 「フォローしているか」を EXISTS で問う</h3>
+    <pre><code><span class="kw">func</span> (s *<span class="ty">Store</span>) IsFollowing(ctx context.<span class="ty">Context</span>, followerID, followeeID <span class="ty">int64</span>) (<span class="ty">bool</span>, <span class="ty">error</span>) {
+	<span class="kw">var</span> exists <span class="ty">bool</span>
+	err := s.pool.QueryRow(ctx,
+		<span class="st">`SELECT EXISTS (SELECT 1 FROM follows WHERE follower_id = $1 AND followee_id = $2)`</span>,
+		followerID, followeeID).Scan(&amp;exists)
+	<span class="kw">return</span> exists, err
+}</code></pre>
+    <p><code>IsFollowing</code> は「<code>followerID</code> は <code>followeeID</code> をフォローしているか?」に <code>true</code>/<code>false</code> で答えます。プロフィール表示で「フォロー中」ボタンにするか「フォローする」ボタンにするかを決めるのに使います（Step 5 の <code>handleGetProfile</code>）。</p>
+    <p>SQL は <code>SELECT EXISTS (SELECT 1 FROM follows WHERE ...)</code> という形です。<strong><code>EXISTS</code></strong> は「内側の問い合わせに1行でも該当があれば <code>true</code>」を返す述語です。内側の <code>SELECT 1</code> は「行の中身は要らない、存在だけ知りたい」という定型で、<code>1</code> という定数を選んでいます（何を選んでも <code>EXISTS</code> の結果は同じなので、最小の <code>1</code> を書く慣習）。<code>count(*)</code> で数えて「0より大きいか」を見ることもできますが、<code>EXISTS</code> は<strong>1行見つかった時点で探索を打ち切れる</strong>ので、「あるか無いか」だけを知りたいときはこちらが素直で効率的です。複合主キーがあるので該当は高々1行、その1行の有無だけを <code>bool</code> で受け取っています。</p>
+
+    <h2 class="step" id="step-2"><span class="step-no">Step 2</span>プロフィールの数字 — users.go の集計</h2>
+    <p>フォローが張れるようになったので、次はそれを<strong>見せる</strong>側です。プロフィール画面には「表示名・自己紹介・投稿数・フォロワー数・フォロー数」が並びます。これらを <code>users.go</code> の3つの関数で用意します。<code>CreateUser</code> / <code>GetUserByLogin</code> / <code>GetUserByID</code> / <code>scanUser</code> は第01章で導入済みなので、この章で足す（あるいは使う）<code>GetUserByUsername</code>・<code>GetUserStats</code>・<code>UpdateProfile</code> の3つに絞ります。</p>
+
+    <div class="file-tag">src/backend/internal/store/users.go（抜粋）</div>
+    <pre><code><span class="kw">func</span> (s *<span class="ty">Store</span>) GetUserByUsername(ctx context.<span class="ty">Context</span>, username <span class="ty">string</span>) (*<span class="ty">User</span>, <span class="ty">error</span>) {
+	<span class="kw">return</span> scanUser(s.pool.QueryRow(ctx, <span class="st">`SELECT `</span>+userCols+<span class="st">` FROM users WHERE username = $1`</span>, username))
+}
+
+<span class="cm">// UpdateProfile は表示名と自己紹介を更新する。</span>
+<span class="kw">func</span> (s *<span class="ty">Store</span>) UpdateProfile(ctx context.<span class="ty">Context</span>, id <span class="ty">int64</span>, displayName, bio <span class="ty">string</span>) (*<span class="ty">User</span>, <span class="ty">error</span>) {
+	<span class="kw">return</span> scanUser(s.pool.QueryRow(ctx, <span class="st">`
+		UPDATE users SET display_name = $2, bio = $3 WHERE id = $1
+		RETURNING `</span>+userCols,
+		id, displayName, bio))
+}
+
+<span class="cm">// GetUserStats はプロフィール表示用の集計値をまとめて返す。</span>
+<span class="kw">func</span> (s *<span class="ty">Store</span>) GetUserStats(ctx context.<span class="ty">Context</span>, userID <span class="ty">int64</span>) (*<span class="ty">UserStats</span>, <span class="ty">error</span>) {
+	<span class="kw">var</span> st <span class="ty">UserStats</span>
+	err := s.pool.QueryRow(ctx, <span class="st">`
+		SELECT
+			(SELECT count(*) FROM posts   WHERE user_id     = $1),
+			(SELECT count(*) FROM follows WHERE followee_id = $1),
+			(SELECT count(*) FROM follows WHERE follower_id = $1)`</span>,
+		userID).Scan(&amp;st.Posts, &amp;st.Followers, &amp;st.Following)
+	<span class="kw">if</span> err != <span class="kw">nil</span> {
+		<span class="kw">return</span> <span class="kw">nil</span>, err
+	}
+	<span class="kw">return</span> &amp;st, <span class="kw">nil</span>
+}</code></pre>
+
+    <p><code>GetUserByUsername</code> は「ユーザー名からユーザーを引く」だけの関数です。<code>userCols</code>（第01章で定義した <code>"id, username, display_name, email, password_hash, bio, created_at"</code>）を <code>SELECT</code> し、共通の <code>scanUser</code> で <code>*User</code> に詰めます。プロフィール URL は <code>/api/users/{username}</code> のように<strong>ユーザー名で指す</strong>ので、id ではなく username から引くこの関数が入口になります。ユーザーが見つからなければ <code>scanUser</code> が <code>ErrNotFound</code> を返します（第01章参照）。</p>
+    <p><code>UpdateProfile</code> は<strong>表示名と自己紹介だけ</strong>を更新します。<code>UPDATE users SET display_name = $2, bio = $3 WHERE id = $1</code> で、id で1人を特定して2列を書き換え、<code>RETURNING userCols</code> で<strong>更新後の行をそのまま返して</strong> <code>scanUser</code> に渡します。<code>username</code> や <code>email</code>、<code>password_hash</code> はここでは触れません——プロフィール編集で変えられるのは「見た目の名前」と「自己紹介」だけ、という設計です。「誰がこれを呼べるか」（＝自分のプロフィールだけ）は Store 層ではなく API 層で守ります（Step 5 の FR-4）。</p>
+
+    <h3>GetUserStats — 3つの数字を1クエリで数える</h3>
+    <p>この章で丁寧に読みたいのが <code>GetUserStats</code> です。プロフィールの3つの数字を、<strong>1回の <code>QueryRow</code> でまとめて</strong>取ってきます。SQL の形が独特です。</p>
+    <pre><code>	<span class="kw">SELECT</span>
+		(<span class="kw">SELECT</span> count(*) <span class="kw">FROM</span> posts   <span class="kw">WHERE</span> user_id     = $1),
+		(<span class="kw">SELECT</span> count(*) <span class="kw">FROM</span> follows <span class="kw">WHERE</span> followee_id = $1),
+		(<span class="kw">SELECT</span> count(*) <span class="kw">FROM</span> follows <span class="kw">WHERE</span> follower_id = $1)</code></pre>
+    <p>外側の <code>SELECT</code> が、3つの<strong>スカラーサブクエリ</strong>（括弧でくくった、1つの値だけを返す小さな SELECT）を1行として並べています。1つずつ意味を読みます。</p>
+    <ul>
+      <li><code>(SELECT count(*) FROM posts WHERE user_id = $1)</code> ——<strong>投稿数</strong>。<code>posts</code> テーブルで、このユーザーが書いた行を数えます。</li>
+      <li><code>(SELECT count(*) FROM follows WHERE followee_id = $1)</code> ——<strong>フォロワー数</strong>。<code>follows</code> でこのユーザーが<strong>される側</strong>（<code>followee_id</code>）になっている行を数える。「このユーザーをフォローしている人の数」です。</li>
+      <li><code>(SELECT count(*) FROM follows WHERE follower_id = $1)</code> ——<strong>フォロー数</strong>。<code>follows</code> でこのユーザーが<strong>する側</strong>（<code>follower_id</code>）になっている行を数える。「このユーザーがフォローしている人の数」です。</li>
+    </ul>
+    <p>ここで、フォロワー数とフォロー数の違いが <strong><code>followee_id</code> か <code>follower_id</code> か</strong>という1語の差になっていることに注目してください。同じ <code>follows</code> テーブルを、<strong>どちらの列で絞るか</strong>で「フォロワー」と「フォロー中」を数え分けています。関係テーブルの向きを読み違えると数字が入れ替わるので、ここは丁寧に。<code>$1</code> という同じパラメータが3か所すべてに使われ、pgx が「対象ユーザー1人の userID」を3つの位置に配ってくれます。</p>
+    <p>結果は「3つの数が入った1行」なので、<code>.Scan(&amp;st.Posts, &amp;st.Followers, &amp;st.Following)</code> で <code>UserStats</code> の3フィールドへ順に受け取ります。<strong>1往復で3つの数字が揃う</strong>のが利点です。もし3回に分けてクエリを投げると、DB との往復が3倍になります。関連する集計は、まとめられるならまとめる——第07章の N+1 対策につながる考え方が、ここに芽生えています。</p>
+
+    <div class="gonote"><div class="box-k">RDB メモ · スカラーサブクエリという小技</div>
+      <p><code>SELECT (SELECT ...), (SELECT ...)</code> のように、<code>SELECT</code> リストの中に「1つの値を返す SELECT」を埋め込めます。これを<strong>スカラーサブクエリ</strong>と呼びます。<code>count(*)</code> は必ず1つの数を返すので、この用途にぴったり。3つの独立した集計を、<code>JOIN</code> や複雑なグルーピングなしに横一列で取れます。件数が大きくなると <code>count(*)</code> は重くなりますが（第07章で索引の話をします）、この規模では十分素直で読みやすい書き方です。「関連する小さな集計を1行にまとめる」——覚えておくと便利な型です。</p>
+    </div>
+
+    <h2 class="step" id="step-3"><span class="step-no">Step 3</span>一覧の「続き」をどう取るか — ページネーション共通ヘルパー</h2>
+    <p>フォロワーが3人なら、一覧を全部返せばいい。でも人気ユーザーには数百・数千のフォロワーがいます。それを1回のレスポンスで全部返すのは、サーバにもクライアントにも無理があります。だから一覧は<strong>「少しずつ、続きを辿れるように」</strong>返します。これが<strong>ページネーション</strong>です。</p>
+    <p>この章で、本書全体で使う<strong>ページネーションの共通ヘルパー</strong>を初めて導入します。<code>post_handlers.go</code> にある <code>parsePageParams</code> と <code>writePostPage</code> の2つです。フォロー一覧・投稿一覧・タイムライン・リプライ——一覧を返す場所はどれもこの2つを土台にします。まず全体像を見て、それから仕組みを解剖します。</p>
+
+    <div class="file-tag">src/backend/internal/api/post_handlers.go（抜粋）</div>
+    <pre><code><span class="kw">const</span> (
+	defaultPageSize = <span class="st">20</span>
+	maxPageSize     = <span class="st">50</span>
+)
+
+<span class="cm">// parsePageParams は cursor（キーセットの目印）と limit を読み取る。</span>
+<span class="kw">func</span> parsePageParams(w http.<span class="ty">ResponseWriter</span>, r *http.<span class="ty">Request</span>) (*<span class="ty">int64</span>, <span class="ty">int</span>, <span class="ty">bool</span>) {
+	<span class="kw">var</span> cursor *<span class="ty">int64</span>
+	<span class="kw">if</span> c := r.URL.Query().Get(<span class="st">"cursor"</span>); c != <span class="st">""</span> {
+		id, err := strconv.ParseInt(c, <span class="st">10</span>, <span class="st">64</span>)
+		<span class="kw">if</span> err != <span class="kw">nil</span> || id &lt;= <span class="st">0</span> {
+			writeError(w, http.StatusBadRequest, <span class="st">"bad_cursor"</span>, <span class="st">"続きの読み込み位置が不正です。最初から読み込み直してください。"</span>)
+			<span class="kw">return</span> <span class="kw">nil</span>, <span class="st">0</span>, <span class="kw">false</span>
+		}
+		cursor = &amp;id
+	}
+	limit := defaultPageSize
+	<span class="kw">if</span> l := r.URL.Query().Get(<span class="st">"limit"</span>); l != <span class="st">""</span> {
+		n, err := strconv.Atoi(l)
+		<span class="kw">if</span> err != <span class="kw">nil</span> || n &lt;= <span class="st">0</span> || n &gt; maxPageSize {
+			writeError(w, http.StatusBadRequest, <span class="st">"bad_limit"</span>, <span class="st">"取得件数は1〜50で指定してください。"</span>)
+			<span class="kw">return</span> <span class="kw">nil</span>, <span class="st">0</span>, <span class="kw">false</span>
+		}
+		limit = n
+	}
+	<span class="kw">return</span> cursor, limit, <span class="kw">true</span>
+}
+
+<span class="cm">// writePostPage は limit+1 件取ってきた投稿から「次のページがあるか」を判定して返す。</span>
+<span class="cm">// ascending=true のとき（リプライ一覧）はカーソルの向きが逆になる。</span>
+<span class="kw">func</span> (s *<span class="ty">Server</span>) writePostPage(w http.<span class="ty">ResponseWriter</span>, r *http.<span class="ty">Request</span>, posts []store.<span class="ty">Post</span>, limit <span class="ty">int</span>, ascending <span class="ty">bool</span>) {
+	<span class="kw">var</span> next *<span class="ty">int64</span>
+	<span class="kw">if</span> len(posts) &gt; limit {
+		posts = posts[:limit]
+		last := posts[len(posts)-<span class="st">1</span>].ID
+		next = &amp;last
+	}
+	_ = ascending <span class="cm">// カーソルはどちらの向きでも「最後に見た投稿のID」</span>
+	out, err := s.toPostJSONs(r.Context(), posts, s.optionalUserID(r))
+	<span class="kw">if</span> err != <span class="kw">nil</span> {
+		writeStoreError(w, err)
+		<span class="kw">return</span>
+	}
+	writeJSON(w, http.StatusOK, postListJSON{Posts: out, NextCursor: next})
+}</code></pre>
+
+    <h3>parsePageParams — リクエストから「どこから・何件」を読む</h3>
+    <p>一覧のリクエストは <code>GET /api/users/bob/followers?cursor=42&amp;limit=20</code> のような形で来ます。<code>parsePageParams</code> は、この URL のクエリ文字列から2つの値を安全に読み取ります。</p>
+    <p><strong>cursor（続きの読み込み位置）</strong>。<code>r.URL.Query().Get("cursor")</code> でクエリの <code>cursor</code> を文字列で取り、空でなければ <code>strconv.ParseInt</code> で <code>int64</code> に変換します。変換に失敗するか <code>id &lt;= 0</code> なら、<code>400 bad_cursor</code> を返して打ち切ります。カーソルの正体は「最後に見た行の id」です（フォロー一覧なら <code>follows.id</code>）。<strong>初回のリクエストには <code>cursor</code> が付きません</strong>——そのとき <code>cursor</code> は <code>nil</code> のまま（<code>*int64</code> のゼロ値）で、「先頭から取る」を意味します。</p>
+    <p><strong>limit（1ページの件数）</strong>。既定は <code>defaultPageSize</code>（<code>20</code>）。クエリに <code>limit</code> があれば <code>strconv.Atoi</code> で数に直し、<code>0以下</code> または <code>maxPageSize</code>（<code>50</code>）超なら <code>400 bad_limit</code> で弾きます。<strong>上限を <code>50</code> に固定している</strong>のが大事です。もし <code>limit=100000</code> のような巨大な値を許すと、1リクエストで DB から大量の行を引かされ、サーバを疲弊させられます（悪意ある DoS にも、うっかりにもなりうる）。上限を設けることで「1回に返す最大量」を運営側が握ります。</p>
+    <p>戻り値は <code>(*int64, int, bool)</code> の3つ。3番目の <code>bool</code> が<strong>「読み取りに成功したか」の合図</strong>です。失敗時はすでに <code>writeError</code> でレスポンスを書き終えているので、呼び出し側は <code>false</code> を見たら<strong>何もせず即 return</strong> すればよい——この「<code>ok</code> を返して、呼び出し側は <code>if !ok { return }</code>」というパターンは本書の随所で使われます（第01章の <code>decodeBody</code> と同じ形）。</p>
+
+    <div class="gonote"><div class="box-k">GO メモ · なぜ cursor は *int64（ポインタ）なのか</div>
+      <p><code>cursor</code> の型は <code>int64</code> ではなく <strong><code>*int64</code>（ポインタ）</strong>です。理由は「<strong>値が無い</strong>」を表現したいから。初回リクエストにはカーソルが無く、それは「id が 0」とは意味が違います（id 0 の行から続けるのではなく、そもそも先頭から取る）。<code>int64</code> だとゼロ値の <code>0</code> しかなく「未指定」と「0番」を区別できませんが、<code>*int64</code> なら <code>nil</code>（未指定）と <code>&amp;42</code>（42番から）を区別できます。この <code>nil</code> が、Store 層の SQL <code>($2::bigint IS NULL OR f.id &lt; $2)</code> の <code>IS NULL</code> 分岐にそのまま対応します——「カーソルが <code>nil</code> なら全件対象、値があればそれ未満」。Go の <code>nil</code> と SQL の <code>NULL</code> が、<code>*int64</code> を通してきれいに橋渡しされているのです。</p>
+    </div>
+
+    <h3>writePostPage — limit+1 件取って「次があるか」を判定する</h3>
+    <p>ここが<strong>この章で最も味わってほしい定石</strong>です。一覧を返すとき、「次のページがあるかどうか」をどうやって知るか。素朴には「もう一度 <code>count</code> して残りを数える」といった方法が思いつきますが、追加のクエリが要ります。もっと賢い手があります。</p>
+    <p><strong><code>limit+1</code> 件リクエストする</strong>のです。20件欲しいなら、DB には21件くれと頼む。返ってきた件数を見て——</p>
+    <pre><code>	<span class="kw">var</span> next *<span class="ty">int64</span>
+	<span class="kw">if</span> len(posts) &gt; limit {
+		posts = posts[:limit]
+		last := posts[len(posts)-<span class="st">1</span>].ID
+		next = &amp;last
+	}</code></pre>
+    <ul>
+      <li><strong>21件返ってきた（<code>len(posts) &gt; limit</code>）</strong> → まだ続きがある。余分の1件は<strong>「次があるぞ」という証拠</strong>なので、<code>posts[:limit]</code> で先頭20件に切り詰めてクライアントには20件だけ返し、20件目の id を <strong><code>next_cursor</code></strong> として添える。</li>
+      <li><strong>20件以下しか返ってこなかった</strong> → これで最後。<code>next</code> は <code>nil</code> のまま。クライアントは <code>next_cursor</code> が無いのを見て「もう続きは無い」と判断できる。</li>
+    </ul>
+    <p>この「21件目が来るかどうか」だけで、<strong>追加のクエリを1本も投げずに「次ページの有無」が分かる</strong>——これが <code>limit+1</code> の妙味です。<code>count(*)</code> で全体を数える必要も、「次を実際に引いてみて空かどうか」を確かめる必要もありません。返ってきた <code>next_cursor</code>（最後に見た行の id）を、クライアントは次のリクエストの <code>?cursor=</code> にそのまま乗せる。こうして「最後に見た id の続きから、また limit+1 件」を繰り返し、一覧を途切れなく辿れます。</p>
+    <p>Store 層が <code>limit+1</code> を受け取る仕掛けは、呼び出し側にあります。Step 5 で見るように、ハンドラは <code>list(..., cursor, limit+1)</code> と<strong>呼ぶ時点で1を足して</strong>います。Store の SQL は素直に「言われた件数まで」を <code>LIMIT $3</code> で返すだけ。「+1して頼み、+1が来たかで判定する」という<strong>約束</strong>が、ハンドラと <code>writePostPage</code> のあいだで守られています。</p>
+    <p>なお <code>ascending</code> 引数は、リプライ一覧（会話は古い順）でカーソルの<strong>向きの意味</strong>が逆になることを示すためのものですが、コードでは <code>_ = ascending</code> と<strong>あえて捨てて</strong>います。コメントの通り「カーソルはどちらの向きでも『最後に見た投稿のID』」なので、next_cursor の計算そのものは向きに依存しないのです。フォロー一覧では常に新しい順（降順）なので、この引数は Step 5 で <code>false</code> を渡します。</p>
+
+    <div class="box hazard"><div class="box-k">⚠ 落とし穴 — Store には「limit+1」を渡す、を忘れない</div>
+      <p><code>writePostPage</code>（や後述のフォロー一覧の判定）が「次ページあり」を検知できるのは、<strong>Store に <code>limit+1</code> を頼んでいる</strong>という前提があるからです。もしハンドラで <code>limit+1</code> の <code>+1</code> を書き忘れ、ちょうど <code>limit</code> 件だけ頼むと、「20件返ってきた=ちょうど20件で終わり」なのか「本当は21件以上あるのに20で切られた」のか区別できず、<strong>最後のページなのに <code>next_cursor</code> を返してしまう</strong>（あるいは逆）バグになります。「<code>+1</code> して頼む」と「<code>&gt; limit</code> で判定する」は<strong>必ずセット</strong>。片方だけ変えてはいけません。</p>
+    </div>
+
+    <h2 class="step" id="step-4"><span class="step-no">Step 4</span>フォロー一覧を引く — 列の修飾とキーセット</h2>
+    <p>ヘルパーの準備ができたので、Step 1 で後回しにした <code>follows.go</code> の下半分——一覧クエリ <code>ListFollowers</code> / <code>ListFollowing</code>——に戻ります。ここには2つの読みどころがあります。<strong>(A) 列を必ず修飾する理由</strong>と、<strong>(B) なぜ並び順の鍵に <code>created_at</code> ではなく <code>follows.id</code> を使うか</strong>です。</p>
+
+    <div class="file-tag">src/backend/internal/store/follows.go（一覧クエリ再掲）</div>
+    <pre><code><span class="cm">// follows と users の両方に id / created_at があるため、列は必ず修飾する</span>
+<span class="kw">const</span> followUserCols = <span class="st">"u.id, u.username, u.display_name, u.email, u.password_hash, u.bio, u.created_at, f.id"</span>
+
+<span class="kw">func</span> (s *<span class="ty">Store</span>) ListFollowers(ctx context.<span class="ty">Context</span>, userID <span class="ty">int64</span>, beforeEdgeID *<span class="ty">int64</span>, limit <span class="ty">int</span>) ([]<span class="ty">FollowEdge</span>, <span class="ty">error</span>) {
+	rows, err := s.pool.Query(ctx, <span class="st">`
+		SELECT `</span>+followUserCols+<span class="st">` FROM users u
+		JOIN follows f ON f.follower_id = u.id
+		WHERE f.followee_id = $1
+		  AND ($2::bigint IS NULL OR f.id &lt; $2)
+		ORDER BY f.id DESC LIMIT $3`</span>,
+		userID, beforeEdgeID, limit)
+	<span class="kw">if</span> err != <span class="kw">nil</span> {
+		<span class="kw">return</span> <span class="kw">nil</span>, err
+	}
+	<span class="kw">return</span> scanFollowEdges(rows)
+}</code></pre>
+
+    <h3>(A) 列を修飾する — u.id と f.id は別物</h3>
+    <p>このクエリは <code>users u</code> と <code>follows f</code> を <code>JOIN</code> しています。ここで問題が起きます。<strong>両方のテーブルに <code>id</code> 列と <code>created_at</code> 列がある</strong>のです。もし <code>SELECT id, ... FROM users u JOIN follows f ...</code> と<strong>修飾なしで書くと</strong>、PostgreSQL は「その <code>id</code> は <code>users</code> の? <code>follows</code> の?」と判断できず、<strong>「column reference "id" is ambiguous」というエラー</strong>で落ちます。</p>
+    <p>だから <code>followUserCols</code> は、すべての列に<strong>テーブルの別名（エイリアス）</strong>を付けています。<code>u.id</code>（ユーザーの id）、<code>u.created_at</code>（登録日時）、そして最後の <code>f.id</code>（<strong>フォロー関係の id</strong>）。この <code>f.id</code> こそが、<code>FollowEdge.EdgeID</code> に入る値です。<code>scanFollowEdges</code> の <code>Scan</code> の順序——<code>&amp;e.ID</code>（<code>u.id</code>）... <code>&amp;e.EdgeID</code>（<code>f.id</code>）——と、<code>followUserCols</code> の並びが<strong>1対1で対応</strong>していることを確かめてください。列の順を1つでもずらすと、ユーザー id とエッジ id が入れ替わり、ページネーションが壊れます。</p>
+    <p><code>JOIN follows f ON f.follower_id = u.id</code> と <code>WHERE f.followee_id = $1</code> の組み合わせが、「<code>$1</code> をフォローしている人（<code>u</code>）を、その関係（<code>f</code>）とともに取り出す」を表します。<code>ListFollowing</code> は <code>ON</code> と <code>WHERE</code> の <code>follower</code>/<code>followee</code> が<strong>入れ替わる</strong>だけ——「<code>$1</code> がフォローしている人」を取るので向きが逆になります。関係テーブルは、この向きの入れ替えだけで「フォロワー」と「フォロー中」を両方引ける、という美しさがあります。</p>
+
+    <h3>(B) キーセットページネーション — f.id &lt; $2 で続きを取る</h3>
+    <p>WHERE 句の後半とORDER BY が、Step 3 のヘルパーと噛み合う<strong>キーセット</strong>の部分です。</p>
+    <pre><code>	  <span class="kw">AND</span> ($2::bigint <span class="kw">IS NULL OR</span> f.id &lt; $2)
+	<span class="kw">ORDER BY</span> f.id <span class="kw">DESC LIMIT</span> $3</code></pre>
+    <p>読み解きます。<code>$2</code> は <code>beforeEdgeID</code>（＝クライアントが送ってきた <code>cursor</code>）です。<code>($2::bigint IS NULL OR f.id &lt; $2)</code> は2つの場合を1行で表しています——<strong>カーソルが <code>NULL</code>（初回）なら全件が対象</strong>、<strong>カーソルに値があれば <code>f.id &lt; $2</code>（そのエッジ id より小さい＝それより古い関係）だけが対象</strong>。<code>ORDER BY f.id DESC</code> で新しい順（id の大きい順）に並べ、<code>LIMIT $3</code>（＝ハンドラが渡す <code>limit+1</code>）で必要な件数だけ取る。</p>
+    <p>これが<strong>キーセットページネーション</strong>です。「最後に見た <code>f.id</code> の続き（それより小さい id）を、また limit+1 件」——Step 3 で見た「next_cursor を次の cursor に乗せて繰り返す」の DB 側の実体がこれです。<strong>「オフセットを数えて N 件飛ばす」のではなく、「最後に見た id の位置から続きを取る」</strong>。この違いがなぜ効くのか——なぜオフセット方式を避けるのか——という<strong>深い議論は第04章</strong>で扱います。この章では「最後に見た id の続きを取る」実装そのものに集中します。</p>
+
+    <div class="box hazard"><div class="box-k">⚠ 落とし穴 — なぜ並び順の鍵が created_at ではなく follows.id なのか</div>
+      <p>「新しい順に並べる」なら、素直には <code>created_at</code>（作成日時）で並べたくなります。<code>follows</code> にも <code>created_at</code> 列があるのに、このクエリは<strong>あえて <code>f.id</code>（連番）で並べています</strong>。理由は<strong>時刻が逆転しうるから</strong>です。</p>
+      <p><code>created_at</code> は <code>DEFAULT now()</code> でサーバのシステム時刻が入ります。ところが Docker コンテナや WSL2 の環境では、ホスト OS の<strong>クロック補正（NTP同期・サスペンド復帰・時刻のジャンプ）</strong>によって、システム時刻がわずかに<strong>巻き戻る</strong>ことがあります。すると「後から挿入したのに <code>created_at</code> が前の行より小さい」という<strong>時刻の逆転</strong>が起こりえます。もし <code>created_at</code> を並び順とカーソルの鍵にしていると、この逆転で<strong>ページの境目で行が飛ぶ・重複する</strong>という厄介なバグになります（しかも稀にしか再現せず、デバッグが非常に難しい）。</p>
+      <p>一方 <code>id BIGSERIAL</code> は<strong>挿入のたびに単調増加する連番</strong>で、DB が採番するので時計とは無関係です。「後から入った行は必ず大きい id」が保証される。だから<strong>順序の鍵には <code>id</code> を使う</strong>のが安全です。<code>created_at</code> は「いつフォローしたか」の表示には使えますが、<strong>並び替えとページネーションの基準にしてはいけない</strong>——これは <code>follows</code> に限らず、<code>posts</code>（<code>p.id &lt; $2</code>）でも likes でも本書が一貫して守っている原則です。第00章のスキーマのコメント「created_at はクロック補正（Docker/WSL2等）で逆転しうるため、順序の鍵には連番を使う」は、まさにこの話でした。</p>
+    </div>
+
+    <div class="gonote"><div class="box-k">RDB メモ · なぜ follows に索引 idx_follows_followee_id があるか</div>
+      <p>第00章のスキーマには <code>CREATE INDEX ... ON follows (followee_id, id DESC)</code> と <code>(follower_id, id DESC)</code> の2本がありました。これは <code>ListFollowers</code> / <code>ListFollowing</code> のためです。<code>WHERE f.followee_id = $1 ... ORDER BY f.id DESC</code> という「特定ユーザーで絞って、id 降順で並べる」クエリは、<code>(followee_id, id DESC)</code> の複合索引があれば<strong>絞り込みと並び替えを索引だけで済ませられ</strong>、フォロワーが増えても速いままです。索引の設計が「どうクエリするか」から逆算されている好例ですが、なぜこの列順の索引が効くのかは第07章で掘り下げます。ここでは「一覧クエリの形と索引の形が一致している」とだけ押さえてください。</p>
+    </div>
+
+    <p>最後に <code>scanFollowEdges</code> をもう一度。<code>rows.Next()</code> で1行ずつ回し、<code>Scan</code> で <code>FollowEdge</code> の各フィールド（埋め込んだ <code>User</code> の分と <code>EdgeID</code>）に詰め、スライスに追加していきます。<code>edges := []FollowEdge{}</code> と<strong>空スライスで初期化</strong>しているのは、該当0件のとき <code>nil</code> ではなく<strong>空配列 <code>[]</code> を返す</strong>ため——API が <code>null</code> ではなく <code>[]</code> を返すと、フロント側が「常に配列」として扱えて楽になります。<code>defer rows.Close()</code> と最後の <code>rows.Err()</code> で、行の後始末と走査中エラーの回収を忘れずに行っています（第02章の <code>scanPosts</code> と同じ作法）。</p>
+
+    <p>ついでに、プロフィールの「投稿タブ」で使う投稿一覧も見ておきます。<code>posts.go</code> の <code>ListUserPosts</code> です（他の関数は各章で扱うのでここでは省略）。フォロー一覧とまったく同じキーセットの型をしています。</p>
+
+    <div class="file-tag">src/backend/internal/store/posts.go（抜粋）</div>
+    <pre><code><span class="cm">// ListUserPosts はあるユーザーの投稿（リプライ含む）を新しい順に返す。</span>
+<span class="cm">// beforeID はキーセットページネーションの目印（教材 Chapter 5）。</span>
+<span class="kw">func</span> (s *<span class="ty">Store</span>) ListUserPosts(ctx context.<span class="ty">Context</span>, userID <span class="ty">int64</span>, beforeID *<span class="ty">int64</span>, limit <span class="ty">int</span>) ([]<span class="ty">Post</span>, <span class="ty">error</span>) {
+	rows, err := s.pool.Query(ctx, postSelect+<span class="st">`
+		WHERE p.user_id = $1 AND ($2::bigint IS NULL OR p.id &lt; $2)
+		ORDER BY p.id DESC LIMIT $3`</span>,
+		userID, beforeID, limit)
+	<span class="kw">if</span> err != <span class="kw">nil</span> {
+		<span class="kw">return</span> <span class="kw">nil</span>, err
+	}
+	<span class="kw">return</span> scanPosts(rows)
+}</code></pre>
+    <p><code>WHERE p.user_id = $1 AND ($2::bigint IS NULL OR p.id &lt; $2) ORDER BY p.id DESC LIMIT $3</code>——フォロー一覧の <code>f.id &lt; $2</code> が、投稿一覧では <code>p.id &lt; $2</code> になっているだけで、<strong>構造は瓜二つ</strong>です。並びの鍵は投稿でも <code>p.id</code>（連番）。だから <code>writePostPage</code> という同じヘルパーで「次ページ判定」ができるのです。「一覧はどれもキーセットで、連番 id を鍵に、limit+1 で判定」——この統一が、コードの重複を減らし、バグの入る隙を狭めています。</p>
+
+    <h2 class="step" id="step-5"><span class="step-no">Step 5</span>ハンドラを組む — user_handlers.go</h2>
+    <p>Store 層（フォロー操作・集計・一覧）が揃いました。最後に、それらを HTTP に繋ぐ <code>user_handlers.go</code> を<strong>全文</strong>で見ます。プロフィール取得・更新、投稿一覧、フォロー/解除、フォロワー/フォロー一覧——プロフィールまわりのエンドポイントがすべてここに集まっています。</p>
+
+    <div class="file-tag">src/backend/internal/api/user_handlers.go</div>
+    <pre><code><span class="kw">package</span> api
+
+<span class="kw">import</span> (
+	<span class="st">"context"</span>
+	<span class="st">"net/http"</span>
+
+	<span class="st">"twitter-sns/internal/store"</span>
+)
+
+<span class="kw">type</span> <span class="ty">profileJSON</span> <span class="kw">struct</span> {
+	<span class="ty">UserJSON</span>
+	PostsCount     <span class="ty">int</span>  <span class="st">`json:"posts_count"`</span>
+	FollowersCount <span class="ty">int</span>  <span class="st">`json:"followers_count"`</span>
+	FollowingCount <span class="ty">int</span>  <span class="st">`json:"following_count"`</span>
+	IsFollowing    <span class="ty">bool</span> <span class="st">`json:"is_following"`</span>
+	IsMe           <span class="ty">bool</span> <span class="st">`json:"is_me"`</span>
+}
+
+<span class="cm">// GET /api/users/{username}</span>
+<span class="kw">func</span> (s *<span class="ty">Server</span>) handleGetProfile(w http.<span class="ty">ResponseWriter</span>, r *http.<span class="ty">Request</span>) {
+	u, err := s.store.GetUserByUsername(r.Context(), r.PathValue(<span class="st">"username"</span>))
+	<span class="kw">if</span> err != <span class="kw">nil</span> {
+		writeStoreError(w, err)
+		<span class="kw">return</span>
+	}
+	stats, err := s.store.GetUserStats(r.Context(), u.ID)
+	<span class="kw">if</span> err != <span class="kw">nil</span> {
+		writeStoreError(w, err)
+		<span class="kw">return</span>
+	}
+	viewerID := s.optionalUserID(r)
+	isFollowing := <span class="kw">false</span>
+	<span class="kw">if</span> viewerID != <span class="st">0</span> &amp;&amp; viewerID != u.ID {
+		isFollowing, err = s.store.IsFollowing(r.Context(), viewerID, u.ID)
+		<span class="kw">if</span> err != <span class="kw">nil</span> {
+			writeStoreError(w, err)
+			<span class="kw">return</span>
+		}
+	}
+	writeJSON(w, http.StatusOK, profileJSON{
+		UserJSON:       toUserJSON(u),
+		PostsCount:     stats.Posts,
+		FollowersCount: stats.Followers,
+		FollowingCount: stats.Following,
+		IsFollowing:    isFollowing,
+		IsMe:           viewerID == u.ID,
+	})
+}
+
+<span class="kw">type</span> <span class="ty">updateProfileRequest</span> <span class="kw">struct</span> {
+	DisplayName <span class="ty">string</span> <span class="st">`json:"display_name"`</span>
+	Bio         <span class="ty">string</span> <span class="st">`json:"bio"`</span>
+}
+
+<span class="cm">// PATCH /api/users/me — 自分のプロフィールのみ編集できる（FR-4）</span>
+<span class="kw">func</span> (s *<span class="ty">Server</span>) handleUpdateProfile(w http.<span class="ty">ResponseWriter</span>, r *http.<span class="ty">Request</span>) {
+	<span class="kw">var</span> req updateProfileRequest
+	<span class="kw">if</span> !decodeBody(w, r, &amp;req) {
+		<span class="kw">return</span>
+	}
+	displayName, ok := validateDisplayName(req.DisplayName)
+	<span class="kw">if</span> !ok {
+		writeError(w, http.StatusBadRequest, <span class="st">"invalid_display_name"</span>, <span class="st">"表示名は1〜50文字で入力してください。"</span>)
+		<span class="kw">return</span>
+	}
+	bio, ok := validateBio(req.Bio)
+	<span class="kw">if</span> !ok {
+		writeError(w, http.StatusBadRequest, <span class="st">"invalid_bio"</span>, <span class="st">"自己紹介は160文字以内で入力してください。"</span>)
+		<span class="kw">return</span>
+	}
+	u, err := s.store.UpdateProfile(r.Context(), currentUserID(r), displayName, bio)
+	<span class="kw">if</span> err != <span class="kw">nil</span> {
+		writeStoreError(w, err)
+		<span class="kw">return</span>
+	}
+	writeJSON(w, http.StatusOK, toUserJSON(u))
+}
+
+<span class="cm">// GET /api/users/{username}/posts?cursor=</span>
+<span class="kw">func</span> (s *<span class="ty">Server</span>) handleListUserPosts(w http.<span class="ty">ResponseWriter</span>, r *http.<span class="ty">Request</span>) {
+	u, err := s.store.GetUserByUsername(r.Context(), r.PathValue(<span class="st">"username"</span>))
+	<span class="kw">if</span> err != <span class="kw">nil</span> {
+		writeStoreError(w, err)
+		<span class="kw">return</span>
+	}
+	cursor, limit, ok := parsePageParams(w, r)
+	<span class="kw">if</span> !ok {
+		<span class="kw">return</span>
+	}
+	posts, err := s.store.ListUserPosts(r.Context(), u.ID, cursor, limit+<span class="st">1</span>)
+	<span class="kw">if</span> err != <span class="kw">nil</span> {
+		writeStoreError(w, err)
+		<span class="kw">return</span>
+	}
+	s.writePostPage(w, r, posts, limit, <span class="kw">false</span>)
+}
+
+<span class="cm">// resolveTargetUser はパスの {username} からユーザーを引く共通処理。</span>
+<span class="kw">func</span> (s *<span class="ty">Server</span>) resolveTargetUser(w http.<span class="ty">ResponseWriter</span>, r *http.<span class="ty">Request</span>) (*store.<span class="ty">User</span>, <span class="ty">bool</span>) {
+	u, err := s.store.GetUserByUsername(r.Context(), r.PathValue(<span class="st">"username"</span>))
+	<span class="kw">if</span> err != <span class="kw">nil</span> {
+		writeStoreError(w, err)
+		<span class="kw">return</span> <span class="kw">nil</span>, <span class="kw">false</span>
+	}
+	<span class="kw">return</span> u, <span class="kw">true</span>
+}
+
+<span class="cm">// POST /api/users/{username}/follow</span>
+<span class="kw">func</span> (s *<span class="ty">Server</span>) handleFollow(w http.<span class="ty">ResponseWriter</span>, r *http.<span class="ty">Request</span>) {
+	target, ok := s.resolveTargetUser(w, r)
+	<span class="kw">if</span> !ok {
+		<span class="kw">return</span>
+	}
+	<span class="kw">if</span> err := s.store.Follow(r.Context(), currentUserID(r), target.ID); err != <span class="kw">nil</span> {
+		writeStoreError(w, err)
+		<span class="kw">return</span>
+	}
+	w.WriteHeader(http.StatusNoContent)
+}
+
+<span class="cm">// DELETE /api/users/{username}/follow</span>
+<span class="kw">func</span> (s *<span class="ty">Server</span>) handleUnfollow(w http.<span class="ty">ResponseWriter</span>, r *http.<span class="ty">Request</span>) {
+	target, ok := s.resolveTargetUser(w, r)
+	<span class="kw">if</span> !ok {
+		<span class="kw">return</span>
+	}
+	<span class="kw">if</span> err := s.store.Unfollow(r.Context(), currentUserID(r), target.ID); err != <span class="kw">nil</span> {
+		writeStoreError(w, err)
+		<span class="kw">return</span>
+	}
+	w.WriteHeader(http.StatusNoContent)
+}
+
+<span class="cm">// GET /api/users/{username}/followers?cursor=</span>
+<span class="kw">func</span> (s *<span class="ty">Server</span>) handleListFollowers(w http.<span class="ty">ResponseWriter</span>, r *http.<span class="ty">Request</span>) {
+	s.handleFollowList(w, r, s.store.ListFollowers)
+}
+
+<span class="cm">// GET /api/users/{username}/following?cursor=</span>
+<span class="kw">func</span> (s *<span class="ty">Server</span>) handleListFollowing(w http.<span class="ty">ResponseWriter</span>, r *http.<span class="ty">Request</span>) {
+	s.handleFollowList(w, r, s.store.ListFollowing)
+}
+
+<span class="kw">type</span> <span class="ty">followLister</span> <span class="kw">func</span>(ctx context.<span class="ty">Context</span>, userID <span class="ty">int64</span>, beforeEdgeID *<span class="ty">int64</span>, limit <span class="ty">int</span>) ([]store.<span class="ty">FollowEdge</span>, <span class="ty">error</span>)
+
+<span class="cm">// handleFollowList はフォロー/フォロワー一覧の共通処理。</span>
+<span class="cm">// 投稿一覧と同じく limit+1 件取得で「続きの有無」を判定し、カーソルで途切れなく辿れる。</span>
+<span class="kw">func</span> (s *<span class="ty">Server</span>) handleFollowList(w http.<span class="ty">ResponseWriter</span>, r *http.<span class="ty">Request</span>, list followLister) {
+	target, ok := s.resolveTargetUser(w, r)
+	<span class="kw">if</span> !ok {
+		<span class="kw">return</span>
+	}
+	cursor, limit, ok := parsePageParams(w, r)
+	<span class="kw">if</span> !ok {
+		<span class="kw">return</span>
+	}
+	edges, err := list(r.Context(), target.ID, cursor, limit+<span class="st">1</span>)
+	<span class="kw">if</span> err != <span class="kw">nil</span> {
+		writeStoreError(w, err)
+		<span class="kw">return</span>
+	}
+	<span class="kw">var</span> next *<span class="ty">int64</span>
+	<span class="kw">if</span> len(edges) &gt; limit {
+		edges = edges[:limit]
+		last := edges[len(edges)-<span class="st">1</span>].EdgeID
+		next = &amp;last
+	}
+	out := make([]<span class="ty">UserJSON</span>, len(edges))
+	<span class="kw">for</span> i := range edges {
+		out[i] = toUserJSON(&amp;edges[i].User)
+	}
+	resp := map[<span class="ty">string</span>]<span class="ty">any</span>{<span class="st">"users"</span>: out}
+	<span class="kw">if</span> next != <span class="kw">nil</span> {
+		resp[<span class="st">"next_cursor"</span>] = *next
+	}
+	writeJSON(w, http.StatusOK, resp)
+}</code></pre>
+
+    <h3>handleGetProfile — プロフィールに is_following / is_me を添える</h3>
+    <p>プロフィール取得は、単にユーザー情報を返すだけではありません。<strong>「見ている人にとって」の情報</strong>を足します。<code>profileJSON</code> は <code>UserJSON</code>（公開してよいユーザー情報。email や hash は含まない。第01章）を埋め込み、そこに <code>posts_count</code> / <code>followers_count</code> / <code>following_count</code> の3つの数字と、<code>is_following</code> / <code>is_me</code> の2つの真偽値を加えた形です。</p>
+    <p>処理の流れは——<code>GetUserByUsername</code> で対象ユーザーを引き、<code>GetUserStats</code> で3つの数字を取り、そして<strong>閲覧者との関係</strong>を判定します。</p>
+    <pre><code>	viewerID := s.optionalUserID(r)
+	isFollowing := <span class="kw">false</span>
+	<span class="kw">if</span> viewerID != <span class="st">0</span> &amp;&amp; viewerID != u.ID {
+		isFollowing, err = s.store.IsFollowing(r.Context(), viewerID, u.ID)
+		...
+	}</code></pre>
+    <p><code>s.optionalUserID(r)</code> は「ログインしていれば閲覧者の id、未ログインなら <code>0</code>」を返します（プロフィールは未ログインでも見られるので、必須ではなく <strong>optional</strong>）。<code>viewerID != 0</code>（ログイン済み）<strong>かつ</strong> <code>viewerID != u.ID</code>（自分自身のプロフィールではない）ときだけ、<code>IsFollowing</code> を呼んで「フォロー中か」を調べます。自分のプロフィールを見ているときや未ログインのときは、<code>IsFollowing</code> を呼ぶ意味がないので<strong>クエリを省いて</strong> <code>false</code> のまま。最後に <code>IsMe: viewerID == u.ID</code> で「これは自分のプロフィールか」を返します。フロントはこの2つの真偽値を見て、「フォローする / フォロー中 / 編集」のどのボタンを出すかを決められます。</p>
+
+    <h3>handleUpdateProfile — 自分のプロフィールだけ編集できる（FR-4）</h3>
+    <p>プロフィール更新は <code>PATCH /api/users/me</code> です。パスが <code>{username}</code> ではなく<strong><code>me</code> 固定</strong>なのがポイント。「誰を編集するか」をパスで受け取らず、<strong>ログイン中の本人（<code>currentUserID(r)</code>）</strong>に固定しています。だから「alice が bob のプロフィールを書き換える」ことは URL からして不可能——これが要件 FR-4「自分のプロフィールのみ編集できる」の実装です。認可を「パスの解釈」ではなく「認証済みユーザー」に紐付けることで、他人を編集する余地を構造的に消しています。</p>
+    <p><code>decodeBody</code> でリクエストを読み、<code>validateDisplayName</code>（1〜50文字）と <code>validateBio</code>（160文字以内）で検証してから <code>UpdateProfile</code> を呼ぶ、という第01章・第02章と同じ「デコード → 検証 → Store」の流れです。<code>me</code> を扱うので <code>currentUserID(r)</code>（ログイン必須。<code>optionalUserID</code> ではない）を使っている点に注目してください。</p>
+
+    <h3>resolveTargetUser と handleFollow / handleUnfollow</h3>
+    <p>フォロー・解除は、どちらもまず<strong>「誰に対して」</strong>のユーザーをパスの <code>{username}</code> から引きます。この「username → User、失敗なら 404 を書いて false」という定型を <code>resolveTargetUser</code> に切り出し、<code>handleFollow</code>・<code>handleUnfollow</code>・<code>handleFollowList</code> の3か所で使い回しています（<code>ok</code> パターン再び）。</p>
+    <p>本体は驚くほど短い。<code>handleFollow</code> は <code>s.store.Follow(ctx, currentUserID(r), target.ID)</code> を呼ぶだけ、<code>handleUnfollow</code> は <code>Unfollow</code> を呼ぶだけ。フォローする側は<strong>常にログイン中の本人</strong>（<code>currentUserID(r)</code>）、される側はパスの相手（<code>target.ID</code>）。成功したら本文なしの <code>204 No Content</code> を返します。「作成/削除して、返す本文は無い」という操作に <code>204</code> はぴったりです。自己フォロー（<code>ErrSelfFollow</code>）・相手不在（<code>ErrNotFound</code>）・二重フォロー（冪等に成功）といった分岐は、すべて Step 1 で見た Store 側が引き受けているので、ハンドラはこれだけで済みます。<strong>薄いハンドラ、賢い Store</strong>——本書の役割分担がよく出ています。</p>
+
+    <h3>handleFollowList — 関数を差し替えて2つの一覧を1つにする</h3>
+    <p>この章のハンドラで最も技巧的なのが <code>handleFollowList</code> です。フォロワー一覧（<code>/followers</code>）とフォロー中一覧（<code>/following</code>）は、<strong>ほとんど同じ処理</strong>——ユーザーを引き、ページ params を読み、一覧クエリを limit+1 で叩き、next_cursor を判定して返す——で、<strong>違うのは「どの Store 関数を呼ぶか」だけ</strong>です。そこで、<strong>呼ぶ関数そのものを引数で受け取る</strong>ことで共通化しています。</p>
+    <pre><code><span class="kw">type</span> <span class="ty">followLister</span> <span class="kw">func</span>(ctx context.<span class="ty">Context</span>, userID <span class="ty">int64</span>, beforeEdgeID *<span class="ty">int64</span>, limit <span class="ty">int</span>) ([]store.<span class="ty">FollowEdge</span>, <span class="ty">error</span>)</code></pre>
+    <p><code>followLister</code> は<strong>関数の型</strong>です。<code>ListFollowers</code> も <code>ListFollowing</code> も<strong>まったく同じシグネチャ</strong>（<code>(ctx, userID, beforeEdgeID, limit)</code> を取り <code>([]FollowEdge, error)</code> を返す）なので、両方ともこの型の値として扱えます。だから <code>handleListFollowers</code> は <code>s.handleFollowList(w, r, s.store.ListFollowers)</code>、<code>handleListFollowing</code> は <code>...ListFollowing</code> と、<strong>差し替える関数だけを渡して</strong>共通処理を呼び出せます。</p>
+    <p>共通処理の中身は、Step 3 の <code>writePostPage</code> とまったく同じ「limit+1 で判定」の型です。<code>list(ctx, target.ID, cursor, limit+1)</code> で1件多く取り、<code>len(edges) &gt; limit</code> なら <code>edges[:limit]</code> に切り詰めて<strong>最後の <code>EdgeID</code></strong>（<code>follows.id</code>!）を <code>next_cursor</code> にする。ここで <code>edges[len(edges)-1].EdgeID</code> と<strong>ユーザー id ではなくエッジ id</strong> を使っているのが決定的です——Step 4 で見たとおり、フォロー一覧のカーソルは <code>f.id</code> でなければキーセットが成立しません。<code>User.ID</code> を間違って渡すと、まったく無関係な位置から続きを取ってしまいます。</p>
+    <p>最後に、<code>edges</code> を <code>toUserJSON(&amp;edges[i].User)</code> で <code>UserJSON</code> の配列に変換し（埋め込んだ <code>User</code> だけを公開用に取り出す）、<code>map[string]any{"users": out}</code> に詰めて返します。<code>next</code> があるときだけ <code>resp["next_cursor"]</code> を足すので、最後のページでは <code>next_cursor</code> キー自体が現れません——クライアントは「キーが無い＝もう続きは無い」と判断できます。</p>
+
+    <div class="gonote"><div class="box-k">GO メモ · 関数を値として渡す（第一級関数）</div>
+      <p>Go では関数は<strong>値</strong>です。変数に入れたり、引数で渡したり、返り値にしたりできます（第一級関数）。<code>followLister</code> のように「関数の型」に名前を付けておくと、同じ形の関数をまとめて扱えます。<code>handleFollowList</code> は「フォロワーか・フォロー中か」という<strong>可変部分だけを関数として外から注入</strong>し、共通の骨格（ユーザー解決・ページング・整形）を1か所に保っています。<code>if isFollowers { ... } else { ... }</code> のような分岐で書くより、<strong>差分を関数で渡す</strong>ほうが、共通処理の重複が生まれず、新しい一覧を足すのも同じ型の関数を1本用意するだけで済みます。<code>s.store.ListFollowers</code> と書くと、<code>s.store</code> という<strong>レシーバに束縛された</strong>メソッド値が得られる（メソッドを関数として取り出せる）点も、この共通化を支えています。</p>
+    </div>
+
+    <h2 class="step" id="step-6"><span class="step-no">Step 6</span>動かして確認する — curl とテスト</h2>
+    <p>フォローの土台・集計・一覧・ハンドラが揃いました。実際に curl で「alice が bob をフォローする」流れを踏み、ゴールの4項目を確かめます。事前に第00章で DB を、第01章で alice と bob の2ユーザーを用意しておいてください（サインアップして Cookie を取得します）。</p>
+
+    <div class="box do"><div class="box-k">▸ 動かして確認 — フォローして、数字と一覧を見る</div>
+      <p>alice の Cookie（<code>alice.txt</code>）を使って bob をフォローし、bob のプロフィールと alice のフォロー一覧を確認します。</p>
+      <pre class="term"><code><span class="ps">$</span> <span class="cm"># alice が bob をフォロー（204 が返れば成功）</span>
+<span class="ps">$</span> curl -s -b alice.txt -X POST http://localhost:8080/api/users/bob/follow -w "%{http_code}\n"
+<span class="out">204</span>
+<span class="ps">$</span> <span class="cm"># bob のプロフィール — followers_count が 1 に</span>
+<span class="ps">$</span> curl -s http://localhost:8080/api/users/bob | jq '{username, followers_count, following_count}'
+<span class="out">{
+  "username": "bob",
+  "followers_count": 1,
+  "following_count": 0
+}</span>
+<span class="ps">$</span> <span class="cm"># bob のフォロワー一覧に alice が現れる</span>
+<span class="ps">$</span> curl -s http://localhost:8080/api/users/bob/followers | jq '.users[].username'
+<span class="out">"alice"</span>
+<span class="ps">$</span> <span class="cm"># alice のフォロー中一覧に bob が現れる</span>
+<span class="ps">$</span> curl -s http://localhost:8080/api/users/alice/following | jq '.users[].username'
+<span class="out">"bob"</span></code></pre>
+      <p><code>followers_count</code> が <code>1</code> になり、両方の一覧に相手が現れれば、フォローの往復が通っています。</p>
+    </div>
+
+    <div class="box do"><div class="box-k">▸ 動かして確認 — 冪等・自己フォロー・解除</div>
+      <p>二重フォローが1件のままか、自己フォローが弾かれるか、解除で消えるかを確かめます。</p>
+      <pre class="term"><code><span class="ps">$</span> <span class="cm"># もう一度フォローしても二重にならない（204、count は 1 のまま）</span>
+<span class="ps">$</span> curl -s -b alice.txt -X POST http://localhost:8080/api/users/bob/follow -w "%{http_code}\n"
+<span class="out">204</span>
+<span class="ps">$</span> curl -s http://localhost:8080/api/users/bob | jq '.followers_count'
+<span class="out">1</span>
+<span class="ps">$</span> <span class="cm"># 自分自身はフォローできない（400 self_follow）</span>
+<span class="ps">$</span> curl -s -b alice.txt -X POST http://localhost:8080/api/users/alice/follow -w "%{http_code}\n"
+<span class="out">400</span>
+<span class="ps">$</span> <span class="cm"># フォロー解除 → followers_count が 0 に戻る</span>
+<span class="ps">$</span> curl -s -b alice.txt -X DELETE http://localhost:8080/api/users/bob/follow -w "%{http_code}\n"
+<span class="out">204</span>
+<span class="ps">$</span> curl -s http://localhost:8080/api/users/bob | jq '.followers_count'
+<span class="out">0</span></code></pre>
+      <p>2回目のフォローでも <code>followers_count</code> が <code>1</code> のまま（冪等）、自己フォローが <code>400</code>、解除で <code>0</code> に戻れば、Step 1 の設計が効いています。</p>
+    </div>
+
+    <div class="box do"><div class="box-k">▸ 動かして確認 — テストを通す</div>
+      <p>最後に、ビルドと単体テストが通ることを確かめます。本書に付く自動テストは<strong>認証（<code>internal/auth</code>）と入力検証（<code>internal/api</code>）</strong>の単体テストで、フォロー機能そのものの専用テストはありません（<code>store</code> は <code>[no test files]</code>）。フォロー・解除・冪等・自己フォロー禁止・一覧ページングの確認は、上の <code>curl</code> の手順で行った通りです。</p>
+      <pre class="term"><code><span class="ps">$</span> cd src/backend
+<span class="ps">$</span> go test ./...
+<span class="out">?   	twitter-sns/cmd/server	[no test files]
+?   	twitter-sns/frontend_dist	[no test files]
+ok  	twitter-sns/internal/api	0.402s
+ok  	twitter-sns/internal/auth	0.612s
+?   	twitter-sns/internal/store	[no test files]</span></code></pre>
+      <p><code>ok</code> が並び、<code>curl</code> の確認も通れば、この章は完成です。</p>
+    </div>
+
+    <h2>つまずき FAQ</h2>
+    <details class="qa"><summary>二重フォローは、なぜ <code>ON CONFLICT DO NOTHING</code> で「1件」に収まるの?</summary>
+      <div class="qa-body"><p><code>follows</code> の主キーが <code>PRIMARY KEY (follower_id, followee_id)</code> という<strong>複合主キー</strong>だからです。同じ <code>(alice, bob)</code> の組は主キー制約により1つしか存在できず、2回目の INSERT は主キーと<strong>衝突（conflict）</strong>します。通常は「重複エラー」になりますが、<code>ON CONFLICT DO NOTHING</code> が「衝突したら何もしない（エラーにもしない）」と指示するため、2回目以降は静かに無視され、行は1件のまま。結果として <code>Follow</code> は<strong>何度呼んでも「フォロー済み」の状態に収束する冪等操作</strong>になります。UI がフォローボタンの連打やリトライを気にしなくてよくなるのが利点です。</p></div>
+    </details>
+    <details class="qa"><summary>自己フォロー禁止を、なぜ DB の <code>CHECK</code> と Go の <code>if</code> の<strong>両方</strong>で防ぐの?</summary>
+      <div class="qa-body"><p>役割が違うからです。DB の <code>CHECK (follower_id &lt;&gt; followee_id)</code> は<strong>最後の砦</strong>——どんな経路でデータが入ろうと、自己フォロー行は物理的に作れないことを保証します。一方 Go の <code>if followerID == followeeID { return ErrSelfFollow }</code> は<strong>意味のある門番</strong>——DB に無駄な問い合わせを投げる前に弾き、しかも <code>ErrSelfFollow</code> という<strong>専用のエラー</strong>を返すので、API 層は「自己フォローという特定の失敗」を認識して <code>400</code> と分かりやすいメッセージを返せます。DB の CHECK 違反エラーは汎用的すぎて意味を読み取りにくい。<strong>「DB は最終防御、アプリは早期リターンと意図の明確化」</strong>——多層防御の典型で、投稿本文の <code>char_length BETWEEN 1 AND 280</code>（第00章）を DB と Go の両方で検証したのと同じ考え方です。</p></div>
+    </details>
+    <details class="qa"><summary>「最後に見た id の続きを取る」キーセットは、オフセット（<code>OFFSET</code>）方式と何が違うの?</summary>
+      <div class="qa-body"><p>ざっくり言うと、<strong>オフセットは「N件飛ばしてその先」、キーセットは「この id より先」</strong>です。オフセットは <code>LIMIT 20 OFFSET 40</code> のように「先頭から40件飛ばして次の20件」を取りますが、飛ばす40件も内部的には走査されるため、後ろのページほど遅くなります。しかも、途中で行が挿入・削除されると<strong>ページの境目がずれて行が飛ぶ・重複する</strong>問題があります。本書のキーセット（<code>WHERE f.id &lt; $2 ORDER BY f.id DESC LIMIT 20</code>）は「最後に見た id より小さいものを20件」なので、常に一定の速さで、挿入があっても境目がずれません。この章では「最後に見た id の続きを取る」実装に集中しました。<strong>なぜオフセットを避けるか</strong>のより深い議論——性能の内訳と、大量データでの挙動——は<strong>第04章</strong>で詳しく扱います。ここでは予告まで。</p></div>
+    </details>
+
+    <h2>理解度チェック</h2>
+    <p>次の問いに<strong>自分の言葉で</strong>答えられたら、この章は卒業です。</p>
+    <details class="qa"><summary>1. <code>follows</code> の複合主キー <code>(follower_id, followee_id)</code> と <code>CHECK (follower_id &lt;&gt; followee_id)</code> は、それぞれ何を防いでいるか。</summary>
+      <div class="qa-body"><p><strong>複合主キー</strong>は「同じ人が同じ相手を2回フォローする」<strong>二重フォロー</strong>を防ぐ。<code>(follower_id, followee_id)</code> の組は1つしか存在できないため、同じ組の重複行が作れない。<code>Follow</code> の <code>ON CONFLICT DO NOTHING</code> は、この主キー衝突を「エラーにせず無視」に変えて冪等にしている。<strong>CHECK 制約</strong>は <code>follower_id</code> と <code>followee_id</code> が等しい行——<strong>自己フォロー</strong>——を禁じる（<code>&lt;&gt;</code> は「等しくない」）。前者は「関係の一意性」、後者は「関係の妥当性」を DB レベルで保証している。</p></div>
+    </details>
+    <details class="qa"><summary>2. フォロー一覧の並び順とカーソルに、<code>created_at</code> ではなく <code>follows.id</code> を使うのはなぜか。</summary>
+      <div class="qa-body"><p><code>created_at</code>（<code>DEFAULT now()</code>）は、Docker/WSL2 などの<strong>クロック補正で時刻が巻き戻る</strong>ことがあり、「後から挿入したのに時刻が前より小さい」<strong>逆転</strong>が起こりうる。これを並び順・カーソルの鍵にすると、ページの境目で行が飛ぶ・重複するバグになる（しかも稀で再現困難）。一方 <code>id BIGSERIAL</code> は<strong>挿入のたびに単調増加する連番</strong>で時計とは無関係、「後の行は必ず大きい id」が保証される。だから並び替えとキーセット（<code>f.id &lt; $2 ORDER BY f.id DESC</code>）の鍵には <code>id</code> を使う。<code>created_at</code> は「いつフォローしたか」の表示には使ってよいが、順序の基準にしてはいけない。</p></div>
+    </details>
+    <details class="qa"><summary>3. <code>parsePageParams</code> と <code>writePostPage</code>（および <code>handleFollowList</code>）は、「次のページがあるか」をどうやって追加クエリなしで判定しているか。</summary>
+      <div class="qa-body"><p><strong>limit+1 件をリクエストする</strong>。20件欲しければ Store に21件頼む（ハンドラが <code>list(..., cursor, limit+1)</code> と <code>+1</code> して呼ぶ）。返ってきた件数を見て、<code>len(...) &gt; limit</code>（21件来た）なら<strong>まだ続きがある</strong>ので、先頭 <code>limit</code> 件に切り詰めて、<code>limit</code> 件目の id（フォロー一覧なら <code>EdgeID</code>=<code>follows.id</code>）を <code>next_cursor</code> として返す。<code>limit</code> 件以下しか来なければ<strong>最後のページ</strong>で <code>next_cursor</code> は付けない。余分の1件が「次があるぞ」の証拠になるので、<code>count(*)</code> などの追加クエリが不要。クライアントは <code>next_cursor</code> を次の <code>?cursor=</code> に乗せて繰り返す。「+1して頼む」と「&gt; limit で判定する」は必ずセット。</p></div>
+    </details>
+
+    <h2>まとめ — 次はタイムラインという難問へ</h2>
+    <p>この章で、Chirp は「関係」を持ちました。<code>follows</code> という関係テーブルに「誰が誰を」の1行を積み、複合主キーで二重フォローを畳み、<code>CHECK</code> で自己フォローを禁じ、<code>ON CONFLICT DO NOTHING</code> と冪等な <code>DELETE</code> でフォロー/解除を安全に繰り返せるようにしました。プロフィールには <code>GetUserStats</code> の3つのスカラーサブクエリで投稿数・フォロワー数・フォロー数が並び、閲覧者との関係（<code>is_following</code> / <code>is_me</code>）も添えました。そして——本書で何度も使う<strong>ページネーションの共通ヘルパー</strong>（<code>parsePageParams</code> / <code>writePostPage</code>）と、<strong>連番 id を鍵にしたキーセット</strong>（<code>f.id &lt; $2</code>、<code>limit+1</code> で次ページ判定）を手に入れました。<code>handleFollowList</code> が関数を差し替えて2つの一覧を1つにまとめる技も見ました。</p>
+    <p>次の第04章では、この「フォロー関係」と「投稿」が出会います。<strong>タイムライン</strong>——自分とフォローしている全員の投稿を、新しい順に1本のリストに混ぜて返す——という、SNS の心臓を作ります。ここは本書で最も設計判断が問われる章です。「読むときに集めるか、書くときに配るか」（fan-out on read / on write）という古典的な難問に踏み込み、そしてこの章で予告した<strong>「なぜオフセットではなくキーセットなのか」の深い議論</strong>を、性能の内訳とともに決着させます。関係を作ったこの章は、その難問の土台です。</p>
+
+    <div class="chap-foot">
+      <a class="pager" href="02-post.html"><span class="dir">← 前へ</span>第02章 · 投稿する</a>
+      <a class="pager next" href="04-timeline.html"><span class="dir">次へ →</span>第04章 · タイムラインという難問</a>
+    </div>
+  </main>
+</div>
+</body>
+</html>

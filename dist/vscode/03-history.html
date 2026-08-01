@@ -1,0 +1,612 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>第03章 編集と取り消し・Undo — ゼロから作るテキストエディタ</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500;600&family=Source+Serif+4:opsz,wght@8..60,400;8..60,600;8..60,700&family=Noto+Serif+JP:wght@400;600;700&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<div class="shell">
+
+  <aside class="spine">
+    <a class="wordmark" href="index.html">MINT EDITOR · from scratch</a>
+    <div class="book-title">ゼロから作る<br>テキストエディタ</div>
+    <div class="book-sub">TypeScript と Canvas で mint editor を組む</div>
+
+    <div class="legend"><span>読む <b>↓</b></span><span>組む <b>↑</b></span></div>
+
+    <nav aria-label="目次">
+      <ul class="toc">
+        <li><a class="nav-item" href="index.html"><span class="nav-num">序</span><span class="nav-label">はじめに・準備<span class="nav-tag">Setup</span></span></a></li>
+        <li><a class="nav-item" href="00-overview.html"><span class="nav-num">00</span><span class="nav-label">文字を打てる箱の正体<span class="nav-tag">Overview</span></span></a></li>
+        <li><a class="nav-item" href="01-buffer.html"><span class="nav-num">01</span><span class="nav-label">テキストを持つ<span class="nav-tag">Buffer</span></span></a></li>
+        <li><a class="nav-item" href="02-document.html"><span class="nav-num">02</span><span class="nav-label">行とカーソル<span class="nav-tag">Doc</span></span></a></li>
+        <li><a class="nav-item current" aria-current="page" href="03-history.html"><span class="nav-num">03</span><span class="nav-label">編集と取り消し<span class="nav-tag">Undo</span></span></a></li>
+        <li><a class="nav-item" href="04-view.html"><span class="nav-num">04</span><span class="nav-label">画面に描く<span class="nav-tag">Canvas</span></span></a></li>
+        <li><a class="nav-item" href="05-input.html"><span class="nav-num">05</span><span class="nav-label">入力を受ける<span class="nav-tag">Input</span></span></a></li>
+        <li><a class="nav-item" href="06-search.html"><span class="nav-num">06</span><span class="nav-label">複数カーソルと検索<span class="nav-tag">Multi</span></span></a></li>
+        <li><a class="nav-item" href="07-highlight.html"><span class="nav-num">07</span><span class="nav-label">色をつける<span class="nav-tag">Syntax</span></span></a></li>
+        <li><a class="nav-item" href="08-ime.html"><span class="nav-num">08</span><span class="nav-label">日本語を打つ<span class="nav-tag">IME</span></span></a></li>
+        <li><a class="nav-item" href="09-assemble.html"><span class="nav-num">09</span><span class="nav-label">開いて保存する・組み立て<span class="nav-tag">Assemble</span></span></a></li>
+      </ul>
+    </nav>
+
+    <div class="spine-foot">
+      各章は一つの部品・機能。<br>下（バッファ）から上（UI）へ<br>積み上げて動かしていく。
+    </div>
+  </aside>
+
+  <main class="reading">
+    <div class="progress-tag">第03章 / 全10章 · 層: HISTORY · 読了目安 2〜2.5時間</div>
+    <div class="eyebrow"><span>HISTORY</span><span class="depth">— 編集を逆向きに持ち、取り消す</span></div>
+    <h1>編集と取り消し・Undo</h1>
+    <p class="lede">本書の白眉です。Undo と聞くと、多くの人は「編集前の全文をどこかに取っておいて、押されたら書き戻す」——つまり<strong>スナップショット</strong>を思い浮かべます。mint editor はそれをしません。編集はすべて <code>Edit {from, to, text}</code> の列で表され、<code>doc.applyEdits</code> は編集を適用しながら、それを<strong>ちょうど打ち消す逆向きの編集列</strong>を返します。この逆編集を積んでおくだけで Undo になり、Undo を適用すると今度は Redo が返ってくる。全文コピーはどこにも要りません。この「編集を逆向きに持つ」という一手が、いかに軽く、いかに一様で、いかに壊れにくいか——それを最後まで見届けます。</p>
+
+    <div class="box goal"><div class="box-k">◈ この章のゴール</div>
+      <p>次の 3 つを、自分の目と手で確認できたら達成です。</p>
+      <ol>
+        <li><code>applyEdits</code> が返す<strong>逆向き編集列</strong>を、なぜ「もう一度適用するだけ」で元に戻せるのか、消えた文字・入った文字の観点から自分の言葉で説明できる。</li>
+        <li>スナップショット方式（全文コピー）と逆向き編集方式を比べ、後者が<strong>メモリで有利</strong>な理由を言える。</li>
+        <li><code>npx vitest run src/core/history.test.ts</code> で、連続タイプが 1 グループにまとまる Undo を含む 6 件のテストが PASS する。<code>groupId</code> と <code>joinPrevious</code> の役割を目視する。</li>
+      </ol>
+    </div>
+
+    <div class="box map"><div class="box-k">☰ この章のステップ</div>
+      <ol>
+        <li><a href="#step-1">applyEdits は「逆向き編集列」を返す（<code>core/document.ts</code> 再訪）</a></li>
+        <li><a href="#step-2">なぜ逆向き編集が Undo になるのか — 消えた文字・入った文字</a></li>
+        <li><a href="#step-3">逆編集を適用すると Redo が生えてくる</a></li>
+        <li><a href="#step-4">スナップショット方式との対決 — メモリで勝つ</a></li>
+        <li><a href="#step-5">History の設計 — 2 本のスタックとエントリの形（<code>core/history.ts</code>）</a></li>
+        <li><a href="#step-6">push — 編集を 1 件記録し、グループを判定する</a></li>
+        <li><a href="#step-7">groupId と joinPrevious — 連続タイプを 1 回の Undo にまとめる</a></li>
+        <li><a href="#step-8">undo / redo — グループ単位でスタックを渡り歩く</a></li>
+        <li><a href="#step-9">動かして確かめる — 6 件のテストを読む</a></li>
+      </ol>
+    </div>
+
+    <h2>スナップショットを、持たない</h2>
+    <p>第02章で <code>TextDocument</code> ができ、<code>applyEdits</code> で編集をまとめて適用できるようになりました。ここまでで「文字を打つ・消す」は動きます。しかし、まだ<strong>取り消せません</strong>。Undo のないエディタは、崖の上で綱渡りをするようなものです。1 文字打ち間違えるたびに手が止まる。だから Undo は「あれば嬉しい機能」ではなく、編集という行為そのものを<strong>安全にする土台</strong>です。</p>
+    <p>素朴に作るなら、こう考えます——「編集する前に、いまの全文をコピーして箱にしまっておく。Undo が押されたら、箱から出して丸ごと書き戻す」。これが<strong>スナップショット方式</strong>です。動きます。単純です。しかし、10 万文字のファイルで 1 文字打つたびに 10 万文字をコピーして積む、という重さがついて回ります。100 回打てば 1000 万文字ぶんの履歴です。</p>
+    <p>mint editor は、まったく別の道を行きます。第00章で <code>Edit {from, to, text}</code> という「編集の統一形」を、第02章で「編集をまとめて適用する <code>applyEdits</code>」を用意しました。その <code>applyEdits</code> が、実は編集を適用するついでに<strong>それを打ち消す逆向きの編集</strong>を組み立てて返しています。この逆編集はふつう数バイト——「消えた文字」と「入った位置」だけ。それを積むのが本章の <code>History</code> です。<strong>全文はどこにも保存しない。</strong> この一点が、本章を本書の白眉たらしめています。まずはその心臓、<code>applyEdits</code> の返り値をもう一度、今度は Undo の目で読み直すところから始めます。</p>
+
+    <h2 class="step" id="step-1"><span class="step-no">Step 1</span>applyEdits は「逆向き編集列」を返す</h2>
+    <p>第02章で書いた <code>TextDocument.applyEdits</code> を、本章の主役として再訪します。02章では「行情報の差分更新」に目を向けましたが、本章で見るべきは<strong>返り値</strong>です。このメソッドは <code>void</code> ではなく <code>Edit[]</code> を返します。何を返しているのか。まずクラスの設計コメントから。</p>
+
+    <div class="file-tag">core/document.ts（クラスの設計コメント・再掲）</div>
+    <pre><code><span class="cm">/**
+ * TextDocument — バッファに「行」の知識を足した文書モデル。
+ *
+ * バッファはオフセットしか知らない。エディタは (行, 桁) で考えたい。
+ * その橋渡しとして、各行の開始オフセット lineStarts を常に持ち、
+ * 編集のたびに全再計算ではなく「壊れた範囲だけ」を差分更新する。
+ *
+ * applyEdits は昇順・非重複の編集列をまとめて適用し、
+ * 「最終状態の座標系で有効な逆向き編集列」を返す。
+ * この逆向き編集列をもう一度 applyEdits に渡せば元に戻る（= Undo の土台）。
+ */</span></code></pre>
+
+    <p>コメントの後半 3 行が、本章のすべてを予告しています。「<strong>逆向き編集列を返す</strong>」「<strong>もう一度 applyEdits に渡せば元に戻る</strong>」「<strong>= Undo の土台</strong>」。つまり Undo の仕組みは、この 1 メソッドの返り値にほぼ内包されているのです。<code>History</code> クラスは、この返り値を積んで取り出すだけの「箱」にすぎません。では、その返り値を作っている本体を見ます。</p>
+
+    <div class="file-tag">core/document.ts（applyEdits・本章の主役／再掲）</div>
+    <pre><code>  <span class="cm">/**
+   * 編集列をまとめて適用する。
+   * 前提: edits は from 昇順・互いに重複しない。
+   * 返り値: 適用後の文書の座標系で有効な逆向き編集列（昇順・非重複）。
+   */</span>
+  applyEdits(edits: <span class="kw">readonly</span> <span class="ty">Edit</span>[]): <span class="ty">Edit</span>[] {
+    <span class="kw">const</span> inverses: <span class="ty">Edit</span>[] = [];
+    <span class="kw">let</span> delta = <span class="st">0</span>;
+    <span class="kw">for</span> (<span class="kw">const</span> e <span class="kw">of</span> edits) {
+      <span class="kw">const</span> from = e.from + delta;
+      <span class="kw">const</span> to = e.to + delta;
+      <span class="kw">const</span> removed = <span class="kw">this</span>.buffer.slice(from, to);
+      <span class="kw">this</span>.buffer.replace(from, to, e.text);
+      <span class="kw">this</span>.updateLineStarts(from, to, e.text);
+      inverses.push({ from, to: from + e.text.length, text: removed });
+      delta += e.text.length - (to - from);
+    }
+    <span class="kw">this</span>.version++;
+    <span class="kw">return</span> inverses;
+  }</code></pre>
+
+    <p>1 行ずつ、ただし今回は<strong>逆編集がどう生まれるか</strong>だけに集中して読みます。ループは渡された編集を 1 件ずつ処理し、その各件について<strong>逆編集を 1 件 <code>inverses</code> に積みます</strong>。心臓は次の 3 行です。</p>
+    <pre><code>      <span class="kw">const</span> removed = <span class="kw">this</span>.buffer.slice(from, to);
+      <span class="kw">this</span>.buffer.replace(from, to, e.text);
+      inverses.push({ from, to: from + e.text.length, text: removed });</code></pre>
+    <ul>
+      <li><strong>1 行目 — 消える前に捕まえる。</strong> <code>replace</code> で上書きしてしまう前に、これから消える文字 <code>[from, to)</code> を <code>slice</code> で読み取って <code>removed</code> に控えます。これが「編集で失われる文字」です。逆編集はこれを<strong>後で復活させる</strong>ために覚えておく必要があります。</li>
+      <li><strong>2 行目 — 実際に置き換える。</strong> <code>buffer.replace(from, to, e.text)</code> で <code>[from, to)</code> を <code>e.text</code> に差し替えます。ここで文書が変わります。</li>
+      <li><strong>3 行目 — 逆編集を組み立てる。</strong> ここが白眉です。<code>{ from, to: from + e.text.length, text: removed }</code>。これは「<strong>いま入れた <code>e.text</code> があった場所を、さっき控えた <code>removed</code> で置き換えよ</strong>」という <code>Edit</code> です。読み下すと「<code>from</code> から『新しく入った文字の長さ』ぶんの範囲を、消えたはずの文字で埋め戻せ」。まさに<strong>この編集を打ち消す編集</strong>そのものです。</li>
+    </ul>
+
+    <div class="gonote"><div class="box-k">TS メモ · 返り値の型 <code>Edit[]</code> と <code>readonly Edit[]</code></div>
+      <p>引数は <code>readonly Edit[]</code>、返り値は <code>Edit[]</code> です。引数を <code>readonly</code> にしているのは「渡された編集列を <code>applyEdits</code> の中で書き換えない」という約束を型で示すため。呼び出し側は自分の配列を汚される心配なく渡せます。一方、返り値の <code>inverses</code> は関数内で新しく <code>const inverses: Edit[] = []</code> と作った配列なので、呼び出し側が自由に持ち回れるよう <code>readonly</code> を外しています。<strong>入力は不変・出力は可変</strong>——この非対称は「借りたものは触らない、作ったものは渡す」という関数設計の基本形です。</p>
+    </div>
+
+    <p>逆編集は「<code>e.text.length</code>」という<strong>新しく入った文字の長さ</strong>で範囲を作っている点に注意してください。挿入した瞬間、文書はもう変わっています。だから逆編集の座標は「元の座標」ではなく「<strong>適用後の座標</strong>」で書かれます。コメントが「最終状態の座標系で有効な逆向き編集列」と言っているのは、このことです。だからこそ、返ってきた逆編集を<strong>そのまま</strong> <code>applyEdits</code> に渡すだけで元に戻せる——座標のつじつまが最初から合っているのです。</p>
+
+    <h2 class="step" id="step-2"><span class="step-no">Step 2</span>なぜ逆向き編集が Undo になるのか</h2>
+    <p>Step 1 のコードは読めました。しかし「なぜそれで元に戻るのか」を、コードではなく<strong>絵</strong>で腑に落としておきます。ここが本章でいちばん大切な直観です。編集とは、詰まるところ「<strong>ある文字が消え、別の文字が入る</strong>」ことです。だから逆編集とは「<strong>入った文字を消し、消えた文字を戻す</strong>」——ただそれだけのことです。</p>
+
+    <p>具体例で追います。文書 <code>"abcdef"</code> の <code>[2, 4)</code>（<code>"cd"</code>）を <code>"XYZ"</code> に置き換える編集 <code>{ from:2, to:4, text:"XYZ" }</code> を考えます。</p>
+
+    <div class="ascii">編集と、その逆編集 —— 消えた "cd" を覚え、入った "XYZ" の跡地を埋め戻す
+
+  元の文書        a b c d e f          消えるのは [2,4) = "cd"
+  offset          0 1 2 3 4 5
+
+  編集 { from:2, to:4, text:"XYZ" } を適用
+                    ┌── ここを "XYZ" で置換 ──┐
+  適用後の文書    a b X Y Z e f        入ったのは [2,5) = "XYZ"（3文字）
+  offset          0 1 2 3 4 5 6
+
+  逆編集 = applyEdits が返す { from:2, to:5, text:"cd" }
+                    └ 入った "XYZ" の範囲 ┘   └ 戻すのは覚えておいた "cd"
+  逆編集を適用    a b c d e f          元に戻った！
+  offset          0 1 2 3 4 5</div>
+
+    <p>順に見ます。もとの <code>"abcdef"</code> で消えるのは <code>[2,4)</code> の <code>"cd"</code>。だから <code>applyEdits</code> は <code>replace</code> の前に <code>removed = "cd"</code> を控えました（Step 1 の 1 行目）。置換後、文書は <code>"abXYZef"</code> になり、<strong>入った文字 <code>"XYZ"</code> は <code>[2,5)</code> を占めています</strong>（3 文字なので <code>to = from + 3 = 5</code>）。</p>
+    <p>逆編集はこの跡地を狙います。<code>{ from:2, to:5, text:"cd" }</code>——「<code>[2,5)</code>（＝入った <code>"XYZ"</code>）を、覚えておいた <code>"cd"</code> で置き換えよ」。適用すると <code>"ab"</code> ＋ <code>"cd"</code> ＋ <code>"ef"</code> ＝ <code>"abcdef"</code>。<strong>寸分たがわず元通り</strong>です。しかも逆編集がやっていることも、ただの <code>Edit</code> の適用——第00章で作った「置換 1 つ」に他なりません。編集を打ち消すのに、専用の「取り消しロジック」は 1 行も要らない。<strong>編集を打ち消すのは、また別の編集である。</strong> これが本章の核心の一文です。</p>
+
+    <div class="box hazard"><div class="box-k">⚠ 落とし穴 — 逆編集の座標は「適用後」の座標</div>
+      <p>初学者がここで必ず引っかかるのが「逆編集の <code>to</code> はなぜ元の <code>4</code> ではなく <code>5</code> なのか」です。逆編集は<strong>編集が済んだ後の文書</strong>に適用するものだからです。適用後、その場所には元の <code>"cd"</code>（2 文字）ではなく <code>"XYZ"</code>（3 文字）が座っている。だから消し去るべき範囲は <code>[2,5)</code> であって <code>[2,4)</code> ではありません。「逆編集は未来（＝編集後）の座標系で書く」——この一点さえ押さえれば、逆編集の <code>to = from + e.text.length</code> という式が自然に読めます。元の <code>to</code>（＝ <code>e.to</code>）は逆編集には<strong>登場しません</strong>。</p>
+    </div>
+
+    <p>挿入・削除でも同じ原理が働きます。第00章で <code>Edit</code> を「幅ゼロの置換＝挿入」「空文字への置換＝削除」に畳んだのを思い出してください。逆編集も同じ畳み込みに乗ります。</p>
+
+    <div class="ascii">3 種の編集は、そのまま 3 種の逆編集に化ける（すべて「置換 1 つ」）
+
+  編集              意味               applyEdits が返す逆編集      逆の意味
+  ───────────────────────────────────────────────────────────────
+  { 3, 3, "X" }    挿入（X を入れる）  { 3, 4, "" }               削除（X を消す）
+  { 3, 5, "" }     削除（2文字消す）   { 3, 3, removed }          挿入（消した文字を戻す）
+  { 2, 4, "XYZ" }  置換               { 2, 5, "cd" }             逆置換（元に戻す）</div>
+
+    <p>美しい対称です。<strong>挿入の逆は削除、削除の逆は挿入、置換の逆は逆置換</strong>。しかもそのどれもが「<code>{from, to, text}</code> を <code>applyEdits</code> に渡す」という<strong>まったく同じ操作</strong>で実行される。編集の種類が 3 つあっても、取り消しのコードは分岐しません。第00章で <code>Edit</code> を 1 形に統一した投資が、ここで満額の配当を出しています。</p>
+
+    <h2 class="step" id="step-3"><span class="step-no">Step 3</span>逆編集を適用すると Redo が生えてくる</h2>
+    <p>ここでもう一段、目の覚めるような性質があります。<code>applyEdits</code> は<strong>どんな編集列を渡されても</strong>、それを打ち消す逆編集を返します。ということは——<strong>逆編集を <code>applyEdits</code> に渡すと、その逆編集（＝元編集）が返ってくる</strong>。つまり Undo を実行した瞬間に、Redo に必要なデータが手元に生まれるのです。</p>
+
+    <div class="ascii">applyEdits は「往復チケット」を発行する —— Undo が Redo を生む
+
+  文書 "abcdef"
+
+  ① 編集 { 2,4,"XYZ" } を applyEdits
+       文書 → "abXYZef"
+       返り値 = 逆編集 { 2,5,"cd" }   ← これを undoStack に積む（= Undo 用）
+
+  ② Undo: 逆編集 { 2,5,"cd" } を applyEdits
+       文書 → "abcdef"（戻った）
+       返り値 = { 2,4,"XYZ" }         ← 逆の逆＝元編集！ これを redoStack に積む（= Redo 用）
+
+  ③ Redo: { 2,4,"XYZ" } を applyEdits
+       文書 → "abXYZef"（やり直した）
+       返り値 = { 2,5,"cd" }          ← また Undo 用が返る … 無限に往復できる</div>
+
+    <p><code>applyEdits</code> が「編集を適用しつつ逆編集を返す」という 1 つの性質しか持っていないのに、それを繰り返し呼ぶだけで Undo と Redo が<strong>交互に生成され続けます</strong>。Undo するたびに Redo チケットが、Redo するたびに Undo チケットが手に入る。往復チケットの自動発券機です。だから <code>History</code> は「逆編集をどっちのスタックに積むか」を管理するだけでよく、Redo のための特別なデータ構造を一切持ちません。<code>undo</code> の中で <code>applyEdits</code> の返り値を <code>redoStack</code> に積み替える——それだけで Redo が完成します（Step 8 で実物を見ます）。</p>
+
+    <div class="gonote"><div class="box-k">TS メモ · なぜ「逆の逆＝元」が成り立つのか</div>
+      <p><code>applyEdits</code> は「消える文字を控えて、入れた文字の跡地を控えた文字で埋める逆編集」を返します。この規則を逆編集自身に当てはめると——逆編集で消えるのは「さっき入れた文字」、逆編集で入るのは「さっき消した文字」。だから逆編集の逆編集は「さっき入れた文字を、さっき消した文字の跡地に戻す」＝<strong>もとの編集</strong>そのものになります。関数 <code>f</code> が <code>f(f(x)) = x</code> を満たす（自分を 2 回かけると恒等に戻る）性質を数学では<strong>対合（involution）</strong>と呼びます。<code>applyEdits</code> による「逆編集を返す」操作は、まさにこの対合です。Undo/Redo が破綻しないことは、この対合性が保証しています。</p>
+    </div>
+
+    <h2 class="step" id="step-4"><span class="step-no">Step 4</span>スナップショット方式との対決 — メモリで勝つ</h2>
+    <p>ここまでで「逆向き編集で Undo できる」ことは分かりました。では、冒頭で退けた<strong>スナップショット方式</strong>——編集前の全文をコピーして積む——と正面から比べます。どちらも Undo は実現できます。差が出るのは<strong>メモリ</strong>です。</p>
+
+    <table>
+      <tr><th>観点</th><th>スナップショット方式</th><th>逆向き編集方式（本書）</th></tr>
+      <tr><td>1 回の Undo に積むもの</td><td>編集前の<strong>全文</strong>のコピー</td><td>逆編集 <code>{from, to, text}</code> 数個。<code>text</code> は<strong>消えた文字だけ</strong></td></tr>
+      <tr><td>1 文字打ったときの履歴サイズ</td><td>文書全体（例: 10 万文字）</td><td>数バイト（消えた 0〜1 文字＋座標 2 個）</td></tr>
+      <tr><td>100 回打ったときの累積</td><td>10 万 × 100 ＝ 1000 万文字ぶん</td><td>ほぼゼロ（積んだ逆編集の総和だけ）</td></tr>
+      <tr><td>取り消しの計算</td><td>全文を書き戻す（O(n)）</td><td>編集した範囲だけ差し替える（変更量に比例）</td></tr>
+      <tr><td>実装の複雑さ</td><td>単純（コピーするだけ）</td><td><code>applyEdits</code> が逆編集を返せば、あとは積むだけ</td></tr>
+    </table>
+
+    <p>決定的なのは 3 行目です。逆向き編集方式では、履歴のサイズは<strong>「編集した量」にしか比例しません</strong>。1 文字打てば、履歴に増えるのは「その 1 文字を打ち消す逆編集」——挿入の逆は削除なので、逆編集の <code>text</code> は<strong>空文字</strong>です。つまりほぼ座標 2 個ぶん。10 万文字のファイルだろうと 100 万文字のファイルだろうと、1 文字の Undo に必要なメモリは同じ。文書の大きさと履歴の重さが<strong>切り離されている</strong>のが、この方式の勝ち筋です。</p>
+
+    <p>スナップショット方式は「文書が大きいほど、1 回の Undo が重くなる」という筋の悪い性質を持ちます。大きなファイルほど編集したいのに、大きなファイルほど Undo が重い。これは本末転倒です。逆向き編集方式にはこの逆説がありません。だから本格的なエディタ——VSCode も含め——は、ほぼ例外なくこの「編集の逆操作を積む」系の設計を採ります。</p>
+
+    <div class="box hazard"><div class="box-k">⚠ 落とし穴 — 逆向き編集方式が万能なわけではない</div>
+      <p>公平を期すと、逆向き編集方式にも前提があります。<strong>逆編集を、当時の文書に対して正しい順序で適用できること</strong>です。履歴を飛び越えて途中の状態だけ復元したり、編集の順序を入れ替えて適用したりすると、座標のつじつまが狂います。だから本書の <code>History</code> は<strong>スタック（後入れ先出し）</strong>で厳密に「最後にやったことから順に」取り消します。飛び越えはしません。逆に、共同編集（複数人が同時に編集する）のように「順序が入れ替わりうる」世界では、逆編集だけでは足りず OT や CRDT といった別の道具が要ります。本書は単独編集なので、素直なスタックで必要十分です。</p>
+    </div>
+
+    <h2 class="step" id="step-5"><span class="step-no">Step 5</span>History の設計 — 2 本のスタックとエントリの形</h2>
+    <p>原理が固まったので、いよいよ <code>History</code> クラスを読みます。作るファイルは <code>core/history.ts</code>。まず設計コメントと、周辺の型定義から。ここに本章のすべての狙いが凝縮されています。</p>
+
+    <div class="file-tag">core/history.ts</div>
+    <pre><code><span class="kw">import type</span> { <span class="ty">TextDocument</span> } <span class="kw">from</span> <span class="st">"./document"</span>;
+<span class="kw">import type</span> { <span class="ty">Edit</span>, <span class="ty">SelRange</span> } <span class="kw">from</span> <span class="st">"./types"</span>;
+
+<span class="cm">/**
+ * History — Undo / Redo。
+ *
+ * 鍵は「編集を逆向きの編集として持つ」こと。
+ * document.applyEdits が返す逆向き編集列をそのまま積んでおけば、
+ * Undo は「逆向き編集を適用する」だけ。そのとき返ってくる逆逆向きが Redo になる。
+ * テキスト全体のスナップショットはどこにも要らない。
+ *
+ * 連続タイプは groupId でまとめ、Undo 1回で1かたまり戻す。
+ * 「同じ種類の編集」「前回から700ms以内」「カーソルが続き位置」のときだけ同じグループ。
+ */</span>
+
+<span class="kw">export type</span> <span class="ty">EditKind</span> = <span class="st">"typing"</span> | <span class="st">"delete"</span> | <span class="st">"other"</span>;
+
+<span class="kw">interface</span> <span class="ty">HistoryEntry</span> {
+  <span class="cm">/** この編集を取り消す逆向き編集列（当時の文書状態の座標系） */</span>
+  inverses: <span class="ty">Edit</span>[];
+  selBefore: <span class="ty">SelRange</span>[];
+  selAfter: <span class="ty">SelRange</span>[];
+  groupId: <span class="ty">number</span>;
+}
+
+<span class="kw">const</span> GROUP_INTERVAL_MS = <span class="st">700</span>;</code></pre>
+
+    <p>設計コメントは、Step 1〜4 で語ってきたことをそのまま宣言しています。「逆向き編集として持つ」「そのまま積む」「Undo は適用するだけ」「逆逆向きが Redo」「スナップショットは要らない」——もう全部、見覚えのある話です。後半の「連続タイプは <code>groupId</code> でまとめる」だけが新しい論点で、これは Step 7 で扱います。</p>
+
+    <p>型定義を見ます。まず <code>EditKind</code>。</p>
+    <pre><code><span class="kw">export type</span> <span class="ty">EditKind</span> = <span class="st">"typing"</span> | <span class="st">"delete"</span> | <span class="st">"other"</span>;</code></pre>
+    <p>これは編集の「種類」を表す<strong>ユニオン型</strong>です。取りうる値は文字列 3 つ——<code>"typing"</code>（文字入力）、<code>"delete"</code>（削除）、<code>"other"</code>（それ以外＝貼り付けや置換など）。なぜ種類を区別するかというと、<strong>連続タイプだけをまとめたい</strong>からです。「あいうえお」と 5 文字打ったのを Undo 1 回で消したいが、「あ」を打って範囲削除してまた打った、のようにバラバラの操作は<strong>まとめたくない</strong>。その線引きに種類を使います（Step 7）。</p>
+
+    <p>次が本体の <code>HistoryEntry</code>——履歴 1 件の形です。4 つのフィールドを持ちます。</p>
+    <ul>
+      <li><code>inverses: Edit[]</code> — この編集を取り消す<strong>逆向き編集列</strong>。<code>applyEdits</code> の返り値がそのまま入ります。コメントの「当時の文書状態の座標系」が肝で、逆編集は Step 2 で見たとおり「適用直後の座標」で書かれています。</li>
+      <li><code>selBefore: SelRange[]</code> — 編集<strong>前</strong>の選択（カーソル）状態。Undo したら、テキストだけでなくカーソル位置も編集前に戻したい。そのために覚えておきます。第00章の <code>SelRange</code>（<code>anchor</code>/<code>head</code>）の配列で、複数カーソルにも備えて<strong>配列</strong>です。</li>
+      <li><code>selAfter: SelRange[]</code> — 編集<strong>後</strong>の選択状態。Redo したときに復元するカーソル位置です。</li>
+      <li><code>groupId: number</code> — このエントリが属する<strong>グループ番号</strong>。同じ <code>groupId</code> のエントリは、Undo 1 回でまとめて取り消されます（Step 7・8）。</li>
+    </ul>
+
+    <div class="gonote"><div class="box-k">TS メモ · <code>import type</code> と リテラル・ユニオン型</div>
+      <p>先頭の <code>import type { TextDocument } from "./document"</code> の <code>import type</code> は「<strong>型としてしか使わない</strong>」インポートです。<code>History</code> は <code>TextDocument</code> を型注釈（<code>doc: TextDocument</code>）に使うだけで、<code>new TextDocument()</code> のように実体は作りません。<code>import type</code> と書くと、コンパイル後の JS からこの行が<strong>完全に消え</strong>、実行時の依存が減ります（循環インポートの回避にも効く）。<br>
+      <code>EditKind</code> の <code>"typing" | "delete" | "other"</code> は<strong>リテラル・ユニオン型</strong>。「この 3 つの文字列のどれか」だけを許す型で、<code>enum</code> を使わずに列挙を表す TypeScript の定番です。タイプミス（<code>"typo"</code> など）はコンパイル時に弾かれ、<code>switch</code> で全ケースを尽くしたかも型チェッカが見張ってくれます。</p>
+    </div>
+
+    <p>最後に定数 <code>GROUP_INTERVAL_MS = 700</code>。「前の入力から 700 ミリ秒以内なら同じグループ」の<strong>しきい値</strong>です。人が連続してタイプしているときのキー間隔はふつう 700ms より短く、考えて手を止めると空きます。この間（ま）を境目に「ひとつながりのタイプ」を切り出します。マジックナンバーを名前付き定数にして、意図と調整点を 1 か所に集めています。</p>
+
+    <h2 class="step" id="step-6"><span class="step-no">Step 6</span>push — 編集を 1 件記録し、グループを判定する</h2>
+    <p><code>History</code> クラス本体に入ります。まずフィールドと、記録メソッド <code>push</code> です。エディタが編集を 1 つ適用するたびに、この <code>push</code> が呼ばれて履歴に 1 件積まれます。</p>
+
+    <div class="file-tag">core/history.ts（つづき・History クラス前半）</div>
+    <pre><code><span class="kw">export class</span> <span class="ty">History</span> {
+  <span class="kw">private</span> undoStack: <span class="ty">HistoryEntry</span>[] = [];
+  <span class="kw">private</span> redoStack: <span class="ty">HistoryEntry</span>[] = [];
+  <span class="kw">private</span> nextGroupId = <span class="st">1</span>;
+  <span class="kw">private</span> lastKind: <span class="ty">EditKind</span> = <span class="st">"other"</span>;
+  <span class="kw">private</span> lastTime = <span class="st">0</span>;
+
+  <span class="cm">/**
+   * 編集を1件記録する。inverses は document.applyEdits の返り値。
+   * joinPrevious を立てると、条件に関係なく直前のエントリと同じグループにする
+   * （IME の「選択削除 → 確定挿入」を Undo 1回にまとめる用途）。
+   */</span>
+  push(inverses: <span class="ty">Edit</span>[], selBefore: <span class="ty">SelRange</span>[], selAfter: <span class="ty">SelRange</span>[], kind: <span class="ty">EditKind</span>, now: <span class="ty">number</span>, joinPrevious = <span class="kw">false</span>): <span class="ty">void</span> {
+    <span class="kw">const</span> prev = <span class="kw">this</span>.undoStack[<span class="kw">this</span>.undoStack.length - <span class="st">1</span>];
+    <span class="kw">const</span> continues =
+      prev !== <span class="kw">undefined</span> &amp;&amp;
+      (joinPrevious ||
+        (kind !== <span class="st">"other"</span> &amp;&amp;
+          kind === <span class="kw">this</span>.lastKind &amp;&amp;
+          now - <span class="kw">this</span>.lastTime &lt; GROUP_INTERVAL_MS &amp;&amp;
+          sameSelections(prev.selAfter, selBefore)));
+    <span class="kw">const</span> groupId = continues ? prev.groupId : <span class="kw">this</span>.nextGroupId++;
+    <span class="kw">this</span>.undoStack.push({ inverses, selBefore, selAfter, groupId });
+    <span class="kw">this</span>.redoStack = [];
+    <span class="kw">this</span>.lastKind = kind;
+    <span class="kw">this</span>.lastTime = now;
+  }</code></pre>
+
+    <p>フィールドは 5 つ。心臓は最初の 2 つ、<strong>2 本のスタック</strong>です。</p>
+    <ul>
+      <li><code>undoStack</code> — 取り消せる編集の山。新しい編集は上（末尾）に積まれ、Undo は上から取ります。<strong>後入れ先出し（LIFO）</strong>。</li>
+      <li><code>redoStack</code> — やり直せる編集の山。Undo したエントリがここへ移ります。</li>
+      <li><code>nextGroupId</code> — 次に発行するグループ番号。<code>1</code> から始め、新しいグループを作るたびに <code>++</code> で増やします。</li>
+      <li><code>lastKind</code> / <code>lastTime</code> — 直前の編集の「種類」と「時刻」。連続タイプの判定に使う<strong>記憶</strong>です。</li>
+    </ul>
+
+    <p><code>push</code> の引数を確認します。<code>inverses</code>（逆編集列＝ <code>applyEdits</code> の返り値）、<code>selBefore</code>/<code>selAfter</code>（編集前後のカーソル）、<code>kind</code>（編集種類）、<code>now</code>（現在時刻ミリ秒）、そして <code>joinPrevious = false</code>（既定 <code>false</code> の省略可能引数。Step 7 で扱います）。<strong>時刻を引数で受け取っている</strong>のがテスト設計上の妙で、<code>History</code> は自分で <code>Date.now()</code> を呼びません。時刻を外から渡すことで、テストが「0ms、100ms、5000ms」と自在に時間を操作でき、グループ判定を<strong>決定的に</strong>検証できます（Step 9 で実物を見ます）。</p>
+
+    <p>本体を読みます。まず直前のエントリを取り、<code>continues</code>（＝「これは直前と同じグループの続きか?」）を計算します。<code>continues</code> が真なら直前と同じ <code>groupId</code> を、偽なら <code>nextGroupId++</code> で<strong>新しい番号</strong>を割り当てます。この <code>continues</code> の中身が本章の細工の全部なので、次のステップで丁寧に開きます。</p>
+
+    <p>最後の 4 行が地味に重要です。</p>
+    <pre><code>    <span class="kw">this</span>.undoStack.push({ inverses, selBefore, selAfter, groupId });
+    <span class="kw">this</span>.redoStack = [];
+    <span class="kw">this</span>.lastKind = kind;
+    <span class="kw">this</span>.lastTime = now;</code></pre>
+    <p>2 行目の <code>this.redoStack = []</code> に注目してください。<strong>新しい編集をしたら、Redo 履歴は全部捨てる</strong>のです。理由は素直で、Undo で少し戻ってから別の編集をしたら、そこから先の「やり直し」はもう意味を失うから。分岐した未来は捨てる——これはあらゆるエディタの Undo が守る鉄則で、テスト「undo 後の新しい編集で redo が消える」がこの 1 行を検証しています。残り 2 行は「今回の種類・時刻」を記憶し、次回の <code>push</code> のグループ判定に備えます。</p>
+
+    <div class="box hazard"><div class="box-k">⚠ 落とし穴 — redoStack のクリアを忘れると「幽霊 Redo」が出る</div>
+      <p>もし <code>this.redoStack = []</code> を書き忘れると、こうなります——3 文字打って、2 回 Undo して 1 文字目まで戻し、そこで別の文字を打つ。すると <code>redoStack</code> には「消えたはずの 2・3 文字目」がまだ残っていて、Redo を押すと<strong>今の編集と噛み合わない古い履歴</strong>が適用され、文書が壊れます。これがいわゆる「幽霊 Redo」。分岐した瞬間に古い未来を捨てるのは、正しさのためであってお行儀の問題ではありません。</p>
+    </div>
+
+    <h2 class="step" id="step-7"><span class="step-no">Step 7</span>groupId と joinPrevious — 連続タイプを 1 回の Undo にまとめる</h2>
+    <p>Step 6 で飛ばした <code>continues</code> の中身を開きます。ここが「<strong>『あいうえお』と 5 文字打ったのを Undo 1 回で消す</strong>」を実現する仕掛けです。もし何も工夫しなければ、1 文字 = 1 エントリ = Undo 1 回になり、5 文字消すのに 5 回 Undo を押すことになります。それは誰も望みません。人間の感覚では「ひと息に打った一連の文字」はひとかたまりです。</p>
+
+    <pre><code>    <span class="kw">const</span> continues =
+      prev !== <span class="kw">undefined</span> &amp;&amp;
+      (joinPrevious ||
+        (kind !== <span class="st">"other"</span> &amp;&amp;
+          kind === <span class="kw">this</span>.lastKind &amp;&amp;
+          now - <span class="kw">this</span>.lastTime &lt; GROUP_INTERVAL_MS &amp;&amp;
+          sameSelections(prev.selAfter, selBefore)));</code></pre>
+
+    <p><code>continues</code> は「今回の編集を直前と同じグループに入れるか」を表す真偽値です。<code>prev !== undefined</code>（そもそも直前がある）を大前提に、<strong>2 つの経路</strong>のどちらかで真になります。</p>
+
+    <p><strong>経路 A — <code>joinPrevious</code> が真。</strong> これは呼び出し側が「問答無用で直前とくっつけろ」と明示的に指示する脱出口です。後述する IME 確定のように、時間や種類の条件では拾えない「1 つの操作なのに 2 件の編集になる」ケースを、確実に 1 グループにまとめます。</p>
+
+    <p><strong>経路 B — 4 つの条件をすべて満たす。</strong> これが通常の連続タイプ検出で、<code>&amp;&amp;</code> で結ばれた 4 条件<strong>全部</strong>が成り立ってはじめて「続き」と判定します。</p>
+    <ol>
+      <li><code>kind !== "other"</code> — 今回が<strong>タイプか削除</strong>であること。貼り付けや置換（<code>"other"</code>）は、それ 1 つで独立した操作なので絶対にまとめません。</li>
+      <li><code>kind === this.lastKind</code> — 今回と直前が<strong>同じ種類</strong>であること。タイプの連続、削除の連続はまとめるが、「タイプ→削除」の切り替わりでは切ります。方向が変わったら別グループ、という自然な感覚です。</li>
+      <li><code>now - this.lastTime &lt; GROUP_INTERVAL_MS</code> — 前回から<strong>700ms 未満</strong>であること。間が空いたら「打ち直し」とみなして切ります。考えて手を止めた区切りを尊重します。</li>
+      <li><code>sameSelections(prev.selAfter, selBefore)</code> — <strong>カーソルが続き位置</strong>であること。直前の編集後のカーソル（<code>prev.selAfter</code>）と、今回の編集前のカーソル（<code>selBefore</code>）が一致する＝「前の文字のすぐ続きから打っている」こと。マウスで別の場所へ飛んでから打ったら、この条件が崩れて別グループになります。</li>
+    </ol>
+
+    <p>この 4 条件は、いわば「人がひと息に打っている」ことの<strong>操作的な定義</strong>です。同じ動作を、休まず、続き位置で。どれか 1 つでも崩れたら、それは別の意図の始まりだ——という判断を <code>&amp;&amp;</code> の連鎖で表しています。設計コメントの「同じ種類・700ms 以内・続き位置」という 3 語が、そのままコードの条件 2・3・4 に対応しています（条件 1 はその前提）。</p>
+
+    <div class="ascii">連続タイプが 1 グループにまとまる／切れる —— 4 条件の効き方
+
+  h(0ms) e(100ms) y(200ms)  … 同種・700ms内・続き位置 → 全部 group 1
+     └──────────┴──────────┘  Undo 1回で "hey" が丸ごと消える
+
+  a(0ms) b(100ms) c(5000ms)  … c は 700ms 以上空いた（条件3が崩れる）
+     └── group 1 ──┘  └ group 2   Undo 1回目で "c" だけ、2回目で "ab" が消える
+
+  a(0ms, pos0)   b(100ms, pos3)   … カーソルが飛んだ（条件4が崩れる）
+     group 1        group 2         Undo 1回目で "b" だけ消える</div>
+
+    <p>この 3 パターンが、そのまま Step 9 で読むテスト——「連続タイプは 1 グループにまとまる」「時間が空くとグループが切れる」「カーソルが飛ぶとグループが切れる」——に対応します。仕様がテストと 1 対 1 で結ばれているのは、この <code>continues</code> 式を先に言葉で設計したからです。</p>
+
+    <p>最後に <code>groupId</code> の割り当て。</p>
+    <pre><code>    <span class="kw">const</span> groupId = continues ? prev.groupId : <span class="kw">this</span>.nextGroupId++;</code></pre>
+    <p><code>continues</code> が真なら直前と<strong>同じ番号</strong>（<code>prev.groupId</code>）を引き継ぎ、偽なら <code>nextGroupId++</code> で<strong>新しい番号</strong>を切って、その場でカウンタを進めます。こうして「ひと息のタイプ」に同じ <code>groupId</code> の刻印が押され、Undo はこの刻印を頼りに「同じ番号が続く限りまとめて取り消す」（Step 8）。<strong>グループ分けの知恵はこの 1 行に凝縮</strong>され、あとは番号を見るだけで一括 Undo が実現します。</p>
+
+    <div class="gonote"><div class="box-k">TS メモ · <code>joinPrevious = false</code> と IME への布石</div>
+      <p><code>joinPrevious = false</code> は<strong>デフォルト引数</strong>です。呼び出し側が渡さなければ <code>false</code> になるので、ふつうの <code>push(...)</code> は 5 引数で呼べます。この脱出口が効くのが第08章の<strong>日本語入力（IME）</strong>です。「にほんご」を変換して「日本語」を確定する操作は、内部では「変換中の "にほんご" を選択削除」→「"日本語" を挿入」という<strong>2 件の編集</strong>になります。しかし人にとっては<strong>1 回の確定</strong>。だから 2 件目の <code>push</code> を <code>joinPrevious = true</code> で呼び、時間や種類の条件を飛ばして強制的に 1 グループにします。こうすれば「日本語」を Undo 1 回で「にほんご」に戻せる。連続タイプの自動判定（経路 B）ではこの「削除→挿入」の種類変化を拾えないので、明示フラグ（経路 A）を用意してあるわけです。設計コメントが「IME の『選択削除 → 確定挿入』を Undo 1回にまとめる用途」と言っているのは、まさにこれです。</p>
+    </div>
+
+    <h2 class="step" id="step-8"><span class="step-no">Step 8</span>undo / redo — グループ単位でスタックを渡り歩く</h2>
+    <p>記録側（<code>push</code>）ができたので、取り出し側——<code>canUndo</code>/<code>canRedo</code> と、本丸の <code>undo</code>/<code>redo</code> を読みます。ここで Step 3 の「逆編集を適用すると Redo が生える」が実コードになります。</p>
+
+    <div class="file-tag">core/history.ts（つづき・undo / redo）</div>
+    <pre><code>  canUndo(): <span class="ty">boolean</span> {
+    <span class="kw">return</span> <span class="kw">this</span>.undoStack.length > <span class="st">0</span>;
+  }
+
+  canRedo(): <span class="ty">boolean</span> {
+    <span class="kw">return</span> <span class="kw">this</span>.redoStack.length > <span class="st">0</span>;
+  }
+
+  <span class="cm">/** グループ単位で取り消し、復元すべき選択状態を返す */</span>
+  undo(doc: <span class="ty">TextDocument</span>): <span class="ty">SelRange</span>[] | <span class="kw">null</span> {
+    <span class="kw">const</span> top = <span class="kw">this</span>.undoStack[<span class="kw">this</span>.undoStack.length - <span class="st">1</span>];
+    <span class="kw">if</span> (!top) <span class="kw">return</span> <span class="kw">null</span>;
+    <span class="kw">let</span> restore: <span class="ty">SelRange</span>[] = top.selBefore;
+    <span class="kw">while</span> (<span class="kw">this</span>.undoStack.length > <span class="st">0</span> &amp;&amp; <span class="kw">this</span>.undoStack[<span class="kw">this</span>.undoStack.length - <span class="st">1</span>].groupId === top.groupId) {
+      <span class="kw">const</span> e = <span class="kw">this</span>.undoStack.pop()!;
+      <span class="kw">const</span> redoInverses = doc.applyEdits(e.inverses);
+      <span class="kw">this</span>.redoStack.push({ ...e, inverses: redoInverses });
+      restore = e.selBefore;
+    }
+    <span class="kw">this</span>.lastKind = <span class="st">"other"</span>; <span class="cm">// Undo 後のタイプは新しいグループにする</span>
+    <span class="kw">return</span> restore;
+  }
+
+  redo(doc: <span class="ty">TextDocument</span>): <span class="ty">SelRange</span>[] | <span class="kw">null</span> {
+    <span class="kw">const</span> top = <span class="kw">this</span>.redoStack[<span class="kw">this</span>.redoStack.length - <span class="st">1</span>];
+    <span class="kw">if</span> (!top) <span class="kw">return</span> <span class="kw">null</span>;
+    <span class="kw">let</span> restore: <span class="ty">SelRange</span>[] = top.selAfter;
+    <span class="kw">while</span> (<span class="kw">this</span>.redoStack.length > <span class="st">0</span> &amp;&amp; <span class="kw">this</span>.redoStack[<span class="kw">this</span>.redoStack.length - <span class="st">1</span>].groupId === top.groupId) {
+      <span class="kw">const</span> e = <span class="kw">this</span>.redoStack.pop()!;
+      <span class="kw">const</span> undoInverses = doc.applyEdits(e.inverses);
+      <span class="kw">this</span>.undoStack.push({ ...e, inverses: undoInverses });
+      restore = e.selAfter;
+    }
+    <span class="kw">this</span>.lastKind = <span class="st">"other"</span>;
+    <span class="kw">return</span> restore;
+  }
+}</code></pre>
+
+    <p><code>canUndo</code>/<code>canRedo</code> は「スタックが空でないか」を返すだけの述語です。ツールバーの Undo ボタンを灰色にするか、といった判定に使います。本丸は <code>undo</code> です。1 行ずつ。</p>
+    <ul>
+      <li><code>const top = ...length - 1]</code> — <code>undoStack</code> の<strong>一番上</strong>（最後に積んだエントリ）を覗きます。まだ取り出しません。</li>
+      <li><code>if (!top) return null</code> — 空なら「取り消すものがない」の合図に <code>null</code> を返します。</li>
+      <li><code>let restore = top.selBefore</code> — <strong>復元すべきカーソル位置</strong>の初期値。一番上のエントリの「編集前カーソル」です。ループの中で更新されます。</li>
+    </ul>
+
+    <p>そして <code>while</code> ループが本章の「グループ単位 Undo」の実装です。条件は「<strong>スタックが空でなく、かつ一番上の <code>groupId</code> が <code>top.groupId</code> と等しい間</strong>」。つまり<strong>同じグループ番号が続く限り</strong>、繰り返し取り出します。ループの中身は 3 行——</p>
+    <ol>
+      <li><code>const e = this.undoStack.pop()!</code> — 今度は本当に<strong>取り出す</strong>（スタックから除く）。</li>
+      <li><code>const redoInverses = doc.applyEdits(e.inverses)</code> — <strong>逆編集を適用</strong>して文書を戻す。ここで Step 3 の魔法が起きる——<code>applyEdits</code> の返り値 <code>redoInverses</code> は「逆の逆」＝<strong>元編集</strong>、すなわち Redo チケットです。</li>
+      <li><code>this.redoStack.push({ ...e, inverses: redoInverses })</code> — そのエントリを、<code>inverses</code> だけ Redo チケットに差し替えて <code>redoStack</code> へ移す。<code>selBefore</code>/<code>selAfter</code>/<code>groupId</code> はそのまま持ち越し（<code>{ ...e }</code> のスプレッド）。</li>
+    </ol>
+    <p><code>restore = e.selBefore</code> をループのたびに更新するので、グループを全部取り消し終えたとき <code>restore</code> は「<strong>グループの一番最初の編集の、さらに前</strong>」のカーソル位置を指します。「hey」を 1 グループで戻したら、カーソルは「h を打つ前」に戻る——直感どおりです。ループを抜けたら <code>this.lastKind = "other"</code> で種類の記憶をリセットし、「<strong>Undo 直後に打った文字は、戻したグループの続きにしない</strong>」ようにします（コメントの通り）。最後に <code>restore</code> を返し、呼び出し側がその位置にカーソルを置き直します。</p>
+
+    <p><code>redo</code> は <code>undo</code> の完全な鏡像です。<code>undoStack</code> と <code>redoStack</code> を入れ替え、<code>selBefore</code> の代わりに <code>selAfter</code> を復元位置に使うだけ。<code>applyEdits(e.inverses)</code> で「Redo チケット（＝元編集）」を適用すると、文書が編集後の状態に進み、返り値の <code>undoInverses</code> はまた Undo チケットになって <code>undoStack</code> へ戻ります。Step 3 で見た<strong>往復チケットの自動発券</strong>が、この 2 メソッドの対称なループとして実装されているわけです。同じグループが続く限りまとめて進める、という <code>while</code> 条件も鏡のまま。だから「ab を 1 グループ、X を別グループ」で作ったら、Redo も同じ粒度で「ab を一気に、X を一気に」やり直せます（テスト「複数グループの undo / redo を繰り返しても整合する」）。</p>
+
+    <div class="gonote"><div class="box-k">TS メモ · <code>pop()!</code> の <code>!</code>、<code>{ ...e }</code>、<code>SelRange[] | null</code></div>
+      <p><code>this.undoStack.pop()!</code> の末尾 <code>!</code> は<strong>非 null アサーション</strong>。<code>Array.pop()</code> の型は <code>T | undefined</code>（空配列だと <code>undefined</code>）ですが、<code>while</code> 条件で「<code>length &gt; 0</code>」を確かめた直後なので、開発者が「ここでは必ず値がある」と型チェッカに保証しています。乱用は禁物ですが、直前にガードがある局所では正当です。<br>
+      <code>{ ...e, inverses: redoInverses }</code> の <code>...e</code> は<strong>スプレッド</strong>で、<code>e</code> の全フィールドを新オブジェクトにコピーしつつ、<code>inverses</code> だけ後書きで上書きします。元の <code>e</code> は変更しない（イミュータブルな更新）。<br>
+      戻り値の <code>SelRange[] | null</code> は「復元すべきカーソル配列、または取り消すものがなければ <code>null</code>」。呼び出し側は <code>null</code> チェックで「Undo できなかった」を判別できます。<code>SelRange</code> が<strong>配列</strong>なのは、第06章の複数カーソルで N 本のカーソルを一括で戻せるようにするためです。</p>
+    </div>
+
+    <p>最後に、ファイル末尾の小さなヘルパ <code>sameSelections</code> を読んで <code>history.ts</code> は全文です。Step 7 の条件 4（カーソルが続き位置か）で使われていました。</p>
+
+    <div class="file-tag">core/history.ts（つづき・これで全文）</div>
+    <pre><code><span class="kw">function</span> sameSelections(a: <span class="ty">SelRange</span>[], b: <span class="ty">SelRange</span>[]): <span class="ty">boolean</span> {
+  <span class="kw">if</span> (a.length !== b.length) <span class="kw">return</span> <span class="kw">false</span>;
+  <span class="kw">for</span> (<span class="kw">let</span> i = <span class="st">0</span>; i &lt; a.length; i++) {
+    <span class="kw">if</span> (a[i].anchor !== b[i].anchor || a[i].head !== b[i].head) <span class="kw">return</span> <span class="kw">false</span>;
+  }
+  <span class="kw">return</span> <span class="kw">true</span>;
+}</code></pre>
+    <p>2 つの選択配列が<strong>完全に一致するか</strong>を比べる素朴な関数です。まず本数（<code>length</code>）が違えば即 <code>false</code>。同じなら 1 本ずつ <code>anchor</code> と <code>head</code> を突き合わせ、1 つでも食い違えば <code>false</code>、全部一致で <code>true</code>。JavaScript のオブジェクトは <code>===</code> で「同じ参照か」しか見ないので（中身が同じでも別物なら <code>false</code>）、<strong>値として等しいか</strong>を確かめるには、こうして中身を明示的に比較する必要があります。第00章で <code>SelRange</code> を <code>anchor</code>/<code>head</code> の 2 数で定義しておいたおかげで、比較はこの 2 フィールドだけで済んでいます。</p>
+
+    <h2 class="step" id="step-9"><span class="step-no">Step 9</span>動かして確かめる — 6 件のテストを読む</h2>
+    <p>仕様を言葉で設計し、コードに落としました。最後に、その仕様がテストと 1 対 1 で結ばれていることを確かめます。<code>history.test.ts</code> は 6 件。まず土台のヘルパから読みます。</p>
+
+    <div class="file-tag">core/history.test.ts（ヘルパ）</div>
+    <pre><code><span class="kw">import</span> { describe, expect, it } <span class="kw">from</span> <span class="st">"vitest"</span>;
+<span class="kw">import</span> { <span class="ty">TextDocument</span> } <span class="kw">from</span> <span class="st">"./document"</span>;
+<span class="kw">import</span> { <span class="ty">History</span> } <span class="kw">from</span> <span class="st">"./history"</span>;
+<span class="kw">import type</span> { <span class="ty">SelRange</span> } <span class="kw">from</span> <span class="st">"./types"</span>;
+
+<span class="kw">function</span> sel(n: <span class="ty">number</span>): <span class="ty">SelRange</span>[] {
+  <span class="kw">return</span> [{ anchor: n, head: n }];
+}
+
+<span class="cm">/** doc に1文字タイプして履歴に積むヘルパ */</span>
+<span class="kw">function</span> type(doc: <span class="ty">TextDocument</span>, history: <span class="ty">History</span>, offset: <span class="ty">number</span>, ch: <span class="ty">string</span>, now: <span class="ty">number</span>): <span class="ty">void</span> {
+  <span class="kw">const</span> inv = doc.applyEdits([{ from: offset, to: offset, text: ch }]);
+  history.push(inv, sel(offset), sel(offset + ch.length), <span class="st">"typing"</span>, now);
+}</code></pre>
+    <p><code>sel(n)</code> は「オフセット <code>n</code> にある幅ゼロのカーソル 1 本」を作る小道具（<code>anchor === head === n</code> なので、第00章でいう「ただのカーソル」）。<code>type(...)</code> は「1 文字タイプする」実際の流れを凝縮したヘルパで、<strong>本章の使い方の見本</strong>です——(1) <code>doc.applyEdits</code> で挿入して逆編集 <code>inv</code> を受け取り、(2) それを <code>history.push</code> に、編集前カーソル <code>sel(offset)</code>・編集後カーソル <code>sel(offset + ch.length)</code>・種類 <code>"typing"</code>・時刻 <code>now</code> とともに積む。時刻を引数で渡せるので、テストは時間を自由に操れます。</p>
+
+    <div class="file-tag">core/history.test.ts（テスト本体・これで全文）</div>
+    <pre><code>describe(<span class="st">"History"</span>, () => {
+  it(<span class="st">"undo で戻り redo でやり直せる"</span>, () => {
+    <span class="kw">const</span> doc = <span class="kw">new</span> <span class="ty">TextDocument</span>(<span class="st">"abc"</span>);
+    <span class="kw">const</span> h = <span class="kw">new</span> <span class="ty">History</span>();
+    <span class="kw">const</span> inv = doc.applyEdits([{ from: <span class="st">3</span>, to: <span class="st">3</span>, text: <span class="st">"X"</span> }]);
+    h.push(inv, sel(<span class="st">3</span>), sel(<span class="st">4</span>), <span class="st">"other"</span>, <span class="st">0</span>);
+    expect(doc.getText()).toBe(<span class="st">"abcX"</span>);
+
+    expect(h.undo(doc)).toEqual(sel(<span class="st">3</span>));
+    expect(doc.getText()).toBe(<span class="st">"abc"</span>);
+    expect(h.redo(doc)).toEqual(sel(<span class="st">4</span>));
+    expect(doc.getText()).toBe(<span class="st">"abcX"</span>);
+  });
+
+  it(<span class="st">"連続タイプは1グループにまとまり、undo 1回で戻る"</span>, () => {
+    <span class="kw">const</span> doc = <span class="kw">new</span> <span class="ty">TextDocument</span>(<span class="st">""</span>);
+    <span class="kw">const</span> h = <span class="kw">new</span> <span class="ty">History</span>();
+    type(doc, h, <span class="st">0</span>, <span class="st">"h"</span>, <span class="st">0</span>);
+    type(doc, h, <span class="st">1</span>, <span class="st">"e"</span>, <span class="st">100</span>);
+    type(doc, h, <span class="st">2</span>, <span class="st">"y"</span>, <span class="st">200</span>);
+    expect(doc.getText()).toBe(<span class="st">"hey"</span>);
+    h.undo(doc);
+    expect(doc.getText()).toBe(<span class="st">""</span>);
+  });
+
+  it(<span class="st">"時間が空くとグループが切れる"</span>, () => {
+    <span class="kw">const</span> doc = <span class="kw">new</span> <span class="ty">TextDocument</span>(<span class="st">""</span>);
+    <span class="kw">const</span> h = <span class="kw">new</span> <span class="ty">History</span>();
+    type(doc, h, <span class="st">0</span>, <span class="st">"a"</span>, <span class="st">0</span>);
+    type(doc, h, <span class="st">1</span>, <span class="st">"b"</span>, <span class="st">100</span>);
+    type(doc, h, <span class="st">2</span>, <span class="st">"c"</span>, <span class="st">5000</span>); <span class="cm">// 700ms 以上空いた</span>
+    h.undo(doc);
+    expect(doc.getText()).toBe(<span class="st">"ab"</span>);
+    h.undo(doc);
+    expect(doc.getText()).toBe(<span class="st">""</span>);
+  });
+
+  it(<span class="st">"カーソルが飛ぶとグループが切れる"</span>, () => {
+    <span class="kw">const</span> doc = <span class="kw">new</span> <span class="ty">TextDocument</span>(<span class="st">"xxxx"</span>);
+    <span class="kw">const</span> h = <span class="kw">new</span> <span class="ty">History</span>();
+    type(doc, h, <span class="st">0</span>, <span class="st">"a"</span>, <span class="st">0</span>);
+    type(doc, h, <span class="st">3</span>, <span class="st">"b"</span>, <span class="st">100</span>); <span class="cm">// 直前の続き位置(1)ではない</span>
+    h.undo(doc);
+    expect(doc.getText()).toBe(<span class="st">"axxxx"</span>);
+  });
+
+  it(<span class="st">"undo 後の新しい編集で redo が消える"</span>, () => {
+    <span class="kw">const</span> doc = <span class="kw">new</span> <span class="ty">TextDocument</span>(<span class="st">""</span>);
+    <span class="kw">const</span> h = <span class="kw">new</span> <span class="ty">History</span>();
+    type(doc, h, <span class="st">0</span>, <span class="st">"a"</span>, <span class="st">0</span>);
+    h.undo(doc);
+    type(doc, h, <span class="st">0</span>, <span class="st">"b"</span>, <span class="st">5000</span>);
+    expect(h.canRedo()).toBe(<span class="kw">false</span>);
+    expect(doc.getText()).toBe(<span class="st">"b"</span>);
+  });
+
+  it(<span class="st">"複数グループの undo / redo を繰り返しても整合する"</span>, () => {
+    <span class="kw">const</span> doc = <span class="kw">new</span> <span class="ty">TextDocument</span>(<span class="st">""</span>);
+    <span class="kw">const</span> h = <span class="kw">new</span> <span class="ty">History</span>();
+    type(doc, h, <span class="st">0</span>, <span class="st">"a"</span>, <span class="st">0</span>);
+    type(doc, h, <span class="st">1</span>, <span class="st">"b"</span>, <span class="st">100</span>); <span class="cm">// グループ1: "ab"</span>
+    type(doc, h, <span class="st">2</span>, <span class="st">"X"</span>, <span class="st">5000</span>); <span class="cm">// グループ2: "X"</span>
+    expect(doc.getText()).toBe(<span class="st">"abX"</span>);
+    h.undo(doc);
+    expect(doc.getText()).toBe(<span class="st">"ab"</span>);
+    h.undo(doc);
+    expect(doc.getText()).toBe(<span class="st">""</span>);
+    h.redo(doc);
+    expect(doc.getText()).toBe(<span class="st">"ab"</span>);
+    h.redo(doc);
+    expect(doc.getText()).toBe(<span class="st">"abX"</span>);
+  });
+});</code></pre>
+
+    <p>6 件を通して読むと、Step 7 で言葉にした仕様が<strong>そっくりそのまま</strong>検証されているのが分かります。</p>
+    <ul>
+      <li><strong>「undo で戻り redo でやり直せる」</strong> — Step 1〜3 の基本往復。<code>"abc"</code> に <code>"X"</code> を挿し、Undo で <code>"abc"</code> に戻り、返り値がカーソル <code>sel(3)</code>（編集前位置）になること、Redo で <code>"abcX"</code> に戻り <code>sel(4)</code> になることまで確かめています。<strong>テキストとカーソルが両方戻る</strong>のが要点。</li>
+      <li><strong>「連続タイプは1グループにまとまり、undo 1回で戻る」</strong> — Step 7 経路 B の主役。<code>h/e/y</code> を 0・100・200ms で同じ続き位置に打つと全部 group 1 になり、<code>undo</code> 1 回で <code>"hey"</code> がまるごと消えて <code>""</code> に戻ります。</li>
+      <li><strong>「時間が空くとグループが切れる」</strong> — 条件 3。<code>c</code> だけ 5000ms 後なので別グループ。1 回目の Undo で <code>"c"</code> だけ、2 回目で <code>"ab"</code> が消えます。</li>
+      <li><strong>「カーソルが飛ぶとグループが切れる」</strong> — 条件 4。2 文字目 <code>b</code> を続き位置 <code>1</code> ではなく <code>3</code> に打つと <code>sameSelections</code> が崩れて別グループ。Undo 1 回で <code>b</code> だけ消え <code>"axxxx"</code> に。</li>
+      <li><strong>「undo 後の新しい編集で redo が消える」</strong> — <code>push</code> の <code>this.redoStack = []</code>。Undo してから別の文字を打つと <code>canRedo()</code> が <code>false</code>。幽霊 Redo が出ないことの証明です。</li>
+      <li><strong>「複数グループの undo / redo を繰り返しても整合する」</strong> — グループ粒度の往復。<code>"ab"</code>（group 1）と <code>"X"</code>（group 2）を、Undo 2 回で全部戻し、Redo 2 回で全部やり直しても、文書が寸分ずれず往復します。Step 8 の 2 メソッドが鏡像である証拠。</li>
+    </ul>
+
+    <div class="box do"><div class="box-k">▸ 動かして確認</div>
+      <p><code>core/history.ts</code> が書けたら、この章のテストを走らせます。6 件すべて PASS すれば、逆向き編集 Undo とグループ化が正しく動いています。</p>
+      <pre class="term"><code><span class="ps">$</span> cd src &amp;&amp; npx vitest run src/core/history.test.ts
+<span class="out">✓ src/core/history.test.ts (6 tests)
+   ✓ undo で戻り redo でやり直せる
+   ✓ 連続タイプは1グループにまとまり、undo 1回で戻る
+   ✓ 時間が空くとグループが切れる
+   ✓ カーソルが飛ぶとグループが切れる
+   ✓ undo 後の新しい編集で redo が消える
+   ✓ 複数グループの undo / redo を繰り返しても整合する
+ Test Files  1 passed (1)
+      Tests  6 passed (6)</span></code></pre>
+    </div>
+
+    <div class="box do"><div class="box-k">▸ 逆編集の往復も見ておく</div>
+      <p>本章の土台である「<code>applyEdits</code> の逆編集で元に戻る」は、第02章の <code>document.test.ts</code> でも直接検証されています。合わせて走らせて、逆編集が単発でもバッチでも往復することを確かめましょう。</p>
+      <pre class="term"><code><span class="ps">$</span> npx vitest run src/core/document.test.ts
+<span class="out">✓ src/core/document.test.ts (8 tests)
+   ✓ applyEdits の逆向き編集で元に戻る（単発）
+   ✓ applyEdits はバッチ（複数編集）を昇順座標で適用し、逆向きも一括で戻せる
+   … ほか 6 件
+ Test Files  1 passed (1)
+      Tests  8 passed (8)</span></code></pre>
+      <p>「applyEdits の逆向き編集で元に戻る（単発）」は <code>{from:0, to:5, text:"goodbye"}</code> を適用し、返ってきた逆編集をそのまま <code>applyEdits</code> に渡すと元通りになることを確かめています。Step 2 の絵が、そのままテストになっているのです。</p>
+    </div>
+
+    <h2>つまずき FAQ</h2>
+    <details class="qa"><summary>逆編集の <code>to</code> が「元の <code>to</code>」ではなく「<code>from + text.length</code>」なのはなぜ?</summary>
+      <div class="qa-body"><p>逆編集は<strong>編集が済んだ後の文書</strong>に適用するものだからです。<code>{from:2, to:4, text:"XYZ"}</code> を適用すると、<code>[2,4)</code> の場所には元の 2 文字ではなく <code>"XYZ"</code>（3 文字）が座ります。だから逆編集で消し去るべき範囲は <code>[2, 2+3) = [2,5)</code>。元の <code>to</code>（<code>4</code>）は「消える前の座標」なので、適用後の文書には通用しません。<code>applyEdits</code> が返す逆編集は「最終状態の座標系で有効」——つまり<strong>そのまま次の <code>applyEdits</code> に渡せる</strong>よう、最初から適用後の座標で書かれています。だから Undo は「返ってきた逆編集をただ適用するだけ」で済むのです。</p></div>
+    </details>
+    <details class="qa"><summary>スナップショット方式（全文コピー）でも Undo は作れる。なぜわざわざ逆編集にするの?</summary>
+      <div class="qa-body"><p>両方 Undo は作れますが、<strong>メモリの効き方</strong>が段違いです。スナップショットは 1 回の Undo に「文書全体のコピー」を積むので、10 万文字のファイルなら 1 文字打つたびに 10 万文字ぶんの履歴が増えます。逆編集方式は「消えた文字＋座標 2 個」しか積まないので、1 文字挿入の Undo はほぼ座標 2 個ぶん（挿入の逆は削除なので <code>text</code> は空）。<strong>履歴サイズが文書の大きさから切り離される</strong>のが決定的な差です。加えて Undo の計算量も、全文書き戻し（スナップショット）に対し、逆編集は「変更した範囲だけ差し替え」で済みます。大きなファイルほど編集したいのに大きなファイルほど Undo が重い、というスナップショットの逆説を、逆編集方式は持ちません。</p></div>
+    </details>
+    <details class="qa"><summary>連続タイプの「グループ」判定に 4 つも条件があるのは過剰では? 時間だけで十分では?</summary>
+      <div class="qa-body"><p>時間だけだと不自然な挙動が出ます。たとえば「あ」を打った直後（700ms 以内）にマウスで別の行へ飛んで別の文字を打ったら、時間条件だけでは 1 グループにまとまり、Undo 1 回で<strong>離れた 2 か所</strong>が同時に消えて驚きます。だから条件 4「カーソルが続き位置か」（<code>sameSelections(prev.selAfter, selBefore)</code>）が要ります。条件 2「同じ種類か」も同様で、「打つ→消す→打つ」を 1 グループにすると Undo の意味が崩れる。条件 1「<code>other</code> でない」は、貼り付けのような一発操作を巻き込まないため。4 条件は「人がひと息に、同じ動作で、続きの位置で打っている」という<strong>直感の操作的な定義</strong>で、どれも実際の誤動作を 1 つずつ塞いでいます。</p></div>
+    </details>
+
+    <h2>理解度チェック</h2>
+    <p>次の問いに<strong>自分の言葉で</strong>答えられたら、この章は卒業です。</p>
+    <details class="qa"><summary>1. <code>{from:3, to:3, text:"X"}</code>（オフセット 3 に "X" を挿入）の逆編集を書き、なぜそれで元に戻るか説明せよ。</summary>
+      <div class="qa-body"><p>逆編集は <strong><code>{from:3, to:4, text:""}</code></strong>。理由: 挿入で消える文字はない（<code>removed = ""</code>）。挿入後、<code>"X"</code> は <code>[3,4)</code> を占める（1 文字なので <code>to = from + text.length = 3+1 = 4</code>）。逆編集は「入った <code>"X"</code> の跡地 <code>[3,4)</code> を空文字で置き換えよ」＝<strong>削除</strong>。適用すると <code>"X"</code> が消えて元通り。<strong>挿入の逆は削除</strong>で、逆編集の <code>text</code> は空になる。だから 1 文字挿入の Undo は「消えた文字ゼロ＋座標 2 個」という極小のデータで済み、これがメモリ効率の源泉。</p></div>
+    </details>
+    <details class="qa"><summary>2. Redo のための特別なデータ構造が要らないのはなぜか。<code>undo</code> の中の 2 行を挙げて説明せよ。</summary>
+      <div class="qa-body"><p><code>applyEdits</code> が「逆編集を適用しつつ、その逆（＝元編集）を返す」対合だから。<code>undo</code> の中で <code>const redoInverses = doc.applyEdits(e.inverses)</code> が逆編集を適用して文書を戻すと、返り値 <code>redoInverses</code> は<strong>元編集そのもの</strong>＝ Redo チケットになる。それを次の行 <code>this.redoStack.push({ ...e, inverses: redoInverses })</code> で <code>redoStack</code> へ移すだけ。<strong>Undo を実行した瞬間に Redo データが自動で生まれる</strong>ので、Redo 専用の記録機構は不要。<code>redo</code> はこの完全な鏡像で、<code>applyEdits</code> の返り値を今度は <code>undoStack</code> へ戻す。</p></div>
+    </details>
+    <details class="qa"><summary>3. 「hey」を続けて打った後の Undo 1 回で 3 文字が丸ごと消えるのは、コードのどの仕組みによるか。</summary>
+      <div class="qa-body"><p><code>push</code> の <code>continues</code> 判定と <code>groupId</code> の共有、そして <code>undo</code> の <code>while</code> ループの合わせ技。<code>h/e/y</code> は「同じ種類 typing・700ms 以内・続き位置（<code>sameSelections</code> 一致）」の 4 条件を満たすので <code>continues</code> が真になり、<code>groupId = continues ? prev.groupId : nextGroupId++</code> で<strong>3 件とも同じ groupId</strong> を持つ。<code>undo</code> は <code>while (... groupId === top.groupId)</code> で<strong>同じ番号が続く限り</strong>取り出して逆編集を適用し続けるので、3 件が一括で取り消され <code>"hey" → ""</code>。カーソルは各ループで <code>restore = e.selBefore</code> が更新され、最終的に「h を打つ前」の位置に戻る。</p></div>
+    </details>
+
+    <h2>まとめ — 次の層へ</h2>
+    <p>本書の白眉を抜けました。この章の芯は、たった一文——<strong>編集を打ち消すのは、また別の編集である</strong>。<code>applyEdits</code> は編集を適用しながら「消えた文字を控え、入った文字の跡地を控えた文字で埋め戻す」逆編集を返し、それを積むだけで Undo が、逆編集を適用して返る「逆の逆」を積むだけで Redo が成立しました。スナップショットのような全文コピーは一切持たず、履歴の重さは<strong>編集した量にしか比例しない</strong>。その上に <code>groupId</code> による連続タイプのまとめと、IME 確定のための <code>joinPrevious</code> という脱出口を重ね、6 件のテストで「まとまる／切れる／往復する」を決定的に検証しました。編集という行為が、ここでようやく<strong>安全</strong>になったのです。</p>
+    <p>これでコア（<code>core/</code>）の心臓部——テキストを持つ（第01章）、行とカーソル（第02章）、編集と取り消し（第03章）——がすべて揃いました。どれもブラウザを知らない純粋ロジックで、Node 上のテストが正しさを見張っています。次の第04章では、いよいよこの純粋ロジックを<strong>目に見えるもの</strong>にします。<code>&lt;canvas&gt;</code> に文字を描き、見えている範囲だけを効率よく描画する <code>view.ts</code> です。ここまで積み上げた「正しいデータ」を、初めて<strong>画面</strong>へ映します。エディタが「動いて見える」最初の瞬間です。</p>
+
+    <div class="chap-foot">
+      <a class="pager" href="02-document.html"><span class="dir">← 前へ</span>第02章 · 行とカーソル</a>
+      <a class="pager next" href="04-view.html"><span class="dir">次へ →</span>第04章 · 画面に描く</a>
+    </div>
+  </main>
+</div>
+</body>
+</html>

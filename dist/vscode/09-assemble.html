@@ -1,0 +1,821 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>第09章 開いて保存する・組み立て — ゼロから作るテキストエディタ</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500;600&family=Source+Serif+4:opsz,wght@8..60,400;8..60,600;8..60,700&family=Noto+Serif+JP:wght@400;600;700&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<div class="shell">
+
+  <aside class="spine">
+    <a class="wordmark" href="index.html">MINT EDITOR · from scratch</a>
+    <div class="book-title">ゼロから作る<br>テキストエディタ</div>
+    <div class="book-sub">TypeScript と Canvas で mint editor を組む</div>
+
+    <div class="legend"><span>読む <b>↓</b></span><span>組む <b>↑</b></span></div>
+
+    <nav aria-label="目次">
+      <ul class="toc">
+        <li><a class="nav-item" href="index.html"><span class="nav-num">序</span><span class="nav-label">はじめに・準備<span class="nav-tag">Setup</span></span></a></li>
+        <li><a class="nav-item" href="00-overview.html"><span class="nav-num">00</span><span class="nav-label">文字を打てる箱の正体<span class="nav-tag">Overview</span></span></a></li>
+        <li><a class="nav-item" href="01-buffer.html"><span class="nav-num">01</span><span class="nav-label">テキストを持つ<span class="nav-tag">Buffer</span></span></a></li>
+        <li><a class="nav-item" href="02-document.html"><span class="nav-num">02</span><span class="nav-label">行とカーソル<span class="nav-tag">Doc</span></span></a></li>
+        <li><a class="nav-item" href="03-history.html"><span class="nav-num">03</span><span class="nav-label">編集と取り消し<span class="nav-tag">Undo</span></span></a></li>
+        <li><a class="nav-item" href="04-view.html"><span class="nav-num">04</span><span class="nav-label">画面に描く<span class="nav-tag">Canvas</span></span></a></li>
+        <li><a class="nav-item" href="05-input.html"><span class="nav-num">05</span><span class="nav-label">入力を受ける<span class="nav-tag">Input</span></span></a></li>
+        <li><a class="nav-item" href="06-search.html"><span class="nav-num">06</span><span class="nav-label">複数カーソルと検索<span class="nav-tag">Multi</span></span></a></li>
+        <li><a class="nav-item" href="07-highlight.html"><span class="nav-num">07</span><span class="nav-label">色をつける<span class="nav-tag">Syntax</span></span></a></li>
+        <li><a class="nav-item" href="08-ime.html"><span class="nav-num">08</span><span class="nav-label">日本語を打つ<span class="nav-tag">IME</span></span></a></li>
+        <li><a class="nav-item current" aria-current="page" href="09-assemble.html"><span class="nav-num">09</span><span class="nav-label">開いて保存する・組み立て<span class="nav-tag">Assemble</span></span></a></li>
+      </ul>
+    </nav>
+
+    <div class="spine-foot">
+      各章は一つの部品・機能。<br>下（バッファ）から上（UI）へ<br>積み上げて動かしていく。
+    </div>
+  </aside>
+
+  <main class="reading">
+    <div class="progress-tag">第09章 / 全10章 · 層: ASSEMBLE · 読了目安 2〜2.5時間</div>
+    <div class="eyebrow"><span>ASSEMBLE</span><span class="depth">— 開いて保存する・全部品の結線・総括</span></div>
+    <h1>開いて保存する・組み立て</h1>
+    <p class="lede">最後の章です。ここまで作ってきた部品を、1つのアプリに<strong>組み立て</strong>ます。やることは3つ —— ファイルを<strong>開いて保存する</strong>（<code>fileio.ts</code>）、すべての編集コマンドが集まる<strong>司令塔</strong>（<code>editor.ts</code>）、そして全部品を <code>new</code> して結線する<strong>組み立て役</strong>（<code>main.ts</code>）。そして本章の主役は <code>editor.ts</code> です —— これは「司令塔」でありながら <strong>DOM を1行も知りません</strong>。だから <code>31</code> 件の単体テストで、ブラウザを開かずに丸ごと検証できる。序章と第00章で立てた「純粋ロジックを DOM から引き剥がす」という約束の、これが集大成です。</p>
+
+    <div class="box goal"><div class="box-k">◈ この章のゴール</div>
+      <p>次の 3 つを確認できたら、本書は完走です。</p>
+      <ol>
+        <li><code>editor.ts</code> の司令塔が「文書 + 選択範囲の配列 + 履歴」の3状態しか持たず、すべての編集コマンドが <code>applyUserEdits</code> という1本道に流れ込むことを、コードで追って説明できる。</li>
+        <li><code>fileio.ts</code> が「使える環境ではネイティブ保存、無ければ <code>&lt;a download&gt;</code> フォールバック」の二段構えになっている理由を言える。</li>
+        <li><code>cd src &amp;&amp; npx vitest run src/editor/editor.test.ts</code> で司令塔の <code>31</code> 件が PASS し、<strong>DOM を知らないからこそテストできる</strong>ことを目視する。さらに <code>npm test</code>（全 <code>70</code> 件）・<code>npm run build</code>・E2E まで通す。</li>
+      </ol>
+    </div>
+
+    <div class="box map"><div class="box-k">☰ この章のステップ</div>
+      <ol>
+        <li><a href="#step-1">司令塔の設計 — 3つの状態と onDidChange（<code>editor/editor.ts</code>）</a></li>
+        <li><a href="#step-2">すべての編集が通る1本道 — replaceSelections と applyUserEdits</a></li>
+        <li><a href="#step-3">複数カーソルと Undo を束ねる — setText / undo / redo</a></li>
+        <li><a href="#step-4">ファイルを開く — File System Access API とフォールバック（<code>editor/fileio.ts</code>）</a></li>
+        <li><a href="#step-5">保存する — 上書き・名前を付けて保存・ダウンロード</a></li>
+        <li><a href="#step-6">部品を new して結線する（<code>main.ts</code>）</a></li>
+        <li><a href="#step-7">ツールバーとファイル操作をつなぐ</a></li>
+        <li><a href="#step-8">ステータスバー — onDidChange を1か所で購読する</a></li>
+        <li><a href="#step-9">全テストを通す — 31 件が語る「DOM 非依存」の証明</a></li>
+      </ol>
+    </div>
+
+    <h2>組み立てとは、ほとんど「何もしない」こと</h2>
+    <p>最終章と聞くと、いちばん複雑なコードが待っていそうな気がします。実際は逆です。この章のコードは、本書でいちばん<strong>退屈</strong>かもしれません。ファイルを開き、保存し、部品を <code>new</code> でつなぐ —— それだけ。派手な魔法は何もありません。</p>
+    <p>そして、その「退屈さ」こそが、本書が正しく積み上がってきた<strong>証拠</strong>です。第00章で <code>TextBuffer</code> の境界を引き、第01章で速いバッファを裏に据え、第02章で行とカーソルを、第03章で Undo を、第04章で描画を、第05章で入力を、第06〜08章で複数カーソル・検索・色・日本語を —— 一つひとつ、境界を挟みながら独立に作ってきました。境界がきちんと引けていれば、最後の組み立ては「部品をはめるだけ」で終わります。もし組み立てで苦労するとしたら、それはどこかの境界が甘かった、というサインなのです。</p>
+    <p>本章は3つのファイルを読みます。順番に意味があります。まず司令塔 <code>editor.ts</code> —— これが本章の主役で、ここまでの core 部品（<code>document</code> / <code>history</code> / <code>highlighter</code> / <code>selection</code> / <code>search</code>）を結線し、全編集コマンドを束ねます。にもかかわらず DOM をまったく触らないので、単体テストで丸ごと検証できます。次に <code>fileio.ts</code> —— ブラウザごとに違うファイル API を、1つの素直なインターフェースに包みます。最後に <code>main.ts</code> —— すべてを <code>new</code> でつなぎ、ツールバーとステータスバーの DOM を組んで、ブラウザで動くアプリにします。</p>
+
+    <h2 class="step" id="step-1"><span class="step-no">Step 1</span>司令塔の設計 — 3つの状態と onDidChange</h2>
+    <p><code>editor/editor.ts</code> を開きます。名前は <code>editor/</code> フォルダにありますが、序章のファイル地図で予告したとおり、これは<strong>「司令塔（実は DOM 非依存でテスト可能）」</strong>です。まずファイル冒頭の import と、この章でいちばん大事な設計コメントを読みます。</p>
+
+    <div class="file-tag">editor/editor.ts</div>
+    <pre><code><span class="kw">import</span> { TextDocument } <span class="kw">from</span> <span class="st">"../core/document"</span>;
+<span class="kw">import type</span> { EditKind } <span class="kw">from</span> <span class="st">"../core/history"</span>;
+<span class="kw">import</span> { History } <span class="kw">from</span> <span class="st">"../core/history"</span>;
+<span class="kw">import</span> { Highlighter } <span class="kw">from</span> <span class="st">"../core/highlighter"</span>;
+<span class="kw">import</span> { normalizeSelections } <span class="kw">from</span> <span class="st">"../core/selection"</span>;
+<span class="kw">import type</span> { Match, SearchOptions } <span class="kw">from</span> <span class="st">"../core/search"</span>;
+<span class="kw">import</span> { findAll } <span class="kw">from</span> <span class="st">"../core/search"</span>;
+<span class="kw">import type</span> { Edit, SelRange } <span class="kw">from</span> <span class="st">"../core/types"</span>;
+<span class="kw">import</span> { rangeIsEmpty, rangeMax, rangeMin } <span class="kw">from</span> <span class="st">"../core/types"</span>;
+
+<span class="cm">/**
+ * Editor — 編集の司令塔。DOM を一切知らない。
+ *
+ * 状態は「文書(doc) + 選択範囲の配列(selections) + 履歴(history)」の3つ。
+ * すべてのコマンドは
+ *   1. 選択範囲から編集列(Edit[])を組み立て
+ *   2. doc.applyEdits でまとめて適用し
+ *   3. 新しい選択範囲を計算して
+ *   4. 逆向き編集を履歴に積む
+ * という同じ流れに落ちる。ビュー(renderer/input)は onDidChange を購読して描き直すだけ。
+ */</span>
+
+<span class="kw">export type</span> <span class="ty">MoveUnit</span> = <span class="st">"char"</span> | <span class="st">"word"</span> | <span class="st">"lineBoundary"</span> | <span class="st">"docBoundary"</span>;</code></pre>
+
+    <p>import の並びが、そのままこの司令塔が<strong>結線する部品の一覧</strong>になっています。第02章の <code>TextDocument</code>、第03章の <code>History</code> と <code>EditKind</code>、第07章の <code>Highlighter</code>、第06章の <code>normalizeSelections</code> / <code>findAll</code> / <code>Match</code>、そして第00章から使い続けてきた <code>Edit</code> / <code>SelRange</code> とヘルパー <code>rangeIsEmpty</code> / <code>rangeMax</code> / <code>rangeMin</code>。<strong>本書10章ぶんの部品が、この1ファイルに集まってくる</strong>のがひと目で分かります。ここが本の合流点です。</p>
+    <p>そしてクラスコメントが、司令塔の設計思想をまるごと言い切っています。読むべきは2点です。1つは <strong>「状態は3つだけ」</strong> —— 文書 <code>doc</code>、選択範囲の配列 <code>selections</code>、履歴 <code>history</code>。エディタという複雑に見えるものの状態が、たった3つに畳まれています。もう1つは <strong>「すべてのコマンドは同じ流れに落ちる」</strong> ——「選択から編集列を組む → まとめて適用する → 新しい選択を計算する → 逆向きを履歴に積む」。挿入も削除も貼り付けも置換も、ぜんぶこの4ステップを通ります。Step 2 でその1本道を実物で見ます。</p>
+    <p>続いてクラス本体の頭 —— <strong>状態フィールド</strong>と <strong>constructor</strong>、そして「変わったよ」を伝える <code>onDidChange</code> / <code>emit</code> です。</p>
+
+    <div class="file-tag">editor/editor.ts（つづき・状態と通知）</div>
+    <pre><code><span class="kw">export class</span> <span class="ty">Editor</span> {
+  doc: <span class="ty">TextDocument</span>;
+  selections: <span class="ty">SelRange</span>[] = [{ anchor: <span class="st">0</span>, head: <span class="st">0</span> }];
+  history = <span class="kw">new</span> <span class="ty">History</span>();
+  highlighter: <span class="ty">Highlighter</span>;
+
+  <span class="cm">/** 上下移動で覚えておく「目標の桁」。横移動・編集でリセットされる */</span>
+  <span class="kw">private</span> goalColumns: (<span class="ty">number</span> | <span class="ty">null</span>)[] = [<span class="kw">null</span>];
+  <span class="cm">/** ビューが次の描画でカーソルを可視範囲に入れるべきか */</span>
+  revealRequested = <span class="kw">false</span>;
+
+  <span class="cm">/** 検索状態 */</span>
+  searchQuery = <span class="st">""</span>;
+  searchOptions: <span class="ty">SearchOptions</span> = {};
+  <span class="kw">private</span> cachedMatches: <span class="ty">Match</span>[] = [];
+  <span class="kw">private</span> matchesVersion = -<span class="st">1</span>;
+  <span class="kw">private</span> matchesQuery = <span class="st">""</span>;
+  <span class="kw">private</span> matchesOptionsKey = <span class="st">""</span>;
+
+  <span class="kw">private</span> listeners: (() => <span class="ty">void</span>)[] = [];
+  <span class="kw">private</span> now: () => <span class="ty">number</span>;
+
+  <span class="kw">constructor</span>(text = <span class="st">""</span>, now: () => <span class="ty">number</span> = () => <span class="ty">Date</span>.now()) {
+    <span class="kw">this</span>.doc = <span class="kw">new</span> <span class="ty">TextDocument</span>(text);
+    <span class="kw">this</span>.highlighter = <span class="kw">new</span> <span class="ty">Highlighter</span>(<span class="kw">this</span>.doc);
+    <span class="kw">this</span>.now = now;
+  }
+
+  onDidChange(fn: () => <span class="ty">void</span>): <span class="ty">void</span> {
+    <span class="kw">this</span>.listeners.push(fn);
+  }
+
+  <span class="kw">private</span> emit(): <span class="ty">void</span> {
+    <span class="kw">for</span> (<span class="kw">const</span> fn <span class="kw">of</span> <span class="kw">this</span>.listeners) fn();
+  }
+
+  <span class="kw">private</span> resetGoals(): <span class="ty">void</span> {
+    <span class="kw">this</span>.goalColumns = <span class="kw">this</span>.selections.map(() => <span class="kw">null</span>);
+  }
+
+  getText(): <span class="ty">string</span> {
+    <span class="kw">return</span> <span class="kw">this</span>.doc.getText();
+  }</code></pre>
+
+    <p>フィールドを上から見ます。まず<strong>3つの主状態</strong> —— <code>doc</code>（第02章の <code>TextDocument</code>。中に第01章の速いバッファを抱えています）、<code>selections</code>（<code>SelRange</code> の<strong>配列</strong>。要素が1個なら普通のカーソル、複数なら第06章の複数カーソル）、<code>history</code>（第03章の Undo/Redo スタック）。それに描画補助の <code>highlighter</code>（第07章）が加わります。</p>
+    <p>残りは<strong>脇役の状態</strong>です。<code>goalColumns</code> は上下移動で「元いた桁」を覚えておくためのもの（短い行を通り抜けても桁が戻る、あの挙動）。<code>revealRequested</code> は「次の描画でカーソルを画面内に入れて」という<strong>ビューへの旗</strong>。<code>searchQuery</code> 以下の一群は検索状態とその<strong>キャッシュ</strong>（同じ検索を毎回やり直さないための覚え書き）。そして <code>listeners</code> が、変更通知の購読者リストです。</p>
+    <p>ここで注目すべきは <strong><code>constructor</code> の第2引数 <code>now</code></strong> です。現在時刻を返す関数を、外から<strong>差し込める</strong>ようにしてあります。既定は <code>Date.now</code> ですが、テストではニセの時計を渡せる。第03章の「時間が空くと Undo が分かれる」挙動を、実時間を待たずに検証するための仕込みです（Step 9 で <code>makeEditor</code> がこれを使います）。<strong>時刻という「外の世界」すら引数にして司令塔の外へ追い出す</strong> —— これが DOM 非依存を徹底する、という設計の細部です。</p>
+    <p>そして通知のしくみ。<code>onDidChange(fn)</code> で「変わったら呼んで」という関数を登録し、<code>emit()</code> で登録された全員を呼び出す。司令塔は「状態が変わった」と<strong>知らせるだけ</strong>で、誰がどう描き直すかは知りません。この <code>emit</code> が、Step 8 のステータスバーと、第04章のビューを、同じ1本の通知でまとめて起こします。</p>
+
+    <div class="gonote"><div class="box-k">TS メモ · Observer パターンと、依存を「上向き」に保つこと</div>
+      <p><code>onDidChange</code> / <code>emit</code> は <strong>Observer（オブザーバ）パターン</strong>の最小形です。「変化を起こす側（司令塔）」が「変化を知りたい側（ビュー・ステータスバー）」を<strong>名指しで知らない</strong>のが要点です。司令塔は <code>listeners: (() =&gt; void)[]</code> という「引数なし・戻り値なしの関数の配列」を持つだけ。だから <code>Editor</code> は <code>EditorView</code> にも <code>document</code> にも依存せず、<strong>依存の矢印が下（core）から上（DOM）へ一方通行</strong>に保たれます。もし司令塔がビューを直接呼んだら、この矢印が逆流し、Node 上のテストにブラウザが必要になってしまう。通知を関数の配列で持つ、というささやかな判断が、<code>31</code> 件のテストを DOM なしで走らせられる理由の一つです。</p>
+    </div>
+
+    <h2 class="step" id="step-2"><span class="step-no">Step 2</span>すべての編集が通る1本道 — replaceSelections と applyUserEdits</h2>
+    <p>ここが司令塔の<strong>心臓</strong>です。クラスコメントの「すべてのコマンドは同じ流れに落ちる」を、コードで見ます。挿入・改行・タブ・貼り付け・置換 —— ユーザーの編集はすべて、この2つのメソッドに合流します。</p>
+
+    <div class="file-tag">editor/editor.ts（つづき・全編集の共通経路）</div>
+    <pre><code>  <span class="cm">/**
+   * 各選択範囲を makeText の返すテキストで置き換える。全編集コマンドの共通経路。
+   * 編集後、各カーソルは挿入テキストの直後に置かれる。
+   */</span>
+  replaceSelections(makeText: (sel: <span class="ty">SelRange</span>, index: <span class="ty">number</span>) => <span class="ty">string</span>, kind: <span class="ty">EditKind</span>, joinPrevious = <span class="kw">false</span>): <span class="ty">void</span> {
+    <span class="kw">const</span> sels = normalizeSelections(<span class="kw">this</span>.selections);
+    <span class="kw">const</span> edits: <span class="ty">Edit</span>[] = [];
+    <span class="kw">const</span> newSels: <span class="ty">SelRange</span>[] = [];
+    <span class="kw">let</span> delta = <span class="st">0</span>;
+    <span class="kw">for</span> (<span class="kw">let</span> i = <span class="st">0</span>; i &lt; sels.length; i++) {
+      <span class="kw">const</span> from = rangeMin(sels[i]);
+      <span class="kw">const</span> to = rangeMax(sels[i]);
+      <span class="kw">const</span> text = makeText(sels[i], i);
+      edits.push({ from, to, text });
+      <span class="kw">const</span> head = from + delta + text.length;
+      newSels.push({ anchor: head, head });
+      delta += text.length - (to - from);
+    }
+    <span class="kw">this</span>.applyUserEdits(edits, newSels, kind, joinPrevious);
+  }
+
+  <span class="cm">/** 編集列を適用し、履歴に積み、ビューへ通知する */</span>
+  applyUserEdits(edits: <span class="ty">Edit</span>[], newSelections: <span class="ty">SelRange</span>[], kind: <span class="ty">EditKind</span>, joinPrevious = <span class="kw">false</span>): <span class="ty">void</span> {
+    <span class="kw">if</span> (edits.length === <span class="st">0</span>) <span class="kw">return</span>;
+    <span class="kw">const</span> selBefore = <span class="kw">this</span>.selections;
+    <span class="kw">const</span> firstLine = <span class="kw">this</span>.doc.lineAt(edits[<span class="st">0</span>].from);
+    <span class="kw">const</span> inverses = <span class="kw">this</span>.doc.applyEdits(edits);
+    <span class="kw">this</span>.highlighter.invalidateFrom(firstLine);
+    <span class="kw">this</span>.selections = normalizeSelections(newSelections);
+    <span class="kw">this</span>.history.push(inverses, selBefore, <span class="kw">this</span>.selections, kind, <span class="kw">this</span>.now(), joinPrevious);
+    <span class="kw">this</span>.resetGoals();
+    <span class="kw">this</span>.revealRequested = <span class="kw">true</span>;
+    <span class="kw">this</span>.emit();
+  }
+
+  insertText(text: <span class="ty">string</span>, joinPrevious = <span class="kw">false</span>): <span class="ty">void</span> {
+    <span class="kw">const</span> kind: <span class="ty">EditKind</span> = text.length &lt;= <span class="st">2</span> &amp;&amp; !text.includes(<span class="st">"\n"</span>) ? <span class="st">"typing"</span> : <span class="st">"other"</span>;
+    <span class="kw">this</span>.replaceSelections(() => text, kind, joinPrevious);
+  }</code></pre>
+
+    <p><code>replaceSelections</code> は「<strong>各カーソルに、それぞれ差し込むテキストを作らせて、まとめて置換する</strong>」関数です。引数の <code>makeText</code> は「この選択範囲には何を入れる?」を答えるコールバック。挿入なら全カーソル同じ文字、貼り付けなら1行ずつ違う文字 —— <strong>「何を入れるか」だけを差し替えれば、あらゆる編集コマンドがこの1つの関数で書ける</strong>ようになっています。</p>
+    <p>ループの中身が肝です。まず <code>normalizeSelections</code> で選択を昇順に整え（第06章。重なりを潰し、順序を保証する）、各範囲について <code>rangeMin</code>/<code>rangeMax</code> で <code>[from, to)</code> を取り、<code>makeText</code> で差し込む文字を得て、<code>Edit</code> を積みます。ここで <code>Edit { from, to, text }</code> が第00章 Step 3 のあの統一形そのままなのに気づいてください。<strong>本書の最初に決めた「編集は1形」が、最後の合流点でも一切変わらず効いている</strong>のです。</p>
+    <p>そして <code>delta</code> —— これが複数カーソルの<strong>ずれ</strong>を吸収する仕掛けです。1本目のカーソルで3文字挿入すると、2本目以降のオフセットは3つ後ろへずれます。<code>delta</code> はその累積ずれで、<code>head = from + delta + text.length</code> によって、挿入後の正しいカーソル位置を先回りで計算します。「複数カーソルで同時に挿入しても位置がずれない」という第06章の魔法の正体は、この一行の足し算です。</p>
+    <p>合流の終点が <code>applyUserEdits</code> です。ここでクラスコメントの4ステップが順番どおりに実行されます。</p>
+    <ol>
+      <li><code>selBefore</code> に<strong>編集前の選択を退避</strong>（Undo で戻すため）。</li>
+      <li><code>this.doc.applyEdits(edits)</code> で<strong>まとめて適用</strong>。返ってくる <code>inverses</code> が「これを打ち消す逆向き編集」です（第03章）。</li>
+      <li><code>highlighter.invalidateFrom</code> で、変わった行から先の<strong>色づけを無効化</strong>（第07章。次の描画で色を計算し直させる）。</li>
+      <li><code>history.push</code> で<strong>逆向き編集を履歴に積む</strong>。<code>kind</code> と <code>this.now()</code> と <code>joinPrevious</code> が、第03章の「連続タイプは1回で戻す」まとめ判定に使われます。</li>
+    </ol>
+    <p>最後に <code>resetGoals</code>（上下移動の目標桁をリセット）、<code>revealRequested = true</code>（カーソルを画面に入れて、の旗）、そして <code>emit()</code>（全購読者へ通知）。<strong>編集の後始末が、ここ1か所に集約されている</strong>。だから新しい編集コマンドを足すときも、<code>replaceSelections</code> に「何を入れるか」を渡すだけでよく、履歴も色も通知も自動でついてきます。</p>
+    <p><code>insertText</code> がその実例です。中身はたった2行 —— 短くて改行を含まない入力なら <code>"typing"</code>（連続タイプとしてまとめる）、そうでなければ <code>"other"</code> と <code>kind</code> を決め、<code>replaceSelections(() =&gt; text, ...)</code> を呼ぶだけ。<strong>「全カーソルに同じ <code>text</code> を入れる」を、無名関数 <code>() =&gt; text</code> ひとつで表現している</strong>のがエレガントです。</p>
+
+    <div class="box hazard"><div class="box-k">⚠ 落とし穴 — applyEdits の前提「昇順・非重複」を誰かが守らねばならない</div>
+      <p><code>doc.applyEdits</code> は、渡される編集列が<strong>オフセットの昇順に並び、範囲が重ならない</strong>ことを前提にしています。この前提が崩れると、オフセットがずれてテキストが壊れます。だから <code>replaceSelections</code> は必ず先頭で <code>normalizeSelections</code> を通し、削除系（<code>backspace</code> など）は <code>deleteRanges</code> の中で <code>mergeRanges</code> を通して<strong>重なりを1つに統合</strong>します。実際、editor.test.ts には「選択範囲の直後に空カーソルがある Backspace で編集が重複しない」という回帰テストがあり、これは <code>[0,1)</code> の選択と offset 1 の空カーソルが<strong>両方 <code>[0,1)</code> の削除を生んで負のオフセットを作った</strong>バグ（Codex レビュー指摘）を捕まえた跡です。「昇順・非重複」という不変条件は、司令塔の側で必ず保証してから <code>doc</code> に渡す —— これが破れると静かに壊れる、繊細な境界です。</p>
+    </div>
+
+    <h2 class="step" id="step-3"><span class="step-no">Step 3</span>複数カーソルと Undo を束ねる — setText / undo / redo</h2>
+    <p>司令塔には、Step 2 の1本道に加えて「<strong>状態をまるごと差し替える</strong>」操作があります。ファイルを開いたときの <code>setText</code> と、履歴を巻き戻す <code>undo</code> / <code>redo</code> です。どちらも「複数の状態を<strong>矛盾なく一斉に</strong>更新する」のが仕事で、司令塔がなぜ状態を1か所に集めているのかがよく分かります。</p>
+
+    <div class="file-tag">editor/editor.ts（つづき・差し替えと履歴ジャンプ）</div>
+    <pre><code>  <span class="cm">/** ファイルを開いたときなど、文書ごと差し替える */</span>
+  setText(text: <span class="ty">string</span>): <span class="ty">void</span> {
+    <span class="kw">this</span>.doc = <span class="kw">new</span> <span class="ty">TextDocument</span>(text);
+    <span class="kw">this</span>.highlighter = <span class="kw">new</span> <span class="ty">Highlighter</span>(<span class="kw">this</span>.doc);
+    <span class="kw">this</span>.history = <span class="kw">new</span> <span class="ty">History</span>();
+    <span class="kw">this</span>.selections = [{ anchor: <span class="st">0</span>, head: <span class="st">0</span> }];
+    <span class="kw">this</span>.goalColumns = [<span class="kw">null</span>];
+    <span class="kw">this</span>.revealRequested = <span class="kw">true</span>;
+    <span class="kw">this</span>.emit();
+  }
+
+  undo(): <span class="ty">void</span> {
+    <span class="kw">const</span> sel = <span class="kw">this</span>.history.undo(<span class="kw">this</span>.doc);
+    <span class="kw">if</span> (!sel) <span class="kw">return</span>;
+    <span class="kw">this</span>.afterHistoryJump(sel);
+  }
+
+  redo(): <span class="ty">void</span> {
+    <span class="kw">const</span> sel = <span class="kw">this</span>.history.redo(<span class="kw">this</span>.doc);
+    <span class="kw">if</span> (!sel) <span class="kw">return</span>;
+    <span class="kw">this</span>.afterHistoryJump(sel);
+  }
+
+  <span class="kw">private</span> afterHistoryJump(sel: <span class="ty">SelRange</span>[]): <span class="ty">void</span> {
+    <span class="kw">this</span>.selections = normalizeSelections(
+      sel.map((s) => ({ anchor: <span class="kw">this</span>.doc.clampOffset(s.anchor), head: <span class="kw">this</span>.doc.clampOffset(s.head) })),
+    );
+    <span class="cm">// doc.version が進んでいるので highlighter は次の getTokens で自動リセットされる</span>
+    <span class="kw">this</span>.resetGoals();
+    <span class="kw">this</span>.revealRequested = <span class="kw">true</span>;
+    <span class="kw">this</span>.emit();
+  }</code></pre>
+
+    <p><code>setText</code> は<strong>まっさらからやり直す</strong>操作です。新しい <code>TextDocument</code> を作り、<code>Highlighter</code> も履歴も選択も初期状態に戻し、最後に <code>emit()</code>。ファイルを開いたら<strong>Undo 履歴が前のファイルに戻れてはいけない</strong>ので、<code>history = new History()</code> でまっさらにしているのがポイントです。この <code>setText</code> を、Step 7 の <code>doOpen</code>（ファイルを開く）と「10万行」ボタンが呼びます。司令塔の外側 —— ファイル入出力 —— と、司令塔の状態が、この1メソッドできれいに接続されます。</p>
+    <p><code>undo</code> / <code>redo</code> はほとんど <code>history</code> への委譲です。<code>history.undo(this.doc)</code> が <code>doc</code> を実際に巻き戻し、「戻った先での選択範囲」を返す。返り値が無ければ（もう戻れなければ）何もしません。返ってきたら <code>afterHistoryJump</code> で後始末をします。</p>
+    <p><code>afterHistoryJump</code> で効いているのが <code>clampOffset</code> です。履歴に記録された選択オフセットが、巻き戻した後の文書の<strong>長さをはみ出さない</strong>よう、<code>doc.clampOffset</code> で切り詰めています。文書の状態と選択の状態がズレて破綻しないための安全弁です。コメントにあるとおり、色づけは <code>doc.version</code> が進むことで次の描画時に自動リセットされるので、ここで明示的に触る必要はありません。<strong>状態が3つとも司令塔の中にあるからこそ、この「一斉に、矛盾なく」の更新が1メソッドで書ける</strong> —— 状態を1か所に集める設計の恩恵です。</p>
+
+    <div class="box hazard"><div class="box-k">⚠ 紙面の都合による省略について</div>
+      <p><code>editor.ts</code> は全 <code>558</code> 行あります。本章では司令塔の<strong>中核</strong> —— 部品の結線（Step 1）・全編集の1本道（Step 2）・差し替えと履歴（Step 3）—— を全文で載せました。以降にある次のメソッド群は、いずれも Step 2 で見た<strong>同じ1本道</strong>（最終的に <code>applyUserEdits</code> か <code>setSelections</code> へ流れ込む）に落ちる委譲なので、紙面では省略します。</p>
+      <pre><code>  <span class="cm">// …（同様に applyUserEdits / setSelections へ流れ込む）</span>
+  <span class="cm">// 編集: insertNewline / insertTab / backspace / deleteForward / deleteRanges</span>
+  <span class="cm">// 移動: move / moveOffset / moveVertical</span>
+  <span class="cm">// 選択: setSelections / selectAll / collapseToPrimary / addCursorAt</span>
+  <span class="cm">//       selectWordAt / selectLineAt / selectNextOccurrence / selectAllOccurrences</span>
+  <span class="cm">// クリップボード: copyForClipboard / cutForClipboard / paste</span>
+  <span class="cm">// 検索・置換: setSearch / matches / findNext / replaceCurrent / replaceAll / activeMatchNumber</span>
+  <span class="cm">// 文字境界: prevBoundary / nextBoundary / prevWordBoundary / nextWordBoundary / wordRangeAt</span></code></pre>
+      <p>関数名はすべて実物のままです。完成コードは <code>src/src/editor/editor.ts</code> にあります。たとえば <code>backspace</code> は「選択が空ならカーソルの手前1文字（サロゲートペアを壊さない <code>prevBoundary</code> ぶん）を範囲にし、<code>deleteRanges</code> へ」。<code>paste</code> は「カーソル数と貼り付け行数が一致すれば1行ずつ、そうでなければ全カーソル同文字を <code>replaceSelections</code> へ」。<strong>どれも『何を編集列にするか』を決めて1本道に流すだけ</strong>で、後始末（履歴・色・通知）は書いていません。Step 2 の共通経路が全部引き受けるからです。</p>
+    </div>
+
+    <h2 class="step" id="step-4"><span class="step-no">Step 4</span>ファイルを開く — File System Access API とフォールバック</h2>
+    <p>司令塔の外へ出ます。ブラウザで「ファイルを開く・保存する」をどう実装するか。ここには<strong>ブラウザ間の断層</strong>があります。Chrome / Edge には <strong>File System Access API</strong> があり、ネイティブアプリのように「開いたファイルにそのまま上書き保存」できます。ところが Firefox / Safari にはこれが無い。<code>fileio.ts</code> は、この差を1つの素直なインターフェースの裏に隠します。まずファイル冒頭と、開く側です。</p>
+
+    <div class="file-tag">editor/fileio.ts</div>
+    <pre><code><span class="cm">/**
+ * ファイルを開く / 保存する。
+ *
+ * File System Access API（Chrome / Edge）があれば本物の「上書き保存」ができる。
+ * ない環境（Firefox / Safari）では &lt;input type=file&gt; とダウンロードで代替する。
+ */</span>
+
+<span class="kw">export interface</span> <span class="ty">OpenedFile</span> {
+  name: <span class="ty">string</span>;
+  text: <span class="ty">string</span>;
+  <span class="cm">/** File System Access API のハンドル。null なら上書き保存できない環境 */</span>
+  handle: <span class="ty">FileSystemFileHandle</span> | <span class="ty">null</span>;
+}
+
+<span class="kw">interface</span> <span class="ty">PickerWindow</span> <span class="kw">extends</span> <span class="ty">Window</span> {
+  showOpenFilePicker?: (options?: <span class="ty">object</span>) => <span class="ty">Promise</span>&lt;<span class="ty">FileSystemFileHandle</span>[]&gt;;
+  showSaveFilePicker?: (options?: <span class="ty">object</span>) => <span class="ty">Promise</span>&lt;<span class="ty">FileSystemFileHandle</span>&gt;;
+}
+
+<span class="kw">const</span> win = window <span class="kw">as</span> <span class="ty">PickerWindow</span>;
+
+<span class="kw">export function</span> hasNativeFilePicker(): <span class="ty">boolean</span> {
+  <span class="kw">return typeof</span> win.showOpenFilePicker === <span class="st">"function"</span>;
+}
+
+<span class="kw">export async function</span> openTextFile(): <span class="ty">Promise</span>&lt;<span class="ty">OpenedFile</span> | <span class="ty">null</span>&gt; {
+  <span class="kw">if</span> (hasNativeFilePicker()) {
+    <span class="kw">try</span> {
+      <span class="kw">const</span> [handle] = <span class="kw">await</span> win.showOpenFilePicker!({});
+      <span class="kw">const</span> file = <span class="kw">await</span> handle.getFile();
+      <span class="kw">return</span> { name: file.name, text: <span class="kw">await</span> file.text(), handle };
+    } <span class="kw">catch</span> {
+      <span class="kw">return</span> <span class="kw">null</span>; <span class="cm">// キャンセル</span>
+    }
+  }
+  <span class="kw">return new</span> <span class="ty">Promise</span>((resolve) => {
+    <span class="kw">const</span> input = document.createElement(<span class="st">"input"</span>);
+    input.type = <span class="st">"file"</span>;
+    input.onchange = <span class="kw">async</span> () => {
+      <span class="kw">const</span> file = input.files?.[<span class="st">0</span>];
+      <span class="kw">if</span> (!file) <span class="kw">return</span> resolve(<span class="kw">null</span>);
+      resolve({ name: file.name, text: <span class="kw">await</span> file.text(), handle: <span class="kw">null</span> });
+    };
+    input.oncancel = () => resolve(<span class="kw">null</span>);
+    input.click();
+  });
+}</code></pre>
+
+    <p>まず戻り値の型 <code>OpenedFile</code> が、この設計の要です。<code>name</code>（ファイル名）と <code>text</code>（中身）に加えて、<strong><code>handle: FileSystemFileHandle | null</code></strong> を持ちます。この <code>handle</code> こそが「あとで同じファイルに上書きするための切符」で、コメントどおり <strong><code>null</code> なら上書きできない環境</strong>を意味します。開いた側は「切符があるか無いか」だけを持ち回れば、保存のときに正しい分岐ができる —— <strong>ブラウザの差を <code>handle</code> が <code>null</code> かどうかの1点に畳んでいる</strong>のが、この章いちばんの設計の妙です。</p>
+    <p>次の <code>PickerWindow</code> は、TypeScript に「<code>window</code> には <code>showOpenFilePicker</code> という（まだ標準型に無いかもしれない）メソッドがあるかも」と教えるための型です。<code>?</code> 付き（省略可能）なのは、<strong>無いブラウザがある</strong>から。<code>const win = window as PickerWindow</code> で型を付け替え、<code>hasNativeFilePicker()</code> で「そのメソッドが実際に関数として存在するか」を実行時に確かめます。<strong>型で「あるかも」と言い、実行時に「本当にあるか」を確かめる</strong> —— 機能検出（feature detection）の作法です。</p>
+    <p><code>openTextFile</code> は二股に分かれます。<strong>ネイティブがある側</strong>（<code>if</code> の中）—— <code>showOpenFilePicker</code> を呼ぶとファイル選択ダイアログが出て、選ばれた <code>handle</code> から中身を読み、<strong><code>handle</code> ごと返します</strong>。ユーザーがキャンセルすると例外が飛ぶので <code>catch</code> で握りつぶして <code>null</code> を返します。<strong>ネイティブが無い側</strong>（<code>if</code> を抜けた後）—— 昔ながらの <code>&lt;input type="file"&gt;</code> を <code>document.createElement</code> で動的に作り、<code>click()</code> でダイアログを開き、<code>onchange</code> で選ばれたファイルを読みます。ここでは <code>handle</code> が取れないので <strong><code>handle: null</code></strong> を返す —— これが「上書きできない環境」の印になります。</p>
+
+    <div class="gonote"><div class="box-k">TS メモ · Promise でコールバックを「待てる値」に変える</div>
+      <p>後半のフォールバックで <code>return new Promise((resolve) =&gt; { … })</code> という書き方をしています。<code>&lt;input&gt;</code> の <code>onchange</code> は「いつか呼ばれるコールバック」で、そのままでは <code>await</code> できません。そこで <code>Promise</code> で包み、<strong>ファイルが選ばれた瞬間に <code>resolve(結果)</code> を呼ぶ</strong>ことで、<code>onchange</code> という古い形のイベントを <code>await openTextFile()</code> で待てる<strong>近代的な値</strong>に翻訳しています。<code>oncancel</code> では <code>resolve(null)</code>。呼び出す側（Step 7 の <code>doOpen</code>）は、ネイティブかフォールバックかを<strong>いっさい気にせず</strong> <code>const opened = await openTextFile()</code> と書けます。API の断層が、この <code>Promise</code> でならされているのです。</p>
+    </div>
+
+    <h2 class="step" id="step-5"><span class="step-no">Step 5</span>保存する — 上書き・名前を付けて保存・ダウンロード</h2>
+    <p>開く側の対になるのが保存です。ここは<strong>三段構え</strong>になります。① <code>handle</code> があれば<strong>そのまま上書き</strong>、② 無くてもネイティブ API があれば<strong>「名前を付けて保存」</strong>、③ どちらも無ければ<strong><code>&lt;a download&gt;</code> でダウンロード</strong>。<code>fileio.ts</code> の残り、これで全文です。</p>
+
+    <div class="file-tag">editor/fileio.ts（つづき・これで全文）</div>
+    <pre><code><span class="cm">/**
+ * 保存。handle があれば上書き、なければ「名前を付けて保存」またはダウンロード。
+ * 返り値は次回以降の上書きに使うハンドル（取得できた場合）。
+ */</span>
+<span class="kw">export async function</span> saveTextFile(text: <span class="ty">string</span>, name: <span class="ty">string</span>, handle: <span class="ty">FileSystemFileHandle</span> | <span class="ty">null</span>): <span class="ty">Promise</span>&lt;{ name: <span class="ty">string</span>; handle: <span class="ty">FileSystemFileHandle</span> | <span class="ty">null</span> } | <span class="ty">null</span>&gt; {
+  <span class="kw">if</span> (handle) {
+    <span class="kw">const</span> writable = <span class="kw">await</span> handle.createWritable();
+    <span class="kw">await</span> writable.write(text);
+    <span class="kw">await</span> writable.close();
+    <span class="kw">return</span> { name, handle };
+  }
+  <span class="kw">if</span> (<span class="kw">typeof</span> win.showSaveFilePicker === <span class="st">"function"</span>) {
+    <span class="kw">try</span> {
+      <span class="kw">const</span> newHandle = <span class="kw">await</span> win.showSaveFilePicker!({ suggestedName: name });
+      <span class="kw">const</span> writable = <span class="kw">await</span> newHandle.createWritable();
+      <span class="kw">await</span> writable.write(text);
+      <span class="kw">await</span> writable.close();
+      <span class="kw">return</span> { name: newHandle.name, handle: newHandle };
+    } <span class="kw">catch</span> {
+      <span class="kw">return</span> <span class="kw">null</span>; <span class="cm">// キャンセル</span>
+    }
+  }
+  <span class="cm">// フォールバック: ダウンロードとして保存</span>
+  <span class="kw">const</span> blob = <span class="kw">new</span> <span class="ty">Blob</span>([text], { type: <span class="st">"text/plain;charset=utf-8"</span> });
+  <span class="kw">const</span> url = <span class="ty">URL</span>.createObjectURL(blob);
+  <span class="kw">const</span> a = document.createElement(<span class="st">"a"</span>);
+  a.href = url;
+  a.download = name;
+  a.click();
+  <span class="ty">URL</span>.revokeObjectURL(url);
+  <span class="kw">return</span> { name, handle: <span class="kw">null</span> };
+}</code></pre>
+
+    <p>三段を上から。<strong>① <code>if (handle)</code></strong> —— 切符があれば、それが最速の道です。<code>handle.createWritable()</code> で書き込みストリームを開き、<code>write(text)</code> で全文を書き、<code>close()</code> で確定。ダイアログは<strong>出ません</strong>。ネイティブアプリの <code>Ctrl+S</code> とまったく同じ、静かな上書き保存です。そして <code>{ name, handle }</code> を返し、<strong>同じ切符を呼び出し元へ返して次回も上書きできるように</strong>します。</p>
+    <p><strong>② <code>if (typeof win.showSaveFilePicker === "function")</code></strong> —— 切符は無いがネイティブ API はある場合（例: 新規ファイルの初回保存）。<code>showSaveFilePicker</code> で「名前を付けて保存」ダイアログを出し、ユーザーが決めた場所の <code>newHandle</code> に書き込みます。ここで<strong>新しく手に入った <code>newHandle</code> を返す</strong>のが賢い点で、これを呼び出し元が覚えておけば、2回目の保存からは①の静かな上書きに<strong>昇格</strong>します。キャンセルは <code>catch</code> で <code>null</code>。</p>
+    <p><strong>③ フォールバック</strong> —— どちらも無い Firefox / Safari。テキストを <code>Blob</code>（メモリ上のファイルの塊）にし、<code>URL.createObjectURL</code> で一時 URL を作り、<code>&lt;a download&gt;</code> 要素を組み立てて <code>click()</code> —— これがブラウザの<strong>ダウンロード</strong>を発火させます。使い終えた URL は <code>revokeObjectURL</code> で<strong>すぐ解放</strong>（メモリリーク防止）。この道では上書き先を握れないので <code>handle: null</code> を返します。</p>
+    <p>三段どれも、戻り値の形は同じ <code>{ name, handle } | null</code>。<strong>呼び出し元は「どの道を通ったか」を知らずに、返ってきた <code>name</code> と <code>handle</code> を保存状態として更新するだけ</strong>でよいのです。Step 4 の <code>OpenedFile.handle</code> と、この戻り値の <code>handle</code> が、開く→保存→また保存のループをぐるりとつなぎます。</p>
+
+    <div class="box hazard"><div class="box-k">⚠ 落とし穴 — File System Access API は https / localhost でしか動かない</div>
+      <p><code>showOpenFilePicker</code> / <code>showSaveFilePicker</code> は<strong>セキュアコンテキスト</strong>（<code>https://</code> または <code>http://localhost</code>）でのみ有効です。<code>file://</code> で HTML を直接開くと動きません。開発中に <code>npm run dev</code>（<code>localhost</code>）で試すぶんには問題ありませんが、ネイティブ保存が「なぜか出ずにダウンロードになる」ときは、まず配信元が <code>https</code> か <code>localhost</code> かを疑ってください。加えて、上書き時にブラウザが<strong>書き込み許可</strong>を求めることがあり、許可が失効すると <code>createWritable()</code> が例外を投げます。この失効は Step 7 の <code>doSave</code> 側で <code>try/catch</code> し、<strong>次回は「名前を付けて保存」へ降格</strong>させて回復します。ネットワークやユーザー操作という「外の世界」は、いつでも失敗しうる前提で書く、という保存処理の鉄則です。</p>
+    </div>
+
+    <h2 class="step" id="step-6"><span class="step-no">Step 6</span>部品を new して結線する（main.ts）</h2>
+    <p>いよいよ最後のファイル <code>main.ts</code> —— アプリの<strong>入口</strong>です。ここで初めてすべての部品が <code>new</code> され、DOM に接続され、ブラウザで動き出します。まず import と、開いたときに表示されるサンプルコード、そして「10万行」を生成するヘルパーです。</p>
+
+    <div class="file-tag">main.ts（先頭・部品の import とサンプル）</div>
+    <pre><code><span class="kw">import</span> <span class="st">"./style.css"</span>;
+<span class="kw">import</span> { Editor } <span class="kw">from</span> <span class="st">"./editor/editor"</span>;
+<span class="kw">import</span> { EditorView } <span class="kw">from</span> <span class="st">"./editor/view"</span>;
+<span class="kw">import</span> { InputHandler } <span class="kw">from</span> <span class="st">"./editor/input"</span>;
+<span class="kw">import</span> { FindBar } <span class="kw">from</span> <span class="st">"./editor/findbar"</span>;
+<span class="kw">import</span> { openTextFile, saveTextFile } <span class="kw">from</span> <span class="st">"./editor/fileio"</span>;
+<span class="kw">import</span> { rangeIsEmpty, rangeMax, rangeMin } <span class="kw">from</span> <span class="st">"./core/types"</span>;
+
+<span class="cm">/**
+ * main — 部品の組み立て。
+ * Editor（状態と編集） / EditorView（描画） / InputHandler（入力） / FindBar（検索UI）
+ * をつなぎ、ツールバーとステータスバーを足す。
+ */</span></code></pre>
+
+    <p>この import 7行が、本書10章の<strong>集大成の目録</strong>です。<code>Editor</code>（第00〜08章の core を束ねる司令塔）、<code>EditorView</code>（第04章の Canvas 描画）、<code>InputHandler</code>（第05・08章のキー/マウス/IME）、<code>FindBar</code>（第06章の検索 UI）、<code>openTextFile</code>/<code>saveTextFile</code>（本章の入出力）、そして第00章から使い続けた <code>rangeIsEmpty</code>/<code>rangeMax</code>/<code>rangeMin</code>。<strong>本書のすべてが、この1ファイルに集まって初めて「エディタ」になります。</strong></p>
+    <p>次に、起動時に表示されるサンプル <code>SAMPLE</code> と、大きなファイルの体験用 <code>buildLargeSample</code>。<code>SAMPLE</code> はエディタの機能（日本語・複数カーソル・検索・シンタックスハイライト）が一目で分かるよう作られたテンプレート文字列です。長いので前半だけ抜き、生成関数は全文を載せます。</p>
+
+    <div class="file-tag">main.ts（つづき・サンプルと大量行生成）</div>
+    <pre><code><span class="kw">const</span> SAMPLE = <span class="st">`// mint editor — 自作テキストエディタ
+// ライブラリなしで、バッファ・カーソル・描画・Undo をすべて自前で実装しています。
+//
+// 試してみる:
+//   - 日本語入力（IME の未確定文字列がカーソル位置に出ます）
+//   - Alt+クリックで複数カーソル / Ctrl+D で次の同一単語を選択
+//   - Ctrl+F 検索 / Ctrl+H 置換 / Ctrl+Z で取り消し
+//   - ツールバーの「10万行」で大きなファイルの快適さを確認
+`</span>; <span class="cm">// …（サンプル本文は続く。省略せず src/src/main.ts を参照）</span>
+
+<span class="kw">function</span> buildLargeSample(lines: <span class="ty">number</span>): <span class="ty">string</span> {
+  <span class="kw">const</span> parts: <span class="ty">string</span>[] = [];
+  parts.push(<span class="st">`// 大きなファイルのテスト: ${lines.toLocaleString()} 行`</span>);
+  parts.push(<span class="st">"// 可視範囲しか描画していないので、スクロールも編集も軽いままです。"</span>);
+  <span class="kw">for</span> (<span class="kw">let</span> i = parts.length; i &lt; lines; i++) {
+    <span class="kw">switch</span> (i % <span class="st">5</span>) {
+      <span class="kw">case</span> <span class="st">0</span>:
+        parts.push(<span class="st">`function process_${i}(input) { // ${i} 行目`</span>);
+        <span class="kw">break</span>;
+      <span class="kw">case</span> <span class="st">1</span>:
+        parts.push(<span class="st">`  const label = "アイテム ${i}";`</span>);
+        <span class="kw">break</span>;
+      <span class="kw">case</span> <span class="st">2</span>:
+        parts.push(<span class="st">`  if (input > ${i}) return label + "を処理", ${i * 3};`</span>);
+        <span class="kw">break</span>;
+      <span class="kw">case</span> <span class="st">3</span>:
+        parts.push(<span class="st">`  return null; /* まだ ${i} 番目 */`</span>);
+        <span class="kw">break</span>;
+      <span class="kw">default</span>:
+        parts.push(<span class="st">"}"</span>);
+    }
+  }
+  <span class="kw">return</span> parts.join(<span class="st">"\n"</span>);
+}</code></pre>
+
+    <p><code>buildLargeSample(lines)</code> は、<code>i % 5</code> で5種類の行パターンを回して <code>lines</code> 行のコードを生成します。中身に意味はありません —— 目的は「<strong>10万行あっても軽い</strong>」を体感させること。第04章で「見えている数十行だけ描く（仮想スクロール）」を作ったからこそ、この <code>100_000</code> 行を開いてもスクロールも編集も一瞬です。本書の<strong>最初の設計判断（描画を可視範囲に限る）の成果を、ユーザーがボタン一つで確かめられる</strong>ようになっています。</p>
+    <p>そして、部品の結線 —— この章のクライマックスです。DOM を組み、部品を <code>new</code> でつなぎます。</p>
+
+    <div class="file-tag">main.ts（つづき・DOM 構築と部品の new）</div>
+    <pre><code><span class="cm">// ---------------------------------------------------------------- DOM 構築</span>
+
+<span class="kw">const</span> app = document.getElementById(<span class="st">"app"</span>)!;
+app.innerHTML = <span class="st">`
+  &lt;header class="toolbar"&gt;
+    &lt;span class="brand"&gt;mint editor&lt;/span&gt;
+    &lt;button id="btn-open" title="Ctrl+O"&gt;開く&lt;/button&gt;
+    &lt;button id="btn-save" title="Ctrl+S"&gt;保存&lt;/button&gt;
+    &lt;button id="btn-large" title="10万行のサンプルを生成して開く"&gt;10万行&lt;/button&gt;
+    &lt;span id="file-name"&gt;untitled.js&lt;/span&gt;
+    &lt;span class="flex-spacer"&gt;&lt;/span&gt;
+    &lt;span id="stat-search"&gt;&lt;/span&gt;
+    &lt;span id="stat-sel"&gt;&lt;/span&gt;
+    &lt;span id="stat-pos"&gt;&lt;/span&gt;
+  &lt;/header&gt;
+  &lt;div class="editor-shell"&gt;
+    &lt;div id="scroller"&gt;
+      &lt;div id="sizer"&gt;&lt;/div&gt;
+      &lt;canvas id="editor-canvas"&gt;&lt;/canvas&gt;
+    &lt;/div&gt;
+    &lt;!-- スクロールしない座標系（shell 直下）に置く。scroller 内に置くと
+         コンテンツと一緒にスクロールし、viewport 座標の指定と二重にずれる --&gt;
+    &lt;textarea id="hidden-input" autocorrect="off" autocapitalize="off" spellcheck="false"&gt;&lt;/textarea&gt;
+  &lt;/div&gt;
+`</span>;
+
+<span class="kw">const</span> scroller = document.getElementById(<span class="st">"scroller"</span>)!;
+<span class="kw">const</span> canvas = document.getElementById(<span class="st">"editor-canvas"</span>) <span class="kw">as</span> <span class="ty">HTMLCanvasElement</span>;
+<span class="kw">const</span> sizer = document.getElementById(<span class="st">"sizer"</span>)!;
+<span class="kw">const</span> textarea = document.getElementById(<span class="st">"hidden-input"</span>) <span class="kw">as</span> <span class="ty">HTMLTextAreaElement</span>;
+
+<span class="kw">const</span> editor = <span class="kw">new</span> <span class="ty">Editor</span>(SAMPLE);
+<span class="kw">const</span> view = <span class="kw">new</span> <span class="ty">EditorView</span>(editor, scroller, canvas, sizer);
+<span class="kw">const</span> input = <span class="kw">new</span> <span class="ty">InputHandler</span>(editor, view, textarea);
+<span class="kw">const</span> findBar = <span class="kw">new</span> <span class="ty">FindBar</span>(editor);
+document.querySelector(<span class="st">".editor-shell"</span>)!.appendChild(findBar.el);</code></pre>
+
+    <p>前半は素の DOM 構築です。<code>app.innerHTML</code> にツールバー（<code>header.toolbar</code>）と、エディタ本体（<code>editor-shell</code>）を流し込みます。エディタ本体の中身は3つ —— スクロール領域 <code>#scroller</code>、その中の<strong>高さ稼ぎ用</strong>の <code>#sizer</code>（10万行ぶんの高さを持たせてスクロールバーを出す空 <code>div</code>）、実際に描く <code>&lt;canvas&gt;</code>、そして<strong>隠しの <code>&lt;textarea&gt;</code></strong>。この textarea は目に見えませんが、キー入力と IME の変換を受け取る第05・08章の要です。HTML コメントが「<code>editor-shell</code> 直下（スクロールしない側）に置け」と念押ししているのは、第08章で踏んだ「スクロールと二重にずれる」バグの教訓がここに刻まれているからです。</p>
+    <p>そして後半 —— <strong>本書でいちばん短くて、いちばん重い4行</strong>です。</p>
+    <pre><code><span class="kw">const</span> editor = <span class="kw">new</span> <span class="ty">Editor</span>(SAMPLE);
+<span class="kw">const</span> view = <span class="kw">new</span> <span class="ty">EditorView</span>(editor, scroller, canvas, sizer);
+<span class="kw">const</span> input = <span class="kw">new</span> <span class="ty">InputHandler</span>(editor, view, textarea);
+<span class="kw">const</span> findBar = <span class="kw">new</span> <span class="ty">FindBar</span>(editor);</code></pre>
+    <p>依存の向きに注目してください。<code>editor</code> は<strong>何にも依存せず</strong>単独で生まれます（引数はただの文字列）。<code>view</code> は <code>editor</code> と DOM 要素を受け取り、<code>input</code> は <code>editor</code> と <code>view</code> を、<code>findBar</code> は <code>editor</code> を受け取る。<strong>すべての矢印が <code>editor</code>（＝司令塔＝core）へ向かい、逆流しません。</strong> 司令塔は自分に誰がぶら下がっているかを知らず、ただ <code>onDidChange</code> で「変わった」と叫ぶだけ。ビューも入力も検索バーも、その叫びを聞いて勝手に描き直す。<strong>この4行が、序章で立てた「純粋ロジックを DOM から引き剥がす」設計の、目に見える結実</strong>です。だから <code>editor</code> だけを取り出して、DOM なしで <code>31</code> 件のテストにかけられるのです。</p>
+
+    <h2 class="step" id="step-7"><span class="step-no">Step 7</span>ツールバーとファイル操作をつなぐ</h2>
+    <p>部品はつながりました。あとは「開く / 保存 / 10万行」ボタンに、Step 4・5 のファイル関数と、Step 3 の <code>setText</code> を配線するだけです。</p>
+
+    <div class="file-tag">main.ts（つづき・ファイル操作）</div>
+    <pre><code><span class="cm">// ---------------------------------------------------------------- ファイル</span>
+
+<span class="kw">let</span> fileName = <span class="st">"untitled.js"</span>;
+<span class="kw">let</span> fileHandle: <span class="ty">FileSystemFileHandle</span> | <span class="ty">null</span> = <span class="kw">null</span>;
+<span class="cm">/** 開いたファイルの改行コード。保存時に元へ戻す */</span>
+<span class="kw">let</span> eol: <span class="st">"\n"</span> | <span class="st">"\r\n"</span> = <span class="st">"\n"</span>;
+<span class="kw">const</span> fileNameLabel = document.getElementById(<span class="st">"file-name"</span>)!;
+
+<span class="kw">async function</span> doOpen(): <span class="ty">Promise</span>&lt;<span class="ty">void</span>&gt; {
+  <span class="kw">const</span> opened = <span class="kw">await</span> openTextFile();
+  <span class="kw">if</span> (!opened) <span class="kw">return</span>;
+  eol = opened.text.includes(<span class="st">"\r\n"</span>) ? <span class="st">"\r\n"</span> : <span class="st">"\n"</span>;
+  editor.setText(opened.text.replace(/\r\n/g, <span class="st">"\n"</span>));
+  view.scanMaxLineLength();
+  fileName = opened.name;
+  fileHandle = opened.handle;
+  fileNameLabel.textContent = fileName;
+  input.focus();
+}
+
+<span class="kw">async function</span> doSave(): <span class="ty">Promise</span>&lt;<span class="ty">void</span>&gt; {
+  <span class="kw">const</span> text = eol === <span class="st">"\r\n"</span> ? editor.getText().replace(/\n/g, <span class="st">"\r\n"</span>) : editor.getText();
+  <span class="kw">try</span> {
+    <span class="kw">const</span> saved = <span class="kw">await</span> saveTextFile(text, fileName, fileHandle);
+    <span class="kw">if</span> (saved) {
+      fileName = saved.name;
+      fileHandle = saved.handle;
+      fileNameLabel.textContent = fileName;
+    }
+  } <span class="kw">catch</span> (err) {
+    <span class="cm">// 権限の失効などで上書きに失敗することがある。次回は「名前を付けて保存」へ</span>
+    fileHandle = <span class="kw">null</span>;
+    alert(<span class="st">`保存に失敗しました: ${err instanceof Error ? err.message : err}`</span>);
+  }
+  input.focus();
+}
+
+document.getElementById(<span class="st">"btn-open"</span>)!.addEventListener(<span class="st">"click"</span>, doOpen);
+document.getElementById(<span class="st">"btn-save"</span>)!.addEventListener(<span class="st">"click"</span>, doSave);
+document.getElementById(<span class="st">"btn-large"</span>)!.addEventListener(<span class="st">"click"</span>, () => {
+  editor.setText(buildLargeSample(<span class="st">100_000</span>));
+  view.scanMaxLineLength();
+  fileName = <span class="st">"large-sample.js"</span>;
+  fileHandle = <span class="kw">null</span>;
+  fileNameLabel.textContent = fileName;
+  input.focus();
+});</code></pre>
+
+    <p>3つの状態変数 —— <code>fileName</code>（表示名）、<code>fileHandle</code>（上書き用の切符。Step 4・5 で持ち回ってきたあれ）、<code>eol</code>（改行コード）を <code>main.ts</code> のスコープに置きます。ここが「開く→編集→保存」の記憶を保つ場所です。</p>
+    <p><code>doOpen</code> の流れは素直です。<code>await openTextFile()</code> で開き（ネイティブかフォールバックかは気にしない）、<code>null</code>（キャンセル）なら何もしない。開けたら <code>editor.setText(...)</code> で<strong>司令塔に文書を差し替えさせ</strong>（Step 3。履歴もクリアされる）、<code>fileHandle = opened.handle</code> で切符を受け取る。最後に <code>input.focus()</code> でキーボード入力を textarea に戻します。<strong>ファイル入出力（<code>fileio.ts</code>）と司令塔（<code>editor.ts</code>）が、<code>setText</code> ひとつで接続されている</strong>のが見どころです。</p>
+    <p>ここで <code>eol</code> の扱いが実務的です。開くとき <code>opened.text.includes("\r\n")</code> で元の改行コードを覚え、内部では <code>\r\n</code> を <code>\n</code> に統一（エディタのロジックは <code>\n</code> だけを扱えばよくなる）。保存時に <code>doSave</code> の先頭で、覚えた <code>eol</code> が <code>\r\n</code> なら書き戻す。<strong>Windows の改行を勝手に書き換えない</strong>という、テキストエディタとして当然の礼儀を、開くと保存の両端でそっと守っています。</p>
+    <p><code>doSave</code> の <code>try/catch</code> が、Step 5 の落とし穴への備えです。上書き権限が失効して <code>saveTextFile</code> が投げたら、<code>fileHandle = null</code> にして<strong>切符を捨て</strong>、次回は「名前を付けて保存」へ降格させる。<code>alert</code> でユーザーにも知らせます。返り値 <code>saved</code> があれば、新しい <code>name</code> と <code>handle</code> で状態を更新 —— これで初回のダウンロード保存が、2回目からネイティブ上書きに昇格する道もつながります。</p>
+    <p>3つのボタンは <code>addEventListener</code> で関数につなぐだけ。「10万行」ボタンは <code>buildLargeSample(100_000)</code> を <code>setText</code> に流し込み、<code>fileHandle = null</code>（生成物なので上書き先は無い）にします。<strong>司令塔・入出力・描画のすべてが、ここでボタンの <code>click</code> に集約される</strong> —— アプリの操作面が完成した瞬間です。</p>
+
+    <div class="gonote"><div class="box-k">TS メモ · view.scanMaxLineLength() が結線を越えて呼ばれる理由</div>
+      <p><code>doOpen</code> と「10万行」で、<code>setText</code> の直後に <code>view.scanMaxLineLength()</code> を呼んでいます。これは第04章の描画層の仕事で、「いちばん長い行はどれか」を測り、<strong>横スクロールの幅（<code>#sizer</code> の横幅）</strong>を決めるためのものです。司令塔（<code>editor</code>）は文字数は知っていても<strong>ピクセル幅は知りません</strong>（DOM 非依存なので <code>canvas.measureText</code> を持たない）。だから「文書が丸ごと変わった」ときだけ、<code>main.ts</code> が明示的に描画層へ「測り直して」と頼みます。<strong>純粋ロジックが持てない情報（ピクセル）を、組み立て役が橋渡しする</strong> —— 層を分けた設計の、ちょうど継ぎ目にあたる一行です。ふだんの編集では <code>onDidChange</code> 経由で自動更新されるので、この明示呼び出しは「全差し替え」の特別な場面だけに要ります。</p>
+    </div>
+
+    <div class="file-tag">main.ts（つづき・入力ハンドラへのコールバック）</div>
+    <pre><code>input.onRequestOpen = doOpen;
+input.onRequestSave = doSave;
+input.onRequestFind = (withReplace) => {
+  <span class="kw">const</span> primary = editor.selections[editor.selections.length - <span class="st">1</span>];
+  <span class="kw">const</span> selected = rangeIsEmpty(primary) ? <span class="st">""</span> : editor.doc.buffer.slice(rangeMin(primary), rangeMax(primary));
+  findBar.open(withReplace, selected.includes(<span class="st">"\n"</span>) ? <span class="st">""</span> : selected);
+};
+input.onEscape = () => {
+  <span class="kw">if</span> (findBar.isOpen) {
+    findBar.close();
+    <span class="kw">return</span> <span class="kw">true</span>;
+  }
+  <span class="kw">return</span> <span class="kw">false</span>;
+};
+findBar.onClose = () => input.focus();</code></pre>
+
+    <p>ここは<strong>キーボードショートカットの配線</strong>です。<code>InputHandler</code>（第05章）は <code>Ctrl+O</code> / <code>Ctrl+S</code> / <code>Ctrl+F</code> / <code>Esc</code> を検出しますが、「では何をするか」は知りません。その<strong>穴（コールバック）</strong>を <code>main.ts</code> が埋めます。<code>Ctrl+O</code> → <code>doOpen</code>、<code>Ctrl+S</code> → <code>doSave</code>。<code>Ctrl+F</code>（検索）は、いま選択中の1行テキストを検索欄の初期値にして <code>findBar.open</code> を呼ぶ気の利いた仕掛け付き。<code>Esc</code> は「検索バーが開いていれば閉じて <code>true</code>（消費した）、そうでなければ <code>false</code>（司令塔の <code>collapseToPrimary</code> に任せる）」。<strong>入力層は「いつ」を、組み立て役は「何を」を担当する</strong> —— この責任分割が、ショートカットを足すたびに司令塔や入力層をいじらずに済ませます。</p>
+
+    <h2 class="step" id="step-8"><span class="step-no">Step 8</span>ステータスバー — onDidChange を1か所で購読する</h2>
+    <p>最後のピースは、画面右上の「行 12, 列 4」「3 文字を選択」といった<strong>ステータス表示</strong>です。これが Step 1 で作った <code>onDidChange</code> の、いちばん分かりやすい消費者です。</p>
+
+    <div class="file-tag">main.ts（つづき・これで全文）</div>
+    <pre><code><span class="cm">// ---------------------------------------------------------------- ステータスバー</span>
+
+<span class="kw">const</span> statPos = document.getElementById(<span class="st">"stat-pos"</span>)!;
+<span class="kw">const</span> statSel = document.getElementById(<span class="st">"stat-sel"</span>)!;
+editor.onDidChange(() => {
+  <span class="kw">const</span> primary = editor.selections[editor.selections.length - <span class="st">1</span>];
+  <span class="kw">const</span> pos = editor.doc.toPosition(primary.head);
+  statPos.textContent = <span class="st">`行 ${pos.line + 1}, 列 ${pos.column + 1}`</span>;
+  <span class="kw">if</span> (editor.selections.length &gt; <span class="st">1</span>) {
+    statSel.textContent = <span class="st">`カーソル ${editor.selections.length} 本`</span>;
+  } <span class="kw">else if</span> (!rangeIsEmpty(primary)) {
+    statSel.textContent = <span class="st">`${rangeMax(primary) - rangeMin(primary)} 文字を選択`</span>;
+  } <span class="kw">else</span> {
+    statSel.textContent = <span class="st">""</span>;
+  }
+});
+
+statPos.textContent = <span class="st">"行 1, 列 1"</span>;
+input.focus();
+
+<span class="cm">// E2E テスト・デバッグ用フック</span>
+(window <span class="kw">as unknown as</span> <span class="ty">Record</span>&lt;<span class="ty">string</span>, <span class="ty">unknown</span>&gt;).__editor = editor;</code></pre>
+
+    <p><code>editor.onDidChange(() =&gt; { … })</code> —— たったこれだけで、<strong>編集・移動・選択・Undo・ファイル差し替えのすべてに反応して</strong>ステータスバーが更新されます。理由は Step 2 で見たとおり、あらゆる状態変化の終点で <code>emit()</code> が呼ばれるから。ステータスバーは「いつ更新すればいいか」を<strong>いっさい考えなくていい</strong>。ただ「変わったら、いまの状態を読んで書き直す」だけ。これが Observer パターンの果実です。</p>
+    <p>コールバックの中身も素直です。プライマリカーソル（配列の末尾）の <code>head</code> を <code>doc.toPosition</code> で <code>{line, column}</code> に変換し（第02章の座標変換!）、<code>+1</code> して人間向けの「1始まり」で表示。選択の状態表示は3分岐 —— カーソルが複数なら「カーソル N 本」、単一で範囲があるなら「N 文字を選択」、ただのカーソルなら空。第00章 Step 2 で「オフセットは編集用、Position は表示用」と分けた設計が、ここで <code>toPosition</code> という1呼び出しに結実しています。</p>
+    <p>そして最後の1行 —— <code>(window as … ).__editor = editor</code>。これは<strong>E2E テスト用の裏口</strong>です。ブラウザを自動操作する Playwright（<code>e2e/smoke.mjs</code>）が、<code>window.__editor.getText()</code> のように司令塔へ<strong>直接手を伸ばして</strong>状態を検査できるようにしてあります。司令塔が DOM から独立しているので、こうしてグローバルに1個晒すだけで、実ブラウザ上での振る舞いまで機械検証できる。<strong>「DOM を知らない司令塔」という設計が、単体テストだけでなく E2E の足場にもなっている</strong>のです。</p>
+    <p>これで <code>main.ts</code> は全文です。そして本書の<strong>すべてのコード</strong>が、ここに集まりました。バッファも、行とカーソルも、Undo も、描画も、入力も、複数カーソルも、検索も、色も、日本語も —— 一本の <code>editor</code> に束ねられ、4行の <code>new</code> で結線され、ブラウザで動く mint editor になりました。</p>
+
+    <h2 class="step" id="step-9"><span class="step-no">Step 9</span>全テストを通す — 31 件が語る「DOM 非依存」の証明</h2>
+    <p>組み上がりました。最後に<strong>動かして確かめます</strong>。この章の主題「司令塔は DOM を知らないからテストできる」を、実際のテストで目視しましょう。<code>editor.test.ts</code> は司令塔 <code>Editor</code> を単体で <code>new</code> し、<strong>ブラウザなしで</strong> <code>31</code> 件を検証します。</p>
+
+    <div class="box do"><div class="box-k">▸ 動かして確認 — 司令塔の 31 件</div>
+      <p><code>editor.ts</code> は <code>558</code> 行の大きな司令塔ですが、DOM を1行も触らないので Node 上でそのまま回せます。次を実行してください。</p>
+      <pre class="term"><code><span class="ps">$</span> cd src
+<span class="ps">$</span> npx vitest run src/editor/editor.test.ts
+<span class="out">✓ src/editor/editor.test.ts (31 tests)
+   ✓ Editor 基本編集 &gt; タイプで挿入され、カーソルが進む
+   ✓ Editor 基本編集 &gt; 選択中のタイプは選択を置き換える
+   ✓ Editor 基本編集 &gt; Enter は前行のインデントを引き継ぐ
+   ✓ Editor 基本編集 &gt; 行頭の Backspace は前行と結合する
+   ✓ Editor 基本編集 &gt; Backspace はサロゲートペアを壊さない
+   ✓ Editor 基本編集 &gt; Delete は次の1文字を消す
+   ✓ Editor 基本編集 &gt; 選択範囲の直後に空カーソルがある Backspace で編集が重複しない
+   ✓ Editor 複数カーソル &gt; 複数カーソルで同時に挿入できる
+   ✓ Editor 複数カーソル &gt; 複数カーソルの Backspace で位置がずれない
+   ✓ Editor 複数カーソル &gt; selectNextOccurrence (Ctrl+D 相当)
+   ✓ Editor 複数カーソル &gt; 空カーソルの Ctrl+D は単語を選択する
+   ✓ Editor 複数カーソル &gt; selectAllOccurrences で全出現にカーソル
+   ✓ Editor 複数カーソル &gt; Esc で1本に畳む
+   ✓ Editor カーソル移動 &gt; 上下移動は目標桁を維持する
+   ✓ Editor カーソル移動 &gt; 文書端で破綻しない
+   ✓ Editor カーソル移動 &gt; Shift+移動で選択が伸びる
+   ✓ Editor カーソル移動 &gt; Home は非空白先頭と行頭をトグルする
+   ✓ Editor カーソル移動 &gt; 単語移動
+   ✓ Editor Undo / Redo &gt; 連続タイプは1回の undo で戻る
+   ✓ Editor Undo / Redo &gt; 時間が空くと undo が分かれる
+   ✓ Editor Undo / Redo &gt; 複数カーソル編集も1回で戻る
+   ✓ Editor Undo / Redo &gt; undo で選択位置も復元される
+   ✓ Editor 検索・置換 &gt; findNext が現在位置から次の一致へ
+   ✓ Editor 検索・置換 &gt; 末尾まで行くと先頭へ折り返す
+   ✓ Editor 検索・置換 &gt; replaceAll
+   ✓ Editor 検索・置換 &gt; replaceCurrent は一致を置換して次へ
+   ✓ Editor クリップボード &gt; 選択なしのコピーは行コピー
+   ✓ Editor クリップボード &gt; 行カットは行ごと消える
+   ✓ Editor クリップボード &gt; 最終行の行カットは空行を残さない
+   ✓ Editor クリップボード &gt; IME 相当の「選択削除 → 確定挿入」が Undo 1回で戻る
+   ✓ Editor クリップボード &gt; カーソル数と行数が一致する貼り付けは1行ずつ配る
+ Test Files  1 passed (1)
+      Tests  31 passed (31)</span></code></pre>
+      <p>この <code>31</code> 件が、本章の主題そのものです。<strong>キー入力も、マウスも、Canvas も、IME イベントも、いっさい登場しません。</strong> テストは <code>new Editor("hello")</code> と司令塔を素手で作り、<code>ed.insertText("X")</code>・<code>ed.backspace()</code>・<code>ed.selectNextOccurrence()</code>・<code>ed.undo()</code> のようにメソッドを直接叩き、<code>ed.getText()</code> と <code>ed.selections</code> で結果を確かめるだけ。<strong>司令塔が DOM を知らないから、ブラウザを一度も開かずに、エディタの頭脳を丸ごと検証できる</strong> —— 序章と第00章で立てた設計の約束が、ここで <code>31</code> 個の緑のチェックとして返ってきました。</p>
+    </div>
+
+    <p>特に味わい深いのが「Editor クリップボード &gt; IME 相当の『選択削除 → 確定挿入』が Undo 1回で戻る」です。第08章で作った日本語入力 —— compositionstart で選択を消し、compositionend で確定文字を <code>joinPrevious</code> で結合する —— という<strong>ブラウザ固有の IME イベント列を、DOM なしで <code>replaceSelections(() =&gt; "", "other")</code> と <code>insertText("こんにちは", true)</code> の2呼び出しに翻訳して再現</strong>しています。IME という最もブラウザ依存に見える機能ですら、司令塔のメソッド呼び出しに落とせるから、こうしてテストできる。DOM 非依存設計の射程の広さが、この1件に凝縮されています。</p>
+
+    <div class="box do"><div class="box-k">▸ 総仕上げ — 全 70 件・型チェック・E2E</div>
+      <p>本書の完走を、3つのコマンドで締めくくります。まず全単体テスト（core と司令塔、全 <code>70</code> 件）。</p>
+      <pre class="term"><code><span class="ps">$</span> npm test
+<span class="out"> Test Files  7 passed (7)
+      Tests  70 passed (70)</span></code></pre>
+      <p>次に型チェックとビルド。TypeScript の型が全ファイルで矛盾なく通り、本番用にバンドルできることを確かめます。</p>
+      <pre class="term"><code><span class="ps">$</span> npm run build
+<span class="out">vite v5.4.x building for production...
+✓ 18 modules transformed.
+dist/index.html                  0.41 kB
+dist/assets/index-CshRx1y6.css   2.50 kB
+dist/assets/index-HTB3Xk3f.js   41.30 kB
+✓ built in 251ms</span></code></pre>
+      <p>（パッチ版・ビルド時間・ファイル名のハッシュは環境で変わります。<code>tsc --noEmit</code> でエラーが出ず、<code>✓ built</code> が出れば成功です。）</p>
+      <p>最後に E2E スモークテスト。Playwright が<strong>実ブラウザで mint editor を開き</strong>、文字を打ち、複数カーソルで編集し、Undo する —— 受け入れ基準を実機でなぞります（Step 8 で晒した <code>window.__editor</code> が足場です）。</p>
+
+      <div class="box hazard"><div class="box-k">⚠ 落とし穴 — E2E は先に dev サーバを立てておく（ポートも決まっている）</div>
+        <p>これまでの <code>npm test</code> や <code>npm run build</code> と違い、<strong>E2E は「動いているエディタ」に外から接続するテスト</strong>です。相手がいなければ始まりません。しかも <code>e2e/smoke.mjs</code> は接続先を <strong><code>http://localhost:5199</code> に決め打ち</strong>しています——<code>npm run dev</code> の既定は <code>5173</code> 番なので、<strong>ふつうに dev を立ち上げただけでは繋がりません</strong>。</p>
+        <p>先に dev サーバを起動していないと、こうなります。</p>
+        <pre class="term"><code><span class="ps">$</span> node e2e/smoke.mjs
+<span class="out">page.goto: net::ERR_CONNECTION_REFUSED at http://localhost:5199/
+Call log:
+  - navigating to "http://localhost:5199/", waiting until "load"</span></code></pre>
+        <p><strong>正しい手順は「ターミナルを2枚使う」</strong>です。1枚目でポートを指定して dev サーバを立てっぱなしにし、2枚目で E2E を走らせます。</p>
+        <pre class="term"><code><span class="cm"># ターミナル1（立てっぱなしにする）</span>
+<span class="ps">$</span> npx vite --port 5199 --strictPort
+<span class="out">  ➜  Local:   http://localhost:5199/</span>
+
+<span class="cm"># ターミナル2</span>
+<span class="ps">$</span> node e2e/smoke.mjs</code></pre>
+        <p><code>--strictPort</code> は「5199 が埋まっていたら、勝手に別の番号にずらさず落ちる」という指定です。Vite は既定だと空いている番号へ黙って移ってしまい、E2E だけが繋がらない状態になる——それを防ぐための保険です。終わったらターミナル1で <code>Ctrl+C</code> して止めてください。</p>
+      </div>
+
+      <pre class="term"><code><span class="ps">$</span> node e2e/smoke.mjs
+<span class="out">基本編集:
+  ok - FR-02 文字入力
+  ok - FR-03 改行
+  ok - FR-05 カーソル移動
+  ok - FR-04 行頭 Backspace で行結合
+  ok - FR-06 Shift+移動で選択
+  ok - FR-06 選択の置換
+  ok - FR-07 複数カーソル一括編集
+  ok - FR-08 Undo（複数カーソルの入力が1回で戻る）
+  ok - FR-08 Redo
+  ok - FR-09 Ctrl+F で検索バー
+  ok - FR-09 一致件数の表示
+  ok - FR-09 全置換
+  ok - FR-11 変換中は未確定（バッファに入らない）
+  ok - FR-11 確定で1つの編集として挿入
+  ok - FR-11 確定文字列は Undo 1回で消える
+大容量:
+  ok - FR-13 10万行を開ける
+  ok - FR-13 中間位置での編集が即応 (144ms)
+  ok - FR-13 編集内容が正しい
+
+結果: 18 passed, 0 failed</span></code></pre>
+      <p>各行の <code>FR-xx</code> は要件定義（<code>editor_requirements.md</code>）の<strong>機能要件の番号</strong>です。つまりこの E2E は「作ると決めたことが、実機で全部できているか」を要件の並び順どおりに突き合わせている。<code>FR-13</code> の <code>(144ms)</code> のように<strong>実測値を出す項目</strong>もあり、10万行の文書の中間を編集しても応答が返ることを数字で押さえています（この数字は環境によって変わります）。</p>
+      <p><strong>単体（70）→ 型（build）→ E2E（実ブラウザ・18項目）</strong>の三層が緑になれば、mint editor は完成です。おめでとうございます。</p>
+    </div>
+
+    <h2>つまずき FAQ</h2>
+    <details class="qa"><summary><code>editor.ts</code> は <code>editor/</code> フォルダにあるのに「DOM 非依存」って矛盾していない?</summary>
+      <div class="qa-body"><p>フォルダの場所は「役割の分類」で、依存関係とは別物です。<code>editor.ts</code> は入力や描画と<strong>いっしょに使われる</strong>ので <code>editor/</code> に置かれていますが、中身は <code>document</code> も <code>window</code> も <code>canvas</code> も一切参照しません（import を見ても core の型と関数だけ）。証拠は <code>editor.test.ts</code> の <code>31</code> 件が Node 上で（ブラウザなしで）通ること。もし1行でも DOM に触れていたら、これらのテストは <code>document is not defined</code> で落ちます。「純粋ロジックを DOM から引き剥がす」は<strong>フォルダではなく import で判定する</strong>、と覚えてください。<code>core/</code> は徹底的に純粋、<code>editor.ts</code> は司令塔なので純粋、<code>view.ts</code>/<code>input.ts</code>/<code>fileio.ts</code>/<code>main.ts</code> が DOM に触る層です。</p></div>
+    </details>
+    <details class="qa"><summary>なぜ挿入・削除・貼り付け・置換で別々の後始末（履歴・色・通知）を書かなくていいの?</summary>
+      <div class="qa-body"><p>すべての編集が <code>applyUserEdits</code> という<strong>1本道</strong>に合流するからです（Step 2）。<code>replaceSelections</code> は各コマンドから「何を入れるか」だけを受け取って <code>Edit[]</code> を組み、最後に必ず <code>applyUserEdits</code> を呼びます。そこで「編集の適用 → 逆向きを履歴に push → 色の無効化 → <code>emit()</code> で通知」がまとめて実行される。だから新しい編集機能を足すときも、<code>replaceSelections</code> に <code>makeText</code> を渡すだけでよく、後始末は自動でついてきます。「共通の後始末を1か所に集める」——これは編集コマンドが増えても複雑さが増えない、本書の設計の背骨です。逆に言えば、<code>applyUserEdits</code> を通さずに <code>doc</code> を直接いじると履歴も通知も壊れるので、司令塔の外から <code>doc.applyEdits</code> を呼んではいけません。</p></div>
+    </details>
+    <details class="qa"><summary>File System Access API が無いブラウザだと、保存するたびにダウンロードフォルダにファイルが増えてしまう?</summary>
+      <div class="qa-body"><p>はい、フォールバック（③の <code>&lt;a download&gt;</code>）ではそうなります。これはブラウザのサンドボックス制約による<strong>本質的な限界</strong>で、Firefox / Safari には「開いたファイルに黙って上書きする」手段がそもそも与えられていません（セキュリティのため）。<code>fileio.ts</code> はこの現実を隠さず、「できる環境では最良（ネイティブ上書き）、できない環境では次善（ダウンロード）」という段階的縮退（graceful degradation）で対応しています。個人開発のツールとしては十分実用的で、もし全ブラウザで本物の上書きが要るなら、それは Web の限界なので Electron / Tauri のようなデスクトップ化を検討する領域です。本書のスコープは「ブラウザだけで完結する」なので、フォールバックまでを正解としています。</p></div>
+    </details>
+
+    <h2>理解度チェック</h2>
+    <p>本書最後の問いです。自分の言葉で答えられたら、mint editor はあなたのものです。</p>
+    <details class="qa"><summary>1. <code>Editor</code> が持つ3つの状態を挙げ、あらゆる編集コマンドがどんな共通の流れに落ちるか説明せよ。</summary>
+      <div class="qa-body"><p>3状態は <code>doc</code>（文書＝行とカーソルの計算＋裏の速いバッファ）、<code>selections</code>（<code>SelRange</code> の<strong>配列</strong>。複数なら複数カーソル）、<code>history</code>（Undo/Redo スタック）。共通の流れは、クラスコメントの4ステップ —— (1) 選択範囲から <code>Edit[]</code> を組み立て、(2) <code>doc.applyEdits</code> でまとめて適用し、(3) 新しい選択を計算し、(4) 逆向き編集を <code>history</code> に積む。実装上は <code>replaceSelections</code>（何を入れるかを <code>makeText</code> で受ける）→ <code>applyUserEdits</code>（適用・履歴 push・色の無効化・<code>emit</code> 通知）という2メソッドに集約され、挿入・削除・貼り付け・置換・IME 確定がすべてここを通る。</p></div>
+    </details>
+    <details class="qa"><summary>2. <code>fileio.ts</code> が「開く・保存」をどう二段（三段）構えにし、<code>OpenedFile.handle</code> がその要になる理由を述べよ。</summary>
+      <div class="qa-body"><p>開く（<code>openTextFile</code>）は、<code>hasNativeFilePicker()</code> が真なら File System Access API で <code>handle</code> ごと取得、偽なら <code>&lt;input type=file&gt;</code> で読み <code>handle: null</code>。保存（<code>saveTextFile</code>）は三段 —— ① <code>handle</code> があれば <code>createWritable</code> で<strong>静かに上書き</strong>、② 無くてもネイティブ API があれば <code>showSaveFilePicker</code> で「名前を付けて保存」し新しい <code>handle</code> を返す、③ どちらも無ければ <code>&lt;a download&gt;</code> でダウンロード。要は <code>handle</code> —— これが「上書きできる切符」であり、<code>null</code> かどうか1点で全分岐が決まる。開く→保存で <code>handle</code> を持ち回るから、初回ダウンロードが次回ネイティブ上書きに昇格し、権限失効時は <code>null</code> に戻して降格できる。ブラウザ間の断層を <code>handle</code> の有無に畳んだのが設計の核。</p></div>
+    </details>
+    <details class="qa"><summary>3. <code>editor.test.ts</code> の 31 件が「DOM を一度も使わずに」エディタの頭脳を検証できるのはなぜか。<code>main.ts</code> の4行の <code>new</code> と関連づけて説明せよ。</summary>
+      <div class="qa-body"><p><code>Editor</code> が DOM（<code>document</code>/<code>window</code>/<code>canvas</code>）を一切参照せず、状態と編集ロジックだけを持つ「純粋な司令塔」だから。テストは <code>new Editor(text)</code> と単独生成し、<code>insertText</code>/<code>backspace</code>/<code>undo</code> 等のメソッドを直接叩いて <code>getText()</code>・<code>selections</code> を検査するだけでよい。<code>main.ts</code> の4行（<code>new Editor</code> → <code>new EditorView(editor,…)</code> → <code>new InputHandler(editor,view,…)</code> → <code>new FindBar(editor)</code>）を見ると、依存の矢印がすべて <code>editor</code> へ向かい逆流しないことが分かる。司令塔は自分の購読者を <code>onDidChange</code> の関数配列としてしか知らず、ビューや入力を名指ししない。この一方通行の依存があるから、<code>editor</code> だけを切り離して Node 上でテストでき、実ブラウザ検証は <code>window.__editor</code> を1個晒すだけで済む。</p></div>
+    </details>
+
+    <h2>読み終えたあなたへ — mint editor と、10章の地図</h2>
+    <p>ここまで来ました。序章で引いた Feynman の言葉を、もう一度。</p>
+    <blockquote>
+      作れないものを、私は理解していない。
+      <cite>Richard Feynman</cite>
+    </blockquote>
+    <p>本書を開いたとき、テキストエディタは「使えるけれど、中で何が起きているかは説明できない」魔法でした。いまは違います。あなたは <code>&lt;canvas&gt;</code> と1本の文字列から始めて、約 2,600 行で本物のコードエディタを組み上げ、その一つひとつの手触りを<strong>自分のコードで説明できる</strong>ようになりました。カーソルが点滅し、キーで文字が生え、Enter で行が割れ、日本語の変換候補がカーソルの真下に浮かぶ —— あの当たり前の裏側は、もうあなたにとって魔法ではありません。</p>
+
+    <p>10章で積み上げてきたものを、下から一望しておきます。この地図こそ、あなたが手に入れた最大の資産です。</p>
+    <div class="ascii">読み終えた mint editor — 10 の層（下から積み上げた順）
+
+  09 組み立て   fileio(開く/保存) + editor(司令塔) + main(結線・UI)  ← 本章
+  ──────────────────────────────────────────────────────────
+  08 日本語      IME の composition を1回の編集に畳む
+  07 色をつける  字句解析 → 可視範囲だけ色分け
+  06 複数ｶｰｿﾙ    SelRange の配列 + 検索・置換
+  ──────────────────────────────────────────────────────────
+  05 入力を受ける キー/マウス/IME を編集メソッドへ翻訳（DOM 層）
+  04 画面に描く   可視範囲だけ Canvas に描く（10万行でも軽い）
+  ──────────────────────────────────────────────────────────
+  03 編集と取消   逆向き編集を積む Undo / Redo（時間でまとめる）
+  02 行とカーソル オフセット ⇄ (行,桁) の変換・applyEdits
+  01 テキスト保持 ピーステーブル（編集しても文字列を動かさない）
+  00 全体像       TextBuffer という「境界」を1本引く
+  ──────────────────────────────────────────────────────────
+       すべて &lt;canvas&gt; 1枚の上で、ライブラリなしに完結</div>
+
+    <p>この積み上げの全体を貫いていたのは、たった2つの設計作法でした。1つは <strong>「実装より先に境界（<code>interface</code>）を引く」</strong>。第00章の <code>TextBuffer</code> がそうで、おかげで遅い <code>SimpleBuffer</code> を速い <code>PieceTableBuffer</code> に、上の層を無傷のまま差し替えられました。もう1つは <strong>「純粋ロジックを DOM から引き剥がす」</strong>。<code>core/</code> と、そして本章で見た <code>editor.ts</code> の司令塔がそうで、おかげでエディタの頭脳を <code>70</code> 件のテストで —— ブラウザを一度も開かずに —— 見張り続けられました。境界と、純粋さ。複雑なものを一歩ずつ確実に積み上げる鍵は、突き詰めればこの2つだけです。</p>
+
+    <p>そして、この2つの作法は<strong>エディタ専用のものではありません</strong>。「上が本当に必要とする最小限を <code>interface</code> に書く」「外の世界（DOM・時刻・ファイル・ネットワーク）に触れるロジックと、触れない純粋なロジックを分ける」——これは、あなたが次に作るどんなソフトウェアにも効く普遍の道具です。本書で手を動かして体に入れたこの2つを、テキストエディタの外へ持ち出してください。それが、本書があなたに残したいちばんの土産です。</p>
+
+    <div class="box done"><div class="box-k">✓ 本書を完走したあなたが手にしたもの</div>
+      <ul>
+        <li><strong>動く mint editor 一式</strong> —— ライブラリなし・実装 約 2,600 行（テスト込み 約 3,300 行）。日本語 IME・複数カーソル・検索置換・Undo・シンタックスハイライト・10万行でも軽い仮想スクロールを、すべて自前で。</li>
+        <li><strong>10 層に分解されたエディタの地図</strong> —— どのエディタ（VSCode も含め）も、この4部品＋機能層でできていると説明できる目。</li>
+        <li><strong>2つの設計作法</strong> —— 「先に境界を引く」「純粋ロジックを引き剥がす」。エディタ以外にも効く、複雑さと戦う武器。</li>
+        <li><strong>70 件の単体テスト + E2E</strong> —— 正しさを目視でなく機械に見張らせる習慣と、そのための「テストできる設計」。</li>
+      </ul>
+    </div>
+
+    <h2>v1 で切ったもの — mint editor が「まだできないこと」</h2>
+    <p>完成を祝う前に、<strong>できないことを正確に知っておく</strong>のも同じくらい大事です。本書の mint editor には、意図的に切った機能がいくつもあります。「作れなかった」のではなく「<strong>v1 の範囲を守るために、後回しにすると決めた</strong>」もの。どれも、あなたが次に手をつける拡張の候補です。</p>
+
+    <table>
+      <tr><th>切ったもの</th><th>いまどうなるか</th><th>入れるならどこから</th></tr>
+      <tr>
+        <td><strong>行の折り返し</strong>（word wrap）</td>
+        <td>長い行は折り返さず、<strong>横スクロール</strong>で見る。実装に <code>wrap</code> の概念は1つも無い。</td>
+        <td>「1論理行 = 1表示行」という前提が第04章の描画・第02章の座標変換の全体に染みているので、最も重い改修。<code>lineAt</code> と可視範囲の計算から。</td>
+      </tr>
+      <tr>
+        <td><strong>タブストップ</strong></td>
+        <td><code>Tab</code> キーは<strong>スペース2つ</strong>を挿入（<code>insertTab</code>）。既存ファイル中の <code>\t</code> は<strong>常に幅4</strong>で描く（<code>tabSize = 4</code>）。本物のタブストップ（「次の4の倍数の桁まで」）ではない。</td>
+        <td><code>metrics.ts</code> の <code>charWidth</code> は文字単体しか見ないので、「行頭からの桁」を渡せる形に変える必要がある。</td>
+      </tr>
+      <tr>
+        <td><strong>置換の <code>$1</code> 参照</strong></td>
+        <td>正規表現で検索はできるが、置換文字列の <code>$1</code> は<strong>ただの文字</strong>として入る（第06章の落とし穴ボックス）。</td>
+        <td><code>Match</code> に捕獲グループを持たせるところから（第06章）。</td>
+      </tr>
+      <tr>
+        <td><strong>ピーステーブルのコンパクション</strong></td>
+        <td>ピース配列そのものは削除で減る（消した範囲は <code>splice</code> で取り除かれる）。減らないのは <strong><code>added</code> バッファ</strong>のほう —— <strong>一度打った文字は、あとで消しても文字列から取り除かれない</strong>。打っては消しを繰り返すと、実際の文書は短いのに <code>added</code> だけが伸び続ける。</td>
+        <td>「ピース数か <code>added</code> の長さが閾値を超えたら、<code>getText()</code> の結果で作り直す」が最も素朴な手（ピース1個・<code>added</code> 空の状態に戻る）。第01章の実装ノートの宿題。</td>
+      </tr>
+      <tr>
+        <td><strong>色付けの初回コスト</strong></td>
+        <td>10万行の末尾へ<strong>一気に</strong>飛ぶと、0行目からトークナイズするので初回だけ<strong>約115ms</strong>（第07章 FAQ）。2回目以降は 0ms。</td>
+        <td>行の状態を間引いて保存し（例: 100行ごとにチェックポイント）、そこから再開する。</td>
+      </tr>
+      <tr>
+        <td><strong>複数カーソル + IME の描画</strong></td>
+        <td>同じ行に複数カーソルがある状態で日本語変換すると、<strong>2本目以降のカーソルの描画位置</strong>が、手前のカーソルの未確定文字列の幅ぶんずれる。<strong>確定した結果そのものは正しい</strong>（ずれるのは変換中の見た目だけ）。</td>
+        <td>第04章に<strong>不揃いが1組ある</strong>。文字を描く <code>renderComposingLine</code> は <code>shift</code> 変数で「手前に差し込んだぶん」を累積して桁を補正するのに、<strong>カーソルを描くループ</strong>（<code>render</code> 内）は <code>text.slice(0, pos.column) + composition.text</code> と<strong>自分の1本ぶんしか足していない</strong>。カーソル側にも同じ累積補正を入れれば揃う。</td>
+      </tr>
+    </table>
+
+    <p>この表は<strong>言い訳ではなく、地図</strong>です。それぞれ「なぜ切ったか」と「どこから手をつけるか」が言えるのは、あなたが全10層を自分で組んだからこそ。使うだけの人には、この一覧は書けません。</p>
+
+    <p>本書はここで終わりますが、mint editor はここからが始まりです。手元のコードは、あなたの実験場です。上の表の6つでもいいし、行番号の表示、括弧の対応ハイライト、簡単な自動補完、別の言語のシンタックス、テーマの切り替え、ミニマップ —— 足したい機能があれば、まず「どこに境界を引くか」を考え、「純粋ロジックとして書けるか」を問い、テストを1件足してから実装する。本書で何度も繰り返したこのリズムで、あなたはもう自分の力でエディタを育てられます。</p>
+    <p>最後に、序章の一文をもう一度あなたへ返します。<strong>エディタは、魔法ではない。</strong> あなたが、その裏側を作りきったのですから。お疲れさまでした。そして、ようこそ —— 作って理解する側へ。</p>
+
+    <div class="chap-foot">
+      <a class="pager" href="08-ime.html"><span class="dir">← 前へ</span>第08章 · 日本語を打つ</a>
+      <a class="pager next" href="index.html"><span class="dir">最初に戻る ↺</span>序章 · はじめに・準備</a>
+    </div>
+  </main>
+</div>
+</body>
+</html>

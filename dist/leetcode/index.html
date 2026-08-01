@@ -1,0 +1,329 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>手を動かして作るオンラインジャッジ — はじめに・準備</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500;600&family=Source+Serif+4:opsz,wght@8..60,400;8..60,600;8..60,700&family=Noto+Serif+JP:wght@400;600;700&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<div class="shell">
+
+  <aside class="spine">
+    <a class="wordmark" href="index.html">JUDGE · from scratch</a>
+    <div class="book-title">手を動かして作る<br>オンラインジャッジ</div>
+    <div class="book-sub">Go で サンドボックスから Web まで</div>
+
+    <div class="legend"><span>読む <b>↓</b></span><span>組む <b>↑</b></span></div>
+
+    <nav aria-label="目次">
+      <ul class="toc">
+        <li><a class="nav-item current" aria-current="page" href="index.html"><span class="nav-num">序</span><span class="nav-label">はじめに・準備<span class="nav-tag">Setup</span></span></a></li>
+        <li><a class="nav-item" href="00-smallest.html"><span class="nav-num">00</span><span class="nav-label">いちばん小さいジャッジ<span class="nav-tag">Judge</span></span></a></li>
+        <li><a class="nav-item" href="01-process.html"><span class="nav-num">01</span><span class="nav-label">プロセスと標準入出力<span class="nav-tag">IO</span></span></a></li>
+        <li><a class="nav-item" href="02-verdict.html"><span class="nav-num">02</span><span class="nav-label">verdict — 判定の種類<span class="nav-tag">Verdict</span></span></a></li>
+        <li><a class="nav-item" href="03-threat.html"><span class="nav-num">03</span><span class="nav-label">なぜ他人のコードは危険か<span class="nav-tag">Threat</span></span></a></li>
+        <li><a class="nav-item" href="04-sandbox.html"><span class="nav-num">04</span><span class="nav-label">コンテナに閉じ込める<span class="nav-tag">Sandbox</span></span></a></li>
+        <li><a class="nav-item" href="05-limits.html"><span class="nav-num">05</span><span class="nav-label">時間とメモリを断ち切る<span class="nav-tag">Limits</span></span></a></li>
+        <li><a class="nav-item" href="06-lang.html"><span class="nav-num">06</span><span class="nav-label">いろんな言語で<span class="nav-tag">Lang</span></span></a></li>
+        <li><a class="nav-item" href="07-store.html"><span class="nav-num">07</span><span class="nav-label">問題とテストケースを持つ<span class="nav-tag">Store</span></span></a></li>
+        <li><a class="nav-item" href="08-queue.html"><span class="nav-num">08</span><span class="nav-label">提出を「あとで」捌く<span class="nav-tag">Queue</span></span></a></li>
+        <li><a class="nav-item" href="09-web.html"><span class="nav-num">09</span><span class="nav-label">画面をつける<span class="nav-tag">Web</span></span></a></li>
+      </ul>
+    </nav>
+
+    <div class="spine-foot">
+      各章は「実行の心臓部」から<br>始めて「Web」へ登る。<br>下（採点の核）から上（画面）へ<br>積み上げて動かしていく。
+    </div>
+  </aside>
+
+  <main class="reading">
+    <div class="eyebrow"><span>序章</span><span class="depth">— はじめに・準備</span></div>
+    <h1>「採点」は、魔法ではない</h1>
+    <p class="lede">LeetCode でコードを提出すると、数秒後に <strong>Accepted</strong> の緑が返る。あの一瞬の裏で、誰のものとも知れないコードが、どこかで安全に走らされ、出力を比べられ、時間とメモリを測られている。その仕組みを、動くコードを一歩ずつ追いながら、Go で自分の手で組み上げていく本です。</p>
+
+    <p>オンラインジャッジを「使う」ことはできても、「中で何が起きているか」を説明できる人は多くありません。提出コードの隔離実行、時間・メモリの制限、複数言語の実行系、非同期のジョブ処理。言葉は知っていても、実際に動くものを一度も作ったことがなければ、それはまだ理解ではなく暗記です。</p>
+
+    <p>この本の方針はひとつです。<strong>作って理解する。</strong> 既存のジャッジ基盤（Judge0 のような）は使いません。「提出された文字列を実行して、出力を期待値と比べる」という採点の芯から始めて、その上に少しずつ層を積み上げ、最後には Web の画面から Go / JavaScript / TypeScript / SQL のコードを提出すると、隔離された Docker コンテナで採点され、<code>AC</code> / <code>WA</code> / <code>TLE</code> が返ってくる、小さいけれど本物のオンラインジャッジを組み上げます。</p>
+
+    <blockquote>
+      作れないものを、私は理解していない。
+      <cite>Richard Feynman</cite>
+    </blockquote>
+
+    <h2>オンラインジャッジとは何か — 3行で</h2>
+    <p>先に、これから作るものの正体を短く言い切っておきます。</p>
+    <ul>
+      <li>オンラインジャッジは <strong>提出 → 隔離実行 → 採点 → verdict</strong> の4拍子です。ユーザーの書いたコードを受け取り、それを安全な場所で走らせ、出力を期待値と比べ、<code>AC</code>（正解）や <code>WA</code>（不正解）といった<strong>判定</strong>を返します。</li>
+      <li>採点の芯は <strong>「実行して、出力を比較する」</strong>だけです。提出コードの標準出力が期待出力と一致すれば <code>AC</code>、違えば <code>WA</code>。本書はまずこの芯（第00章）を Docker 抜きで取り出し、そこから隔離・制限・言語・Web へ広げます。</li>
+      <li>いちばん難しいのは <strong>「他人のコードは敵だと思って走らせる」</strong>ことです。提出コードは無限ループするかもしれないし、ファイルを消そうとするかもしれない。だから実行は必ず<strong>サンドボックス</strong>（Docker コンテナ）に閉じ込めます（第03〜05章）。</li>
+    </ul>
+    <p>この3行を「自分の書いたコードで説明できる」状態が、本書のゴールです。</p>
+
+    <h2>この本の読み方</h2>
+    <p>章は、そのままオンラインジャッジの<strong>機能の層</strong>に対応しています。左の目次を見てください。一番下が「実行の心臓部（採点の核）」、その上に「サンドボックス」、さらに「DB（問題とテストケース）」が乗り、一番上に「Web（画面）」が来ます。<strong>組むときは下から上へ</strong>。採点の芯がないうちに画面だけ作っても、緑の <code>AC</code> は出せません。</p>
+
+    <div class="ascii">オンラインジャッジの全体像 — 実行の核から Web まで
+
+  ┌──────────────────────────────────────────────┐
+  │ 09 Web            問題を選ぶ・書く・提出する画面 │ ← 第09章
+  ├──────────────────────────────────────────────┤
+  │ 08 Queue          提出を非同期に捌くジョブキュー │ ← 第08章
+  ├──────────────────────────────────────────────┤
+  │ 07 Store          問題・テストケース・履歴（DB） │ ← 第07章
+  ├──────────────────────────────────────────────┤
+  │ 04-06 Sandbox     Docker 隔離・時間/メモリ制限   │ ← 第04〜06章
+  │                   複数言語（Go / JS / TS / SQL） │
+  ├──────────────────────────────────────────────┤
+  │ 00-02 Judge       実行して出力を比較し verdict   │ ← 第00〜02章
+  │                   （採点の心臓部・Docker 抜き）  │
+  └──────────────────────────────────────────────┘
+                    ▼
+              1 個の Go プロセス（+ Docker Desktop）</div>
+
+    <p>各章は<strong>ステップ</strong>に分かれています。1ステップ = 「コードを1かたまり書いて（読んで）、動かして、確認する」の単位です。ステップごとに次のものが必ずあります。</p>
+
+    <ul>
+      <li><strong>コードの全文</strong> — 断片ではなく、その時点で必要なコードすべてを載せます。本書のコードはリポジトリの <code>backend/</code> にある完成版と一致しています。</li>
+      <li><strong>コードの解説</strong> — 初見でつまずきやすい行は、取り出して説明します。</li>
+      <li><strong>動かして確認</strong> — 実際に打つコマンドと、出るはずの出力。「読んだだけ」で先に進まないための関所です。</li>
+    </ul>
+
+    <p>章末には<strong>つまずき FAQ</strong> と<strong>理解度チェック</strong>があります。理解度チェックの問いに自分の言葉で答えられたら、その章は卒業です。</p>
+
+    <div class="box map"><div class="box-k">☰ 進め方は2通り</div>
+      <ol>
+        <li><strong>読む派</strong> — <code>backend/</code> の完成コードをエディタで開き、本書を横に置いて読み進め、各ステップの「動かして確認」を実行する。<em>初心者にはこちらをおすすめします。</em></li>
+        <li><strong>写経派</strong> — 空の Go モジュールを自分で作り、本書のコードを手で打ちながら組み上げる。時間はかかりますが、いちばん力がつきます。動かなくなったら <code>backend/</code> と差分を見比べれば復帰できます。</li>
+      </ol>
+    </div>
+
+    <h2>前提と、かかる時間</h2>
+    <p>必要なのは <strong>Go の基礎文法</strong>（変数・関数・構造体・スライス・マップ・<code>if err != nil</code>）、<strong>Docker の基本</strong>（<code>docker run</code> でコンテナを1つ起動できる程度）、そして<strong>ターミナル操作</strong>です。ジャッジ内部の予備知識はまったく要りません。むしろ「知らない」状態から作った方が、一つひとつの概念が腑に落ちます。</p>
+    <p>Go の中でも本書で多用する道具（<code>os/exec</code> でプロセスを起動する、<code>context</code> で締め切りを渡す、goroutine でジョブを捌く、Docker にファイルを <code>tar</code> で渡す）は、この序章の「Go とツールの予備知識」でまとめて解説し、各章でも初出のたびに <strong>GO メモ</strong>というボックスで補足します。分からない道具が出てきたら、まずそこを見てください。</p>
+    <p><strong>Go の外に出るのは2箇所だけです。</strong> 第07章で <strong>SQL</strong>（データベースに指示を出す言語）を、最終章の第09章で <strong>React + TypeScript</strong>（画面を組む道具）を使います。どちらも<strong>読者に求めるのは「既にあるコードを読むこと」だけ</strong>で、自分で設計する必要はありません。必要になる最小限は、第09章ぶんを下の道具箱に、第07章ぶんをその章の「SQL メモ」に用意してあるので、<strong>SQL も React も初めてで構いません。Go だけを知っている状態から始められます。</strong></p>
+    <p>読了目安は、読む派で <strong>1章あたり2〜3.5時間、全体で22〜38時間</strong>（第09章はフロントが初めてなら4〜5時間見てください）。1日1ステップでも1〜2ヶ月で完走できます。急がないこと。1章飛ばすと次の章は必ず分からなくなる構成なので、<strong>順番に、確認コマンドを全部通しながら</strong>進んでください。</p>
+
+    <h2>環境構築</h2>
+    <p>やることは6つです。Go を入れ、Docker Desktop を入れて起動し、Node.js を入れ、コードを手元に置き、テストが通ることを確かめ、最後に<strong>ジャッジイメージとフロントをビルド</strong>します。第04章以降の隔離実行には <strong>Docker Desktop の起動が必須</strong>です（無いと採点そのものができません）。</p>
+    <p><strong>ただし、6つ全部を今すぐ揃える必要はありません。</strong> 本書は下の層から積むので、必要になる時期がずれています。</p>
+    <div class="ascii">どこまで進めるのに、何が要るか
+  ┌──────────────┬────────────────────────────────────┐
+  │ 第00〜03章   │ Go だけ（採点の芯・脅威モデル）    │ ← 1 だけで足りる
+  │ 第04〜08章   │ + Docker Desktop + ジャッジイメージ│ ← 2・6a が要る
+  │ 第09章       │ + Node.js + フロントのビルド       │ ← 3・6b が要る
+  └──────────────┴────────────────────────────────────┘
+  「おまけ: 完成品を先に触る」だけは、最初から全部が要ります。</div>
+
+    <h3>1. Go をインストールする</h3>
+    <p><a href="https://go.dev/dl/" target="_blank" rel="noopener">go.dev/dl</a> から自分の OS 用のインストーラを入れて、ターミナルで確認します。本書のコード（<code>backend/go.mod</code>）は <strong>Go 1.26 以上</strong>を要求します。</p>
+    <pre class="term"><code><span class="ps">$</span> go version
+<span class="out">go version go1.26.0 windows/amd64</span></code></pre>
+
+    <h3>2. Docker Desktop を入れて、起動しておく</h3>
+    <p>提出コードは<strong>信頼できない他人のコード</strong>として扱います（後述）。それを安全に走らせる檻が Docker です。<a href="https://www.docker.com/products/docker-desktop/" target="_blank" rel="noopener">Docker Desktop</a> を入れ、<strong>起動しておいてください</strong>。クジラのアイコンが「Running」になっていれば準備完了です。疎通を確認します。</p>
+    <pre class="term"><code><span class="ps">$</span> docker run --rm hello-world
+<span class="out">Hello from Docker!
+This message shows that your installation appears to be working correctly.</span></code></pre>
+
+    <div class="box hazard"><div class="box-k">⚠ 落とし穴 — Docker が起動していないと採点できない</div>
+      <p>第04章以降、採点は毎回 <code>docker run</code> でコンテナを起動して行います。<strong>Docker Desktop が起動していないと、ジャッジは動きません</strong>。本書のバックエンドは<strong>起動時に</strong> Docker の疎通を確認し、不通なら <code>警告: Docker に接続できません。ジャッジは動作しません</code> というログを出します。起動の瞬間から黙って IE を返し続ける、ということはしません。うまく採点されないときは、まずクジラのアイコンが「Running」かを疑ってください。なお第00〜03章は Docker を使わずに「採点の芯」だけを扱うので、そこまでは Docker なしでも読み進められます。</p>
+    </div>
+
+    <h3>3. Node.js を入れる（第09章のフロント用）</h3>
+    <p>最終章（第09章）で作る Web 画面は React + TypeScript で書かれていて、ブラウザに配る形（HTML・JS・CSS）に<strong>ビルドする</strong>のに Node.js が要ります。<strong>第08章までは一切使わないので、後回しにしても構いません</strong>——ただし後述の「完成品を先に触ってみる」をやるなら、ここで入れておいてください。</p>
+    <pre class="term"><code><span class="ps">$</span> node --version
+<span class="out">v22.21.1</span>
+<span class="ps">$</span> npm --version
+<span class="out">11.6.0</span></code></pre>
+    <p><strong>Node 22 以上</strong>を想定しています（ジャッジ用の実行イメージも <code>node:22</code> を使うので、手元と揃えておくと余計な差で悩みません）。<code>npm</code> は Node.js に同梱されるので、別途入れる必要はありません。</p>
+
+    <h3>4. コードを手元に置く</h3>
+    <p>本書のコード一式はリポジトリの <code>backend/</code>（Go バックエンド）と <code>frontend/</code>（Web 画面）です。以後、<strong>本書の Go コマンドはすべて <code>backend/</code> の中で実行します</strong>。Redis クローンのような単一パッケージ <code>main</code> の平らな構成とは違い、本書のバックエンドは<strong>役割ごとにパッケージを分けた入れ子構成</strong>（<code>internal/judge</code> / <code>internal/store</code> / <code>internal/api</code>）です。ジャッジという主題そのものが「採点・保存・配信」という独立した関心事に分かれるためで、この分割自体が設計の学びになります。</p>
+    <div class="ascii">backend/
+├── go.mod                       ← Go モジュール定義
+├── cmd/server/main.go           ← 起動（HTTP サーバ + ワーカー）
+└── internal/
+    ├── judge/                   ← 採点の心臓部（第00〜06・08章）
+    │   ├── verdict.go           ← 7種の verdict（第00章）
+    │   ├── compare.go           ← 出力比較・正規化（第00章）
+    │   ├── judge.go             ← JudgeSubmission / decideCase（第00章〜）
+    │   ├── protocol.go          ← コンテナとの受け渡しプロトコル（第04章）
+    │   ├── sandbox.go           ← Docker 隔離実行（第04章）
+    │   ├── lang.go              ← 言語ごとの実行仕様（第06章）
+    │   └── worker.go            ← 提出を捌くジョブキュー（第08章）
+    ├── store/                   ← 問題・テストケース・提出履歴（第07章）
+    │   ├── models.go            ← Problem / Testcase / Submission
+    │   └── ...
+    └── api/                     ← HTTP ハンドラ（第09章）
+        └── api.go</div>
+
+    <div class="gonote"><div class="box-k">GO メモ · internal パッケージと入れ子構成</div>
+      <p>Go で <code>internal/</code> という名前のディレクトリは特別で、<strong>その1つ上の階層のコードからしか import できません</strong>。<code>backend/internal/judge</code> は <code>backend/</code> 配下（<code>cmd/server</code> など）からは使えますが、外のモジュールからは触れません。「この基盤の外に公開する API ではない、内部実装だ」という意思表示です。<br>
+      パッケージが分かれると、あるパッケージの関数を別のパッケージから呼ぶには <code>store.Problem</code> のように<strong>パッケージ名で修飾</strong>し、大文字始まりの名前（エクスポートされたもの）だけが見えます。本書で <code>judge.go</code> が <code>store.Problem</code> を受け取るのはこのためです。Redis 版が全部を1つの <code>main</code> に置いていたのと対照的に、こちらは関心事の境界を型とパッケージで引いています。</p>
+    </div>
+
+    <h3>5. テストが通ることを確かめる</h3>
+    <pre class="term"><code><span class="ps">$</span> cd backend
+<span class="ps">$</span> go test ./... -count=1
+<span class="out">?       judge/cmd/server        [no test files]
+?       judge/internal/api      [no test files]
+ok      judge/internal/judge    0.412s
+?       judge/internal/store    [no test files]</span></code></pre>
+    <p><code>internal/judge</code> が <code>ok</code> になれば準備完了です（テストが置いてあるのはこのパッケージだけなので、他は <code>[no test files]</code> と出ます）。このテスト群は、ジャッジの核ロジック（出力の比較・受け渡しプロトコル）を機械的に検収するものです。これらは Docker 不要で通るので、まずここが緑になることを確認してください。</p>
+
+    <h3>6. ジャッジイメージとフロントをビルドする</h3>
+    <p>ここまでは「材料を置いた」だけです。実際に採点を動かすには、あと2つビルドが要ります。<strong>どちらもリポジトリには入っていない</strong>（各自の環境で作るもの）ので、忘れると後で静かに詰まります。</p>
+
+    <p><strong>6a. ジャッジイメージ（第04章以降で必要）</strong>——提出コードを閉じ込める檻そのものです。Go / Node / SQL の3つを作ります。</p>
+    <pre class="term"><code><span class="cm"># PowerShell 5.1 では && が使えないので2行に分ける</span>
+<span class="ps">$</span> cd images
+<span class="ps">$</span> ./build.ps1
+<span class="out">done: judge-go / judge-node / judge-sql</span>
+<span class="cm"># 3つ揃ったか確認（並び順は環境により異なります）</span>
+<span class="ps">$</span> docker images --format "{{.Repository}}" | findstr judge
+<span class="out">judge-sql
+judge-node
+judge-go</span></code></pre>
+    <p>初回は Go のコンパイル環境などを取り込むので<strong>数分かかります</strong>。<code>judge-go</code> / <code>judge-node</code> / <code>judge-sql</code> の<strong>3つが揃っていること</strong>だけ確認できれば十分です。中身（Dockerfile とランナースクリプト）は第04〜06章で1行ずつ読むので、いまは「檻を3種類焼いた」とだけ捉えてください。</p>
+
+    <p><strong>6b. フロント（第09章で必要）</strong>——React で書かれた画面を、ブラウザに配れる形に変換します。<code>npm install</code> は<strong>初回だけ</strong>必要です（<code>node_modules/</code> を作る）。</p>
+    <pre class="term"><code><span class="ps">$</span> cd frontend
+<span class="ps">$</span> npm install       <span class="cm"># 初回のみ。依存パッケージを入れる</span>
+<span class="ps">$</span> npm run build     <span class="cm"># frontend/dist/ を生成する</span>
+<span class="out">vite v6.4.3 building for production...
+✓ 71 modules transformed.
+dist/index.html                   0.40 kB
+dist/assets/index-*.css           4.00 kB
+dist/assets/index-*.js          789.70 kB
+✓ built in 4.16s</span></code></pre>
+
+    <div class="box hazard"><div class="box-k">⚠ 落とし穴 — <code>frontend/dist/</code> が無いと、画面は「404」になる</div>
+      <p>Go のサーバは <code>frontend/dist/</code> の中身を静的配信します（第09章）。この <code>dist/</code> は <code>npm run build</code> で<strong>初めて生成される</strong>ディレクトリで、リポジトリには含まれていません。ビルドせずにサーバを起動すると、<strong>起動ログは何事もなく正常に出る</strong>のに、ブラウザで開くと <code>404 page not found</code> だけが返ります。</p>
+      <pre class="term"><code><span class="ps">$</span> go run ./cmd/server
+<span class="out">listening on http://127.0.0.1:8080</span>   <span class="cm">← 警告は何も出ない</span>
+<span class="cm"># ブラウザで開くと…</span>
+<span class="out">404 page not found</span>                  <span class="cm">← dist/ が無い</span></code></pre>
+      <p><strong>エラーメッセージが原因を教えてくれない</strong>ので、知らないと確実にハマります。「API は動いていそうなのに画面が真っ白／404」のときは、まず <code>frontend/dist/</code> があるかを疑ってください。同じ落とし穴は第09章 Step 6 でもう一度、静的配信の仕組みとあわせて扱います。</p>
+    </div>
+
+    <h3>おまけ: 完成品を先に触ってみる</h3>
+    <p>これから作るものの完成形を、先に触っておきましょう。ゴールを知ってから登る山は、迷いません。<strong>ここまでの1〜6（とくに 6a のイメージと 6b の <code>dist/</code>）を済ませ、Docker Desktop を起動した状態で</strong>、バックエンドを立ち上げ、ブラウザで問題を開き、<strong>正答コードを提出</strong>すると <code>AC</code> が返ります。</p>
+    <pre class="term"><code><span class="cm"># backend を起動（HTTP + ジャッジワーカー、フロントも静的配信）</span>
+<span class="ps">$</span> cd backend
+<span class="ps">$</span> go run ./cmd/server
+<span class="out">listening on http://127.0.0.1:8080</span>
+
+<span class="cm"># ブラウザで http://127.0.0.1:8080 を開く</span>
+<span class="cm"># 「2数の和」を選び、Go を選択してエディタにこう書いて提出:</span></code></pre>
+    <p>起動ログはこの1行だけです。Docker が正常なら余計な出力は出ません。逆に言えば、<strong>準備が足りないときは起動時に警告が出ます</strong>——ここが「後から静かに <code>IE</code> が返り続ける」のを防ぐ関所になっています（第04章 Step 7 で実装を読みます）。</p>
+    <pre class="term"><code><span class="cm"># Docker Desktop を起動し忘れた場合</span>
+<span class="out">警告: Docker に接続できません。ジャッジは動作しません: docker not reachable: ...</span>
+<span class="out">listening on http://127.0.0.1:8080</span>
+
+<span class="cm"># Docker は動いているが、6a のイメージビルドを忘れた場合</span>
+<span class="out">警告: ジャッジイメージ judge-go がありません。images/ でビルドしてください (build.ps1)</span>
+<span class="out">listening on http://127.0.0.1:8080</span></code></pre>
+    <p>どちらの場合もサーバ自体は起動します（画面は見えます）が、<strong>提出すると採点できず <code>IE</code> になります</strong>。この2つの警告が出ていないことを確かめてから、次に進んでください。なお <code>frontend/dist/</code> の欠落だけは<strong>警告が出ない</strong>ので（サーバは静的配信の中身を起動時に検査しません）、上の落とし穴のとおり自分で確認する必要があります。</p>
+    <pre><code><span class="kw">package</span> main
+
+<span class="kw">import</span> <span class="st">"fmt"</span>
+
+<span class="kw">func</span> main() {
+	<span class="kw">var</span> a, b <span class="ty">int</span>
+	fmt.Scan(&amp;a, &amp;b)
+	fmt.Println(a + b)
+}</code></pre>
+    <p>提出すると画面はまず「採点中」になり、数秒後に各テストケースの緑が並び、提出全体の verdict が <strong><code>AC</code></strong> に変わります。この本はこれから10章かけて、この一連の流れ — コードが隔離環境で走り、出力が比べられ、緑が返るまで — の一つひとつを、自分のコードで説明できるようになるまで潜っていきます。</p>
+
+    <h2>Go とツールの予備知識 — 本書で使う道具箱</h2>
+    <p>オンラインジャッジの実装は「他人のプロセスを起動し、締め切りで打ち切り、<strong>どう死んだかを終了コードで読み取り</strong>、コンテナに閉じ込める」世界です。最初にまとめて顔合わせしておきます。<strong>いま全部を覚える必要はありません。</strong>各章で出てきたときに、ここへ戻って確認できれば十分です。最後の1項目（React / TypeScript）だけは第09章まで出番がないので、いまは飛ばして構いません。</p>
+
+    <h3>string の比較 — 採点のいちばん芯</h3>
+    <p>驚くかもしれませんが、採点の芯は Go の <code>==</code> です。提出コードの標準出力（文字列）と、期待出力（文字列）を比べ、等しければ正解。第00章はまさにこの <code>==</code> の周りに、実務で必要な「正規化」を1枚だけ被せる話です。</p>
+    <pre><code>actual := <span class="st">"8\n"</span>       <span class="cm">// 提出コードが出した標準出力</span>
+expected := <span class="st">"8\n"</span>     <span class="cm">// 問題に登録された期待出力</span>
+ok := actual == expected  <span class="cm">// これが AC / WA のいちばん芯</span></code></pre>
+    <p>ただし現実には「末尾の改行が1つ多い」「行末に空白がある」だけで <code>==</code> は <code>false</code> になります。人間の目には同じでも機械には別物。この落差を埋めるのが第00章の <code>normalizeOutput</code> です。</p>
+
+    <h3>os/exec — 他人のプロセスを起動する</h3>
+    <p>ジャッジは結局「提出コードを別プロセスとして走らせ、標準入力を流し込み、標準出力を受け取る」ことに尽きます。Go でこれを担うのが <code>os/exec</code> です。</p>
+    <pre><code>cmd := exec.Command(<span class="st">"./solution"</span>)   <span class="cm">// 起動するプログラム</span>
+cmd.Stdin = strings.NewReader(input)  <span class="cm">// テストケースの入力を stdin へ</span>
+out, err := cmd.Output()              <span class="cm">// 標準出力を受け取る</span></code></pre>
+    <p>本書では最終的に、この <code>exec.Command</code> の相手を<strong>「提出コードそのもの」ではなく「提出コードを中で走らせる <code>docker run</code>」</strong>に差し替えます（第04章）。そうすることで、危険なコードをホストから隔離したコンテナの中に閉じ込めます。第01章では、まず檻なしで <code>os/exec</code> の素振りをして「プロセスと標準入出力」の感触を掴みます。</p>
+
+    <h3>context.Context — 締め切りを渡す</h3>
+    <p>提出コードは無限ループするかもしれません。だからジャッジは「N 秒経ったら問答無用で打ち切る」仕組みが要ります。Go では <code>context.Context</code> に締め切りを持たせて渡すのが定石です。</p>
+    <pre><code>ctx, cancel := context.WithTimeout(ctx, <span class="st">2</span>*time.Second)
+<span class="kw">defer</span> cancel()
+cmd := exec.CommandContext(ctx, <span class="st">"docker"</span>, <span class="st">"run"</span>, ...) <span class="cm">// ctx が切れたら kill</span></code></pre>
+    <p><code>exec.CommandContext</code> は「<code>ctx</code> が締め切りに達したら、そのプロセスを自動で殺す」を保証します。TLE（時間超過）判定の土台の一つがこれです。第00章で登場する <code>JudgeSubmission(ctx context.Context, ...)</code> の第一引数がこの <code>ctx</code> で、いまは「締め切りや中断を運ぶ管」とだけ捉えておけば十分です。</p>
+
+    <h3>goroutine — 提出を「あとで」捌く</h3>
+    <p>採点には数秒かかります。ユーザーを画面の前で待たせないため、提出は<strong>いったん受け付けて即座に「採点中」を返し、裏で採点する</strong>（非同期）。Go でこの「裏で」を担うのが goroutine です。</p>
+    <pre><code>jobs := <span class="kw">make</span>(<span class="kw">chan</span> Job, <span class="st">100</span>) <span class="cm">// 提出を並べるキュー</span>
+<span class="kw">go</span> <span class="kw">func</span>() {                    <span class="cm">// ワーカー goroutine</span>
+	<span class="kw">for</span> job := <span class="kw">range</span> jobs {
+		judge(job)             <span class="cm">// 1件ずつ採点</span>
+	}
+}()</code></pre>
+    <p>キュー（<code>chan</code>）に提出を積み、別の goroutine が1件ずつ取り出して採点する。この「受け付けと採点の分離」が非同期処理の骨格で、第08章でじっくり作ります。</p>
+
+    <h3>Docker の docker run と、tar でファイルを渡す</h3>
+    <p>提出コードを安全に走らせる檻が <code>docker run</code> です。本書では次のような姿で呼びます（第04〜05章で1つずつ意味を解きます）。</p>
+    <pre class="term"><code><span class="ps">$</span> docker run --rm --network none --read-only \
+    --memory 256m --pids-limit 64 --cpus 1 \
+    judge-go /judge/loop.sh</code></pre>
+    <p><code>--network none</code>（ネットワーク遮断）・<code>--read-only</code>（ファイルシステム改変禁止）・<code>--memory</code>（メモリ上限）・<code>--pids-limit</code>（プロセス数上限）が、要件の非機能要件のうち NF-02/03/05/06 に対応します。実行時間の上限（NF-04）だけは <code>docker run</code> のフラグではなく、Go 側の <code>context.WithTimeout</code> とコンテナ内の <code>timeout</code> の二段構えで断ち切ります（第05章）。そして「提出コードやテストケースをコンテナの中へどう渡すか」の答えが <strong><code>tar</code></strong> です。ファイル群を <code>tar</code> アーカイブに固め、コンテナの標準入力に流し込んで中で展開する。ホスト側にファイルを書き散らさずにコンテナへ資材を届ける、本書の重要な小技です（<code>MakeTar</code> として第04章で登場します）。</p>
+
+    <div class="gonote"><div class="box-k">GO メモ · なぜ Docker を Go から「コマンドとして」叩くのか</div>
+      <p>Go には Docker を操作する SDK もありますが、本書では <code>exec.Command("docker", "run", ...)</code> と<strong>CLI をそのまま叩きます</strong>。理由は2つ。第一に、<code>docker run</code> のフラグは自分でターミナルに打って確かめられるので、学習の透明性が高い。第二に、外部依存を増やさず標準ライブラリ中心で組める。「Go のプロセスが、Docker のプロセスを起動し、Docker が提出コードのプロセスを起動する」という<strong>三段重ねのプロセス</strong>の構図を、<code>os/exec</code> 一本で見通せます。この構図が腑に落ちれば、サンドボックスはもう魔法ではありません。</p>
+    </div>
+
+    <h3>React と TypeScript — 画面を組む道具（第09章だけ）</h3>
+    <p>最終章にだけ登場します。<strong>いま読む必要はありません</strong>——第09章に入ってから、ここへ戻ってきてください。目的は「React を書けるようになること」ではなく、<strong>既にあるフロントのコードを読めるようになること</strong>だけです。必要なのは次の4つで、いずれも Go の知識と対応づけられます。</p>
+
+    <p><strong>① コンポーネント = 「画面の一部を返す関数」。</strong> React では、画面の部品を関数で書きます。引数（<strong>props</strong>）で親から値をもらい、画面の断片を返す。本書でいちばん小さい部品はこれです（第09章 Step 8）。</p>
+    <pre><code><span class="cm">// verdict と status を受け取って、色付きのバッジを返す関数</span>
+<span class="kw">export default function</span> VerdictBadge({ verdict, status }: { verdict?: <span class="ty">string</span>; status?: <span class="ty">string</span> }) {
+  <span class="kw">return</span> &lt;span className={`badge ${verdict}`}&gt;{verdict}&lt;/span&gt;;
+}</code></pre>
+    <p>この関数を呼ぶ側は、関数呼び出しではなく<strong>タグの形</strong>で書きます——<code>&lt;VerdictBadge verdict="AC" /&gt;</code>。「<code>VerdictBadge</code> という部品を、<code>verdict</code> に <code>"AC"</code> を渡して置く」という意味です。</p>
+
+    <p><strong>② JSX = 「コードの中に直接書けるタグ」。</strong> 上の <code>return</code> の右側にある <code>&lt;span&gt;…&lt;/span&gt;</code> がそれです。HTML に見えますが、これは文字列ではなく<strong>言語の構文</strong>で、そのまま値として返せます。<strong><code>{ }</code> で囲んだ中は「ここから先は JS/TS の式」</strong>という切り替えの印です。だから <code>{verdict}</code> は変数の中身に、<code>{`badge ${verdict}`}</code> は文字列を組み立てた結果（例: <code>"badge AC"</code>）になります。</p>
+
+    <p><strong>③ 状態（<code>useState</code>）= 「部品が自分で持つ変数」。</strong> <code>const [code, setCode] = useState("")</code> は「<code>code</code> という状態を空文字で始め、<code>setCode(...)</code> で更新する」。ただの代入と決定的に違うのは、<strong><code>setCode</code> を呼ぶと React がその部品を描き直す</strong>点です。「変数を書き換える」と「画面が変わる」が直結しているのが React の中心的な考え方で、第09章のポーリング（1秒ごとに結果を取りに行き、届いたら画面を更新する）はこれで動きます。</p>
+
+    <p><strong>④ TypeScript の型注釈 = Go の型とほぼ同じ。</strong> 書く位置が違うだけです。</p>
+    <div class="ascii">TypeScript                        Go
+  path: string                    path string          ← 名前の後ろに型
+  init?: RequestInit              （省略可の引数）      ← ? は「渡さなくてよい」
+  req&lt;T&gt;(path): Promise&lt;T&gt;        func req[T any](...) ← &lt;T&gt; はジェネリクス
+  interface Problem { … }         type Problem struct  ← データの形の宣言</div>
+    <p><code>Promise&lt;T&gt;</code> は「いますぐには無いが、後で <code>T</code> が届く」という値です（通信の結果など）。<code>await</code> を付けると届くまで待って中身を取り出せる——Go でチャネルから受け取るのに近い感覚です。</p>
+
+    <p><strong>そして npm と Vite。</strong> <code>npm install</code> が依存パッケージを取ってきて（Go の <code>go mod download</code> に相当）、<code>npm run build</code> がブラウザ用の HTML・JS・CSS を <code>frontend/dist/</code> に吐き出します（<code>go build</code> に相当）。Go のサーバはこの <code>dist/</code> をそのまま配るだけなので、<strong>フロントの世界と Go の世界が接するのは、この1つのディレクトリだけ</strong>です。</p>
+
+    <h2>この本の約束ごと</h2>
+    <ul>
+      <li>コードブロックの上のラベル（例: <code>compare.go</code>）は、そのコードが <code>backend/</code> のどのファイルにあるかを示します。パッケージをまたぐときは <code>internal/judge/compare.go</code> のように道筋も添えます。</li>
+      <li>紙面の都合で一部を省くときは、必ず <code>// …（後の章で）</code> のように省略を明示します。黙って削ることはしません。</li>
+      <li><strong>GO メモ</strong> = Go の文法・標準ライブラリ・ツールの補足。<strong>⚠ 落とし穴</strong> = 実際にバグや事故になりやすい箇所。<strong>▸ 動かして確認</strong> = 実行するコマンドと期待される出力です。</li>
+      <li>本書は「他人のコードは敵」という前提で書かれています。第03章以降、セキュリティに関わる箇所では<strong>なぜその制限が要るのか</strong>を必ず添えます。理由のない制限は覚えられないからです。</li>
+    </ul>
+
+    <p class="hero-rule">それでは、いちばん芯から。</p>
+    <p>最初の章で作るのは、Docker もキューも Web もない、「提出コードの出力を期待出力と比べて <code>AC</code> か <code>WA</code> かを決める」だけの、いちばん小さいジャッジです。地味に見えますが、この <strong>比較して合否を出す核</strong>こそが、10章ぶんの積み上げの土台になります。ここが揺らぐと、上に何を積んでも緑は信用できません。</p>
+
+    <div class="chap-foot">
+      <span></span>
+      <a class="pager next" href="00-smallest.html"><span class="dir">次へ →</span>第00章 · いちばん小さいジャッジ</a>
+    </div>
+  </main>
+</div>
+</body>
+</html>

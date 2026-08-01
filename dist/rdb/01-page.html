@@ -1,0 +1,877 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>第01章 ページの中身 — ディスクからつくるデータベース</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500;600&family=Source+Serif+4:opsz,wght@8..60,400;8..60,600;8..60,700&family=Noto+Serif+JP:wght@400;600;700&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<div class="shell">
+
+  <aside class="spine">
+    <a class="wordmark" href="index.html">MINIDB · from scratch</a>
+    <div class="book-title">ディスクから<br>つくるデータベース</div>
+    <div class="book-sub">Go で B+Tree から SQL まで</div>
+
+    <div class="legend"><span>読む <b>↓</b></span><span>組む <b>↑</b></span></div>
+
+    <nav aria-label="目次">
+      <ul class="toc">
+        <li><a class="nav-item" href="index.html"><span class="nav-num">序</span><span class="nav-label">はじめに・準備<span class="nav-tag">Setup</span></span></a></li>
+        <li><a class="nav-item" href="00-disk.html"><span class="nav-num">00</span><span class="nav-label">ディスクとページ<span class="nav-tag">Disk</span></span></a></li>
+        <li><a class="nav-item current" aria-current="page" href="01-page.html"><span class="nav-num">01</span><span class="nav-label">ページの中身<span class="nav-tag">Page</span></span></a></li>
+        <li><a class="nav-item" href="02-buffer.html"><span class="nav-num">02</span><span class="nav-label">バッファプール<span class="nav-tag">Buffer</span></span></a></li>
+        <li><a class="nav-item" href="03-btree.html"><span class="nav-num">03</span><span class="nav-label">B+Tree 索引<span class="nav-tag">Index</span></span></a></li>
+        <li><a class="nav-item" href="04-catalog.html"><span class="nav-num">04</span><span class="nav-label">表とカタログ<span class="nav-tag">Catalog</span></span></a></li>
+        <li><a class="nav-item" href="05-sql.html"><span class="nav-num">05</span><span class="nav-label">SQL を実行する<span class="nav-tag">Query</span></span></a></li>
+        <li><a class="nav-item" href="06-wal.html"><span class="nav-num">06</span><span class="nav-label">壊れない仕組み<span class="nav-tag">WAL</span></span></a></li>
+        <li><a class="nav-item" href="07-txn.html"><span class="nav-num">07</span><span class="nav-label">索引とトランザクション<span class="nav-tag">Txn</span></span></a></li>
+      </ul>
+    </nav>
+
+    <div class="spine-foot">
+      各章は一つの層。<br>下（ディスク）から上（SQL）へ<br>積み上げて動かしていく。
+    </div>
+  </aside>
+
+  <main class="reading">
+    <div class="progress-tag">第01章 / 全8章 · 層: PAGE · 読了目安 3〜4時間</div>
+    <div class="eyebrow"><span>Page</span><span class="depth">— レコードの住処</span></div>
+    <h1>ページの中身</h1>
+    <p class="lede">ページは固定長 4096 バイト。でも実際の行は「名前が5文字」「名前が20文字」と長さがバラバラです。固定の器に可変長のものを詰める工夫 — <strong>スロット化ページ</strong>を、この章で丸ごと1ファイル作ります。</p>
+
+    <div class="box goal"><div class="box-k">◈ この章のゴール</div>
+      <p>1枚のページの中に、長さの違うレコードを複数入れ、番号で取り出し、削除し、削除した跡地を再利用できるようにする。完成の検収は <code>go test ./internal/storage -run TestSlotted -v</code> が 6 本すべて PASS すること。さらに「20バイトのレコードを2件入れたとき、ページの何バイト目に何が書かれるか」を<strong>紙の上で手計算でき、実際のバイト列と突き合わせて一致させられる</strong>ことを、この章の理解の合格ラインとします。</p>
+    </div>
+
+    <div class="box map"><div class="box-k">☰ この章のステップ</div>
+      <ol>
+        <li><a href="#step-1">Step 1 — 型と定数: ページに「見方」をかぶせる</a></li>
+        <li><a href="#step-2">Step 2 — ヘッダとスロット表を読み書きする</a></li>
+        <li><a href="#step-3">Step 3 — 空きを測る三つの物差し</a></li>
+        <li><a href="#step-4">Step 4 — Insert: 後ろから積む</a></li>
+        <li><a href="#step-5">Step 5 — Get と Delete: コピーを返し、墓標を立てる</a></li>
+        <li><a href="#step-6">Step 6 — Compact: 動かすのは実体だけ、番号は動かさない</a></li>
+        <li><a href="#step-7">Step 7 — テストを読む: ページは再起動を生き延びる</a></li>
+      </ol>
+    </div>
+
+    <h2>固定長の器に、可変長の中身</h2>
+    <p>前章（<a href="00-disk.html">第00章</a>）で、データベースファイルを 4096 バイトごとの区画 = <strong>ページ</strong>に切り、番号（<code>PageID</code>）で読み書きできるようになりました。ただし、いま手元にあるのは <code>Page</code> という「のっぺらぼうの 4096 バイト」です。この中に実際の行 — たとえば <code>(1, 'alice', 30)</code> のようなレコード — をどう並べるかは、まだ何も決めていません。</p>
+    <p>素朴な案から考えてみましょう。<strong>案1: レコードの長さを固定にする。</strong>たとえば「1レコード = 128 バイト」と決めれば、n 番目のレコードは <code>128 × n</code> バイト目、と計算だけで位置が決まります。単純で速い。しかし「名前が5文字の人」も 128 バイト使うので、器の大半が空気になります。逆に 128 バイトを超える行は入りません。実際の行は<strong>可変長</strong> — 長さがデータごとに違う — なので、この案は筋が悪い。</p>
+    <p><strong>案2: 前から順にぎっしり詰める。</strong>無駄はなくなりますが、今度は「n 番目のレコードはどこ?」に答えるために先頭から順に読み飛ばすしかありません。さらに致命的なのは削除です。真ん中の1件を消して詰め直すと、後ろのレコードが全部ずれて、<strong>「3番目のレコード」という参照が別物を指すようになります</strong>。後の章で作る索引（第03章）は「このレコードはここにある」という参照を大量に保持するので、参照がずれる設計は土台として使えません。</p>
+    <p>そこで賢い手 — ページを<strong>両側から</strong>使います。<strong>前から</strong>は、ヘッダと「スロット表」（各レコードがページ内のどこにあるかを指す小さな目印の並び）を伸ばす。<strong>後ろから</strong>は、レコードの実体を積んでいく。両者がぶつかったら、そのページは満杯です。これが <em>スロット化ページ（slotted page）</em> と呼ばれる、ほぼすべての RDBMS が採用しているレイアウトです。</p>
+
+    <div class="ascii">スロット化ページのレイアウト（1 ページ = 4096 バイト）
+
+オフセット
+   0 ┌────────────────────────────────────────────────┐
+     │ numSlots (2B) │ freeEnd (2B) │ next (4B)       │ ← ヘッダ 8 バイト
+   8 ├────────────────────────────────────────────────┤
+     │ slot0 (4B) │ slot1 (4B) │ slot2 (4B) │ …  →    │ ← スロット表（前から伸びる）
+     ├────────────────────────────────────────────────┤
+     │                                                │
+     │           空き領域（どちらでもない場所）           │
+     │                                                │
+     ├────────────────────────────────────────────────┤ ← freeEnd はここを指す
+     │    ← … │ レコード2 │ レコード1 │ レコード0      │ ← 実体（後ろから積む）
+4096 └────────────────────────────────────────────────┘
+
+スロット 1 個 = 4 バイト。実体の「住所と大きさ」だけを持つ:
+     ┌──────────────────┬──────────────────┐
+     │ offset (uint16)  │ length (uint16)  │
+     │ 実体の開始位置    │ 実体のバイト数    │
+     └──────────────────┴──────────────────┘</div>
+
+    <p>この形の最大の利点は、レコードを<strong>スロット番号で指せる</strong>ことです。実体がページ内で多少動いても、スロットの中身（位置と長さ）を書き換えるだけで、「スロット3のレコード」という参照は保たれます。つまり <em>(ページ番号, スロット番号)</em> の組は、レコードの実体が動いても変わらない<strong>安定した住所</strong>になる。この住所は <strong>TID</strong>（タプル ID）と呼ばれ、第03章で B+Tree 索引が「キー → TID」の対応を格納するときの土台になります。この章は、いわば minidb の<strong>住所制度</strong>を作る章です。</p>
+    <p>削除にも、この設計ならではの割り切りがあります。レコードを消すたびに後ろを詰め直すのは高くつくので、すぐには詰めません。スロットに「ここはもう空です」という印 — <strong>墓標（トゥームストーン）</strong> — を立てるだけにして、実体は残骸としてしばらく放置し、空きが本当に必要になったときにまとめて掃除（<strong>コンパクション</strong>）します。「削除は印だけ、掃除は後でまとめて」という発想は、PostgreSQL の <code>VACUUM</code> も同じ仲間です。</p>
+    <p>この章で書くコードは <code>internal/storage/slotted.go</code> の 1 ファイル、約 200 行。7 つのステップで、その<strong>全行</strong>を読み切ります。</p>
+
+    <!-- ================================================== -->
+    <h2 class="step" id="step-1"><span class="step-no">Step 1</span>型と定数: ページに「見方」をかぶせる</h2>
+    <p>最初に作るのは、レイアウトの「設計図」をコードの言葉に翻訳した部分 — 型・定数・エラーの宣言です。ここで大事な考え方が一つあります。<code>SlottedPage</code> は<strong>新しい入れ物ではなく、既存の <code>Page</code> への「見方（ビュー）」</strong>だということです。4096 バイトのメモリは第00章の <code>Page</code> がすでに持っています。<code>SlottedPage</code> はそれを一切コピーせず、「このバイト列をスロット化ページとして解釈しますよ」という眼鏡をかけるだけです。</p>
+
+    <div class="file-tag">internal/storage/slotted.go</div>
+    <pre><code><span class="kw">package</span> storage
+
+<span class="kw">import</span> (
+    <span class="st">"encoding/binary"</span>
+    <span class="st">"errors"</span>
+    <span class="st">"fmt"</span>
+)
+
+<span class="cm">// SlottedPage は 1 ページを「可変長レコードの入れ物」として解釈するビュー。</span>
+<span class="cm">//</span>
+<span class="cm">// レイアウト（リトルエンディアン）:</span>
+<span class="cm">//</span>
+<span class="cm">//    [0:2)  numSlots  スロット数（削除済みを含む）</span>
+<span class="cm">//    [2:4)  freeEnd   レコード実体領域の先頭オフセット（実体は [freeEnd, PageSize) に後ろ詰め）</span>
+<span class="cm">//    [4:8)  next      次ページの PageID（ヒープのページ連結用。単独なら InvalidPageID）</span>
+<span class="cm">//    [8:..) スロット配列（1 スロット 4 バイト: offset uint16, length uint16）</span>
+<span class="cm">//    ...    空き領域（スロット配列とレコード実体に挟まれた部分）</span>
+<span class="cm">//    [freeEnd:PageSize) レコード実体</span>
+<span class="cm">//</span>
+<span class="cm">// スロット番号は一度振られたら再配置しても変わらない。これが行識別子</span>
+<span class="cm">// TID = (PageID, SlotNo) の安定性の根拠になる（索引が M3 以降で依存する）。</span>
+<span class="cm">// 削除は offset=0 の墓標にする（ヘッダがあるため実レコードの offset は 0 にならない）。</span>
+<span class="kw">type</span> <span class="ty">SlottedPage</span> <span class="kw">struct</span> {
+    p *<span class="ty">Page</span>
+}
+
+<span class="kw">const</span> (
+    slottedHeaderSize = <span class="st">8</span>
+    slotSize          = <span class="st">4</span>
+    tombstoneOffset   = <span class="st">0</span>
+)
+
+<span class="kw">var</span> (
+    <span class="cm">// ErrPageFull はコンパクションしても空きが足りないことを示す。</span>
+    <span class="cm">// 呼び出し側（上位層）はこれを合図に別ページへ振り分ける。</span>
+    ErrPageFull = errors.New(<span class="st">"storage: page full"</span>)
+)</code></pre>
+
+    <p>読みどころを順に押さえます。まず冒頭のコメント。<code>[0:2)</code> という書き方は「0 バイト目から始まり、2 バイト目の<strong>手前まで</strong>」という半開区間の記法で、Go のスライス式 <code>p[0:2]</code> がちょうどこの範囲を切り出すことに対応しています。設計図とコードが同じ記法で書けるので、本書ではこの書き方で通します。</p>
+    <p>次に <code>type SlottedPage struct { p *Page }</code>。フィールドはページへの<strong>ポインタ</strong>1本だけです。ポインタ（メモリ上の場所を指す値）を持つということは、<code>SlottedPage</code> 越しの書き込みは、そのまま元の <code>Page</code> の 4096 バイトに反映されるということ。眼鏡をかけても顔は同じ、という比喩の通りです。</p>
+    <p>定数は 3 つ。<code>slottedHeaderSize = 8</code> はヘッダの大きさ（2 + 2 + 4 バイト）。<code>slotSize = 4</code> はスロット 1 個の大きさ（offset 2 バイト + length 2 バイト）。そして <code>tombstoneOffset = 0</code> が墓標の印です。「offset が 0 のスロットは削除済み」という約束ですが、これが成立するのは<strong>ヘッダが必ず先頭 8 バイトを占めるから</strong>です。生きているレコードの実体が 0 バイト目に置かれることは構造上あり得ない。だから 0 を「あり得ない値 = 死んでいる印」として安全に流用できるのです。第00章の <code>InvalidPageID</code> と同じ、<strong>番兵値</strong>（普通のデータでは出現しない特別な値）のテクニックです。</p>
+    <p>最後に <code>ErrPageFull</code>。これは「バグや破損」ではなく「この章の層では正常だが、上の層に判断を仰ぐべき状況」を表すエラーです。1 ページに入り切らないのはページの責任ではありません。上位層（第04章で作るヒープ表）が「じゃあ次のページへ」と振り分けるための<strong>合図</strong>として、名前付きのエラー変数を公開しています。</p>
+
+    <div class="gonote"><div class="box-k">GO メモ · 番兵エラー（sentinel error）</div>
+      <p><code>errors.New("...")</code> は「メッセージを持つだけの、いちばん素朴なエラー値」を作ります。それをパッケージ変数 <code>ErrPageFull</code> として公開しておくと、呼び出し側は <code>errors.Is(err, storage.ErrPageFull)</code> で「満杯という<strong>種類</strong>のエラーか」を判定できます。エラーメッセージの文字列比較ではなく、値の同一性で判定するのが Go の流儀です。この章のテストコードにも <code>errors.Is</code> が登場します。</p>
+    </div>
+
+    <div class="gonote"><div class="box-k">GO メモ · 値レシーバなのに書き換えられる理由</div>
+      <p>この後のメソッドはすべて <code>func (s SlottedPage) ...</code> という<strong>値レシーバ</strong>（メソッド呼び出しのたびに <code>s</code> がコピーされる形）です。「コピーに書き込んでも元に反映されないのでは?」と思うかもしれませんが、コピーされるのは構造体 <code>SlottedPage</code> — つまり<strong>ポインタ <code>p</code> 1 本（8 バイト）だけ</strong>です。コピーされたポインタも同じ <code>Page</code> を指しているので、<code>s.p[0] = ...</code> と書けば元のページが書き換わります。「ポインタを1本持つ小さな構造体は値レシーバでよい」は Go でよく見る型の設計です。</p>
+    </div>
+
+    <div class="box do"><div class="box-k">▸ 動かして確認</div>
+      <p>まだ型と定数だけですが、コンパイルが通ることを確認しておきます。<code>go build</code> は成功すると<strong>何も表示しません</strong>（沈黙 = 合格）。</p>
+      <pre class="term"><code><span class="ps">$</span> go build ./internal/storage
+<span class="out">（何も出なければ成功）</span></code></pre>
+    </div>
+
+    <!-- ================================================== -->
+    <h2 class="step" id="step-2"><span class="step-no">Step 2</span>ヘッダとスロット表を読み書きする</h2>
+    <p>設計図をコメントに書いただけでは、まだ絵に描いた餅です。このステップでは「ヘッダの numSlots を読む/書く」「i 番目のスロットを読む/書く」という<strong>最小の読み書き部品</strong>を作ります。以降のすべての操作（Insert も Delete も Compact も）は、この部品の組み合わせだけで書かれます。バイトオフセットの計算がコードに現れるのはここ<strong>だけ</strong> — レイアウトの知識を1か所に閉じ込めるのが狙いです。</p>
+
+    <div class="file-tag">internal/storage/slotted.go</div>
+    <pre><code><span class="kw">func</span> (s <span class="ty">SlottedPage</span>) numSlots() <span class="kw">uint16</span>     { <span class="kw">return</span> binary.LittleEndian.Uint16(s.p[<span class="st">0</span>:<span class="st">2</span>]) }
+<span class="kw">func</span> (s <span class="ty">SlottedPage</span>) setNumSlots(n <span class="kw">uint16</span>) { binary.LittleEndian.PutUint16(s.p[<span class="st">0</span>:<span class="st">2</span>], n) }
+<span class="kw">func</span> (s <span class="ty">SlottedPage</span>) freeEnd() <span class="kw">uint16</span>      { <span class="kw">return</span> binary.LittleEndian.Uint16(s.p[<span class="st">2</span>:<span class="st">4</span>]) }
+<span class="kw">func</span> (s <span class="ty">SlottedPage</span>) setFreeEnd(o <span class="kw">uint16</span>)  { binary.LittleEndian.PutUint16(s.p[<span class="st">2</span>:<span class="st">4</span>], o) }
+
+<span class="kw">func</span> (s <span class="ty">SlottedPage</span>) slot(i <span class="kw">uint16</span>) (offset, length <span class="kw">uint16</span>) {
+    base := slottedHeaderSize + <span class="kw">int</span>(i)*slotSize
+    <span class="kw">return</span> binary.LittleEndian.Uint16(s.p[base : base+<span class="st">2</span>]),
+        binary.LittleEndian.Uint16(s.p[base+<span class="st">2</span> : base+<span class="st">4</span>])
+}
+
+<span class="kw">func</span> (s <span class="ty">SlottedPage</span>) setSlot(i <span class="kw">uint16</span>, offset, length <span class="kw">uint16</span>) {
+    base := slottedHeaderSize + <span class="kw">int</span>(i)*slotSize
+    binary.LittleEndian.PutUint16(s.p[base:base+<span class="st">2</span>], offset)
+    binary.LittleEndian.PutUint16(s.p[base+<span class="st">2</span>:base+<span class="st">4</span>], length)
+}</code></pre>
+
+    <p>核心は <code>slot(i)</code> の 1 行目、<code>base := slottedHeaderSize + int(i)*slotSize</code> です。スロット表はヘッダ（8 バイト）の直後から、1 個 4 バイトで隙間なく並ぶ — だから <strong>i 番スロットの開始位置は <code>8 + 4i</code> バイト目</strong>。スロット 0 は 8〜11 バイト目、スロット 1 は 12〜15 バイト目、スロット 2 は 16〜19 バイト目です。前半 2 バイトが offset、後半 2 バイトが length。この計算は後の理解度チェックで手を動かして確かめます。</p>
+    <p>もう一つ、ヘッダの読み書きに使っている <code>binary.LittleEndian</code> に注目してください。序章では <code>binary.BigEndian</code> を紹介しましたが、ここでは<strong>リトルエンディアン</strong> — 小さい桁を先に置く方式 — を使っています。たとえば <code>freeEnd = 4096</code>（16進で <code>0x1000</code>）は、ビッグエンディアンなら <code>10 00</code>、リトルエンディアンなら <code>00 10</code> という並びでファイルに書かれます。</p>
+
+    <div class="gonote"><div class="box-k">GO メモ · リトルエンディアンを使う理由</div>
+      <p>序章でも触れたとおり、minidb はエンディアンを<strong>場所によって使い分けて</strong>います。ビッグエンディアンが本当に効くのは、B+Tree のキー（第03章）のように「バイト列のまま並べ替えると数値の大小順に一致してほしい」場所です。一方、ページヘッダのような<strong>読み書きが同じ関数ペアで完結する</strong>場所では、向きはどちらでも動きます。ここでは多くの CPU の内部表現と同じリトルエンディアンを選びました。本当に重要な規律は一つだけ — <strong>書くときと読むときで必ず同じ向きを使う</strong>こと。この章ではヘッダの読み書きを上の getter/setter だけに閉じ込めているので、向きの食い違いは構造的に起こりません。</p>
+    </div>
+
+    <div class="gonote"><div class="box-k">GO メモ · 複数の戻り値と、名前付き戻り値</div>
+      <p><code>func (s SlottedPage) slot(i uint16) (offset, length uint16)</code> のように、Go の関数は<strong>値を2つ以上返せます</strong>。呼ぶ側は <code>off, length := s.slot(i)</code> と2つの変数で受けます。また、戻り値に <code>(offset, length uint16)</code> と<strong>名前</strong>を付けると、「1つ目が位置、2つ目が長さ」という意図がシグネチャだけで伝わります（<code>(uint16, uint16)</code> ではどちらがどちらか分かりません）。片方だけ要らないときは <code>off, _ := s.slot(i)</code> のように <code>_</code>（ブランク識別子）で捨てます。</p>
+    </div>
+
+    <p>部品が揃ったので、ページを「空のスロット化ページ」として初期化する関数と、初期化済みページに眼鏡をかけ直す関数を書きます。ソースファイル上ではこの2つが getter/setter より先に置かれていますが、中身は部品の呼び出しだけです。</p>
+
+    <div class="file-tag">internal/storage/slotted.go</div>
+    <pre><code><span class="cm">// InitSlottedPage はページを空のスロット化ページとして初期化する。</span>
+<span class="kw">func</span> InitSlottedPage(p *<span class="ty">Page</span>) <span class="ty">SlottedPage</span> {
+    sp := <span class="ty">SlottedPage</span>{p: p}
+    sp.setNumSlots(<span class="st">0</span>)
+    sp.setFreeEnd(PageSize)
+    sp.SetNext(InvalidPageID)
+    <span class="kw">return</span> sp
+}
+
+<span class="cm">// AsSlottedPage は初期化済みのページをスロット化ページとして解釈する。</span>
+<span class="kw">func</span> AsSlottedPage(p *<span class="ty">Page</span>) <span class="ty">SlottedPage</span> { <span class="kw">return</span> <span class="ty">SlottedPage</span>{p: p} }</code></pre>
+
+    <p>初期状態の意味を言葉にすると、「スロットは 0 個。実体はまだ何もないので、実体領域の先頭 <code>freeEnd</code> はページの<strong>末尾</strong>（4096）を指す。次ページへの連結はなし」。<code>freeEnd = 4096</code> は「4096 バイト目から実体が始まる = 実体は空」という意味で、これから実体が積まれるたびに左（小さい方）へ動いていきます。</p>
+    <p><code>InitSlottedPage</code> と <code>AsSlottedPage</code> の使い分けは重要です。<strong>新品のページには Init を1回だけ</strong>。ディスクから読み戻した<strong>既存のページには As を</strong>使います。ページの中身はただのバイト列としてディスクに永続化されているので、読み戻したページには numSlots も freeEnd も書き込まれたまま残っています。眼鏡をかけ直すだけで、続きから使えるのです（この確認が Step 7 のテーマです）。</p>
+    <p>残りは外部（この後の章のコード）に公開する小さなメソッド群です。</p>
+
+    <div class="file-tag">internal/storage/slotted.go</div>
+    <pre><code><span class="cm">// NumSlots は墓標を含むスロット総数を返す（走査の上限として使う）。</span>
+<span class="kw">func</span> (s <span class="ty">SlottedPage</span>) NumSlots() <span class="kw">uint16</span> { <span class="kw">return</span> s.numSlots() }
+
+<span class="cm">// Next はヒープ連結における次ページの ID を返す。</span>
+<span class="kw">func</span> (s <span class="ty">SlottedPage</span>) Next() <span class="ty">PageID</span> {
+    <span class="kw">return</span> <span class="ty">PageID</span>(binary.LittleEndian.Uint32(s.p[<span class="st">4</span>:<span class="st">8</span>]))
+}
+
+<span class="cm">// SetNext は次ページの ID を設定する。</span>
+<span class="kw">func</span> (s <span class="ty">SlottedPage</span>) SetNext(id <span class="ty">PageID</span>) {
+    binary.LittleEndian.PutUint32(s.p[<span class="st">4</span>:<span class="st">8</span>], <span class="kw">uint32</span>(id))
+}
+
+<span class="cm">// IsLive はスロットが生存レコードを指しているかを返す（走査用）。</span>
+<span class="kw">func</span> (s <span class="ty">SlottedPage</span>) IsLive(slotNo <span class="kw">uint16</span>) <span class="kw">bool</span> {
+    <span class="kw">if</span> slotNo &gt;= s.numSlots() {
+        <span class="kw">return</span> <span class="kw">false</span>
+    }
+    off, _ := s.slot(slotNo)
+    <span class="kw">return</span> off != tombstoneOffset
+}</code></pre>
+
+    <p>気づいたでしょうか。<code>numSlots</code>（小文字）と <code>NumSlots</code>（大文字）が両方あります。Go では<strong>大文字で始まる名前だけがパッケージの外から見える</strong>ので、生の setter 群は小文字にして外から触れないよう隠し、読み取りの <code>NumSlots</code> だけ大文字で公開しています。「ヘッダを直接いじれるのはこのファイルの中だけ」という壁を、命名だけで作っているわけです。<code>Next</code> / <code>SetNext</code> はヘッダの <code>[4:8)</code> に眠っている「次ページの PageID」の読み書きで、複数ページを数珠つなぎにしてひとつの表を作る第04章まで出番はありません。<code>IsLive</code> は「このスロット、生きてる?」を外から安全に聞くためのもので、範囲外のスロット番号には黙って <code>false</code> を返します。</p>
+
+    <div class="box do"><div class="box-k">▸ 動かして確認</div>
+      <p>ここからは、レイアウトを<strong>実際のバイト列で</strong>目視確認するための使い捨てテストを使います。次のファイルを <code>internal/storage/slotted_demo_test.go</code> として保存してください（章を終えたら削除して構いません）。同じパッケージ内のテストなので、小文字の <code>freeEnd()</code> や <code>slot()</code> も呼べます。中で使っている <code>Insert</code> や <code>Compact</code> はこの後のステップで読むコードですが、手元の <code>src/</code> は完成版なので、いま作っても動きます。</p>
+      <p><strong>写経派の方へ:</strong> あなたはまだ <code>Insert</code> も <code>Compact</code> も書いていないので、このファイルを丸ごと保存するとコンパイルが通りません。<code>TestDemoHeader</code> と <code>TestDemoFreeSpace</code> の 2 本だけを先に作ってください。<code>TestDemoInsert</code> は Step 4、<code>TestDemoCompact</code> は Step 6 まで進んでから追加すれば、同じ出力が得られます。</p>
+      <div class="file-tag">internal/storage/slotted_demo_test.go（使い捨て）</div>
+      <pre><code><span class="kw">package</span> storage
+
+<span class="cm">// 学習用の使い捨てデモ。動きを確認したら消してよい。</span>
+<span class="kw">import</span> (
+    <span class="st">"bytes"</span>
+    <span class="st">"fmt"</span>
+    <span class="st">"testing"</span>
+)
+
+<span class="kw">func</span> TestDemoHeader(t *testing.<span class="ty">T</span>) {
+    <span class="kw">var</span> p <span class="ty">Page</span>
+    sp := InitSlottedPage(&amp;p)
+    fmt.Printf(<span class="st">"numSlots=%d freeEnd=%d next=%d\n"</span>, sp.NumSlots(), sp.freeEnd(), sp.Next())
+    fmt.Printf(<span class="st">"先頭8バイト: % X\n"</span>, p[:<span class="st">8</span>])
+}
+
+<span class="kw">func</span> TestDemoFreeSpace(t *testing.<span class="ty">T</span>) {
+    <span class="kw">var</span> p <span class="ty">Page</span>
+    sp := InitSlottedPage(&amp;p)
+    fmt.Printf(<span class="st">"slotArrayEnd=%d contiguousFree=%d liveBytes=%d\n"</span>,
+        sp.slotArrayEnd(), sp.contiguousFree(), sp.liveBytes())
+    _, found := sp.findTombstone()
+    fmt.Printf(<span class="st">"墓標はあるか? %v\n"</span>, found)
+}
+
+<span class="kw">func</span> TestDemoInsert(t *testing.<span class="ty">T</span>) {
+    <span class="kw">var</span> p <span class="ty">Page</span>
+    sp := InitSlottedPage(&amp;p)
+    rec := bytes.Repeat([]<span class="kw">byte</span>{<span class="st">0xAA</span>}, <span class="st">20</span>) <span class="cm">// 20 バイトのレコード</span>
+    s0, _ := sp.Insert(rec)
+    s1, _ := sp.Insert(rec)
+    off0, len0 := sp.slot(s0)
+    off1, len1 := sp.slot(s1)
+    fmt.Printf(<span class="st">"numSlots=%d freeEnd=%d\n"</span>, sp.NumSlots(), sp.freeEnd())
+    fmt.Printf(<span class="st">"slot0=(offset=%d, length=%d) slot1=(offset=%d, length=%d)\n"</span>,
+        off0, len0, off1, len1)
+    fmt.Printf(<span class="st">"先頭16バイト: % X\n"</span>, p[:<span class="st">16</span>])
+}
+
+<span class="kw">func</span> TestDemoCompact(t *testing.<span class="ty">T</span>) {
+    <span class="kw">var</span> p <span class="ty">Page</span>
+    sp := InitSlottedPage(&amp;p)
+    sp.Insert(bytes.Repeat([]<span class="kw">byte</span>{<span class="st">0x01</span>}, <span class="st">100</span>)) <span class="cm">// slot 0</span>
+    sp.Insert(bytes.Repeat([]<span class="kw">byte</span>{<span class="st">0x02</span>}, <span class="st">200</span>)) <span class="cm">// slot 1</span>
+    sp.Insert(bytes.Repeat([]<span class="kw">byte</span>{<span class="st">0x03</span>}, <span class="st">50</span>))  <span class="cm">// slot 2</span>
+    sp.Delete(<span class="st">1</span>)
+    dump := <span class="kw">func</span>(label <span class="kw">string</span>) {
+        fmt.Printf(<span class="st">"%s: freeEnd=%d\n"</span>, label, sp.freeEnd())
+        <span class="kw">for</span> i := <span class="kw">uint16</span>(<span class="st">0</span>); i &lt; sp.NumSlots(); i++ {
+            off, ln := sp.slot(i)
+            fmt.Printf(<span class="st">"  slot%d=(offset=%d, length=%d) 生存=%v\n"</span>, i, off, ln, sp.IsLive(i))
+        }
+    }
+    dump(<span class="st">"Compact前"</span>)
+    sp.Compact()
+    dump(<span class="st">"Compact後"</span>)
+}</code></pre>
+      <p>まず 1 本目、初期化直後のヘッダを見ます。</p>
+      <pre class="term"><code><span class="ps">$</span> go test ./internal/storage -run TestDemoHeader -v
+<span class="out">=== RUN   TestDemoHeader
+numSlots=0 freeEnd=4096 next=4294967295
+先頭8バイト: 00 00 00 10 FF FF FF FF
+--- PASS: TestDemoHeader (0.00s)
+PASS
+ok  	minidb/internal/storage	0.800s</span></code></pre>
+      <p>8 バイトを手で読み解いてみましょう。<code>00 00</code> = numSlots が 0。<code>00 10</code> = リトルエンディアンなので下位バイトが先、つまり <code>0x1000</code> = 4096 が freeEnd。<code>FF FF FF FF</code> = <code>0xFFFFFFFF</code> = 4294967295 = <code>InvalidPageID</code>（次ページなし）。設計図どおりです。バイト列を自分の目で数えて意味が取れたら、このステップは合格です。</p>
+    </div>
+
+    <!-- ================================================== -->
+    <h2 class="step" id="step-3"><span class="step-no">Step 3</span>空きを測る三つの物差し</h2>
+    <p>Insert を書く前に、「あとどれだけ入るか」を測る道具を揃えます。スロット化ページの空きには、実は<strong>2 種類</strong>あります。一つは、スロット表と実体領域に挟まれた<strong>連続空き</strong> — 新しいレコードをそのまま置ける場所です。もう一つは、削除で生まれた残骸（墓標が指していた実体の跡地）も合算した<strong>総空き</strong> — 掃除をすれば使えるようになる場所です。この 2 つを区別できることが、次のステップの Insert の頭の良さの源になります。</p>
+
+    <div class="file-tag">internal/storage/slotted.go</div>
+    <pre><code><span class="cm">// slotArrayEnd はスロット配列の直後 = 空き領域の先頭。</span>
+<span class="kw">func</span> (s <span class="ty">SlottedPage</span>) slotArrayEnd() <span class="kw">uint16</span> {
+    <span class="kw">return</span> slottedHeaderSize + s.numSlots()*slotSize
+}
+
+<span class="cm">// contiguousFree はスロット配列とレコード実体に挟まれた連続空き。</span>
+<span class="kw">func</span> (s <span class="ty">SlottedPage</span>) contiguousFree() <span class="kw">int</span> {
+    <span class="kw">return</span> <span class="kw">int</span>(s.freeEnd()) - <span class="kw">int</span>(s.slotArrayEnd())
+}
+
+<span class="cm">// liveBytes は生存レコードの合計バイト数。</span>
+<span class="kw">func</span> (s <span class="ty">SlottedPage</span>) liveBytes() <span class="kw">int</span> {
+    total := <span class="st">0</span>
+    <span class="kw">for</span> i := <span class="kw">uint16</span>(<span class="st">0</span>); i &lt; s.numSlots(); i++ {
+        <span class="kw">if</span> off, length := s.slot(i); off != tombstoneOffset {
+            total += <span class="kw">int</span>(length)
+        }
+    }
+    <span class="kw">return</span> total
+}
+
+<span class="cm">// findTombstone は再利用できる墓標スロットを探す。なければ (0, false)。</span>
+<span class="kw">func</span> (s <span class="ty">SlottedPage</span>) findTombstone() (<span class="kw">uint16</span>, <span class="kw">bool</span>) {
+    <span class="kw">for</span> i := <span class="kw">uint16</span>(<span class="st">0</span>); i &lt; s.numSlots(); i++ {
+        <span class="kw">if</span> off, _ := s.slot(i); off == tombstoneOffset {
+            <span class="kw">return</span> i, <span class="kw">true</span>
+        }
+    }
+    <span class="kw">return</span> <span class="st">0</span>, <span class="kw">false</span>
+}</code></pre>
+
+    <p>一つずつ見ます。<code>slotArrayEnd</code> は「スロット表の終わり = 空き領域の始まり」で、式は <code>8 + numSlots × 4</code>。<code>contiguousFree</code> は「実体領域の始まり − 空き領域の始まり」= <code>freeEnd − slotArrayEnd</code> です。初期化直後なら <code>4096 − 8 = 4088</code> バイト。図で言えば、前から伸びる腕と後ろから伸びる腕の「あいだの距離」です。</p>
+    <p><code>liveBytes</code> は全スロットを歩き、<strong>墓標でないスロットの length だけ</strong>を合計します。「いま本当に使われている実体は何バイトか」。これが分かれば総空きは引き算で出ます — ページ全体からヘッダとスロット表と生存実体を引いた残り、<code>4096 − 8 − numSlots×4 − liveBytes</code>。この式は次のステップの Insert の中に現れます。</p>
+    <p><code>findTombstone</code> は先頭から順に墓標スロットを探します。見つかれば「この番号、空いてますよ」とスロット番号ごと再利用できる。スロット表が際限なく伸びるのを防ぐ、削除跡のリサイクル係です。戻り値の <code>(uint16, bool)</code> は Go でよく見る「値 + 見つかったかどうか」のペアです。</p>
+
+    <div class="gonote"><div class="box-k">GO メモ · uint16 の計算を int に逃がす</div>
+      <p><code>contiguousFree</code> が <code>int(s.freeEnd()) - int(s.slotArrayEnd())</code> と、わざわざ <code>int</code> に変換してから引き算しているのには理由があります。<code>uint16</code> は 0〜65535 しか表せない<strong>符号なし</strong>整数なので、引き算の結果が負になると、エラーにならずに巨大な正の数へ<strong>巻き戻り（ラップアラウンド）</strong>ます（例: <code>uint16(3) - uint16(5)</code> は 65534）。空き容量の計算がバグでマイナスになったとき、<code>int</code> なら <code>-2</code> と表示されて即気づけますが、<code>uint16</code> のままだと「空きが 65534 バイトある」ことになって静かに壊れます。<strong>比較や算術をする値は早めに <code>int</code> へ広げる</strong> — 低レベルコードの防御的な作法です。</p>
+    </div>
+
+    <div class="box do"><div class="box-k">▸ 動かして確認</div>
+      <p>空のページで三つの物差しを当ててみます。連続空きが 4088（= 4096 − ヘッダ 8）になるはずです。</p>
+      <pre class="term"><code><span class="ps">$</span> go test ./internal/storage -run TestDemoFreeSpace -v
+<span class="out">=== RUN   TestDemoFreeSpace
+slotArrayEnd=8 contiguousFree=4088 liveBytes=0
+墓標はあるか? false
+--- PASS: TestDemoFreeSpace (0.00s)
+PASS
+ok  	minidb/internal/storage	0.486s</span></code></pre>
+      <p>手計算と一致しました。「空のページに入る最大レコードは何バイトか?」— 4088 と答えたくなりますが、レコードを入れるには<strong>スロットも 1 個（4 バイト）必要</strong>なので、正解は 4084 です。この「実体 + スロット」のセット勘定が、次のステップの主役になります。</p>
+    </div>
+
+    <!-- ================================================== -->
+    <h2 class="step" id="step-4"><span class="step-no">Step 4</span>Insert: 後ろから積む</h2>
+    <p>いよいよレコードを入れます。Insert の仕事を素朴に書けば「freeEnd を左に動かして実体を書き、スロットに (位置, 長さ) を記録する」だけです。しかし面白いのは、<strong>「空きが足りない」に段階がある</strong>ことです。連続空きが足りなくても、削除跡の断片をかき集めれば足りるかもしれない。そこで Insert は三段構えになります。</p>
+    <ol>
+      <li><strong>連続空きで足りる</strong> → そのまま置く（いちばん多い、幸せな道）。</li>
+      <li><strong>連続では足りないが、総空きなら足りる</strong> → コンパクション（掃除）してから置く。</li>
+      <li><strong>総空きでも足りない</strong> → <code>ErrPageFull</code> を返し、上位層に「別のページへどうぞ」と委ねる。</li>
+    </ol>
+
+    <div class="file-tag">internal/storage/slotted.go</div>
+    <pre><code><span class="cm">// Insert はレコードを格納しスロット番号を返す。</span>
+<span class="cm">// 連続空きが足りなくても、断片化した空き（削除跡）で足りるならコンパクションして格納する。</span>
+<span class="cm">// それでも足りなければ ErrPageFull。</span>
+<span class="kw">func</span> (s <span class="ty">SlottedPage</span>) Insert(record []<span class="kw">byte</span>) (<span class="kw">uint16</span>, <span class="ty">error</span>) {
+    <span class="kw">if</span> <span class="kw">len</span>(record) &gt; PageSize-slottedHeaderSize-slotSize {
+        <span class="kw">return</span> <span class="st">0</span>, fmt.Errorf(<span class="st">"storage: レコード %d バイトは 1 ページに収まらない"</span>, <span class="kw">len</span>(record))
+    }
+
+    slotNo, reuse := s.findTombstone()
+    needed := <span class="kw">len</span>(record)
+    <span class="kw">if</span> !reuse {
+        needed += slotSize <span class="cm">// 新しいスロット分</span>
+    }
+
+    <span class="kw">if</span> needed &gt; s.contiguousFree() {
+        <span class="cm">// 断片化込みの総空きで足りるか（= コンパクションで救えるか）</span>
+        totalFree := PageSize - slottedHeaderSize - <span class="kw">int</span>(s.numSlots())*slotSize - s.liveBytes()
+        <span class="kw">if</span> needed &gt; totalFree {
+            <span class="kw">return</span> <span class="st">0</span>, ErrPageFull
+        }
+        s.Compact()
+    }
+
+    <span class="kw">if</span> !reuse {
+        slotNo = s.numSlots()
+        s.setNumSlots(slotNo + <span class="st">1</span>)
+    }
+    newEnd := s.freeEnd() - <span class="kw">uint16</span>(<span class="kw">len</span>(record))
+    copy(s.p[newEnd:], record)
+    s.setFreeEnd(newEnd)
+    s.setSlot(slotNo, newEnd, <span class="kw">uint16</span>(<span class="kw">len</span>(record)))
+    <span class="kw">return</span> slotNo, nil
+}</code></pre>
+
+    <p>上から追いましょう。最初の <code>if</code> は門前払いです。どれだけ掃除しても、空のページに入る最大は「4096 − ヘッダ 8 − スロット 4 = 4084 バイト」。それを超えるレコードは構造的に不可能なので、<code>ErrPageFull</code>（掃除すればなんとかなるかも、という意味を含む）ではなく、別のエラーで即座に断ります。</p>
+    <p>次に <code>findTombstone</code> で墓標スロットを探します。ここが少し面白いところで、必要な空きの量 <code>needed</code> が<strong>再利用できるかどうかで変わります</strong>。墓標を再利用できるならレコードの実体分だけでいい。再利用できないなら、スロット表を 1 個分（4 バイト）前に伸ばす必要があるので <code>needed += slotSize</code>。1 バイトのレコードでも、実際にはスロット込みで 5 バイト食う — このセット勘定を忘れると、満杯判定が 4 バイトずれます。</p>
+    <p>そして三段構えの本体。<code>needed &gt; contiguousFree()</code> なら、総空き <code>totalFree</code> を計算します。式は Step 3 で予告したとおり「ページ全体 − ヘッダ − スロット表<strong>全体</strong> − 生存実体」。それでも足りなければ <code>ErrPageFull</code>、足りるなら <code>s.Compact()</code> — 生存レコードを末尾に詰め直して断片を連続空きに変える掃除 — を呼んでから先へ進みます（<code>Compact</code> の中身は Step 6 で読みます。ここでは「掃除すると連続空き = 総空きになる」とだけ理解して進んでください）。</p>
+    <p>最後が格納の本番、4 行です。<code>newEnd := s.freeEnd() - uint16(len(record))</code> で実体の置き場所を決め（現在の実体領域のさらに左隣）、<code>copy</code> でレコードのバイト列をそこへ書き込み、<code>freeEnd</code> を新しい位置へ更新し、スロットに (位置, 長さ) を記録する。<strong>「後ろから積む」の実装は、実質この 4 行だけ</strong>です。</p>
+    <p>具体的な数字で 2 回転させてみます。20 バイトのレコードを空のページに 2 件入れると、こうなります。</p>
+
+    <div class="ascii">20 バイトのレコードを 2 件、順に Insert する
+
+【挿入前】初期化直後                          freeEnd = 4096
+   0 [numSlots=0][freeEnd=4096][next=∅]
+   8 （スロット表は空）
+     ·············· 連続空き 4088 バイト ··············
+4096 （実体はまだ何もない）
+
+【1件目】slot 0 = (4076, 20)                 freeEnd = 4076
+   0 [numSlots=1][freeEnd=4076][next=∅]
+   8 [slot0=(4076,20)]
+  12 ·············· 連続空き 4064 バイト ··············
+4076 [■■■■■■ レコード0 (20B) ■■■■■■]
+4096
+
+【2件目】slot 1 = (4056, 20)                 freeEnd = 4056
+   0 [numSlots=2][freeEnd=4056][next=∅]
+   8 [slot0=(4076,20)][slot1=(4056,20)]
+  16 ·············· 連続空き 4040 バイト ··············
+4056 [■■ レコード1 (20B) ■■][■■ レコード0 (20B) ■■]
+4096</div>
+
+    <p>1 件目: <code>newEnd = 4096 − 20 = 4076</code>。実体は <code>[4076:4096)</code> に入り、スロット 0 に <code>(4076, 20)</code>。2 件目: <code>newEnd = 4076 − 20 = 4056</code>。実体は <code>[4056:4076)</code>、スロット 1 に <code>(4056, 20)</code>。スロット表は前から 8, 12 バイト目…と右へ、実体は 4096 から左へ。両腕が確かに近づいています。</p>
+
+    <div class="gonote"><div class="box-k">GO メモ · copy — スライスからスライスへの転写</div>
+      <p><code>copy(dst, src)</code> は、<code>src</code> のバイト列を <code>dst</code> に書き写す組み込み関数です。コピーされる量は「<code>dst</code> と <code>src</code> の<strong>短い方</strong>の長さ」。<code>copy(s.p[newEnd:], record)</code> では、<code>s.p[newEnd:]</code>（ページの newEnd バイト目から末尾までを指す窓）に <code>record</code> を写しています。窓の方が長いですが、短い方 = <code>record</code> の長さ分しかコピーされないので、ちょうど <code>[newEnd : newEnd+len(record))</code> に収まります。序章で強調した「スライス式は<strong>コピーではなく窓</strong>」がここで効いています — 窓に書けば、元のページ（＝いずれディスクに書かれるバイト列そのもの）が書き換わるのです。</p>
+    </div>
+
+    <div class="box hazard"><div class="box-k">⚠ 落とし穴</div>
+      <p>ヘッダの offset や freeEnd は <code>uint16</code>（最大 65535）です。<strong>PageSize が 4096 だから成立している</strong>ことに注意してください。もし PageSize を 65536 に変えると、初期値 <code>freeEnd = 65536</code> が uint16 に収まらず 0 に巻き戻り、ページ全体が静かに壊れます。「器の大きさ」と「物差しの幅」はセットで決まっている — レイアウトの定数を変えるときは、必ず両方を見直してください。</p>
+    </div>
+
+    <div class="box do"><div class="box-k">▸ 動かして確認</div>
+      <p>上の図をそのまま実行して、freeEnd・スロット表・先頭 16 バイトの生の値を見ます。</p>
+      <pre class="term"><code><span class="ps">$</span> go test ./internal/storage -run TestDemoInsert -v
+<span class="out">=== RUN   TestDemoInsert
+numSlots=2 freeEnd=4056
+slot0=(offset=4076, length=20) slot1=(offset=4056, length=20)
+先頭16バイト: 02 00 D8 0F FF FF FF FF EC 0F 14 00 D8 0F 14 00
+--- PASS: TestDemoInsert (0.00s)
+PASS
+ok  	minidb/internal/storage	0.491s</span></code></pre>
+      <p>16 バイトの答え合わせです（リトルエンディアン: 下位バイトが先）。<code>02 00</code> = numSlots 2。<code>D8 0F</code> = <code>0x0FD8</code> = 4056 = freeEnd。<code>FF FF FF FF</code> = next なし。続いてスロット 0 が <code>EC 0F</code>（<code>0x0FEC</code> = 4076）と <code>14 00</code>（<code>0x14</code> = 20）、スロット 1 が <code>D8 0F</code>（4056）と <code>14 00</code>（20）。<strong>図と手計算とバイト列が三点一致</strong>しました。仕上げに、複数の可変長レコード（1 バイト・日本語文字列・300 バイト）の出し入れを検証する本物のテストを回します。</p>
+      <pre class="term"><code><span class="ps">$</span> go test ./internal/storage -run TestSlottedInsertGetRoundtrip -v
+<span class="out">=== RUN   TestSlottedInsertGetRoundtrip
+--- PASS: TestSlottedInsertGetRoundtrip (0.00s)
+PASS
+ok  	minidb/internal/storage	0.855s</span></code></pre>
+    </div>
+
+    <!-- ================================================== -->
+    <h2 class="step" id="step-5"><span class="step-no">Step 5</span>Get と Delete: コピーを返し、墓標を立てる</h2>
+    <p>入れたものは取り出せなければ意味がありません。<code>Get</code> はスロット番号からレコードを取り出します。実装で問うべきことは 2 つ — <strong>何を返すか</strong>（参照かコピーか）と、<strong>何を信じるか</strong>（ページのバイト列は正しい前提でよいか）です。</p>
+
+    <div class="file-tag">internal/storage/slotted.go</div>
+    <pre><code><span class="cm">// Get はレコードのコピーを返す（ページ内バイト列への参照を上位層に漏らさない）。</span>
+<span class="kw">func</span> (s <span class="ty">SlottedPage</span>) Get(slotNo <span class="kw">uint16</span>) ([]<span class="kw">byte</span>, <span class="ty">error</span>) {
+    <span class="kw">if</span> slotNo &gt;= s.numSlots() {
+        <span class="kw">return</span> nil, fmt.Errorf(<span class="st">"storage: slot %d は存在しない（総数 %d）"</span>, slotNo, s.numSlots())
+    }
+    off, length := s.slot(slotNo)
+    <span class="kw">if</span> off == tombstoneOffset {
+        <span class="kw">return</span> nil, fmt.Errorf(<span class="st">"storage: slot %d は削除済み"</span>, slotNo)
+    }
+    <span class="cm">// ページ内容は「自分が書いたもの」とは限らない（破損ファイルの可能性）。</span>
+    <span class="cm">// オフセットを疑わずに slice すると panic するので、境界を検査してエラーで返す</span>
+    <span class="kw">if</span> <span class="kw">int</span>(off) &lt; slottedHeaderSize || <span class="kw">int</span>(off)+<span class="kw">int</span>(length) &gt; PageSize {
+        <span class="kw">return</span> nil, fmt.Errorf(<span class="st">"storage: slot %d が壊れている（offset=%d length=%d）"</span>, slotNo, off, length)
+    }
+    out := make([]<span class="kw">byte</span>, length)
+    copy(out, s.p[off:off+length])
+    <span class="kw">return</span> out, nil
+}</code></pre>
+
+    <p>前半は 3 重の門番です。①スロット番号が総数以上なら「存在しない」。②墓標なら「削除済み」。③そして 3 つ目が、初心者が一番書き忘れる検査 — <strong>offset と length がページの範囲に収まっているか</strong>。「自分で書いた値なんだから正しいに決まってる」と思いたくなりますが、ページは<strong>ディスクから読み戻したバイト列</strong>です。ファイルが別のプログラムに書き換えられたかもしれないし、ディスク障害でビットが化けたかもしれない。壊れた offset を信じて <code>s.p[off:off+length]</code> とスライスすれば、範囲外アクセスで<strong>プログラム全体が panic で即死</strong>します。データベースは「1 行が読めない」ことを「全体が落ちる」ことに昇格させてはいけません。だから境界を検査し、エラーという<strong>行儀のよい失敗</strong>に変換して返すのです。</p>
+    <p>後半の 2 行が「何を返すか」への答えです。<code>make</code> で新しいバイトスライスを作り、<code>copy</code> で写して、<strong>コピーを返す</strong>。ページ内部への参照（窓）をそのまま返す方が速いのに、なぜでしょうか。</p>
+
+    <div class="box hazard"><div class="box-k">⚠ 落とし穴 — 参照を返すと、データが「後から化ける」</div>
+      <p>もし <code>return s.p[off:off+length], nil</code> と参照を返すと、呼び出し側が持っているのはページ内部を指す窓です。その後に別の誰かが <code>Insert</code> してコンパクションが走ると、窓の下でバイト列が<strong>黙って別レコードの内容に書き換わります</strong>。呼び出し側から見ると「さっき読んだ alice が、いつの間にか bob になっている」。再現条件が揃わないと起きない、発見の難しいバグの典型です。コピー 1 回のコストで、この事故の可能性ごと消しています。</p>
+    </div>
+
+    <p>次は削除です。概念導入で予告したとおり、Delete は<strong>何も詰め直しません</strong>。スロットを墓標 <code>(0, 0)</code> に書き換える、それだけです。</p>
+
+    <div class="file-tag">internal/storage/slotted.go</div>
+    <pre><code><span class="cm">// Delete はスロットを墓標にする。実体領域はコンパクションまで残るが、</span>
+<span class="cm">// 空き計算上はこの時点で再利用可能になる（FR-02）。</span>
+<span class="kw">func</span> (s <span class="ty">SlottedPage</span>) Delete(slotNo <span class="kw">uint16</span>) <span class="ty">error</span> {
+    <span class="kw">if</span> slotNo &gt;= s.numSlots() {
+        <span class="kw">return</span> fmt.Errorf(<span class="st">"storage: slot %d は存在しない（総数 %d）"</span>, slotNo, s.numSlots())
+    }
+    <span class="kw">if</span> off, _ := s.slot(slotNo); off == tombstoneOffset {
+        <span class="kw">return</span> fmt.Errorf(<span class="st">"storage: slot %d は削除済み"</span>, slotNo)
+    }
+    s.setSlot(slotNo, tombstoneOffset, <span class="st">0</span>)
+    <span class="kw">return</span> nil
+}</code></pre>
+
+    <p>Delete のあと、レコードの実体バイトはページ内にそのまま残っています。しかし誰も（どのスロットも）そこを指していないので、論理的にはもう存在しません。<code>liveBytes</code> の合計から外れるため、Insert の総空き計算では<strong>この瞬間から「空き」として数えられます</strong>。実際に上書きされるのはコンパクションのとき。「削除 = 印を付けるだけ」「回収 = 必要になったら」という遅延方式です。また、二重削除はエラーにしています。同じスロットを 2 回消せてしまう API は、上位層のバグ（同じ行を 2 回消すロジックミス）を隠蔽してしまうからです。</p>
+
+    <div class="box do"><div class="box-k">▸ 動かして確認</div>
+      <p>まず「削除済みスロットは Get できない・二重削除はエラー」を検証するテスト。</p>
+      <pre class="term"><code><span class="ps">$</span> go test ./internal/storage -run TestSlottedDeleteThenGetFails -v
+<span class="out">=== RUN   TestSlottedDeleteThenGetFails
+--- PASS: TestSlottedDeleteThenGetFails (0.00s)
+PASS
+ok  	minidb/internal/storage	0.910s</span></code></pre>
+      <p>次が本命、「削除した分は本当に再利用されるのか」を検証するテストです。テスト自体が読み物として面白いので、全文を読み解きます。</p>
+      <div class="file-tag">internal/storage/slotted_test.go</div>
+      <pre><code><span class="cm">// FR-02: 削除した領域が再利用される。</span>
+<span class="cm">// ページを満杯にし、1件消せばその分の新規挿入が成功することを確認する。</span>
+<span class="kw">func</span> TestSlottedDeletedSpaceIsReused(t *testing.<span class="ty">T</span>) {
+    <span class="kw">var</span> p <span class="ty">Page</span>
+    sp := InitSlottedPage(&amp;p)
+
+    rec := bytes.Repeat([]<span class="kw">byte</span>{<span class="st">0x11</span>}, <span class="st">100</span>)
+    <span class="kw">var</span> slots []<span class="kw">uint16</span>
+    <span class="kw">for</span> {
+        slot, err := sp.Insert(rec)
+        <span class="kw">if</span> errors.Is(err, ErrPageFull) {
+            <span class="kw">break</span>
+        }
+        <span class="kw">if</span> err != nil {
+            t.Fatal(err)
+        }
+        slots = append(slots, slot)
+    }
+    <span class="kw">if</span> <span class="kw">len</span>(slots) &lt; <span class="st">30</span> {
+        t.Fatalf(<span class="st">"100 バイト × %d 件しか入らなかった（4KiB ページとして少なすぎる）"</span>, <span class="kw">len</span>(slots))
+    }
+
+    <span class="cm">// 満杯 → 1件削除 → 同サイズが入る（スロットも再利用される）</span>
+    victim := slots[<span class="kw">len</span>(slots)/<span class="st">2</span>] <span class="cm">// 中程を消す = 断片化した空きになる</span>
+    <span class="kw">if</span> err := sp.Delete(victim); err != nil {
+        t.Fatal(err)
+    }
+    got, err := sp.Insert(rec)
+    <span class="kw">if</span> err != nil {
+        t.Fatalf(<span class="st">"削除後の再挿入が失敗: %v"</span>, err)
+    }
+    <span class="kw">if</span> got != victim {
+        t.Fatalf(<span class="st">"墓標スロットが再利用されていない: got %d, want %d"</span>, got, victim)
+    }
+}</code></pre>
+      <p>筋書きはこうです。100 バイトのレコードを <code>ErrPageFull</code> が返るまで詰め続ける（<code>for</code> に条件がないのは無限ループで、<code>break</code> で抜けます）。1 件あたりスロット込みで 104 バイト食うので、<code>8 + 104n ≦ 4096</code> から <strong>39 件</strong>入って 40 件目で満杯になります。次に<strong>真ん中の 1 件</strong>を消す — 端ではなく中程を消すのがポイントで、空きが実体領域の途中にできる、いちばん意地悪な断片化を作っています。それでも同じ 100 バイトがもう 1 件入ること、しかも<strong>消したのと同じスロット番号</strong>が返ること（<code>got != victim</code> の検査）まで要求しています。実行します。</p>
+      <pre class="term"><code><span class="ps">$</span> go test ./internal/storage -run TestSlottedDeletedSpaceIsReused -v
+<span class="out">=== RUN   TestSlottedDeletedSpaceIsReused
+--- PASS: TestSlottedDeletedSpaceIsReused (0.00s)
+PASS
+ok  	minidb/internal/storage	0.841s</span></code></pre>
+    </div>
+
+    <!-- ================================================== -->
+    <h2 class="step" id="step-6"><span class="step-no">Step 6</span>Compact: 動かすのは実体だけ、番号は動かさない</h2>
+    <p>最後のピースが掃除係、コンパクションです。削除を繰り返したページは、実体領域のあちこちに残骸が散らばり、「総空きは大きいのに連続空きが小さい」状態 — <strong>断片化</strong> — に陥ります。Compact は生存レコードだけをページ末尾へ詰め直し、散った空きを 1 つの連続空きにまとめます。守るべき掟はただ一つ。<strong>スロット番号は絶対に変えないこと。</strong>番号を変えたら、外に配られた TID（ページ番号, スロット番号）が全部無効になるからです。動かしてよいのは実体と、スロットが持つ offset だけ。</p>
+
+    <div class="file-tag">internal/storage/slotted.go</div>
+    <pre><code><span class="cm">// Compact は生存レコードをページ末尾へ詰め直し、削除跡の断片を回収する。</span>
+<span class="cm">// スロット番号は変えない（TID の安定性を守る）— 動くのは実体のオフセットだけ。</span>
+<span class="kw">func</span> (s <span class="ty">SlottedPage</span>) Compact() {
+    <span class="kw">var</span> buf <span class="ty">Page</span> <span class="cm">// 詰め直し用の作業領域</span>
+    writeEnd := <span class="kw">uint16</span>(PageSize)
+    <span class="kw">for</span> i := <span class="kw">uint16</span>(<span class="st">0</span>); i &lt; s.numSlots(); i++ {
+        off, length := s.slot(i)
+        <span class="kw">if</span> off == tombstoneOffset {
+            <span class="kw">continue</span>
+        }
+        writeEnd -= length
+        copy(buf[writeEnd:], s.p[off:off+length])
+        s.setSlot(i, writeEnd, length)
+    }
+    copy(s.p[writeEnd:], buf[writeEnd:])
+    s.setFreeEnd(writeEnd)
+}</code></pre>
+
+    <p>アルゴリズムは Insert の「後ろから積む」をゼロからやり直すだけです。作業用の空ページ <code>buf</code> を用意し、<code>writeEnd</code> を 4096 から始めて、スロット 0 から順に生存レコードを buf の末尾へ積み直していく。墓標は <code>continue</code> で読み飛ばす（積み直さない = ここで初めて実体が本当に消える）。各レコードを積むたびに、スロットの offset を新しい位置 <code>writeEnd</code> に更新します。<strong>スロットの位置（8 + 4i バイト目）そのものは 1 バイトも動いていない</strong>ことに注目してください。ループが終わったら、buf の実体領域を本物のページへ書き戻し、freeEnd を更新して完了です。</p>
+    <p>具体例で見ます。100・200・50 バイトの 3 件を入れ、真ん中（スロット 1）を消した状態から Compact すると、レイアウトはこう変わります。</p>
+
+    <div class="ascii">Compact 前: slot1 は削除済み（実体 200B は残骸として残っている）
+
+   0 [numSlots=3][freeEnd=3746]
+   8 [slot0=(3996,100)][slot1=(0,0)墓標][slot2=(3746,50)]
+  20 ········ 連続空き 3726 バイト ········
+3746 [レコード2 (50B)]
+3796 [××× 残骸 200B（どのスロットも指していない）×××]
+3996 [レコード0 (100B)]
+4096
+
+Compact 後: 生存レコードだけを末尾へ詰め直し
+
+   0 [numSlots=3][freeEnd=3946]
+   8 [slot0=(3996,100)][slot1=(0,0)墓標][slot2=(3946,50)]
+  20 ········ 連続空き 3926 バイト ········
+3946 [レコード2 (50B)]   ← 3746 から移動。でもスロット番号は 2 のまま
+3996 [レコード0 (100B)]  ← もともと末尾詰めなので動かない
+4096</div>
+
+    <p>freeEnd が 3746 から 3946 に戻り、散らばっていた 200 バイトの残骸が連続空きに合流しました。レコード 2 の実体は 3746 から 3946 へ引っ越しましたが、「スロット 2」という住所は不変です。第03章の索引が覚えるのはこの番号なので、コンパクションがいつ走っても索引は壊れません。</p>
+
+    <div class="gonote"><div class="box-k">GO メモ · var buf Page — 配列のゼロ値</div>
+      <p>Go では変数を宣言しただけで<strong>ゼロ値</strong>に初期化されます。<code>var buf Page</code> は <code>[4096]byte</code> の配列なので、全バイトが 0 の作業領域が 1 行で手に入ります。<code>make</code> も <code>new</code> も要りません。関数を抜ければ自動的に破棄されるので、後始末も不要です。</p>
+    </div>
+
+    <div class="box hazard"><div class="box-k">⚠ 落とし穴 — なぜ、いったん別のバッファに写すのか</div>
+      <p>「buf を経由せず、ページの上で直接詰め直せば速いのでは?」と思うかもしれません。しかしそれは<strong>上書き事故</strong>のもとです。墓標スロットの再利用（Step 4）があるため、スロット番号の順序と実体の物理的な並び順は一致するとは限りません。たとえば slot0 が (3000, 500)、slot1 が (3900, 100) を指しているとき、slot0 の実体をページ末尾側 [3596:4096) へ直接コピーすると、<strong>まだ移動していない slot1 の実体（3900〜）を書き潰します</strong>。作業バッファ経由なら、読み元（古いページ）と書き先（buf）が別のメモリなので、どんな並び順でも安全です。4KiB のコピー 1 回は、この安全の対価としては格安です。</p>
+    </div>
+
+    <div class="box do"><div class="box-k">▸ 動かして確認</div>
+      <p>上の図をそのまま実行します。freeEnd の回復と、スロット番号の不変を見てください。</p>
+      <pre class="term"><code><span class="ps">$</span> go test ./internal/storage -run TestDemoCompact -v
+<span class="out">=== RUN   TestDemoCompact
+Compact前: freeEnd=3746
+  slot0=(offset=3996, length=100) 生存=true
+  slot1=(offset=0, length=0) 生存=false
+  slot2=(offset=3746, length=50) 生存=true
+Compact後: freeEnd=3946
+  slot0=(offset=3996, length=100) 生存=true
+  slot1=(offset=0, length=0) 生存=false
+  slot2=(offset=3946, length=50) 生存=true
+--- PASS: TestDemoCompact (0.00s)
+PASS
+ok  	minidb/internal/storage	0.559s</span></code></pre>
+      <p>次に、本物のテストで「断片化していても総空きで足りれば救われる」ことを検証します。60 バイトのレコードを満杯（63 件）まで詰め、<strong>1 つおきに 32 件削除</strong> — 合計 1920 バイト空くのに、連続空きはほぼゼロという極端な断片化を作り、そこへ<strong>断片の合計でしか入らない 800 バイト</strong>を挿入します。Insert が内部で Compact を呼んで成功するはず、というシナリオです。しかもテストは、生き残った全レコードが<strong>コンパクション後も同じスロット番号・同じ内容で読めること</strong>まで検査しています（TID 安定性の検収です）。</p>
+      <div class="file-tag">internal/storage/slotted_test.go</div>
+      <pre><code><span class="cm">// 断片化していても総空きで足りればコンパクションで救う。</span>
+<span class="kw">func</span> TestSlottedCompactRecoversFragmentedSpace(t *testing.<span class="ty">T</span>) {
+    <span class="kw">var</span> p <span class="ty">Page</span>
+    sp := InitSlottedPage(&amp;p)
+
+    small := bytes.Repeat([]<span class="kw">byte</span>{<span class="st">0x22</span>}, <span class="st">60</span>)
+    <span class="kw">var</span> slots []<span class="kw">uint16</span>
+    <span class="kw">for</span> {
+        slot, err := sp.Insert(small)
+        <span class="kw">if</span> errors.Is(err, ErrPageFull) {
+            <span class="kw">break</span>
+        }
+        <span class="kw">if</span> err != nil {
+            t.Fatal(err)
+        }
+        slots = append(slots, slot)
+    }
+    <span class="cm">// 1つおきに削除 → 空きは合計では大きいが連続していない</span>
+    kept := map[<span class="kw">uint16</span>][]<span class="kw">byte</span>{}
+    <span class="kw">for</span> i, slot := <span class="kw">range</span> slots {
+        <span class="kw">if</span> i%<span class="st">2</span> == <span class="st">0</span> {
+            <span class="kw">if</span> err := sp.Delete(slot); err != nil {
+                t.Fatal(err)
+            }
+        } <span class="kw">else</span> {
+            kept[slot], _ = sp.Get(slot)
+        }
+    }
+    <span class="cm">// 断片の合計でしか入らない大きさを挿入 → 内部でコンパクションされるはず</span>
+    big := bytes.Repeat([]<span class="kw">byte</span>{<span class="st">0x33</span>}, <span class="st">800</span>)
+    <span class="kw">if</span> _, err := sp.Insert(big); err != nil {
+        t.Fatalf(<span class="st">"断片化空きの回収に失敗: %v"</span>, err)
+    }
+    <span class="cm">// 生存レコードはコンパクション後も同じスロット番号・同じ内容で読める</span>
+    <span class="kw">for</span> slot, want := <span class="kw">range</span> kept {
+        got, err := sp.Get(slot)
+        <span class="kw">if</span> err != nil {
+            t.Fatalf(<span class="st">"コンパクション後に slot %d が読めない: %v"</span>, slot, err)
+        }
+        <span class="kw">if</span> !bytes.Equal(got, want) {
+            t.Fatalf(<span class="st">"コンパクション後に slot %d の内容が変わった"</span>, slot)
+        }
+    }
+}</code></pre>
+      <pre class="term"><code><span class="ps">$</span> go test ./internal/storage -run TestSlottedCompactRecoversFragmentedSpace -v
+<span class="out">=== RUN   TestSlottedCompactRecoversFragmentedSpace
+--- PASS: TestSlottedCompactRecoversFragmentedSpace (0.00s)
+PASS
+ok  	minidb/internal/storage	0.685s</span></code></pre>
+      <p>最後に満杯検知の境界値テスト。「ページ丸ごとより大きいレコードの門前払い」と「最大サイズ（4084 バイト）ちょうどは入るが、その後は 1 バイトも入らず ErrPageFull」を検証しています。</p>
+      <pre class="term"><code><span class="ps">$</span> go test ./internal/storage -run TestSlottedPageFull -v
+<span class="out">=== RUN   TestSlottedPageFull
+--- PASS: TestSlottedPageFull (0.00s)
+PASS
+ok  	minidb/internal/storage	0.741s</span></code></pre>
+    </div>
+
+    <!-- ================================================== -->
+    <h2 class="step" id="step-7"><span class="step-no">Step 7</span>テストを読む: ページは再起動を生き延びる</h2>
+    <p>この章のコードは 1 バイトもディスクに触れていません。すべて <code>Page</code> というメモリ上の配列への読み書きです。それでも永続化はもう手に入っています — なぜなら、第00章の <code>DiskManager</code> が「ページを丸ごとファイルに書く/読む」を担当してくれるからです。スロット化ページはただのバイト列の<strong>解釈</strong>なので、バイト列ごと保存すれば解釈も一緒に保存される。この分業が正しく機能することを、章の総仕上げのテストで確かめます。</p>
+
+    <div class="file-tag">internal/storage/slotted_test.go</div>
+    <pre><code><span class="cm">// M1 の総合証拠: スロット化ページが DiskManager 経由で永続化され、</span>
+<span class="cm">// 再オープン後も同じ TID（PageID, SlotNo）で読める。</span>
+<span class="kw">func</span> TestSlottedPersistAcrossReopen(t *testing.<span class="ty">T</span>) {
+    path := filepath.Join(t.TempDir(), <span class="st">"test.db"</span>)
+    d, err := OpenDiskManager(path)
+    <span class="kw">if</span> err != nil {
+        t.Fatal(err)
+    }
+    id := d.AllocatePage()
+    <span class="kw">var</span> p <span class="ty">Page</span>
+    sp := InitSlottedPage(&amp;p)
+    want := map[<span class="kw">uint16</span>][]<span class="kw">byte</span>{}
+    <span class="kw">for</span> i := <span class="st">0</span>; i &lt; <span class="st">10</span>; i++ {
+        rec := []<span class="kw">byte</span>(fmt.Sprintf(<span class="st">"record-%d"</span>, i))
+        slot, err := sp.Insert(rec)
+        <span class="kw">if</span> err != nil {
+            t.Fatal(err)
+        }
+        want[slot] = rec
+    }
+    <span class="kw">if</span> err := d.WritePage(id, &amp;p); err != nil {
+        t.Fatal(err)
+    }
+    <span class="kw">if</span> err := d.Close(); err != nil {
+        t.Fatal(err)
+    }
+
+    <span class="cm">// ---- 再起動 ----</span>
+    d2, err := OpenDiskManager(path)
+    <span class="kw">if</span> err != nil {
+        t.Fatal(err)
+    }
+    <span class="kw">defer</span> d2.Close()
+    <span class="kw">var</span> p2 <span class="ty">Page</span>
+    <span class="kw">if</span> err := d2.ReadPage(id, &amp;p2); err != nil {
+        t.Fatal(err)
+    }
+    sp2 := AsSlottedPage(&amp;p2)
+    <span class="kw">for</span> slot, rec := <span class="kw">range</span> want {
+        got, err := sp2.Get(slot)
+        <span class="kw">if</span> err != nil {
+            t.Fatal(err)
+        }
+        <span class="kw">if</span> !bytes.Equal(got, rec) {
+            t.Fatalf(<span class="st">"再オープン後に slot %d の内容が一致しない"</span>, slot)
+        }
+    }
+}</code></pre>
+
+    <p>前半と後半で「別の人生」を演じているのがこのテストの読みどころです。前半: DB ファイルを開き、ページを 1 枚割り当て、メモリ上で <code>InitSlottedPage</code> して 10 件書き込み、<code>WritePage</code> でページ丸ごとディスクへ、そして <code>Close</code>。ここでプログラムが一度終わった（クラッシュした）と思ってください。後半: <strong>まっさらな変数だけ</strong>を使ってファイルを開き直し、同じ PageID を <code>ReadPage</code> で読み戻します。ここで使うのが <code>AsSlottedPage</code> — Init ではありません。読み戻した 4096 バイトには numSlots もスロット表も実体も全部入っているので、眼鏡をかけ直すだけで、<strong>書き込んだときと同じスロット番号</strong>で全レコードが取り出せます。<code>want</code> という「スロット番号 → 中身」の対応表（Go の <code>map</code>）が、再起動をまたいで成立する — これが「TID は永続的な住所である」ことの実証です。</p>
+
+    <div class="box hazard"><div class="box-k">⚠ 落とし穴 — 既存ページに Init を呼ばない</div>
+      <p><code>InitSlottedPage</code> は numSlots = 0、freeEnd = 4096 をヘッダに<strong>上書き</strong>します。レコード実体のバイト列はまだ残っていても、スロット表が空になった時点で全レコードは論理的に消滅です。「開き直したページがなぜか空になる」というバグの原因は、ほぼ間違いなく As と Init の取り違えです。新品には Init を 1 回だけ、既存には常に As。</p>
+    </div>
+
+    <div class="box hazard"><div class="box-k">⚠ 落とし穴 — 逆方向の事故: 未初期化ページに As を呼ぶ</div>
+      <p>取り違えは<strong>逆向きのほうが恐ろしい</strong>ので、こちらも見ておきます。第00章で「<code>WriteAt</code> の穴埋めで 0 だらけのページが生まれることがある」と話しました。その<strong>まっさらな 0 のページに <code>AsSlottedPage</code> を呼ぶ</strong>と、どうなるでしょうか。</p>
+      <p>ヘッダも 0 なので、<code>freeEnd</code> は <strong>0</strong> と読まれます。本来なら 4096（=「まだ 1 バイトも使っていない」）であるべき値です。この時点でページの状態を覗くと、こうなっています。</p>
+      <div class="ascii">numSlots=0  freeEnd=0  contiguousFree=-8   ← 空きが「マイナス8バイト」</div>
+      <p><code>contiguousFree()</code> は <code>freeEnd - slotArrayEnd</code> つまり <code>0 - 8</code>。<strong>ありえない負の値</strong>です。Step 3 の GO メモで「<code>contiguousFree</code> の戻り値をわざわざ <code>int</code> に逃がす」と説明したのは、まさにこういう壊れた状態を<strong>負の数として観測できるようにする</strong>ためでした。<code>uint16</code> のままだったら 65528 という巨大な正の数に見えて、異常だと気づけません。</p>
+      <p>では、この状態で <code>Insert</code> したらどうなるか。<strong>驚くことに、エラーを返さず成功します。</strong></p>
+      <div class="ascii">Insert("hello") => slot=0, err=&lt;nil&gt;
+[Insert後] numSlots=1  freeEnd=4091  contiguousFree=4079
+Get(0)          => "hello"          ← 読めてしまう</div>
+      <p>なぜ通ってしまうのか。<code>Insert</code> は「連続空きが足りない」と判断すると、<strong>諦める前にコンパクションを試す</strong>作りでした（Step 4）。<code>needed(9) &gt; contiguousFree(-8)</code> なので断片化ありと見なされ、次に総空き <code>totalFree</code> を計算します — ところがこの式は <code>numSlots</code>（=0）と生存レコード（=0 バイト）から求めるので、<strong>4088 という「正常なページと同じ答え」</strong>が出ます。足りると判断して <code>Compact()</code> が走り、そこで <code>freeEnd</code> が 4096 に書き直されます。<strong>つまり回り込みは起きず、<code>freeEnd</code> は結果的に正しい値へ復帰してしまう</strong>のです。</p>
+      <p>ではページは無事なのでしょうか。<strong>いいえ。直ったのは <code>freeEnd</code> だけです。</strong> 正しく <code>Init</code> したページと、ヘッダを 16 バイトだけ並べて見比べてみてください。</p>
+      <div class="ascii">(A) Init 済み   01 00 FB 0F  FF FF FF FF  FB 0F 05 00 …
+(B) 未初期化    01 00 FB 0F  00 00 00 00  FB 0F 05 00 …
+                └─ 同 じ ─┘  └─ ここが違う ─┘
+
+  [0:2) numSlots = 1     … 同じ
+  [2:4) freeEnd  = 4091  … 同じ（Compact が直した）
+  [4:8) next     ← (A) FF FF FF FF = InvalidPageID「次は無い」
+                  (B) 00 00 00 00 = PageID 0「次はページ0」という嘘</div>
+      <p><strong><code>next</code> が壊れたまま残ります。</strong> <code>InitSlottedPage</code> は <code>freeEnd</code> だけでなく <code>SetNext(InvalidPageID)</code> — つまり「このページで終わり」という<strong>終端の印</strong>も書いていました。<code>Compact()</code> はそこまでは面倒を見てくれません。</p>
+      <p>この <code>next</code> は、第04章で複数ページを数珠つなぎにするときに使います。<code>heap.go</code> はページを辿るとき <code>next</code> を<strong>無条件に信じて</strong>進みます。だから「次はページ 0」という嘘を辿って<strong>先頭へ戻り、また同じ嘘を読み、また戻る</strong>。実際に <code>next</code> を 0 に壊したヒープへレコードを入れ続けると、こうなります。</p>
+      <div class="ascii">first page = 0
+（next を 0 に壊す）
+Insert を繰り返す → 3 秒経っても終わらない = 無限ループ</div>
+      <p>エラーも例外も出ません。<strong>プログラムがただ帰ってこなくなる</strong>だけです。</p>
+      <p><strong>これが恐ろしいところです。</strong> <code>Insert</code> も <code>Get</code> もエラーを返さず、<code>freeEnd</code> は勝手に直る。読者は「うまくいった」と思って先へ進みます。<strong>壊れているのは、いま見ていない場所（ヘッダの 4〜7 バイト目）だけ</strong>。それが牙を剥くのは何章も先、ページが 2 枚目に増えたときなのです。</p>
+      <p>もうひとつ、被害の出方があります。<strong>すでにレコードが入っているページ</strong>のヘッダが 0 になった場合です。試してみると、こうなります。</p>
+      <div class="ascii">[正常] numSlots=2  freeEnd=4076   ← レコードが2件入っている
+[破損] numSlots=0  freeEnd=0     ← ヘッダが 0 に潰れた
+Insert("CCCCC") => err=&lt;nil&gt;、freeEnd=4091 に「復帰」</div>
+      <p><code>numSlots</code> が 0 と読まれた時点で、<strong>入っていた 2 件は存在しないことになります</strong>。そして <code>freeEnd</code> が 4096 から数え直されるので、新しいレコードは<strong>生きているはずの古いレコードの上に書かれます</strong>。エラーは 1 つも出ません。「ページを開き直したらデータが消えていて、しかも書き込みは普通に通る」— 原因を後から辿るのが最も難しい種類のバグです。</p>
+      <p>だから規律はこうです。<strong>新しく確保したページは、使う前に必ず <code>InitSlottedPage</code> を 1 回通す。</strong></p>
+      <p>minidb がこの事故を防いでいるやり方は、第04章で見ます。<strong>ページを確保する場所と初期化する場所を、離さない</strong>のです — 新しいページが要るとき、<code>heap.go</code> は <code>Allocate</code> に「確保できたらこれをやってくれ」というコールバックを渡し、<strong>その中で <code>InitSlottedPage</code> を呼びます</strong>。確保だけして初期化を忘れる、という隙間がそもそも作れない書き方になっています。「規律を守る」のではなく「<strong>破れない形にする</strong>」— 忘れても何も起きないバグに対しては、これがいちばん確実な対処です。</p>
+    </div>
+
+    <div class="box do"><div class="box-k">▸ 動かして確認</div>
+      <pre class="term"><code><span class="ps">$</span> go test ./internal/storage -run TestSlottedPersistAcrossReopen -v
+<span class="out">=== RUN   TestSlottedPersistAcrossReopen
+--- PASS: TestSlottedPersistAcrossReopen (0.02s)
+PASS
+ok  	minidb/internal/storage	0.804s</span></code></pre>
+      <p>確認が済んだら、使い捨ての <code>slotted_demo_test.go</code> は削除しておきましょう（残しても害はありませんが、本物のテスト一覧に混ざって紛らわしくなります）。</p>
+    </div>
+
+    <!-- ================================================== -->
+    <h2>つまずき FAQ</h2>
+
+    <details class="qa"><summary>なぜ Delete のたびにすぐ Compact しないのですか?</summary>
+      <div class="qa-body"><p>コストが割に合わないからです。Compact は最大 4KiB 近くのメモリコピーを伴います。削除のたびに毎回払うと、大量削除が O(件数 × ページサイズ) の仕事になってしまう。一方、墓標を立てるだけなら 4 バイトの書き換えで済みます。空きが本当に必要になるまで掃除を先送りすれば、Compact の回数は「必要最小限」まで減ります。「消すのは安く、掃除はまとめて」— PostgreSQL が削除を「不可視化」だけで済ませ、後から <code>VACUUM</code> で回収するのも同じ理屈です。</p></div>
+    </details>
+
+    <details class="qa"><summary>offset = 0 を墓標にして、本物のレコードと混ざりませんか?</summary>
+      <div class="qa-body"><p>混ざりません。ページの先頭 8 バイトは必ずヘッダが占めるので、生きているレコードの実体が offset 0 に置かれることは構造上あり得ないからです。実際、レコードの offset は最小でも <code>slottedHeaderSize</code>（8）以上で、<code>Get</code> の境界検査も <code>int(off) &lt; slottedHeaderSize</code> を「壊れている」と判定しています。「正常値として絶対に出ない値を、特別な意味に流用する」のが番兵値のパターンで、<code>InvalidPageID</code>（0xFFFFFFFF）も同じ発想です。</p></div>
+    </details>
+
+    <details class="qa"><summary>4084 バイトより大きいレコードはどうやって保存するのですか?</summary>
+      <div class="qa-body"><p>minidb では保存できません（Insert の最初の <code>if</code> で門前払いになります）。本物の RDBMS は、大きな値を複数ページに分けて格納する<strong>オーバーフローページ</strong>や、PostgreSQL の <strong>TOAST</strong>（大きな列値を別テーブルに退避し、行には参照だけ置く仕組み）で解決しています。仕組み自体は「実体を別の場所に置き、住所だけをページに書く」という、この章でやったことの再帰的な応用です。本書では「1 レコード = 1 ページ内」という制約を割り切ることで、全層の見通しを優先しています。</p></div>
+    </details>
+
+    <details class="qa"><summary>freeEnd は uint16（最大 65535）ですが、大丈夫なのですか?</summary>
+      <div class="qa-body"><p>PageSize = 4096 の間は安全です。ページ内のオフセットは 0〜4096 しか取らないので、uint16 で十分に表せます。危ないのは PageSize を変えるときで、65536 以上にすると初期値 <code>freeEnd = PageSize</code> が uint16 に収まらず 0 に巻き戻ります（Step 4 の落とし穴参照）。逆に「なぜ uint32 にしないの?」と言えば、スロット 1 個が 4 → 8 バイトに倍増し、ページに入るレコード数が減るからです。レイアウトの型選びは、表現範囲と密度のトレードオフです。</p></div>
+    </details>
+
+    <details class="qa"><summary>InitSlottedPage と AsSlottedPage、どちらを使えばいいか毎回迷います。</summary>
+      <div class="qa-body"><p>判断基準は 1 つだけ — <strong>そのページに、守るべきデータが既に入っているか</strong>。入っていない（AllocatePage で確保した直後の新品）なら Init。入っている（ReadPage で読み戻した既存ページ）なら As。Init は「白紙のノートに罫線を引く」、As は「書き込み済みのノートを開く」です。既存ページに Init すると罫線ごと引き直されて、書いてあったものが全部「なかったこと」になります（Step 7 の落とし穴）。</p></div>
+    </details>
+
+    <!-- ================================================== -->
+    <h2>理解度チェック</h2>
+    <p>次の問いに自分の言葉で答えてから、答えを開いてください。Q1〜Q3 はレイアウトの手計算問題です。紙とペンを使ってどうぞ。</p>
+
+    <details class="qa"><summary>Q1. スロット 2 のスロットエントリは、ページの何バイト目にありますか? offset と length それぞれの位置も答えてください。</summary>
+      <div class="qa-body"><p>スロット i の開始位置は <code>slottedHeaderSize + i × slotSize = 8 + 2 × 4 = 16</code> バイト目。エントリは 4 バイトなので <strong>16〜19 バイト目</strong>を占めます。前半 2 バイト（16〜17 バイト目）が offset、後半 2 バイト（18〜19 バイト目）が length です。Step 4 のデモの 16 進ダンプで言えば、先頭 16 バイトの<strong>直後</strong>にスロット 2 が来ることになります。</p></div>
+    </details>
+
+    <details class="qa"><summary>Q2. 初期化直後のページに 20 バイトのレコードを 2 件 Insert しました。freeEnd の値と、それぞれの実体が占めるバイト範囲は?</summary>
+      <div class="qa-body"><p>1 件目: <code>newEnd = 4096 − 20 = 4076</code>。実体は <code>[4076:4096)</code>、スロット 0 = (4076, 20)。2 件目: <code>newEnd = 4076 − 20 = 4056</code>。実体は <code>[4056:4076)</code>、スロット 1 = (4056, 20)。よって <strong>freeEnd = 4056</strong> です。ヘッダのバイト列で言えば 2〜3 バイト目が <code>D8 0F</code>（リトルエンディアンで 0x0FD8 = 4056）になります。Step 4 のデモ出力と一致していることを確認してください。</p></div>
+    </details>
+
+    <details class="qa"><summary>Q3. 空のスロット化ページに入れられる最大レコードは何バイトですか? 式で説明してください。</summary>
+      <div class="qa-body"><p><code>PageSize − slottedHeaderSize − slotSize = 4096 − 8 − 4 = 4084</code> バイトです。レコードは実体だけでなくスロット 1 個（4 バイト）とセットで場所を取るので、連続空き 4088 から 4 を引いた値が上限になります。Insert の最初の <code>if</code> がまさにこの式で門前払いをしており、TestSlottedPageFull は「4084 ちょうどは入る」ことを検証しています。</p></div>
+    </details>
+
+    <details class="qa"><summary>Q4. 100 バイトのレコードは 1 ページに何件入りますか? また、その次の 1 件が入らないのはなぜですか?</summary>
+      <div class="qa-body"><p><strong>39 件</strong>です。1 件あたり実体 100 + スロット 4 = 104 バイトを消費するので、n 件では <code>8 + 104n</code> バイト必要。<code>8 + 104 × 39 = 4064 ≦ 4096</code> は成立しますが、40 件目は <code>4064 + 104 = 4168 &gt; 4096</code> で入りません。40 件目の時点での残り空きは <code>4096 − 4064 = 32</code> バイトしかなく、これは連続空きでも総空きでも 104 に届かないので、コンパクションでも救えず <code>ErrPageFull</code> になります。TestSlottedDeletedSpaceIsReused の最初のループが、まさにこの 39 件で止まります。</p></div>
+    </details>
+
+    <details class="qa"><summary>Q5. Delete した直後、そのレコードの実体バイトはページの中にまだ残っていますか?</summary>
+      <div class="qa-body"><p><strong>残っています。</strong>Delete が書き換えるのはスロットの 4 バイトだけ（offset = 0, length = 0 の墓標にする）で、実体領域には触れません。ただし、どのスロットからも指されなくなった実体は論理的には存在せず、<code>liveBytes</code> の合計から外れるので、Insert の総空き計算では即座に「空き」として扱われます。物理的に上書きされるのは、次に Compact が走ったときです。「論理削除（すぐ）と物理回収（あとで）を分ける」— この分離は第06章の WAL でも別の形で再登場します。</p></div>
+    </details>
+
+    <details class="qa"><summary>Q6. Compact がレコードの実体を動かすのに、スロット番号を絶対に変えないのはなぜですか?</summary>
+      <div class="qa-body"><p>スロット番号が <strong>TID =（ページ番号, スロット番号）という「外に配られた住所」の一部</strong>だからです。第03章の B+Tree 索引は「キー → TID」を大量に格納します。もし Compact がスロット番号を詰め替えたら、ページ内の掃除のたびに索引側の全エントリを探して書き直す羽目になり、コストも複雑さも爆発します。「実体の位置」はスロットの中身（offset）を書き換えるだけで追従でき、外部への約束（番号）は不変に保つ — 間接参照を 1 段挟むことで、変化を内側に閉じ込めているのです。</p></div>
+    </details>
+
+    <div class="box done"><div class="box-k">✓ 完了の合図</div>
+      <p>1 枚のページに複数の可変長レコードを出し入れでき、満杯の検知・削除跡の再利用・断片化からの回収・再起動後の読み出しまでが、すべて <code>slotted.go</code> 1 ファイルで完結している。次のコマンドで 6 本すべてが PASS すれば、この章は完了です。</p>
+      <pre class="term"><code><span class="ps">$</span> go test ./internal/storage -run TestSlotted -v
+<span class="out">=== RUN   TestSlottedInsertGetRoundtrip
+--- PASS: TestSlottedInsertGetRoundtrip (0.00s)
+=== RUN   TestSlottedDeleteThenGetFails
+--- PASS: TestSlottedDeleteThenGetFails (0.00s)
+=== RUN   TestSlottedDeletedSpaceIsReused
+--- PASS: TestSlottedDeletedSpaceIsReused (0.00s)
+=== RUN   TestSlottedCompactRecoversFragmentedSpace
+--- PASS: TestSlottedCompactRecoversFragmentedSpace (0.00s)
+=== RUN   TestSlottedPageFull
+--- PASS: TestSlottedPageFull (0.00s)
+=== RUN   TestSlottedPersistAcrossReopen
+--- PASS: TestSlottedPersistAcrossReopen (0.01s)
+PASS
+ok  	minidb/internal/storage	0.745s</span></code></pre>
+    </div>
+
+    <h2>まとめ — 次の層へ</h2>
+    <p>この章で、のっぺらぼうだった 4096 バイトに<strong>秩序</strong>が生まれました。前からヘッダとスロット表、後ろからレコード実体。削除は墓標、掃除はコンパクション、満杯は <code>ErrPageFull</code> で上に報告。そして何より、<strong>(ページ番号, スロット番号) という安定した住所 = TID</strong> を手に入れました。レコードの実体がページ内でどれだけ引っ越しても、住所は変わらない。この約束の上に、第03章の索引も、第04章の表も建ちます。</p>
+    <p>ただし、いまの作りには大きな弱点があります。Step 7 のテストを思い出してください。レコードを 1 件読むにも <code>ReadPage</code>、1 件書くにも <code>WritePage</code> — <strong>操作のたびに毎回ディスクまで往復</strong>しています。メモリの読み書きがナノ秒の世界なのに対し、ディスク I/O はその数千〜数万倍遅い。同じページに 100 件挿入するのに 100 回ディスクに書きに行くのは、隣の部屋に置けばいい荷物を毎回倉庫まで運んでいるようなものです。</p>
+    <p>解決策は、よく使うページを<strong>メモリに置いたままにする</strong>こと。一度読んだページはメモリ上の「フレーム」に載せてキャッシュし、次からはそこで読み書きする。メモリが足りなくなったら、使われていないページを選んで追い出す。この仕組み — <strong>バッファプール</strong> — がデータベースの体感速度を決める心臓部であり、次章のテーマです。序章で顔見せした 3 メソッドの <code>Store</code> インターフェースが、いよいよ舞台に上がります。</p>
+
+    <div class="chap-foot">
+      <a class="pager" href="00-disk.html"><span class="dir">← 前へ</span>第00章 · ディスクとページ</a>
+      <a class="pager next" href="02-buffer.html"><span class="dir">次へ →</span>第02章 · バッファプール</a>
+    </div>
+  </main>
+</div>
+</body>
+</html>

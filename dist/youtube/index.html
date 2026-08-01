@@ -1,0 +1,228 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>動画サービスをつくる — はじめに・準備</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500;600&family=Source+Serif+4:opsz,wght@8..60,400;8..60,600;8..60,700&family=Noto+Serif+JP:wght@400;600;700&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<div class="shell">
+
+  <aside class="spine">
+    <a class="wordmark" href="index.html">VIDEO-STREAM · from scratch</a>
+    <div class="book-title">動画サービスを<br>つくる</div>
+    <div class="book-sub">Go と ffmpeg で presigned から HLS 配信まで</div>
+
+    <div class="legend"><span>受け取る <b>↓</b></span><span>届ける <b>↑</b></span></div>
+
+    <nav aria-label="目次">
+      <ul class="toc">
+        <li><a class="nav-item current" aria-current="page" href="index.html"><span class="nav-num">序</span><span class="nav-label">はじめに・準備<span class="nav-tag">Setup</span></span></a></li>
+        <li><a class="nav-item" href="00-setup.html"><span class="nav-num">00</span><span class="nav-label">土台をつくる<span class="nav-tag">Setup</span></span></a></li>
+        <li><a class="nav-item" href="01-auth.html"><span class="nav-num">01</span><span class="nav-label">人を扱う<span class="nav-tag">Auth</span></span></a></li>
+        <li><a class="nav-item" href="02-upload.html"><span class="nav-num">02</span><span class="nav-label">動画を受け取る<span class="nav-tag">Upload</span></span></a></li>
+        <li><a class="nav-item" href="03-transcode.html"><span class="nav-num">03</span><span class="nav-label">動画を変換する<span class="nav-tag">Transcode</span></span></a></li>
+        <li><a class="nav-item" href="04-deliver.html"><span class="nav-num">04</span><span class="nav-label">動画を届ける<span class="nav-tag">Deliver</span></span></a></li>
+        <li><a class="nav-item" href="05-social.html"><span class="nav-num">05</span><span class="nav-label">反応をつくる<span class="nav-tag">Social</span></span></a></li>
+        <li><a class="nav-item" href="06-discover.html"><span class="nav-num">06</span><span class="nav-label">見つけてもらう<span class="nav-tag">Discover</span></span></a></li>
+        <li><a class="nav-item" href="07-notify.html"><span class="nav-num">07</span><span class="nav-label">つながりを届ける<span class="nav-tag">Notify</span></span></a></li>
+        <li><a class="nav-item" href="08-web.html"><span class="nav-num">08</span><span class="nav-label">画面をつける<span class="nav-tag">Web</span></span></a></li>
+        <li><a class="nav-item" href="09-beyond.html"><span class="nav-num">09</span><span class="nav-label">仕上げと次の一歩<span class="nav-tag">Beyond</span></span></a></li>
+      </ul>
+    </nav>
+
+    <div class="spine-foot">
+      各章は動画が通る道の一区間。<br>受け取る（下）から届ける（上）へ、<br>1本の動画を最後まで運びきる。
+    </div>
+  </aside>
+
+  <main class="reading">
+    <div class="eyebrow"><span>序章</span><span class="depth">— はじめに・準備</span></div>
+    <h1>動画サービスは、魔法ではない</h1>
+    <p class="lede">YouTube に動画をアップロードすると、少し待つだけで、スマホでもPCでも、電波が悪くても、するすると再生できるようになる。あの「少し待つだけ」の裏で何が起きているのか — それを、動くコードを一歩ずつ追いながら解き明かしていく本です。</p>
+
+    <p>動画サービスを「使う」ことはできても、「中で何が起きているか」を説明できる人は多くありません。数百MBのファイルはどうやってサーバに渡るのか。アップロードした直後は再生できないのに、しばらくすると見られるようになるのはなぜか。同じ動画が、回線が細いときは粗く、太いときは綺麗に、勝手に切り替わるのはどういう仕組みか。言葉は聞いたことがあっても、実際に動くものを一度も作ったことがなければ、それはまだ理解ではなく暗記です。</p>
+
+    <p>この本の方針はひとつです。<strong>作って理解する。</strong> マネージドな動画サービス（AWS の MediaConvert や、Cloudinary のような SaaS）は使いません。ブラウザから大きなファイルを受け取るところから始めて、その上に少しずつ層を積み上げ、最後には自分のブラウザから動画を投稿し、変換を待ち、複数画質で適応再生できる、小さいけれど本物の動画プラットフォームを Go と ffmpeg で組み上げます。バックエンドは約 2,400 行、フロントは約 1,600 行。ひとりの人間が全部を読み切れる大きさです。</p>
+
+    <blockquote>
+      作れないものを、私は理解していない。
+      <cite>Richard Feynman</cite>
+    </blockquote>
+
+    <h2>この本を貫く一つの問い</h2>
+    <p>Redis や Web API を作る本と、この本は決定的に違うところがあります。それは<strong>扱うデータが大きく、しかも「すぐには使える状態にならない」</strong>ことです。テキストの JSON なら受け取った瞬間に処理できますが、動画はそうはいきません。この本のすべての設計判断は、次の一文から出発します。</p>
+
+    <div class="box goal"><div class="box-k">◈ この本の核心テーマ</div>
+      <p><strong>動画ファイルは大きく、準備に時間がかかる。</strong></p>
+      <p>500MB のファイルを、ふつうの API に POST したらどうなるか。変換に3分かかる処理を、投稿ボタンを押した人に待たせたらどうなるか。細い回線の人に、太い回線向けの高画質を送りつけたらどうなるか。—— この本は、この「大きさ」と「時間」に、3つの答えで立ち向かいます。</p>
+    </div>
+
+    <p>その3つの答えが、そのまま本書の山場になります。先に名前だけ挙げておきます。いまは意味が分からなくて構いません。読み終えたとき、この3つを自分のコードで説明できるようになっているのがゴールです。</p>
+
+    <ul>
+      <li><strong>presigned URL による直接アップロード</strong>（第02章） — 大きなファイルを、API サーバに一度も通さず、ブラウザから保管庫へ<strong>直接</strong>上げる。API が発行するのは「この置き場に、10分だけ、書き込んでよい」という期限つきの合鍵（署名済みURL）だけ。ファイル本体は API のメモリも帯域も一切使いません。</li>
+      <li><strong>キュー + ワーカー + ffmpeg による非同期 HLS 変換</strong>（第03章） — 分単位かかる変換を、投稿した人に待たせない。API は「変換してくれ」という<strong>注文票をキューに積むだけ</strong>で即座に応答を返し、別プロセスの<strong>ワーカー</strong>が裏で ffmpeg を呼び、動画を 360p / 720p / 1080p の HLS（複数画質のかけら）に作り替えます。</li>
+      <li><strong>hls.js による適応ビットレート配信</strong>（第04章） — 回線に応じて画質を自動で選ぶ。変換で作った複数画質を、ブラウザ側の <code>hls.js</code> が「今この回線ならこの画質」と<strong>秒単位で選び直しながら</strong>再生します。細い回線でも止まらず、太くなれば綺麗になる。あの体験の正体です。</li>
+    </ul>
+
+    <p>この3つはバラバラの技術ではなく、「大きくて時間のかかるデータを、待たせず・落とさず・届けきる」という<strong>一本のパイプライン</strong>を構成します。本書はそのパイプラインを、動画が通る順に、上流から下流へ作っていきます。</p>
+
+    <h2>この本の読み方</h2>
+    <p>章は、そのまま<strong>1本の動画が辿る道の一区間</strong>に対応しています。左の目次を見てください。土台（第00章）の上に、人を扱い（01）、動画を受け取り（02）、変換し（03）、届け（04）、そこに反応・発見・つながり（05〜07）と画面（08）を足していきます。<strong>組むときは下から上へ</strong>。土台のない家は建たないのと同じで、保管庫とキューとDBが立っていないうちは、動画を1バイトも受け取れません。</p>
+
+    <div class="ascii">動画サービスの全体像 — 動画が通る道
+
+  ┌──────────────────────────────────────────────────────────┐
+  │  ブラウザ (React + hls.js)   ← 08 画面 / 04 適応再生      │
+  └───────┬───────────────────────────────────▲──────────────┘
+          │ ①申請 / ③完了通知                  │ ⑤権限チェック＋配信
+          │ ⑥反応・通知(SSE)                    │
+  ┌───────▼───────────────────────────────────┴──────────────┐
+  │  受付 API (Go, net/http)   ← 00 土台 / 01 認証 / 02 申請  │
+  │    ・大きな動画本体は「通さない」                          │
+  │    ・重い変換は「注文票を積むだけ」で即応答                │
+  └──┬────────────┬───────────────┬──────────────▲────────────┘
+     │ 記録        │ 注文を積む     │ 合鍵を発行    │ ⑦変換完了を記録
+     ▼            ▼               ▼              │
+  ┌──────┐   ┌─────────┐    ┌──────────┐         │
+  │ DB   │   │ Redis   │    │ MinIO    │         │
+  │ Pg16 │   │ キュー  │    │ 保管庫   │◀──②直PUT（API を通らない）
+  └──────┘   └────┬────┘    └────▲─────┘         │
+   状態が        │ ④注文を       │ 成果物(HLS)を  │
+   唯一の真実     │  取り出す      │  書き込む      │
+                 ▼               │                │
+            ┌─────────────────────────────────────┴──┐
+            │  ワーカー (Go + ffmpeg)  ← 03 非同期変換 │
+            │    Redis から注文を取り、ffmpeg で       │
+            │    360p/720p/1080p の HLS に作り替える    │
+            └─────────────────────────────────────────┘</div>
+
+    <p>図の <strong>API とワーカーが別プロセスに分かれている</strong>ことに注目してください。これが本書の設計の背骨です。分単位かかる変換を API と同じプロセスでやってしまうと、変換中は API が他の依頼をさばけなくなります。だから「受付」と「職人」を分ける。受付は身軽に依頼を受け続け、重い仕事は注文箱（キュー）越しに職人へ渡す。第00章で、この2プロセス構成をまず立ち上げます。</p>
+
+    <p>各章は<strong>ステップ</strong>に分かれています。1ステップ = 「コードを1かたまり読んで、なぜそう書くかを理解し、動かして確認する」の単位です。ステップごとに次のものが必ずあります。</p>
+
+    <ul>
+      <li><strong>コードの全文</strong> — 断片ではなく、その時点で必要なコードすべてを載せます。本書のコードはリポジトリの <code>src/</code> にある完成版と<strong>一字一句一致</strong>しています（紙面の都合で省くときは <code>// …</code> と明示します）。</li>
+      <li><strong>コードの解説</strong> — 初見でつまずきやすい行は、取り出して「なぜこう書くか」を厚く説明します。</li>
+      <li><strong>動かして確認</strong> — 実際に打つコマンドと、出るはずの出力。「読んだだけ」で先に進まないための関所です。</li>
+    </ul>
+
+    <p>章末には<strong>つまずき FAQ</strong> と<strong>理解度チェック</strong>があります。理解度チェックの問いに自分の言葉で答えられたら、その章は卒業です。</p>
+
+    <div class="box map"><div class="box-k">☰ 進め方は2通り</div>
+      <ol>
+        <li><strong>読む派</strong> — <code>src/</code> の完成コードをエディタで開き、本書を横に置いて読み進め、各章の「動かして確認」を <code>docker compose</code> で実行する。<em>初心者にはこちらをおすすめします。</em></li>
+        <li><strong>写経派</strong> — 空の Go モジュールと Vite プロジェクトを自分で作り、本書のコードを手で打ちながら組み上げる。時間はかかりますが、いちばん力がつきます。動かなくなったら <code>src/</code> と差分を見比べれば復帰できます。</li>
+      </ol>
+    </div>
+
+    <h2>前提と、かかる時間</h2>
+    <p>必要なのは <strong>Go の基礎文法</strong>（変数・関数・構造体・スライス・マップ・<code>if err != nil</code>）、<strong>SQL の基礎</strong>（<code>SELECT</code> / <code>INSERT</code> / <code>UPDATE</code> と <code>WHERE</code>）、<strong>TypeScript / React の基礎</strong>（第08章まで来たら）、そして <strong>Docker と Docker Compose が動く環境</strong>だけです。動画変換や HLS の予備知識はまったく要りません。むしろ「知らない」状態から作った方が、一つひとつの概念が腑に落ちます。</p>
+    <p>本書で多用する道具（<code>net/http</code> のルーティング、pgx での DB アクセス、Redis のリスト操作、MinIO の presigned URL、ffmpeg のコマンド、hls.js、SSE）は、各章で初出のたびに <strong>実装メモ</strong>というボックスで補足します。分からない要素が出てきたら、まずそこを見てください。</p>
+    <p>読了目安は、読む派で <strong>1章あたり2〜3.5時間、全体で25〜35時間</strong>。1日1ステップでも1〜2ヶ月で完走できます。急がないこと。特に第02〜04章（アップロード・変換・配信）は本書の山場で、ここを飛ばすと以降の章が必ず分からなくなります。<strong>順番に、確認コマンドを全部通しながら</strong>進んでください。</p>
+
+    <h2>この本で作るもの — 3行で</h2>
+    <p>先に、これから作るものの正体を短く言い切っておきます。</p>
+    <ul>
+      <li><strong>YouTube 型の動画投稿・視聴サービス</strong>です。アカウント登録・チャンネル・動画の投稿と変換と視聴、コメント・登録・通知・検索・おすすめまで、動画プラットフォームの一通りが動きます。</li>
+      <li>核心は<strong>「大きくて時間のかかるデータ」の扱い</strong>です。直接アップロード（presigned）・非同期変換（キュー + ワーカー + ffmpeg）・適応配信（hls.js）の3本柱で、待たせず・落とさず・届けきります。</li>
+      <li><strong>DB の状態こそ唯一の真実</strong>です。動画は <code>uploading → uploaded → processing → ready / failed</code> という状態を辿り、<code>ready</code> でない動画は絶対に配信しません。この状態遷移が全体の背骨になります。</li>
+    </ul>
+    <p>この3行を「自分の書いたコードで説明できる」状態が、本書のゴールです。</p>
+
+    <h2>環境構築</h2>
+    <p>やることは3つだけです。Docker を入れ、コードを手元に置き、<code>docker compose up</code> 一発でスタック全体が立ち上がることを確かめます。Go や Node.js を自分のマシンに入れる必要すらありません（すべてコンテナの中でビルドされます）。</p>
+
+    <h3>1. Docker / Docker Compose を入れる</h3>
+    <p><a href="https://docs.docker.com/get-docker/" target="_blank" rel="noopener">Docker Desktop</a>（Windows / Mac）または Docker Engine + Compose plugin（Linux）を入れて、ターミナルで確認します。本書のコンテナ群はメモリを1〜2GB ほど使うので、Docker Desktop の割り当てを確認しておくと安心です。</p>
+    <pre class="term"><code><span class="ps">$</span> docker --version
+<span class="out">Docker version 27.0.3, build 7d4bcd8</span>
+<span class="ps">$</span> docker compose version
+<span class="out">Docker Compose version v2.28.1</span></code></pre>
+
+    <h3>2. コードを手元に置く</h3>
+    <p>本書のコード一式はリポジトリの <code>src/</code> ディレクトリです。以後、<strong>本書のコマンドはすべて <code>src/</code> の中で実行します</strong>。バックエンドは Go（機能ごとに <code>internal/</code> のパッケージに分割）、フロントは Vite + React + TypeScript です。</p>
+    <div class="ascii">src/
+├── docker-compose.yml        ← 6つのサービスをまとめて起動（第00章）
+├── backend/
+│   ├── Dockerfile            ← API と Worker を同じソースからビルド（第00章）
+│   ├── cmd/api/              ← 受付（API）の起動（第00章）
+│   ├── cmd/worker/           ← 職人（Worker）の起動（第00章・03章）
+│   └── internal/
+│       ├── config/           ← 環境変数（第00章）
+│       ├── db/               ← 接続・冪等マイグレーション・schema.sql（第00章）
+│       ├── auth/             ← bcrypt + JWT（第01章）
+│       ├── storage/          ← MinIO 境界・presigned URL（第02章）
+│       ├── queue/            ← Redis キュー・Pub/Sub・視聴数バッファ（第03・07章）
+│       ├── transcode/        ← ffmpeg による HLS 変換（第03章）
+│       ├── httpapi/          ← ルーティングと各ハンドラ（全章）
+│       └── notify/           ← 通知の作成と押し出し（第07章）
+└── frontend/
+    └── src/
+        ├── pages/            ← Home / Watch / Upload / Studio / Channel …（第08章）
+        └── components/       ← Player(hls.js) / Comments / Header(SSE) …（第04・07・08章）</div>
+
+    <div class="gonote"><div class="box-k">実装メモ · 6つのサービスと「登場人物」</div>
+      <p>本書の <code>docker-compose.yml</code> は6つのサービスを立ち上げます。役割で覚えると全体像が掴めます —— <strong>db</strong>（記録係 / PostgreSQL）、<strong>redis</strong>（注文箱 / キュー）、<strong>minio</strong>（保管庫 / S3互換ストレージ）、<strong>api</strong>（受付 / 依頼を受けて記録し指示を出す）、<strong>worker</strong>（職人 / 注文箱から取り出して黙々と変換する）、<strong>web</strong>（画面 / React）。この6人が連携して「大きくて時間のかかる動画」を運びます。第00章で、この <code>docker-compose.yml</code> を1行ずつ読み解きます。</p>
+    </div>
+
+    <h3>3. スタック全体を立ち上げる</h3>
+    <p>準備の総仕上げです。<code>src/</code> で1つのコマンドを打つだけで、6つのサービスがビルドされ、起動します。初回はイメージのビルドに数分かかります。</p>
+    <pre class="term"><code><span class="ps">$</span> cd src
+<span class="ps">$</span> docker compose up --build -d
+<span class="out">[+] Running 6/6
+ ✔ Container src-db-1      Healthy
+ ✔ Container src-redis-1   Healthy
+ ✔ Container src-minio-1   Started
+ ✔ Container src-api-1     Started
+ ✔ Container src-worker-1  Started
+ ✔ Container src-web-1     Started</span>
+
+<span class="cm"># 受付が生きているか確かめる</span>
+<span class="ps">$</span> curl http://localhost:8080/healthz
+<span class="out">{"status":"ok"}</span></code></pre>
+    <p><code>{"status":"ok"}</code> が返れば準備完了です。ブラウザで <code>http://localhost:3000</code> を開けば画面が、<code>http://localhost:9001</code>（minioadmin / minioadmin）を開けば保管庫の管理コンソールが見られます。</p>
+
+    <div class="box hazard"><div class="box-k">⚠ 落とし穴 — ffmpeg はワーカーの中だけにいる</div>
+      <p>動画変換に使う <code>ffmpeg</code> は、<strong>API コンテナにはインストールされていません。ワーカーコンテナの中だけ</strong>にあります（<code>backend/Dockerfile</code> を見ると、<code>worker</code> ステージだけが <code>apk add --no-cache ffmpeg</code> しています）。これは意図的な設計です。受付（API）は「重い作業をしない」のが役目なので、ffmpeg を持たせず軽く保つ。重い変換は、ffmpeg を持つワーカーに任せる。<strong>自分のマシンに ffmpeg を入れる必要はありません</strong>（E2Eテスト用の動画を作るときだけ手元の ffmpeg を使いますが、それも任意です）。この「どこに ffmpeg を置くか」が、そのまま「API とワーカーを分ける理由」の一つになっています。第00章で詳しく見ます。</p>
+    </div>
+
+    <h3>おまけ: 完成品を先に触ってみる</h3>
+    <p>これから作るものの完成形を、先に触っておきましょう。ゴールを知ってから登る山は、迷いません。スタックを立ち上げた状態で、次を試してみてください。</p>
+    <ol>
+      <li><code>http://localhost:3000</code> を開き、メールアドレスとパスワードで<strong>登録</strong>する。</li>
+      <li>手元の動画ファイル（なければ下のコマンドでカラーバー動画を作れます）を<strong>アップロード</strong>する。投稿ボタンを押すと<strong>すぐに</strong>「変換中」と表示される —— 待たされないことに注目。</li>
+      <li>数十秒待つと「視聴可能」に変わる。裏でワーカーが ffmpeg で HLS に変換していたのです。</li>
+      <li>動画を<strong>再生</strong>し、プレイヤーの画質メニューを見る。360p / 720p / 1080p が並んでいて、回線に応じて自動で切り替わります。</li>
+    </ol>
+    <pre class="term"><code><span class="cm"># 手元に ffmpeg があれば、テスト用のカラーバー動画（15秒・音声つき）を作れる</span>
+<span class="ps">$</span> ffmpeg -y -f lavfi -i <span class="st">"testsrc=duration=15:size=1280x720:rate=30"</span> \
+    -f lavfi -i <span class="st">"sine=frequency=440:duration=15"</span> \
+    -c:v libx264 -c:a aac -shortest test.mp4
+<span class="out">（test.mp4 が生成される。これをブラウザからアップロードしてみる）</span></code></pre>
+    <p>投稿ボタンを押した瞬間に応答が返り、しばらくして再生できるようになり、画質が勝手に切り替わる。この本はこれから10章かけて、この一つひとつの体験の裏側を、自分のコードで説明できるようになるまで潜っていきます。</p>
+
+    <h2>この本の約束ごと</h2>
+    <ul>
+      <li>コードブロックの上のラベル（例: <code>docker-compose.yml</code> や <code>httpapi/videos.go</code>）は、そのコードが <code>src/</code> のどのファイルにあるかを示します。</li>
+      <li>紙面の都合で一部を省くときは、必ず <code>// …（後の章で）</code> のように省略を明示します。黙って削ることはしません。</li>
+      <li><strong>実装メモ</strong> = 言語・ライブラリ・ミドルウェアの補足。<strong>⚠ 落とし穴</strong> = 実際にバグになりやすい箇所（多くは開発中に実際に踏んだものです）。<strong>▸ 動かして確認</strong> = 実行するコマンドと期待される出力です。</li>
+      <li>コードの色分けは、<strong>紫がキーワード</strong>（<code>func</code> / <code>type</code> / <code>SELECT</code> 等）、<strong>青緑が型名</strong>、<strong>緑が文字列・数値</strong>、<strong>灰色がコメント</strong>です。</li>
+    </ul>
+
+    <p class="hero-rule">それでは、一番下の層から。</p>
+    <p>最初の章で作るのは「6つのサービスを <code>docker compose</code> で立ち上げ、API とワーカーの2プロセスを起動し、DB のスキーマを用意する」土台です。まだ動画は1本も受け取れませんが、動画を運ぶための舞台 —— 記録係・注文箱・保管庫、そして身軽な受付と黙々働く職人 —— が、この章で勢揃いします。</p>
+
+    <div class="chap-foot">
+      <span></span>
+      <a class="pager next" href="00-setup.html"><span class="dir">次へ →</span>第00章 · 土台をつくる</a>
+    </div>
+  </main>
+</div>
+</body>
+</html>

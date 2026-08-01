@@ -1,0 +1,533 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>第04章 タイムラインという難問 — Twitter をつくる</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500;600&family=Source+Serif+4:opsz,wght@8..60,400;8..60,600;8..60,700&family=Noto+Serif+JP:wght@400;600;700&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<div class="shell">
+
+  <aside class="spine">
+    <a class="wordmark" href="index.html">CHIRP · from scratch</a>
+    <div class="book-title">Twitter を<br>つくる</div>
+    <div class="book-sub">Go + PostgreSQL + React で認証からタイムラインまで</div>
+
+    <div class="legend"><span>読む <b>↓</b></span><span>組む <b>↑</b></span></div>
+
+    <nav aria-label="目次">
+      <ul class="toc">
+        <li><a class="nav-item" href="index.html"><span class="nav-num">序</span><span class="nav-label">はじめに・準備<span class="nav-tag">Setup</span></span></a></li>
+        <li><a class="nav-item" href="00-setup.html"><span class="nav-num">00</span><span class="nav-label">土台をつくる<span class="nav-tag">Setup</span></span></a></li>
+        <li><a class="nav-item" href="01-auth.html"><span class="nav-num">01</span><span class="nav-label">ユーザーという存在（認証）<span class="nav-tag">Auth</span></span></a></li>
+        <li><a class="nav-item" href="02-post.html"><span class="nav-num">02</span><span class="nav-label">投稿する<span class="nav-tag">Post</span></span></a></li>
+        <li><a class="nav-item" href="03-follow.html"><span class="nav-num">03</span><span class="nav-label">つながる（フォロー）<span class="nav-tag">Follow</span></span></a></li>
+        <li><a class="nav-item current" aria-current="page" href="04-timeline.html"><span class="nav-num">04</span><span class="nav-label">タイムラインという難問<span class="nav-tag">Timeline</span></span></a></li>
+        <li><a class="nav-item" href="05-reply.html"><span class="nav-num">05</span><span class="nav-label">会話する（リプライ）<span class="nav-tag">Reply</span></span></a></li>
+        <li><a class="nav-item" href="06-like.html"><span class="nav-num">06</span><span class="nav-label">反応する（いいね）<span class="nav-tag">Like</span></span></a></li>
+        <li><a class="nav-item" href="07-perf.html"><span class="nav-num">07</span><span class="nav-label">速くする（N+1と索引）<span class="nav-tag">Perf</span></span></a></li>
+        <li><a class="nav-item" href="08-web.html"><span class="nav-num">08</span><span class="nav-label">画面をつける（React）<span class="nav-tag">Web</span></span></a></li>
+        <li><a class="nav-item" href="09-beyond.html"><span class="nav-num">09</span><span class="nav-label">さらに先へ（発展）<span class="nav-tag">Beyond</span></span></a></li>
+      </ul>
+    </nav>
+
+    <div class="spine-foot">
+      各章は SNS の一つの機能。<br>下（土台）から上（画面）へ<br>積み上げて動かしていく。
+    </div>
+  </aside>
+
+  <main class="reading">
+    <div class="progress-tag">第04章 / 全10章 · 層: Timeline · 読了目安 2.5〜3時間</div>
+    <div class="eyebrow"><span>Timeline</span><span class="depth">— 本書の白眉</span></div>
+    <h1>タイムラインという難問</h1>
+    <p class="lede">SNS の心臓は<strong>タイムライン</strong>です。「自分がフォローしている人たちの投稿を、ぜんぶ混ぜて、新しい順に流す」——言葉にすれば一行ですが、これを正しく速く作るのは、この本の中で最も奥が深いテーマです。しかも本当の難しさは「集めること」ではなく、<strong>「続きを取ること」</strong>にあります。指でスクロールし続ける間、投稿は次々と新しく生まれ続けている。その動いている川から、重複も欠落もなく次のひとすくいを取り出す——これが本章の主題です。この章を終えたとき、あなたのサーバは自分とフォロイーの投稿を1本のクエリで集めて時系列に流し、<code>cursor</code> で続きを何度でも安全に取れるようになります。</p>
+
+    <div class="box goal"><div class="box-k">◈ この章のゴール</div>
+      <p>次の 3 つを、自分の目と手で確認できたら達成です。</p>
+      <ol>
+        <li><code>GET /api/timeline</code> を叩くと、<strong>自分とフォロイーの投稿が混ざって、新しい順（id 降順）で</strong>返る。リプライは混ざらない。</li>
+        <li>返ってきた <code>next_cursor</code> を <code>?cursor=&lt;id&gt;</code> に付けて再度叩くと、<strong>続きが重複なく・欠落なく</strong>取れる。途中で新しい投稿が入っても、すでに見たページはズレない。</li>
+        <li>ある人を<strong>フォローするとその投稿がタイムラインに現れ</strong>、<strong>フォロー解除すると以降は現れなくなる</strong>（FR-9）。</li>
+      </ol>
+    </div>
+
+    <div class="box map"><div class="box-k">☰ この章のステップ</div>
+      <ol>
+        <li><a href="#step-1">2つの方式 — 配る（on write）か、集める（on read）か</a></li>
+        <li><a href="#step-2">集めるクエリを書く — <code>ListTimeline</code> の SQL 解剖</a></li>
+        <li><a href="#step-3">「続き」をどう取るか — オフセットの罠</a></li>
+        <li><a href="#step-4">カーソル方式と LIMIT 21 — <code>handleTimeline</code> / <code>writePostPage</code></a></li>
+        <li><a href="#step-5">動かして確認する — curl で cursor を送る</a></li>
+      </ol>
+    </div>
+
+    <h2>タイムラインはなぜ難しいのか</h2>
+    <p>第02章で「投稿する」を、第03章で「フォローする」を作りました。データベースには <code>posts</code>（誰の投稿か）と <code>follows</code>（誰が誰をフォローしているか）が溜まっています。タイムラインとは、この2つを組み合わせて<strong>「自分がフォローしている全員の投稿を、時系列で1本の流れにする」</strong>ことです。</p>
+    <p>ここで、素朴な疑問が2つ湧きます。<strong>(1) いつ混ぜるのか</strong> — 投稿が生まれた瞬間に各フォロワーの手元へ配っておくのか、それとも見に来たときにその場で集めるのか。<strong>(2) どこまで返すのか</strong> — フォローが増えれば投稿は何万件にもなる。全部返すわけにはいかないので「新しい方から○件」で切り、スクロールされたら「その続き」を返す。この2つ目、<strong>「続きをどう取るか」こそが本章最大の難所</strong>で、素朴にやると重複や欠落が起きます。</p>
+    <p>本章は、<strong>(1) は「見に来たときに集める」方式（fan-out on read）を採用</strong>し、<strong>(2) は「最後に見た投稿の id をカーソルにする」キーセットページネーション</strong>で解きます。もう一方の「投稿時に各フォロワーへ配る」方式（fan-out on write）は、大規模化したときに効いてくる発展的な手法で、<strong>第09章</strong>で深掘りします。ここでは対比として絵で理解するにとどめ、なぜ学習規模では「集める」で十分なのかを見ていきます。</p>
+
+    <h2 class="step" id="step-1"><span class="step-no">Step 1</span>2つの方式 — 配る（on write）か、集める（on read）か</h2>
+    <p>タイムラインの作り方には、大きく2つの流派があります。名前は「fan-out（ファンアウト、扇状に広げる）」を<strong>いつ</strong>やるかで分かれます。</p>
+
+    <h3>方式① 集める — fan-out on read</h3>
+    <p>投稿は <code>posts</code> テーブルに1件だけ書き込みます。タイムラインを<strong>見に来たとき</strong>に、「自分＋フォロイー全員の投稿を、その場で1本のクエリで集めて、新しい順に並べて返す」。混ぜる作業を<strong>読み取り時</strong>に行うので on read です。</p>
+
+    <div class="ascii">fan-out on read（本章の採用方式）
+
+  投稿するとき                    タイムラインを見るとき
+  ┌───────────┐                 ┌──────────────────────────────┐
+  │ alice が   │  1件書くだけ    │ me がフォロー中: alice, bob    │
+  │ 投稿 #52   │ ───────▶ posts │                              │
+  └───────────┘        ▲        │  SELECT ... FROM posts        │
+  ┌───────────┐        │        │  WHERE user_id = me           │
+  │ bob が     │ ───────┘        │     OR user_id IN (alice,bob) │
+  │ 投稿 #53   │                 │  ORDER BY id DESC LIMIT 21    │
+  └───────────┘                 │        │                     │
+                                │        ▼                     │
+                                │  #53 bob / #52 alice / ...    │  ← その場で集めて
+                                └──────────────────────────────┘     時系列に混ぜる</div>
+
+    <p>長所は<strong>単純さ</strong>です。投稿は1件書くだけ。フォロー・フォロー解除も <code>follows</code> を1行足す/消すだけ。データの置き場所が1か所（<code>posts</code>）なので、矛盾が起きようがありません。短所は<strong>読むたびに集計する</strong>コスト。フォロー数が非常に多い有名人の巨大なタイムラインを毎回その場で組むと、読み取りが重くなります。</p>
+
+    <h3>方式② 配る — fan-out on write</h3>
+    <p>ユーザーごとに「その人専用のタイムライン箱」を用意しておき、<strong>誰かが投稿した瞬間に</strong>、その人のフォロワー全員の箱へ投稿id をコピーして配ります。混ぜる作業を<strong>書き込み時</strong>に済ませるので on write。見に来たときは、自分の箱を上から読むだけ——集計が要りません。</p>
+
+    <div class="ascii">fan-out on write（第09章で深掘り）
+
+  投稿するとき                          タイムラインを見るとき
+  ┌───────────┐                       ┌─────────────────┐
+  │ alice が   │  フォロワー全員の      │ me の箱を        │
+  │ 投稿 #52   │  箱へ #52 をコピー     │ 上から読むだけ    │
+  └─────┬─────┘                       │  #53 #52 #48 ... │
+        ├──▶ [me の箱] ← #52           │  （集計不要・速い）│
+        ├──▶ [carol の箱] ← #52        └─────────────────┘
+        └──▶ [dave の箱] ← #52
+             （フォロワーが100万人なら100万回コピー…）</div>
+
+    <p>長所は<strong>読み取りが速い</strong>こと。箱を上から読むだけなので、フォロー数がいくつでも一定。短所は<strong>書き込みが重い・複雑</strong>なこと。フォロワー100万人が投稿すると100万回のコピーが走り（有名人問題）、フォロー/解除のたびに箱の作り直しが要り、箱の実体（Redis 等）を <code>posts</code> と<strong>別に持つ</strong>ので整合性管理も増えます。</p>
+
+    <div class="box map"><div class="box-k">☰ 2方式の比較</div>
+      <table>
+        <thead><tr><th>観点</th><th>① 集める（on read）</th><th>② 配る（on write）</th></tr></thead>
+        <tbody>
+          <tr><td>混ぜる時点</td><td>読むとき</td><td>書くとき</td></tr>
+          <tr><td>投稿の書き込み</td><td>1件だけ（軽い）</td><td>フォロワー数だけコピー（重い）</td></tr>
+          <tr><td>タイムライン読み取り</td><td>その場で集計（重い）</td><td>箱を読むだけ（軽い）</td></tr>
+          <tr><td>データの置き場</td><td><code>posts</code> の1か所</td><td><code>posts</code> ＋ 各人の箱</td></tr>
+          <tr><td>実装の複雑さ</td><td>低い（SQL 1本）</td><td>高い（配信・整合性・有名人対策）</td></tr>
+          <tr><td>向いている規模</td><td>個人〜中規模</td><td>大規模（フォロー数が多い）</td></tr>
+        </tbody>
+      </table>
+    </div>
+
+    <p>本書は<strong>① 集める（fan-out on read）を採用</strong>します。理由は明快で、この規模（学習プロジェクト・数十〜数千ユーザー）では、投稿を毎回その場で集めても、索引が効いていれば十分速いからです。そして何より<strong>単純</strong>で、SQL が1本で読み切れる。「まず単純な方式で正しく動かし、規模が本当に問題になってから配る方式へ移る」——これが順序として正しい。配る方式が必要になる規模と、そこへの移行は第09章で扱います。<strong>早すぎる最適化を避けて、まず集める。</strong></p>
+
+    <div class="gonote"><div class="box-k">GO メモ · なぜ「集める」で始めるのが定石か</div>
+      <p>実在の Twitter も、初期は「集める」方式に近い形で始まり、規模が問題になってから「配る」方式（＋有名人だけ集める、のハイブリッド）へ育てました。個人開発でいきなり配る方式を組むのは、<strong>使われるか分からないうちに複雑さだけ抱える</strong>典型的な早すぎる最適化です。集める方式は SQL 1本・データ1か所で、バグの入る隙が少ない。「正しさ」を安く手に入れてから「速さ」を足す。この章はその「正しさ」の作り方に集中します。</p>
+    </div>
+
+    <h2 class="step" id="step-2"><span class="step-no">Step 2</span>集めるクエリを書く — ListTimeline の SQL 解剖</h2>
+    <p>方式が決まったので、いよいよ「集める」クエリを書きます。この章の主役、<code>store.ListTimeline</code> です。DB アクセスを担う <code>store</code> パッケージ（第00章で作った器）の <code>posts.go</code> に置きます。まず全文を見てください。</p>
+
+    <div class="file-tag">src/backend/internal/store/posts.go</div>
+    <pre><code><span class="cm">// ListTimeline はホームタイムライン：自分とフォロイーの投稿（リプライ除く）を新しい順に。</span>
+<span class="cm">// 読み取り時に集める方式（fan-out on read、教材 Chapter 5 の①）。</span>
+<span class="kw">func</span> (s *<span class="ty">Store</span>) ListTimeline(ctx context.<span class="ty">Context</span>, userID <span class="ty">int64</span>, beforeID *<span class="ty">int64</span>, limit <span class="ty">int</span>) ([]<span class="ty">Post</span>, <span class="ty">error</span>) {
+	rows, err := s.pool.Query(ctx, postSelect+<span class="st">`
+		WHERE (p.user_id = $1 OR p.user_id IN (SELECT followee_id FROM follows WHERE follower_id = $1))
+		  AND p.reply_to_id IS NULL
+		  AND ($2::bigint IS NULL OR p.id &lt; $2)
+		ORDER BY p.id DESC LIMIT $3`</span>,
+		userID, beforeID, limit)
+	<span class="kw">if</span> err != <span class="kw">nil</span> {
+		<span class="kw">return</span> <span class="kw">nil</span>, err
+	}
+	<span class="kw">return</span> scanPosts(rows)
+}</code></pre>
+
+    <p>短い関数ですが、この <code>WHERE</code> 句に本章の設計のほとんどが詰まっています。頭の <code>postSelect</code> は、第02章で導入した「投稿に必ず作者を JOIN する」共通の前半部です。念のため再掲します。</p>
+
+    <div class="file-tag">src/backend/internal/store/posts.go（第02章で導入）</div>
+    <pre><code><span class="cm">// 投稿は常に作者情報を JOIN して返す</span>
+<span class="kw">const</span> postSelect = <span class="st">`
+	SELECT p.id, p.user_id, u.username, u.display_name, p.body, p.reply_to_id, p.created_at
+	FROM posts p
+	JOIN users u ON u.id = p.user_id`</span></code></pre>
+
+    <p><code>ListTimeline</code> は、この <code>postSelect</code>（<code>SELECT ... FROM posts p JOIN users u</code>）の後ろに <code>WHERE ... ORDER BY ... LIMIT</code> を <strong>文字列連結（<code>+</code>）で足して</strong>1本のクエリを組み立てています。<code>scanPosts</code>（結果を <code>Post</code> の配列に詰める処理）も第02章のものをそのまま使います。つまり<strong>この章の新しさは、足された <code>WHERE</code> 句だけ</strong>です。一句ずつ解剖します。</p>
+
+    <h3>① 自分か、フォロイーか — 誰の投稿を集めるか</h3>
+    <pre><code>	WHERE (p.user_id = $1 OR p.user_id IN (SELECT followee_id FROM follows WHERE follower_id = $1))</code></pre>
+    <p>タイムラインの核心です。<code>$1</code> は「見ている自分の id」。この条件は「投稿の作者（<code>p.user_id</code>）が、<strong>自分自身であるか</strong>（<code>= $1</code>）、<strong>または自分がフォローしている誰かであるか</strong>」を表します。後半の <code>IN (SELECT followee_id FROM follows WHERE follower_id = $1)</code> が肝で、これは「<code>follows</code> テーブルから、フォローする側（<code>follower_id</code>）が自分である行を探し、そのフォローされる側（<code>followee_id</code>）の一覧を作る」——つまり<strong>「自分がフォローしている人たちの id リスト」</strong>です。投稿の作者がそのリストに含まれれば、タイムラインに載せます。</p>
+    <p>ここが、まさに「集める（fan-out on read）」の実体です。<strong>読み取りのたびに、その場で <code>follows</code> を引いてフォロイー一覧を作り、その全員の投稿を <code>posts</code> から拾う</strong>。配る方式のような専用の箱はどこにもなく、必要なときに <code>posts</code> と <code>follows</code> から組み立てています。自分自身（<code>= $1</code>）を含めるのは、「自分の投稿も自分のタイムラインに流れる」ためです（Twitter でも自分のツイートはホームに出ますね）。</p>
+
+    <div class="gonote"><div class="box-k">GO メモ · IN サブクエリで大丈夫か? — 学習規模の割り切り</div>
+      <p><code>IN (SELECT ...)</code> は「フォロイー一覧を毎回引き直す」ので、フォロー数が数万・数十万に膨れると重くなりえます。しかし本書の規模（1人が数十〜数百人をフォロー）なら、<code>follows</code> に <code>follower_id</code> の索引（第03章の <code>idx_follows_follower_id</code>）があるため、フォロイー一覧の取得は高速です。「まず素直な <code>IN</code> で書き、遅くなったら <code>JOIN</code> 書き換えや配る方式を検討する」——この割り切りが個人開発では正解です。大規模でどう変わるかは第09章で。</p>
+    </div>
+
+    <h3>② リプライを除く — ホームには会話を流さない</h3>
+    <pre><code>	  AND p.reply_to_id IS NULL</code></pre>
+    <p>2つ目の条件です。<code>posts</code> テーブルの <code>reply_to_id</code> は「この投稿がどの投稿への返信か」を指す列で、<strong>通常の投稿では <code>NULL</code></strong>、リプライのときだけ相手の投稿 id が入ります（第00章のスキーマ、詳細は第05章）。<code>reply_to_id IS NULL</code> は「返信ではない、独立した投稿だけ」という意味。これで<strong>ホームタイムラインからリプライを除外</strong>しています。</p>
+    <p>なぜ除くのか。もしリプライも混ぜると、フォロイーが誰かと交わした「@返信」の断片が、文脈もなくタイムラインに大量に流れ込んで読みづらくなります（実際の Twitter のホームも、リプライは基本的に主流には混ぜません）。会話（リプライの連なり）は、それ専用の画面で「元の投稿＋ぶら下がる返信」として見せるのが自然です。その会話ビューは<strong>第05章</strong>で作ります。ここでは「ホームはリプライを除く」とだけ押さえてください。</p>
+
+    <h3>③ カーソルより古いものだけ — 「続き」の目印</h3>
+    <pre><code>	  AND ($2::bigint IS NULL OR p.id &lt; $2)</code></pre>
+    <p>3つ目、そして本章後半のすべてに繋がる条件です。<code>$2</code> は「カーソル＝前のページで最後に見た投稿の id」。この一句は2つの場合を <code>OR</code> でまとめています。<strong>(a) <code>$2::bigint IS NULL</code></strong> — カーソルが指定されていない（＝1ページ目）なら、この条件は常に真になり、絞り込みなし。<strong>(b) <code>p.id &lt; $2</code></strong> — カーソルが指定されている（＝2ページ目以降）なら、「その id より<strong>小さい</strong>（＝より古い）投稿だけ」に絞る。</p>
+    <p><code>id</code> は投稿するたびに 1, 2, 3... と増える連番（<code>BIGSERIAL</code>）なので、<strong>「id が小さい ＝ 古い」</strong>が厳密に成り立ちます。だから「最後に見た id より小さいもの」を取れば、確実に「その続き（より古い投稿）」になる。これがキーセットページネーションの心臓です（Step 3・4 で徹底的に掘ります）。</p>
+
+    <div class="gonote"><div class="box-k">GO メモ · <code>$2::bigint IS NULL</code> の <code>::bigint</code> は何?</div>
+      <p><code>::bigint</code> は PostgreSQL の<strong>型キャスト</strong>です。<code>$2</code> に <code>NULL</code> を渡したとき、PostgreSQL は「この <code>NULL</code> が何型か分からない」と型推論に困ることがあります。<code>$2::bigint</code> と明示することで「これは bigint（64bit 整数）の NULL だ」と伝え、型エラーを避けています。Go 側では <code>beforeID *int64</code>（ポインタ）で渡し、<code>nil</code> なら SQL に <code>NULL</code> が入り (a) の枝を、値があれば (b) の枝を通ります。「1ページ目かどうか」をこの1つのプレースホルダで両対応できる、きれいな書き方です。</p>
+    </div>
+
+    <h3>④ 新しい順に、21件 — 並べて切る</h3>
+    <pre><code>	ORDER BY p.id DESC LIMIT $3</code></pre>
+    <p>最後です。<code>ORDER BY p.id DESC</code> で<strong>id の降順（大きい＝新しい順）</strong>に並べます。ここでも並び順の鍵は <code>created_at</code>（時刻）ではなく <code>id</code>（連番）であることに注目してください。理由は次の Step とハザードで詳しく述べますが、一言でいえば<strong>「時刻は逆転しうるが、連番は絶対に逆転しない」</strong>からです。<code>LIMIT $3</code> は「返す件数の上限」。この <code>$3</code> に、呼び出し側は<strong>「欲しい件数 ＋ 1」</strong>を渡します（＝20件欲しいなら 21）。この <code>+1</code> の意味は Step 4 の核心なので、そこで明かします。</p>
+
+    <div class="box hazard"><div class="box-k">⚠ 落とし穴 — 並び順・カーソルに <code>created_at</code> を使ってはいけない</div>
+      <p>「新しい順」と聞くと、つい <code>ORDER BY created_at DESC</code> と書きたくなります。実際そちらでもだいたい動きます。しかし本書は断固として <code>ORDER BY p.id DESC</code>、カーソルも <code>p.id &lt; $2</code> と、<strong>連番 id を順序の鍵にしています</strong>。理由は2つ。</p>
+      <p><strong>(1) 時刻は逆転しうる。</strong> <code>created_at</code> は <code>now()</code> で入りますが、Docker/WSL2 のようなクロックがずれやすい環境や NTP のクロック補正で、<strong>後から挿入された行の時刻が、先の行より前になる</strong>ことがありえます。また、ほぼ同時刻の2投稿が<strong>同じタイムスタンプ</strong>を持つこともある。すると「時刻でカーソルを切る」と、同時刻の境目で投稿を取りこぼしたり重複させたりします。<code>id</code>（<code>BIGSERIAL</code>）は<strong>厳密に単調増加</strong>し、絶対に同値や逆転が起きません。順序の鍵として完璧です。</p>
+      <p><strong>(2) 一意でないカーソルは危険。</strong> カーソルは「ここまで見た」を一意に指す必要があります。<code>created_at</code> は重複しうる（＝一意でない）ので、カーソルとして不適格。<code>id</code> は主キーで必ず一意。だから <code>p.id &lt; $2</code> は「その投稿ちょうど1件の直後から」を寸分の狂いなく指せます。第00章のスキーマのコメント「<em>created_at はクロック補正で逆転しうるため、順序の鍵には連番を使う</em>」は、まさにこの章のためにありました。</p>
+    </div>
+
+    <p>これで「集めるクエリ」は完成です。自分＋フォロイーの、リプライでない投稿を、id 降順に、指定件数だけ取る。あとは<strong>「続きをどう取るか」</strong>——ここからが本章の白眉です。</p>
+
+    <h2 class="step" id="step-3"><span class="step-no">Step 3</span>「続き」をどう取るか — オフセットの罠</h2>
+    <p>タイムラインは何万件にもなりうるので、一度に全部は返しません。「新しい方から20件」を返し、ユーザーがスクロールして下端に着いたら「その続きの20件」を返す——ページネーションです。ここで<strong>2つのやり方</strong>があり、素朴な方（オフセット）には深刻な罠があります。本書はこの罠を、書籍全体で最も丁寧に論じます。</p>
+
+    <h3>素朴なやり方 — オフセットページネーション</h3>
+    <p>多くの入門書が最初に教えるのが<strong>オフセット方式</strong>です。「何件目から何件」を <code>LIMIT / OFFSET</code> で指定します。</p>
+    <pre><code>	<span class="cm">-- 1ページ目：新しい方から20件</span>
+	ORDER BY id DESC LIMIT 20 OFFSET 0
+	<span class="cm">-- 2ページ目：20件飛ばして次の20件</span>
+	ORDER BY id DESC LIMIT 20 OFFSET 20
+	<span class="cm">-- 3ページ目：40件飛ばして次の20件</span>
+	ORDER BY id DESC LIMIT 20 OFFSET 40</code></pre>
+    <p>「ページ番号 × 20 を <code>OFFSET</code> に入れる」だけ。直感的で実装も簡単です。静的な一覧（変化しない検索結果など）ならこれで十分。しかし<strong>タイムラインのように「読んでいる間も新しい行が上に増え続ける」データでは、2つの致命的な問題</strong>が出ます。</p>
+
+    <h3>罠その1 — 読み込み中に新規投稿が入ると、ズレて重複する</h3>
+    <p>これがオフセット最大の欠陥です。具体例で見ます。いま <code>posts</code> の id が新しい順に <code>...45, 44, 43, ..., 26, 25, ...</code> と並んでいるとします。あなたは1ページ目（新しい方から20件）を読み終えました。</p>
+
+    <div class="ascii">1ページ目を読む（OFFSET 0, LIMIT 20）
+
+  新しい ←────────────────────────────────────────→ 古い
+  [45 44 43 42 41 40 39 38 37 36 35 34 33 32 31 30 29 28 27 26] 25 24 ...
+   └──────────────── 1ページ目に返った20件 ────────────────┘   ↑ 次は26の下、25から
+
+  … ここで新しい投稿 #46 が1件入る（誰かがツイートした） …
+
+  投稿列はこうなる：
+  [46 45 44 43 42 41 40 39 38 37 36 35 34 33 32 31 30 29 28 27] 26 25 ...
+   全体が1つ右へずれた（#46 が先頭に割り込んだ）
+
+  2ページ目を読む（OFFSET 20, LIMIT 20）＝「20件飛ばして次の20件」
+  [46 45 44 43 42 41 40 39 38 37 36 35 34 33 32 31 30 29 28 27][26 25 24 ...]
+   └──────────── 飛ばされる20件 ────────────┘ └── 2ページ目 ──┘
+                                                 ↑ #27 がまた出た！（1ページ目にも居た）</div>
+
+    <p>何が起きたか。1ページ目を読んだあと、新しい投稿 <code>#46</code> が1件入りました。すると投稿の列全体が<strong>1つ後ろへずれます</strong>。<code>OFFSET 20</code> は「今の列の先頭から20件飛ばす」という意味なので、飛ばされる20件は <code>[46..27]</code>。ところが <code>#27</code> は、<strong>さっき1ページ目でも返っていた投稿</strong>です。つまり2ページ目の先頭で <code>#27</code> が<strong>もう一度出てくる</strong>——ユーザーの画面には同じ投稿が重複して並びます。逆に、上に入った件数だけ下側の投稿は「飛ばし切れず」ズレるので、<strong>削除やページ移動のタイミングでは欠落</strong>も起きます。</p>
+
+    <div class="box hazard"><div class="box-k">⚠ なぜオフセットは構造的にズレるのか</div>
+      <p>オフセットは<strong>「先頭からの相対位置（何件目）」</strong>で続きを指します。ところがタイムラインの先頭（最新）は<strong>刻々と動いている</strong>。読み込みの合間に新規投稿が n 件入れば、あなたが見たかった境界は n 件分ずれ、その分だけ<strong>重複（上に増えたとき）や欠落（上で消えたとき）</strong>が生じます。「動いている列を、絶対位置ではなく相対位置で切る」——これがオフセットの構造的な欠陥です。SNS のように上端が常に更新されるデータでは、この罠がほぼ必ず顕在化します。</p>
+    </div>
+
+    <h3>罠その2 — 件数が増えるほど OFFSET は遅くなる</h3>
+    <p>もう一つ、性能の問題があります。<code>OFFSET 10000 LIMIT 20</code> は「1万件<strong>読み飛ばして</strong>から、次の20件を返す」という意味です。データベースは<strong>飛ばす1万件を実際に読んで数えてから捨てて</strong>いる——読み飛ばしはタダではありません。ページが深くなる（後ろへ行く）ほど <code>OFFSET</code> は大きくなり、毎回その手前を全部読み直すので、<strong>後ろのページほど線形に遅くなります</strong>。</p>
+
+    <div class="ascii">OFFSET が深いほど遅い
+
+  OFFSET     0 LIMIT 20  →  0件読み飛ばし +  20件返す  … 速い
+  OFFSET   200 LIMIT 20  →  200件読んで捨て +  20件返す
+  OFFSET 10000 LIMIT 20  →  10000件読んで捨て + 20件返す  … 明確に遅い
+                             ↑ 返さない1万件のために毎回働いている</div>
+
+    <p>「無限スクロールで下へ下へ辿る」タイムラインは、まさにこの「深いページ」を踏み続ける使い方です。オフセットは<strong>タイムラインと相性が最悪</strong>——ズレるし、辿るほど遅い。</p>
+
+    <h3>解決 — キーセット（カーソル）ページネーション</h3>
+    <p>では、どうするか。答えは<strong>「何件目か」で指すのをやめ、「最後に見た投稿そのもの（の id）」で指す</strong>ことです。「20件飛ばす」ではなく「id が 26 より小さいものを20件」。これがキーセット（keyset）ページネーション、通称カーソル方式です。Step 2 で見た <code>AND ($2::bigint IS NULL OR p.id &lt; $2)</code> が、まさにこれでした。</p>
+
+    <div class="ascii">キーセット方式 — 「最後に見た id」より古いものを取る
+
+  1ページ目：LIMIT 20（カーソルなし）
+  [45 44 43 42 41 40 39 38 37 36 35 34 33 32 31 30 29 28 27 26] 25 24 ...
+   └──────────────── 20件返す ────────────────┘
+   最後に見たのは #26 → 次の cursor は 26
+
+  … 新規投稿 #46 が入る（列は動くが、関係ない）…
+  [46 45 44 ... 27 26] 25 24 23 ...
+
+  2ページ目：WHERE id &lt; 26 LIMIT 20
+                       25 24 23 ...
+                       └── #26 より小さいものだけ ──┘
+   #46 が上に増えても、「#26 より小さい」は不変。
+   重複しない・欠落しない・#46 は「上に増えた分」として次の更新時に自然に拾える。</div>
+
+    <p>カーソル方式が罠その1を回避できるのは、<strong>境界を「絶対的な id」で指している</strong>からです。上に <code>#46</code> が何件割り込もうと、「<code>#26</code> より id が小さいもの」という条件は<strong>びくともしません</strong>。だから2ページ目は必ず <code>25, 24, 23, ...</code> と続き、重複も欠落もない。罠その2（性能）も解決します。<code>WHERE id &lt; 26 ORDER BY id DESC LIMIT 20</code> は、<code>id</code> の索引を使って「26 の直前へ一気にジャンプして20件読む」だけ——<strong>飛ばす手前を読む必要がありません</strong>。何ページ目だろうと一定の速さです。</p>
+
+    <div class="box map"><div class="box-k">☰ オフセット vs キーセット</div>
+      <table>
+        <thead><tr><th>観点</th><th>オフセット（OFFSET）</th><th>キーセット（cursor）</th></tr></thead>
+        <tbody>
+          <tr><td>続きの指し方</td><td>先頭から何件目（相対）</td><td>最後に見た id（絶対）</td></tr>
+          <tr><td>読込中に新規投稿</td><td><strong>重複・欠落する</strong></td><td>ズレない</td></tr>
+          <tr><td>深いページの速さ</td><td>深いほど遅い（手前を全読み）</td><td>常に一定（索引でジャンプ）</td></tr>
+          <tr><td>任意ページへ跳ぶ</td><td>できる（5ページ目へ直接）</td><td>できない（順に辿る）</td></tr>
+          <tr><td>無限スクロール適性</td><td>低い</td><td><strong>高い</strong></td></tr>
+        </tbody>
+      </table>
+      <p>キーセットの唯一の弱点は「5ページ目へ直接ジャンプ」ができないこと（順に辿るしかない）。しかしタイムラインは<strong>そもそも無限スクロールで順に辿るもの</strong>なので、この弱点は無関係。SNS のフィードにはキーセットが理想的にはまります。</p>
+    </div>
+
+    <div class="gonote"><div class="box-k">GO メモ · 索引がキーセットを速くする（詳細は第07章）</div>
+      <p>キーセットが「深いページでも一定速度」なのは、<code>id</code> に<strong>索引</strong>があり、<code>WHERE id &lt; 26 ORDER BY id DESC</code> がその索引を辿って目的地へ直行できるからです。第00章のスキーマにあった <code>CREATE INDEX idx_posts_user_id_id ON posts (user_id, id DESC)</code> は、まさに「あるユーザーの投稿を id 降順に速く引く」ための並びで、この <code>(user_id, id DESC)</code> の順序がキーセットと索引の相性を生みます。索引がなぜこの形なのか・どう効くのかは第07章で B-Tree の絵とともに掘り下げます。ここでは「並び順（id DESC）と索引の向きが揃っているから速い」とだけ掴んでください。</p>
+    </div>
+
+    <h2 class="step" id="step-4"><span class="step-no">Step 4</span>カーソル方式と LIMIT 21 — handleTimeline / writePostPage</h2>
+    <p>SQL 側（<code>ListTimeline</code>）は「カーソルより古いものを id 降順で取る」まで出来ました。残るは<strong>HTTP の入口</strong>——リクエストから <code>cursor</code> と <code>limit</code> を読み取り、結果を返し、そして<strong>「次のページがあるか」を判定して <code>next_cursor</code> を返す</strong>ロジックです。API 層の <code>post_handlers.go</code> にあります。まずタイムラインのハンドラ本体から。</p>
+
+    <div class="file-tag">src/backend/internal/api/post_handlers.go</div>
+    <pre><code><span class="cm">// GET /api/timeline — ホームタイムライン（FR-9）</span>
+<span class="kw">func</span> (s *<span class="ty">Server</span>) handleTimeline(w http.<span class="ty">ResponseWriter</span>, r *http.<span class="ty">Request</span>) {
+	cursor, limit, ok := parsePageParams(w, r)
+	<span class="kw">if</span> !ok {
+		<span class="kw">return</span>
+	}
+	posts, err := s.store.ListTimeline(r.Context(), currentUserID(r), cursor, limit+<span class="st">1</span>)
+	<span class="kw">if</span> err != <span class="kw">nil</span> {
+		writeStoreError(w, err)
+		<span class="kw">return</span>
+	}
+	s.writePostPage(w, r, posts, limit, <span class="kw">false</span>)
+}</code></pre>
+
+    <p>驚くほど短い。やっていることは3つです。<strong>(1)</strong> <code>parsePageParams</code> でリクエストから <code>cursor</code>（＝カーソル）と <code>limit</code>（＝欲しい件数）を読む。<strong>(2)</strong> <code>ListTimeline</code> を呼ぶ。このとき第4引数に <code>limit+1</code> を渡しているのが最重要ポイント（後述）。<strong>(3)</strong> <code>writePostPage</code> で、取れた投稿を「次ページ有無の判定つき」で JSON に書く。最後の引数 <code>false</code> は「並びは降順（新しい→古い）」の意味です（<code>true</code> にするのはリプライ一覧＝第05章。会話は古い→新しいと逆向きに辿るため）。</p>
+    <p>この <code>handleTimeline</code> 自体には、ページネーションの難しさが<strong>まったく表に出ていません</strong>。難所は <code>parsePageParams</code> と <code>writePostPage</code> という2つの<strong>共通部品</strong>に閉じ込められているからです。この2部品は、タイムラインだけでなく「ユーザーの投稿一覧（第02章）」「リプライ一覧（第05章）」でも同じように使い回されます。順に見ます。</p>
+
+    <div class="box map"><div class="box-k">☰ ページネーション共通部品（第03章で導入）</div>
+      <p>第03章「つながる（フォロー）」で、フォロワー/フォロイー一覧をページ送りするために <code>parsePageParams</code> と <code>writePostPage</code> の考え方（cursor と limit+1）を導入しました。本章はそれを<strong>タイムラインという最も本質的な文脈で</strong>使い直します。もし第03章を飛ばしていても読めるよう、両部品をここで改めて解剖します。</p>
+    </div>
+
+    <h3>入口 — parsePageParams でリクエストを読む</h3>
+    <p>まず、URL のクエリ文字列（<code>?cursor=26&amp;limit=20</code>）から2つの値を読み取り、検証する部品です。</p>
+
+    <div class="file-tag">src/backend/internal/api/post_handlers.go</div>
+    <pre><code><span class="kw">const</span> (
+	defaultPageSize = <span class="st">20</span>
+	maxPageSize     = <span class="st">50</span>
+)
+
+<span class="cm">// parsePageParams は cursor（キーセットの目印）と limit を読み取る。</span>
+<span class="kw">func</span> parsePageParams(w http.<span class="ty">ResponseWriter</span>, r *http.<span class="ty">Request</span>) (*<span class="ty">int64</span>, <span class="ty">int</span>, <span class="ty">bool</span>) {
+	<span class="kw">var</span> cursor *<span class="ty">int64</span>
+	<span class="kw">if</span> c := r.URL.Query().Get(<span class="st">"cursor"</span>); c != <span class="st">""</span> {
+		id, err := strconv.ParseInt(c, <span class="st">10</span>, <span class="st">64</span>)
+		<span class="kw">if</span> err != <span class="kw">nil</span> || id &lt;= <span class="st">0</span> {
+			writeError(w, http.StatusBadRequest, <span class="st">"bad_cursor"</span>, <span class="st">"続きの読み込み位置が不正です。最初から読み込み直してください。"</span>)
+			<span class="kw">return</span> <span class="kw">nil</span>, <span class="st">0</span>, <span class="kw">false</span>
+		}
+		cursor = &amp;id
+	}
+	limit := defaultPageSize
+	<span class="kw">if</span> l := r.URL.Query().Get(<span class="st">"limit"</span>); l != <span class="st">""</span> {
+		n, err := strconv.Atoi(l)
+		<span class="kw">if</span> err != <span class="kw">nil</span> || n &lt;= <span class="st">0</span> || n &gt; maxPageSize {
+			writeError(w, http.StatusBadRequest, <span class="st">"bad_limit"</span>, <span class="st">"取得件数は1〜50で指定してください。"</span>)
+			<span class="kw">return</span> <span class="kw">nil</span>, <span class="st">0</span>, <span class="kw">false</span>
+		}
+		limit = n
+	}
+	<span class="kw">return</span> cursor, limit, <span class="kw">true</span>
+}</code></pre>
+
+    <p>返り値は3つ、<code>(*int64, int, bool)</code>。順に<strong>カーソル</strong>（無指定なら <code>nil</code>）・<strong>件数</strong>・<strong>成功したか</strong>です。最後の <code>bool</code> は「検証に通ったか」で、<code>false</code> のときは既にこの関数の中でエラー応答を書いているので、呼び出し側は <code>if !ok { return }</code> と即座に打ち切ります（<code>handleTimeline</code> の冒頭がまさにそれ）。</p>
+    <p><strong>cursor の読み取り。</strong> <code>?cursor=</code> が付いていなければ <code>cursor</code> は <code>nil</code> のまま（＝1ページ目）。付いていれば <code>strconv.ParseInt(c, 10, 64)</code> で 64bit 整数に変換します。変換に失敗する（数字でない）か、<code>id &lt;= 0</code>（0 以下はありえない id）なら、<code>400 bad_cursor</code> で弾きます。壊れたカーソルを黙って無視して1ページ目を返すのではなく、<strong>「読み込み位置が不正」とはっきり返す</strong>——ユーザーには「最初から読み込み直して」と促します。正しければ、その id のアドレスを <code>cursor = &amp;id</code> でポインタに入れ、<code>ListTimeline</code> の <code>beforeID *int64</code> にそのまま渡せる形にします。</p>
+    <p><strong>limit の読み取り。</strong> 既定は <code>defaultPageSize = 20</code>。<code>?limit=</code> が付いていれば読み、<strong>1〜50 の範囲</strong>（<code>n &lt;= 0 || n &gt; maxPageSize</code> を弾く）に収めます。上限 <code>maxPageSize = 50</code> を設ける理由は<strong>防御</strong>です。もし上限がなければ、誰かが <code>?limit=1000000</code> と投げて一度に巨大な件数を要求し、サーバと DB に過負荷をかけられます。「クライアントの言い値をそのまま信じない」——上限を決めておくのは、公開 API の基本作法です。</p>
+
+    <div class="box hazard"><div class="box-k">⚠ 落とし穴 — 上限（maxPageSize）を決め忘れない</div>
+      <p><code>limit</code> にクライアントの指定をそのまま使うと、<code>?limit=99999999</code> のような要求で<strong>一撃でメモリと DB を食い潰される</strong>恐れがあります。<code>parsePageParams</code> が <code>n &gt; maxPageSize</code> を弾いているのはそのためです。ページ件数に限らず、<strong>外から来る数値には必ず上限（と下限）を設ける</strong>。個人開発でも、公開する API には必ず入れておくべき一線です。</p>
+    </div>
+
+    <h3>核心 — writePostPage と「LIMIT 21」の魔法</h3>
+    <p>そして本章の技術的クライマックス、<code>writePostPage</code> です。ここに「次のページがあるかどうか」を判定する定石が詰まっています。</p>
+
+    <div class="file-tag">src/backend/internal/api/post_handlers.go</div>
+    <pre><code><span class="cm">// writePostPage は limit+1 件取ってきた投稿から「次のページがあるか」を判定して返す。</span>
+<span class="cm">// ascending=true のとき（リプライ一覧）はカーソルの向きが逆になる。</span>
+<span class="kw">func</span> (s *<span class="ty">Server</span>) writePostPage(w http.<span class="ty">ResponseWriter</span>, r *http.<span class="ty">Request</span>, posts []store.<span class="ty">Post</span>, limit <span class="ty">int</span>, ascending <span class="ty">bool</span>) {
+	<span class="kw">var</span> next *<span class="ty">int64</span>
+	<span class="kw">if</span> len(posts) &gt; limit {
+		posts = posts[:limit]
+		last := posts[len(posts)-<span class="st">1</span>].ID
+		next = &amp;last
+	}
+	_ = ascending <span class="cm">// カーソルはどちらの向きでも「最後に見た投稿のID」</span>
+	out, err := s.toPostJSONs(r.Context(), posts, s.optionalUserID(r))
+	<span class="kw">if</span> err != <span class="kw">nil</span> {
+		writeStoreError(w, err)
+		<span class="kw">return</span>
+	}
+	writeJSON(w, http.StatusOK, postListJSON{Posts: out, NextCursor: next})
+}</code></pre>
+
+    <p>ここで、<code>handleTimeline</code> が <code>ListTimeline(..., cursor, limit+1)</code> と<strong>「欲しい件数＋1」</strong>を渡していた謎が解けます。<code>limit</code> が 20 なら、DB からは <strong>21件</strong>取ろうとします。この <code>+1</code> の1件が、<strong>「次のページがまだあるか」を確かめるための偵察役（番兵）</strong>です。仕組みはこうです。</p>
+
+    <div class="ascii">LIMIT 21 で「次ページの有無」を判定する
+
+  欲しいのは20件。でも DB には LIMIT 21（＝ limit+1）で問い合わせる。
+
+  ケースA：21件返ってきた（len(posts) &gt; 20）
+    → まだ21件目が存在する ＝「次のページがある」
+    → 21件目は捨てて20件だけ返す（posts[:limit]）
+    → 返す20件の最後の id を next_cursor にする
+       [#45 ... #26 | #25]   ← #25 は「まだ続きがある」の証人。捨てる。
+        └─ 返す20件 ─┘ ↑偵察役
+
+  ケースB：20件以下しか返らなかった（len(posts) &lt;= 20）
+    → 21件目が無い ＝ これが最後のページ
+    → next_cursor は nil（＝「もう続きは無い」）
+       [#19 #18 ... #1]   ← 全部返す。next は付けない。</div>
+    <p>コードに沿って追います。<code>if len(posts) &gt; limit</code> ——「取れた件数が、欲しい件数(20)を<strong>超えている</strong>（＝21件来た）」なら、<strong>次のページがある</strong>ということ。このとき <code>posts = posts[:limit]</code> で<strong>偵察役の21件目を切り捨てて</strong>ちょうど20件にし、<code>last := posts[len(posts)-1].ID</code> でその20件の<strong>最後の投稿の id</strong> を取り、<code>next = &amp;last</code> で <code>next_cursor</code> にします。逆に <code>len(posts)</code> が 20 以下なら、この <code>if</code> に入らず <code>next</code> は <code>nil</code> のまま——<strong>「もう続きは無い」</strong>を意味します。</p>
+
+    <div class="gonote"><div class="box-k">GO メモ · なぜ「limit+1」なのか — もっと素朴な方法との比較</div>
+      <p>「次ページがあるか」を知る素朴な方法は、<strong>別途 <code>COUNT(*)</code> で総件数を数える</strong>ことです。しかしタイムラインの母集合（自分＋全フォロイーの投稿）を毎回数え上げるのは高くつくうえ、数えた直後に件数が変わりもします。<code>limit+1</code> の妙は、<strong>本命のクエリのついでに、たった1件多く取るだけ</strong>で「次があるか」が分かること。追加のクエリもカウントも要りません。「20件欲しいなら21件問い合わせ、21件来たら『次あり』、20件以下なら『これで最後』、余分な1件は捨てる」——この <code>limit+1</code> は、ページネーション実装の世界共通の定石です。</p>
+    </div>
+
+    <p>残りの行も押さえます。<code>_ = ascending</code> は「この引数は今は使わないが、受け取っている」という Go の書き方（<code>_ =</code> で「意図的に無視」を明示）。コメントどおり、<strong>カーソルは昇順でも降順でも「最後に見た投稿の id」で一貫している</strong>ので、この判定ロジック自体は向きに依存しません。<code>ascending</code> が効いてくるのは<strong>SQL 側の <code>WHERE</code> と <code>ORDER BY</code> の向き</strong>で、タイムラインは <code>p.id &lt; $2 ... DESC</code>（降順）、リプライ一覧は <code>p.id &gt; $2 ... ASC</code>（昇順）と使い分けます。この「向きが逆」の話は第05章の主題です。</p>
+    <p>最後に <code>toPostJSONs</code> が、20件それぞれに<strong>いいね数・自分がいいね済みか・リプライ数</strong>を付けて JSON 化します（この集計を投稿ごとに個別クエリで引くと N+1 問題になる——それを一括で引く工夫は第06章・第07章）。そして <code>postListJSON{Posts: out, NextCursor: next}</code> を返します。返る JSON はこの形です。</p>
+    <pre><code>{
+  <span class="st">"posts"</span>: [ <span class="cm">/* 20件の投稿。新しい順 */</span> ... ],
+  <span class="st">"next_cursor"</span>: <span class="st">26</span>   <span class="cm">// 続きがあれば最後の投稿id。無ければこのキー自体が消える</span>
+}</code></pre>
+    <p>クライアントは単純です。<strong><code>next_cursor</code> があれば、それを <code>?cursor=</code> に付けて次を要求</strong>。<strong>無ければ「最後まで読んだ」</strong>としてスクロールを止める。この往復を繰り返すだけで、重複も欠落もなく、深いページでも一定の速さで、タイムラインを無限に辿れます。</p>
+
+    <h2 class="step" id="step-5"><span class="step-no">Step 5</span>動かして確認する — curl で cursor を送る</h2>
+    <p>クエリ（<code>ListTimeline</code>）とハンドラ（<code>handleTimeline</code> ＋2部品）が揃いました。本当にタイムラインが機能するかを、実際に叩いて確かめます。第00章の手順で DB とサーバを起動しておいてください（<code>docker compose up -d</code> → <code>go run ./cmd/server</code>）。</p>
+
+    <div class="box do"><div class="box-k">▸ 動かして確認 — フォロー → タイムラインに現れる</div>
+      <p>2人（alice / bob）を登録し、alice でログインして bob をフォローし、それぞれ投稿してから alice のタイムラインを引きます。<code>-c</code>（Cookie 保存）・<code>-b</code>（Cookie 送信）は第01章のとおり。</p>
+      <pre class="term"><code><span class="cm"># alice を登録（Cookie は alice.txt へ）</span>
+<span class="ps">$</span> curl -sS -c alice.txt -X POST http://localhost:8080/api/auth/signup \
+    -H <span class="st">"Content-Type: application/json"</span> -d @- &lt;&lt;'JSON'
+{"username":"alice","display_name":"Alice","email":"alice@example.com","password":"correct horse battery staple"}
+JSON
+
+<span class="cm"># bob を登録（Cookie は bob.txt へ）</span>
+<span class="ps">$</span> curl -sS -c bob.txt -X POST http://localhost:8080/api/auth/signup \
+    -H <span class="st">"Content-Type: application/json"</span> -d @- &lt;&lt;'JSON'
+{"username":"bob","display_name":"Bob","email":"bob@example.com","password":"correct horse battery staple"}
+JSON
+
+<span class="cm"># bob が投稿する</span>
+<span class="ps">$</span> curl -sS -b bob.txt -X POST http://localhost:8080/api/posts \
+    -H <span class="st">"Content-Type: application/json"</span> -d @- &lt;&lt;'JSON'
+{"body":"bob の1本目"}
+JSON
+<span class="out">{"id":1,"body":"bob の1本目","created_at":"2026-07-14T10:00:00Z","author":{"id":2,"username":"bob","display_name":"Bob"},"like_count":0,"liked_by_me":false,"reply_count":0}</span>
+
+<span class="cm"># alice はまだ誰もフォローしていない → タイムラインは自分の投稿だけ（今は空）</span>
+<span class="ps">$</span> curl -sS -b alice.txt http://localhost:8080/api/timeline
+<span class="out">{"posts":[]}</span>
+
+<span class="cm"># alice が bob をフォローする（FR-9）</span>
+<span class="ps">$</span> curl -sS -b alice.txt -X POST http://localhost:8080/api/users/bob/follow
+<span class="out">   （204 No Content：本文なし）</span>
+
+<span class="cm"># もう一度 alice のタイムライン → bob の投稿が現れた！</span>
+<span class="ps">$</span> curl -sS -b alice.txt http://localhost:8080/api/timeline
+<span class="out">{"posts":[{"id":1,"body":"bob の1本目","created_at":"...","author":{"id":2,"username":"bob","display_name":"Bob"},"like_count":0,"liked_by_me":false,"reply_count":0}]}</span></code></pre>
+      <p>フォローする前は空だった alice のタイムラインに、フォロー後は bob の投稿が現れました。これが「集める（fan-out on read）」の実演です——bob の投稿はどこにもコピーされておらず、<code>ListTimeline</code> が <code>follows</code> を引いてその場で拾っています。</p>
+    </div>
+
+    <div class="box do"><div class="box-k">▸ 動かして確認 — cursor で続きを取る</div>
+      <p>次に、ページネーションを確かめます。bob にたくさん投稿してもらい、<code>?limit=</code> を小さくして「続き」を <code>next_cursor</code> で辿ります（少件数で挙動を見るため <code>limit=2</code>）。</p>
+      <pre class="term"><code><span class="cm"># bob が4本まとめて投稿（id は 2, 3, 4, 5 と増える想定。先の1本と合わせて計5件）</span>
+<span class="ps">$</span> for n in 2 3 4 5; do \
+    curl -sS -b bob.txt -X POST http://localhost:8080/api/posts \
+      -H <span class="st">"Content-Type: application/json"</span> -d @- &lt;&lt;JSON; done
+{"body":"bob の投稿 #$n"}
+JSON
+
+<span class="cm"># 1ページ目：limit=2。新しい順（id 降順）に2件 + next_cursor</span>
+<span class="ps">$</span> curl -sS -b alice.txt <span class="st">"http://localhost:8080/api/timeline?limit=2"</span>
+<span class="out">{"posts":[{"id":5,...},{"id":4,...}],"next_cursor":4}</span>
+
+<span class="cm"># 2ページ目：next_cursor(4) を cursor に付ける → id &lt; 4 の続き</span>
+<span class="ps">$</span> curl -sS -b alice.txt <span class="st">"http://localhost:8080/api/timeline?limit=2&amp;cursor=4"</span>
+<span class="out">{"posts":[{"id":3,...},{"id":2,...}],"next_cursor":2}</span>
+
+<span class="cm"># 3ページ目：cursor=2 → 残り1件。next_cursor が消える＝最後</span>
+<span class="ps">$</span> curl -sS -b alice.txt <span class="st">"http://localhost:8080/api/timeline?limit=2&amp;cursor=2"</span>
+<span class="out">{"posts":[{"id":1,...}]}</span></code></pre>
+      <p><code>next_cursor</code> を <code>?cursor=</code> に詰めて叩き直すたびに、<strong>重複なく続きが取れて</strong>いること、そして最後のページで <code>next_cursor</code> が<strong>消える</strong>（＝もう続きは無い）ことを確認してください。これが Step 4 の <code>limit+1</code> 判定の実演です。<code>id 5,4</code>（次あり）→ <code>id 3,2</code>（次あり）→ <code>id 1</code> のみ（次なし）と、キーセットが綺麗に境界を刻んでいます。</p>
+      <div class="box hazard"><div class="box-k">⚠ 落とし穴 — 「ちょうど割り切れる」と、最後のページは空になる</div>
+        <p>いまは投稿が5件なので、2件ずつだと <code>2 + 2 + 1</code> で最後に1件残りました。では投稿が<strong>4件</strong>（<code>2 + 2</code> でちょうど割り切れる）だったらどうなるか。2ページ目で <code>id 2,1</code> を返した時点で残りが無いので、<code>limit+1</code> の21件目（この例では3件目）が取れず、<strong>2ページ目の時点で <code>next_cursor</code> が消えます</strong>。つまり「3ページ目を叩いて空が返る」のではなく、<strong>そもそも3ページ目が案内されない</strong>。</p>
+        <p>これは不具合ではなく、<code>limit+1</code> 方式の<strong>狙いどおりの挙動</strong>です。「次があるか」を<em>件数を数えて推測する</em>のではなく<strong>実際に1件多く取ってみて確かめる</strong>ので、ちょうど割り切れる場合でも「空のページ」を読者に見せずに済みます。もし <code>len(posts) == limit</code> で判定していたら、4件のときに「次がある」と誤って案内し、読者は空のページを1回踏むことになっていました。<strong>この1件の余分が、その誤判定を防いでいます。</strong></p>
+      </div>
+    </div>
+
+    <div class="box do"><div class="box-k">▸ 動かして確認 — フォロー解除で消える</div>
+      <p>最後に、フォロー解除で bob の投稿がタイムラインから消えることを確かめます（FR-9 の後半）。</p>
+      <pre class="term"><code><span class="cm"># alice が bob をフォロー解除</span>
+<span class="ps">$</span> curl -sS -b alice.txt -X DELETE http://localhost:8080/api/users/bob/follow
+<span class="out">   （204 No Content）</span>
+
+<span class="cm"># タイムラインを引き直す → bob の投稿は消えた（自分の投稿だけになる）</span>
+<span class="ps">$</span> curl -sS -b alice.txt http://localhost:8080/api/timeline
+<span class="out">{"posts":[]}</span></code></pre>
+      <p>フォロー解除は <code>follows</code> の行を1つ消すだけ。<code>ListTimeline</code> の <code>IN (SELECT followee_id FROM follows WHERE follower_id = $1)</code> が<strong>次に引かれた瞬間から</strong> bob を含まなくなるので、以降 bob の投稿は現れません。これも「集める」方式ゆえの気持ちよさです——箱を作り直す処理も、配った投稿を回収する処理も要らない。<code>follows</code> という1つの真実だけを更新すれば、タイムラインは自動的に追随します。</p>
+    </div>
+
+    <div class="box hazard"><div class="box-k">⚠ 落とし穴（このプロジェクト固有）— 日本語ボディは必ず <code>-d @-</code> で stdin から渡す</div>
+      <p>上の <code>curl</code> で本文を <code>-d '...'</code> と<strong>引数に直接書かず</strong>ヒアドキュメント（stdin）で渡しているのは、この環境（Windows の git-bash からネイティブ <code>curl.exe</code> を呼ぶ）では<strong>日本語を含むボディを引数で渡すと cp932 に化けて</strong>壊れた JSON が届くためです（第01章と同じ注意）。投稿本文に日本語を入れる本章では特に効くので、<strong>常に <code>-d @-</code></strong> を癖にしてください。</p>
+    </div>
+
+    <div class="box do"><div class="box-k">▸ 動かして確認 — テストを通す</div>
+      <p>タイムラインの受け入れ基準（フォロー中の投稿だけが混ざる・カーソルで重複なく辿れる・リプライは除外）は、上の <code>curl</code> の手順で確かめます。あわせて、ビルドと単体テスト（認証・入力検証）が通ることも確認しておきます（タイムライン専用の自動テストはなく、<code>store</code> は <code>[no test files]</code>）。</p>
+      <pre class="term"><code><span class="ps">$</span> cd src/backend
+<span class="ps">$</span> go test ./...
+<span class="out">?   	twitter-sns/cmd/server	[no test files]
+?   	twitter-sns/frontend_dist	[no test files]
+ok  	twitter-sns/internal/api	0.402s
+ok  	twitter-sns/internal/auth	0.612s
+?   	twitter-sns/internal/store	[no test files]</span></code></pre>
+      <p><code>curl</code> の確認が通り、<code>ok</code> が並べば、タイムラインは完成です。</p>
+    </div>
+
+    <h2>つまずき FAQ</h2>
+    <details class="qa"><summary>カーソルに <code>created_at</code>（投稿時刻）を使えないの? 「新しい順」なんだから時刻の方が自然では?</summary>
+      <div class="qa-body"><p>使えません（正確には「危険で使うべきでない」）。理由は2つ。<strong>(1) 時刻は逆転・重複しうる</strong> — Docker/WSL2 のクロックずれや NTP 補正で、後から入った行の <code>created_at</code> が前の行より早くなることがあり、同時刻の2投稿が同じタイムスタンプを持つこともあります。すると「時刻より小さいものを取る」カーソルは、同時刻の境目で欠落や重複を起こします。<strong>(2) カーソルは一意でなければならない</strong> — <code>created_at</code> は重複しうるので「ちょうどここまで」を一意に指せません。<code>id</code>（<code>BIGSERIAL</code>）は<strong>厳密に単調増加</strong>し必ず一意なので、順序の鍵にもカーソルにも完璧です。第00章のスキーマのコメントが「順序の鍵には連番を使う」と明記しているのはこのためです。</p></div>
+    </details>
+    <details class="qa"><summary>なぜ <code>limit+1</code>? わざわざ1件多く取らず、返した件数が <code>limit</code> ちょうどかで判定すればいいのでは?</summary>
+      <div class="qa-body"><p>「返った件数が <code>limit</code> ちょうどなら次がある」と判定すると、<strong>ちょうど割り切れる最後のページで誤判定</strong>します。たとえば全40件を limit=20 で辿ると、2ページ目でちょうど20件返りますが、実際は<strong>そこで終わり</strong>。件数だけでは「20件返った＝次がある」と誤り、存在しない3ページ目を要求してしまいます。<code>limit+1</code>（＝21件問い合わせ）なら、<strong>21件目が実在するか</strong>で「次あり/なし」を確実に判定できます。21件来れば必ず次があり、20件以下なら必ず最後。曖昧さがありません。別途 <code>COUNT(*)</code> を打つより安く、これがページネーションの世界標準の定石です。</p></div>
+    </details>
+    <details class="qa"><summary>フォローがどんどん増えたら、<code>IN (SELECT ...)</code> で毎回フォロイー一覧を引くのは重くならない?</summary>
+      <div class="qa-body"><p>本書の規模（1人が数十〜数百人をフォロー）では問題になりません。<code>follows</code> に <code>follower_id</code> の索引（第03章 <code>idx_follows_follower_id</code>）があるので、フォロイー一覧の取得は高速で、その id 集合で <code>posts</code> を引くのも <code>posts</code> 側の索引が効きます。重くなるのは、1人が<strong>数万人をフォロー</strong>したり、フォロイーの誰かが<strong>膨大な投稿</strong>を持つ大規模ケース。そのときは <code>IN</code> を <code>JOIN</code> に書き換える、あるいは「集める」から「配る（fan-out on write）」へ切り替える、といった手が要ります。それは<strong>第09章</strong>の主題です。学習規模では、まず素直な <code>IN</code> で正しく動かすのが正解。「遅くなってから速くする」順序を守ります。</p></div>
+    </details>
+
+    <h2>理解度チェック</h2>
+    <p>次の問いに<strong>自分の言葉で</strong>答えられたら、この章は卒業です。</p>
+    <details class="qa"><summary>1. 「集める（fan-out on read）」と「配る（fan-out on write）」の違いを、投稿時と読み取り時の負荷の観点で説明せよ。本書がどちらを選び、なぜか。</summary>
+      <div class="qa-body"><p>「集める」は投稿を <code>posts</code> に<strong>1件書くだけ</strong>で、タイムラインを見に来たときに自分＋フォロイーの投稿を<strong>その場で1本のクエリで集計</strong>する。投稿は軽く、読み取りは重い。「配る」は投稿の瞬間に<strong>フォロワー全員の箱へコピー</strong>しておき、読むときは<strong>箱を上から読むだけ</strong>。投稿は重く（有名人問題）、読み取りは軽い。本書は<strong>「集める」を選択</strong>。理由は、学習規模では索引が効けば集計でも十分速く、SQL 1本・データ1か所で<strong>単純で正しく</strong>作れるから。配る方式は複雑さが先に来る早すぎる最適化になりやすい。大規模化と配る方式は第09章。</p></div>
+    </details>
+    <details class="qa"><summary>2. オフセットページネーションが、タイムラインで「重複」を起こす仕組みを説明せよ。キーセット方式はなぜそれを防げるのか。</summary>
+      <div class="qa-body"><p>オフセットは続きを<strong>「先頭から何件目」という相対位置</strong>で指す。タイムラインの先頭（最新）は刻々と動くので、1ページ目を読んだあと新規投稿が n 件割り込むと、列全体が n 件ずれる。<code>OFFSET 20</code> は「今の先頭から20件飛ばす」ため、飛ばす範囲が<strong>1ページ目で既に見た投稿に食い込み</strong>、2ページ目でそれらが<strong>再び返って重複</strong>する（上で消えれば欠落）。キーセットは続きを<strong>「最後に見た id より小さいもの」という絶対位置</strong>で指すので、上に何件割り込もうと <code>id &lt; 26</code> は不変。境界がずれず、重複も欠落もしない。加えて索引でジャンプできるので深いページでも一定速度。</p></div>
+    </details>
+    <details class="qa"><summary>3. <code>handleTimeline</code> が <code>ListTimeline(..., limit+1)</code> と1件多く問い合わせる理由と、<code>writePostPage</code> がその1件をどう使うかを説明せよ。</summary>
+      <div class="qa-body"><p>1件多く取るのは<strong>「次のページがあるか」を偵察する</strong>ため。欲しいのが20件でも DB には21件問い合わせる。<code>writePostPage</code> は <code>len(posts) &gt; limit</code>（＝21件来た）なら「次あり」と判断し、<strong>偵察役の21件目を <code>posts[:limit]</code> で切り捨てて</strong>ちょうど20件にし、その最後の投稿の id を <code>next_cursor</code> に入れて返す。20件以下しか来なければ「これが最後」で <code>next_cursor</code> は <code>nil</code>（JSON からキーが消える）。別途 <code>COUNT</code> を打たずに、本命クエリのついでの1件だけで次ページ有無を確実に判定できる定石。</p></div>
+    </details>
+
+    <h2>まとめ — 会話の層へ</h2>
+    <p>この章で、SNS の心臓——<strong>タイムライン</strong>——ができました。自分とフォロイーの投稿を <code>ListTimeline</code> が1本のクエリで集め（fan-out on read）、リプライを除き（<code>reply_to_id IS NULL</code>）、id 降順に並べ、<code>cursor</code> と <code>limit+1</code> の定石で「続き」を重複も欠落もなく辿れるようにしました。オフセットの罠（動く列を相対位置で切るとズレる／深いほど遅い）を避け、連番 id をカーソルにするキーセット方式を選んだこと——本書で最も丁寧に論じたこの判断が、この先の一覧系すべて（ユーザー投稿・リプライ・フォロワー）の土台になります。フォローすれば現れ、解除すれば消える。<code>follows</code> という1つの真実を更新するだけで、タイムラインが自動で追随する気持ちよさも味わいました。</p>
+    <p>次の第05章では、いままで「除いて」きた <code>reply_to_id</code> に光を当てます。ある投稿にぶら下がる<strong>リプライ（会話）</strong>を、今度は<strong>古い順（会話を上から読み進める向き）</strong>で辿ります。本章のカーソルと <code>writePostPage</code> をそのまま使いますが、<code>ORDER BY</code> と <code>p.id &gt; $2</code> の<strong>向きが逆になる</strong>——<code>writePostPage</code> の <code>ascending</code> 引数が、ついに仕事をします。SNS が「流す」から「語り合う」へ進む一歩です。</p>
+
+    <div class="chap-foot">
+      <a class="pager" href="03-follow.html"><span class="dir">← 前へ</span>第03章 · つながる（フォロー）</a>
+      <a class="pager next" href="05-reply.html"><span class="dir">次へ →</span>第05章 · 会話する（リプライ）</a>
+    </div>
+  </main>
+</div>
+</body>
+</html>

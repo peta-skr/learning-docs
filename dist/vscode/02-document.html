@@ -1,0 +1,591 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>第02章 行とカーソル — ゼロから作るテキストエディタ</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500;600&family=Source+Serif+4:opsz,wght@8..60,400;8..60,600;8..60,700&family=Noto+Serif+JP:wght@400;600;700&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<div class="shell">
+
+  <aside class="spine">
+    <a class="wordmark" href="index.html">MINT EDITOR · from scratch</a>
+    <div class="book-title">ゼロから作る<br>テキストエディタ</div>
+    <div class="book-sub">TypeScript と Canvas で mint editor を組む</div>
+
+    <div class="legend"><span>読む <b>↓</b></span><span>組む <b>↑</b></span></div>
+
+    <nav aria-label="目次">
+      <ul class="toc">
+        <li><a class="nav-item" href="index.html"><span class="nav-num">序</span><span class="nav-label">はじめに・準備<span class="nav-tag">Setup</span></span></a></li>
+        <li><a class="nav-item" href="00-overview.html"><span class="nav-num">00</span><span class="nav-label">文字を打てる箱の正体<span class="nav-tag">Overview</span></span></a></li>
+        <li><a class="nav-item" href="01-buffer.html"><span class="nav-num">01</span><span class="nav-label">テキストを持つ<span class="nav-tag">Buffer</span></span></a></li>
+        <li><a class="nav-item current" aria-current="page" href="02-document.html"><span class="nav-num">02</span><span class="nav-label">行とカーソル<span class="nav-tag">Doc</span></span></a></li>
+        <li><a class="nav-item" href="03-history.html"><span class="nav-num">03</span><span class="nav-label">編集と取り消し<span class="nav-tag">Undo</span></span></a></li>
+        <li><a class="nav-item" href="04-view.html"><span class="nav-num">04</span><span class="nav-label">画面に描く<span class="nav-tag">Canvas</span></span></a></li>
+        <li><a class="nav-item" href="05-input.html"><span class="nav-num">05</span><span class="nav-label">入力を受ける<span class="nav-tag">Input</span></span></a></li>
+        <li><a class="nav-item" href="06-search.html"><span class="nav-num">06</span><span class="nav-label">複数カーソルと検索<span class="nav-tag">Multi</span></span></a></li>
+        <li><a class="nav-item" href="07-highlight.html"><span class="nav-num">07</span><span class="nav-label">色をつける<span class="nav-tag">Syntax</span></span></a></li>
+        <li><a class="nav-item" href="08-ime.html"><span class="nav-num">08</span><span class="nav-label">日本語を打つ<span class="nav-tag">IME</span></span></a></li>
+        <li><a class="nav-item" href="09-assemble.html"><span class="nav-num">09</span><span class="nav-label">開いて保存する・組み立て<span class="nav-tag">Assemble</span></span></a></li>
+      </ul>
+    </nav>
+
+    <div class="spine-foot">
+      各章は一つの部品・機能。<br>下（バッファ）から上（UI）へ<br>積み上げて動かしていく。
+    </div>
+  </aside>
+
+  <main class="reading">
+    <div class="progress-tag">第02章 / 全10章 · 層: DOCUMENT · 読了目安 2〜2.5時間</div>
+    <div class="eyebrow"><span>DOCUMENT</span><span class="depth">— 行の目次と、2つの座標系の橋渡し</span></div>
+    <h1>行とカーソル</h1>
+    <p class="lede">第01章で手に入れたバッファは、<strong>オフセットしか知りません</strong>。「先頭から何文字目」は数えられても、「これは何行目の何桁目か」は分からない。でも人間は行で考えます。カーソルは3行目、選択は5行目から7行目、ステータスバーには「12 : 4」。この章では、バッファの上に<strong>行の知識</strong>を1枚かぶせる <code>TextDocument</code> を作ります。鍵は <strong>lineStarts</strong> —— 各行の先頭オフセットだけを覚えた小さな「目次」です。これを編集のたびに全部作り直すのではなく、<strong>壊れた範囲だけ</strong>差分更新する。オフセットと <code>(行, 桁)</code> の往復も、編集をまとめて適用して<strong>そのまま取り消せる</strong>逆向き編集列も、すべてこの1ファイルに収めます。あわせて、カーソルを「特別扱いしない」複数カーソルの標準形（<code>selection.ts</code>）も引きます。</p>
+
+    <div class="box goal"><div class="box-k">◈ この章のゴール</div>
+      <p>次の 3 つを、自分の言葉と手で確認できたら達成です。</p>
+      <ol>
+        <li><code>lineStarts</code>（行頭オフセットの配列）が「行の目次」であり、なぜ毎回全走査せず<strong>差分更新</strong>するのかを説明できる。</li>
+        <li>オフセット↔<code>Position</code> の変換が、<code>lineAt</code> の<strong>二分探索</strong>を土台にしていることを読み解ける。</li>
+        <li><code>npx vitest run src/core/document.test.ts</code> と <code>selection.test.ts</code> が PASS し、差分更新が「全再計算」と常に一致することを目視する。</li>
+      </ol>
+    </div>
+
+    <div class="box map"><div class="box-k">☰ この章のステップ</div>
+      <ol>
+        <li><a href="#step-1">バッファに「行」を足す — TextDocument の骨格（<code>core/document.ts</code>）</a></li>
+        <li><a href="#step-2">行の目次をつくる — <code>computeLineStarts</code></a></li>
+        <li><a href="#step-3">オフセットから行を引く — <code>lineAt</code> の二分探索</a></li>
+        <li><a href="#step-4">2つの座標系を往復する — <code>toPosition</code> / <code>toOffset</code> と行のヘルパー</a></li>
+        <li><a href="#step-5">編集をまとめて適用し、逆向きを返す — <code>applyEdits</code></a></li>
+        <li><a href="#step-6">行の目次を差分更新する — <code>updateLineStarts</code>（この章の核心）</a></li>
+        <li><a href="#step-7">カーソルを配列で持つ — <code>selection.ts</code> と正規化</a></li>
+        <li><a href="#step-8">演習: Document を手で動かす</a></li>
+      </ol>
+    </div>
+
+    <h2>なぜ「行」という層を1枚はさむのか</h2>
+    <p>第01章の <code>PieceTableBuffer</code> は、テキストを1本の長い文字列のように扱えるデータ構造でした。<code>slice(from, to)</code> で読み、<code>replace(from, to, text)</code> で書き換える。ここで <code>from</code> も <code>to</code> も、すべて<strong>オフセット</strong> —— 文書先頭からの UTF-16 コード単位数です。バッファにとって世界は1次元。改行文字 <code>\n</code> ですら「たまたまそこにある1文字」でしかなく、「行」という概念は存在しません。</p>
+    <p>ところがエディタの上の層は、絶えず<strong>行で考えます</strong>。カーソルは「3行目の先頭」にいる。選択は「5行目から7行目まで」。画面には「見えている範囲の行だけ」を描く。ステータスバーには「12行 : 4桁」と出す。マウスでクリックされた画面座標は、まず「何行目の何桁目か」に翻訳されます。<strong>人間の側はぜんぶ <code>(行, 桁)</code> の世界</strong>なのです。</p>
+    <p>この2つの世界 —— バッファの<strong>オフセット</strong>と、人間の<strong>行・桁</strong> —— を橋渡しするのが、この章で作る <code>TextDocument</code> です。橋を架けるのに必要なのは、たった1つの情報。「各行が、オフセットいくつから始まるか」。これを配列にしたものが <code>lineStarts</code> です。行頭さえ分かれば、オフセットからも行が引けるし、行・桁からもオフセットに戻せます。この章は、その小さな配列を<strong>正しく・速く保ち続ける</strong>ための工夫の物語です。</p>
+    <p>そしてもう1つ。この章の <code>Document</code> は、単なる座標変換係ではありません。<strong>編集を実際に適用する場所</strong>でもあります。第00章で「編集は <code>Edit { from, to, text }</code> 1形に畳める」と学びました。その <code>Edit</code> の列をバッファに流し込み、同時に <code>lineStarts</code> を更新し、しかも<strong>元に戻せる逆向きの編集列</strong>を返す —— これが <code>applyEdits</code> です。第03章の Undo は、この逆向き編集列にそっくり乗ります。地味に見えて、この章はエディタの「編集の心臓」に踏み込みます。</p>
+
+    <h2 class="step" id="step-1"><span class="step-no">Step 1</span>バッファに「行」を足す — TextDocument の骨格</h2>
+    <p>作るファイルは <code>core/document.ts</code>。まず先頭の import と、設計を語るコメント、クラスの骨格（フィールドと単純なゲッター）から読みます。</p>
+
+    <div class="file-tag">core/document.ts</div>
+    <pre><code><span class="kw">import type</span> { <span class="ty">TextBuffer</span> } <span class="kw">from</span> <span class="st">"./buffer"</span>;
+<span class="kw">import</span> { <span class="ty">PieceTableBuffer</span> } <span class="kw">from</span> <span class="st">"./pieceTable"</span>;
+<span class="kw">import type</span> { <span class="ty">Edit</span>, <span class="ty">Position</span> } <span class="kw">from</span> <span class="st">"./types"</span>;
+
+<span class="cm">/**
+ * TextDocument — バッファに「行」の知識を足した文書モデル。
+ *
+ * バッファはオフセットしか知らない。エディタは (行, 桁) で考えたい。
+ * その橋渡しとして、各行の開始オフセット lineStarts を常に持ち、
+ * 編集のたびに全再計算ではなく「壊れた範囲だけ」を差分更新する。
+ *
+ * applyEdits は昇順・非重複の編集列をまとめて適用し、
+ * 「最終状態の座標系で有効な逆向き編集列」を返す。
+ * この逆向き編集列をもう一度 applyEdits に渡せば元に戻る（= Undo の土台）。
+ */</span>
+<span class="kw">export class</span> <span class="ty">TextDocument</span> {
+  buffer: <span class="ty">TextBuffer</span>;
+  <span class="kw">private</span> lineStarts: <span class="ty">number</span>[];
+  <span class="cm">/** 編集のたびに増える版数。キャッシュの無効化判定に使う */</span>
+  version = <span class="st">0</span>;
+
+  <span class="kw">constructor</span>(text = <span class="st">""</span>, buffer?: <span class="ty">TextBuffer</span>) {
+    <span class="kw">this</span>.buffer = buffer ?? <span class="kw">new</span> <span class="ty">PieceTableBuffer</span>(text);
+    <span class="kw">this</span>.lineStarts = computeLineStarts(text);
+  }
+
+  <span class="kw">get</span> length(): <span class="ty">number</span> {
+    <span class="kw">return</span> <span class="kw">this</span>.buffer.length;
+  }
+
+  <span class="kw">get</span> lineCount(): <span class="ty">number</span> {
+    <span class="kw">return</span> <span class="kw">this</span>.lineStarts.length;
+  }
+
+  getText(): <span class="ty">string</span> {
+    <span class="kw">return</span> <span class="kw">this</span>.buffer.getText();
+  }</code></pre>
+
+    <p>コメントは、この章の設計をそのまま3段落に要約したものです。「バッファはオフセットしか知らない / エディタは <code>(行, 桁)</code> で考えたい / その橋渡しとして <code>lineStarts</code> を持つ」——ここまで序文で述べたことと一字一句同じ思想です。読み進める前に、この4行を頭に刻んでおいてください。以降のコードは、全部このコメントの実装です。</p>
+    <p>クラスの中身を上から見ます。フィールドは3つだけです。</p>
+    <ul>
+      <li><code>buffer: TextBuffer</code> —— 第00章で引いた境界です。<code>Document</code> は「テキストが<strong>どう持たれているか</strong>」を知りません。<code>slice</code> と <code>replace</code> と <code>getText</code> と <code>length</code>、この4つの約束しか使わない。だから中身が <code>SimpleBuffer</code> でも <code>PieceTableBuffer</code> でも、<code>Document</code> のコードは1文字も変わりません。境界を引いた果実がここで効きます。</li>
+      <li><code>private lineStarts: number[]</code> —— この章の主役。<strong>各行の開始オフセットの配列</strong>です。<code>private</code> なので外からは触れません。行に関する問い合わせは、必ずこのクラスのメソッドを通します。中身は正しく保ち続ける責務があるので、外に生で見せないのです。</li>
+      <li><code>version = 0</code> —— 編集のたびに増える<strong>版数（バージョン番号）</strong>。「前に見たときから中身が変わったか?」を、重い比較なしに一発で判定できます。使い道は<strong>キャッシュの無効化</strong>です。文書の中身が変わったかを毎回全文比較していては話になりませんが、整数1つを比べるだけなら一瞬。本書では第07章の色付け（<code>Highlighter</code> が「版が変わっていたらトークンのキャッシュを全部捨てる」）と、第06章の検索（一致位置のキャッシュ）がこの手を使います。いまはただの整数カウンタだと思っておけば十分です。</li>
+    </ul>
+    <p>コンストラクタの1行目、<code>this.buffer = buffer ?? new PieceTableBuffer(text)</code> に注目してください。<code>??</code> は<strong>null 合体演算子</strong>で、「左が <code>null</code> か <code>undefined</code> なら右を使う」という意味です。つまり「<code>buffer</code> を渡されたらそれを使い、渡されなければ本命の <code>PieceTableBuffer</code> を自分で作る」。この <code>buffer?</code> という省略可能な引数が、じつはテストの生命線です。テストでは <code>new TextDocument("...", new SimpleBuffer("..."))</code> のように<strong>素朴なバッファを注入</strong>して、ピーステーブルのバグと <code>Document</code> のバグを切り分けられるようにしてあります。</p>
+    <p>2行目、<code>this.lineStarts = computeLineStarts(text)</code> で、最初の行頭配列を作ります。この <code>computeLineStarts</code> の中身が Step 2 です。ゲッター3つ（<code>length</code> / <code>lineCount</code> / <code>getText</code>）はどれも一行の委譲で、<code>lineCount</code> が「<code>lineStarts</code> の長さ = 行数」であることだけ覚えておいてください。<strong>行が1つ増えれば <code>lineStarts</code> の要素も1つ増える</strong>。この対応が、この章のすべての基礎です。</p>
+
+    <div class="gonote"><div class="box-k">TS メモ · import type と ?? 演算子</div>
+      <p><code>import type { TextBuffer }</code> の <code>type</code> は「これは<strong>型だけ</strong>の import で、実行時のコードは持ち込まない」という宣言です。<code>TextBuffer</code> や <code>Edit</code> は <code>interface</code>（コンパイルで消える型）なので、<code>import type</code> にしておくとバンドラが確実にコードから消せて、無駄な依存が残りません。一方 <code>PieceTableBuffer</code> は <code>new</code> する<strong>実体（クラス）</strong>なので、ふつうの <code>import</code> で持ち込みます。「型は <code>import type</code>、値は <code>import</code>」——この2種類を意識して分けるのが、本書のコアの流儀です。<br>
+      <code>a ?? b</code> は<strong>null 合体演算子</strong>。<code>a</code> が <code>null</code> / <code>undefined</code> のときだけ <code>b</code> を返します。似た <code>a || b</code>（論理 OR）との違いは、<code>a</code> が <code>0</code> や <code>""</code>（空文字）や <code>false</code> のとき。<code>||</code> はこれらも「偽」とみなして <code>b</code> に落ちますが、<code>??</code> は「<code>null</code> か <code>undefined</code> のときだけ」なので、<code>0</code> や <code>""</code> はそのまま左を採用します。オフセット <code>0</code> や空文字を正当な値として扱うエディタでは、この違いが効いてきます。</p>
+    </div>
+
+    <h2 class="step" id="step-2"><span class="step-no">Step 2</span>行の目次をつくる — computeLineStarts</h2>
+    <p>「各行がオフセットいくつから始まるか」を配列にする関数です。これはクラスの外に置いた<strong>モジュール関数</strong>（<code>export function</code>）で、コンストラクタからも、あとで検証用にも呼ばれます。ファイル末尾にありますが、話の順番としてここで読みます。</p>
+
+    <div class="file-tag">core/document.ts（モジュール関数）</div>
+    <pre><code><span class="kw">export function</span> computeLineStarts(text: <span class="ty">string</span>): <span class="ty">number</span>[] {
+  <span class="kw">const</span> starts = [<span class="st">0</span>];
+  <span class="kw">let</span> idx = text.indexOf(<span class="st">"\n"</span>);
+  <span class="kw">while</span> (idx !== <span class="st">-1</span>) {
+    starts.push(idx + <span class="st">1</span>);
+    idx = text.indexOf(<span class="st">"\n"</span>, idx + <span class="st">1</span>);
+  }
+  <span class="kw">return</span> starts;
+}</code></pre>
+
+    <p>考え方はシンプルです。<strong>0行目は必ずオフセット 0 から始まる</strong> —— だから <code>starts</code> は <code>[0]</code> で口を開けます。あとは改行文字 <code>\n</code> を探すたびに、「その<strong>次</strong>のオフセット」を新しい行の先頭として押し込むだけ。<code>\n</code> が位置 <code>idx</code> にあるなら、次の行は <code>idx + 1</code> から始まります（改行文字そのものは前の行の末尾に属し、行頭ではないので <code>+1</code>）。</p>
+    <p><code>text.indexOf("\n")</code> は最初の改行位置を返し、見つからなければ <code>-1</code>。だから <code>while (idx !== -1)</code> のループは「改行がある限り回る」。ループの中で <code>starts.push(idx + 1)</code> して次の行頭を記録し、<code>text.indexOf("\n", idx + 1)</code> で<strong>今の改行の次から</strong>次の改行を探します。第2引数の <code>idx + 1</code> が探索開始位置で、これを忘れると同じ改行を無限に見つけ続けてしまいます。</p>
+    <p>具体例で見ましょう。<code>"one\ntwo\nthree"</code> を流すとどうなるか。</p>
+
+    <div class="ascii">lineStarts — 各行の開始オフセットだけを覚えた「行の目次」
+
+  文字  :  o  n  e  \n   t  w  o  \n   t  h  r  e  e
+  ｵﾌｾｯﾄ :  0  1  2  3    4  5  6  7    8  9 10 11 12
+
+  \n は offset 3 と 7 にある
+    → 行頭は  0（先頭）,  3+1=4,  7+1=8
+
+  lineStarts = [0, 4, 8]
+                |  |  +- 2行目 "three" は offset 8 から
+                |  +---- 1行目 "two"   は offset 4 から
+                +------- 0行目 "one"   は offset 0 から</div>
+
+    <p>3行のテキストに対して <code>lineStarts</code> は要素3つ。<code>lineCount</code>（＝ <code>lineStarts.length</code>）は 3。テスト「<strong>行の取得と行数</strong>」がまさにこれを確かめています。ここで <code>"one\ntwo\nthree"</code> は末尾に <code>\n</code> がないので3行ですが、もし末尾に <code>\n</code> があったら?——それが次の注意点です。</p>
+
+    <div class="box hazard"><div class="box-k">⚠ 落とし穴 — 末尾の改行は「空の最終行」を生む</div>
+      <p><code>"a\n"</code>（<code>a</code> のあとに改行1つ）を <code>computeLineStarts</code> に流すと、<code>\n</code> は offset 1 にあるので <code>starts</code> は <code>[0, 2]</code>。要素は2つ、つまり <strong>行数は2</strong>です。1行目（index 1）は offset 2 から始まりますが、テキストの長さも2なので、その行は<strong>空文字</strong>。「<code>a</code> の行」と「空っぽの行」の2行になります。<br>
+      直感に反するかもしれませんが、これは<strong>正しい</strong>挙動です。テキストエディタで <code>a</code> と打って Enter を押した状態を思い出してください。カーソルは2行目の先頭にいて、そこにはまだ何もない。まさに「空の最終行」です。だからテスト「<strong>末尾改行は空の最終行を作る</strong>」は <code>lineCount</code> が 2 で、<code>getLine(1)</code> が <code>""</code> であることを要求します。「改行は行の<strong>区切り</strong>であって<strong>終端</strong>ではない」——この一貫した見方が、行数の数え間違いを防ぎます。</p>
+    </div>
+
+    <p>ところで、なぜ <code>lineStarts</code> という配列を<strong>持ち歩く</strong>のでしょう。カーソルの行を知りたくなるたびに <code>computeLineStarts(getText())</code> を呼べば済むのでは?——理屈上はそうです。しかしそれは<strong>文書全体を毎回なめ直す</strong> <code>O(n)</code> の処理。10万文字のファイルなら、カーソルを1つ動かすだけで10万文字を走査することになります。カーソル移動や画面スクロールは<strong>毎フレームのように起きる</strong>ので、これは致命的に重い。だから <code>lineStarts</code> を<strong>状態として保持</strong>し、行を引くときは配列を二分探索（Step 3）、編集で崩れたときだけ差分更新（Step 6）する。「重い計算は一度きり、あとは差分」——これが <code>Document</code> の設計方針の核です。</p>
+
+    <h2 class="step" id="step-3"><span class="step-no">Step 3</span>オフセットから行を引く — lineAt の二分探索</h2>
+    <p><code>lineStarts</code> を手にしたら、いよいよ橋を渡します。まずは「オフセット → 行番号」の方向。<strong>あるオフセットが、何行目に属するか</strong>を求める <code>lineAt</code> です。</p>
+
+    <div class="file-tag">core/document.ts（つづき）</div>
+    <pre><code>  <span class="cm">/** offset を含む行番号。lineStarts[i] &lt;= offset を満たす最大の i を二分探索 */</span>
+  lineAt(offset: <span class="ty">number</span>): <span class="ty">number</span> {
+    <span class="kw">let</span> lo = <span class="st">0</span>;
+    <span class="kw">let</span> hi = <span class="kw">this</span>.lineStarts.length - <span class="st">1</span>;
+    <span class="kw">let</span> ans = <span class="st">0</span>;
+    <span class="kw">while</span> (lo &lt;= hi) {
+      <span class="kw">const</span> mid = (lo + hi) &gt;&gt; <span class="st">1</span>;
+      <span class="kw">if</span> (<span class="kw">this</span>.lineStarts[mid] &lt;= offset) {
+        ans = mid;
+        lo = mid + <span class="st">1</span>;
+      } <span class="kw">else</span> {
+        hi = mid - <span class="st">1</span>;
+      }
+    }
+    <span class="kw">return</span> ans;
+  }</code></pre>
+
+    <p>やりたいことは、コメントの通り「<code>lineStarts[i] &lt;= offset</code> を満たす<strong>最大の <code>i</code></strong>」を探すこと。言い換えると、行頭オフセットが <code>offset</code> を追い越さないギリギリの行。それが「<code>offset</code> の乗っている行」です。<code>lineStarts</code> は<strong>単調増加</strong>（行頭は必ず前の行頭より右）なので、線形に舐めなくても<strong>二分探索</strong>で <code>O(log n)</code> で見つかります。</p>
+    <p>二分探索を1行ずつ追います。<code>lo</code> と <code>hi</code> は探索範囲の左端・右端の添字で、最初は配列全体（<code>0</code> から <code>length - 1</code>）。<code>ans</code> は「これまでに見つかった、条件を満たす最大の添字」で、初期値 <code>0</code>（0行目は必ず offset 0 から始まり、どんな非負 offset に対しても条件を満たすので、安全な初期解）。</p>
+    <ul>
+      <li><code>const mid = (lo + hi) &gt;&gt; 1</code> —— 範囲の<strong>真ん中</strong>の添字。<code>&gt;&gt; 1</code> は「右へ1ビットシフト」で、整数の <code>÷2</code> の切り捨てと同じです。<code>(lo + hi) / 2</code> と書いても値は同じですが、<code>&gt;&gt; 1</code> なら結果が確実に整数になり、<code>Math.floor</code> を挟む必要がありません。二分探索の定番の書き方です。</li>
+      <li><code>if (this.lineStarts[mid] &lt;= offset)</code> —— 真ん中の行頭が <code>offset</code> 以下なら、<strong>その行はまだ候補</strong>（あるいは正解）。そこで <code>ans = mid</code> と「暫定の答え」を更新し、<code>lo = mid + 1</code> で<strong>もっと右に、より大きい添字がないか</strong>を探しに行きます。「最大の <code>i</code> が欲しい」ので、条件を満たしたら右へ攻めるのがポイントです。</li>
+      <li><code>else</code>（<code>lineStarts[mid] &gt; offset</code>）—— 真ん中の行頭が <code>offset</code> を追い越している。その行は<strong>行き過ぎ</strong>なので候補から外し、<code>hi = mid - 1</code> で左半分に絞ります。</li>
+    </ul>
+    <p><code>lo &lt;= hi</code> の間ループし、範囲が尽きたら <code>ans</code> を返す。この <code>ans</code> こそ「条件を満たす最大の添字 = <code>offset</code> の行番号」です。具体例で確かめましょう。<code>lineStarts = [0, 4, 8]</code>、<code>offset = 6</code>（<code>"one\ntwo\nthree"</code> の <code>w</code> と <code>o</code> の間あたり）で <code>lineAt(6)</code> を追うと:</p>
+
+    <div class="ascii">lineAt(6) を lineStarts = [0, 4, 8] でたどる
+
+  step1: lo=0 hi=2  mid=1  lineStarts[1]=4 &lt;= 6 → ans=1, lo=2
+  step2: lo=2 hi=2  mid=2  lineStarts[2]=8 &gt;  6 → hi=1
+  step3: lo=2 hi=1  → lo &gt; hi でループ終了
+
+  戻り値 ans = 1   （offset 6 は 1行目 "two" の中）</div>
+
+    <p>行頭 4（1行目の先頭）は 6 以下なので候補、8（2行目の先頭）は 6 を超えるので行き過ぎ。答えは 1行目。手で追うと、二分探索が「単調増加の配列で、条件を満たす最後の要素」を確実に射止めていることが見えます。</p>
+
+    <div class="box hazard"><div class="box-k">⚠ 落とし穴 — 比較演算子と HTML、そして符号なしシフト</div>
+      <p>このコードには <code>&lt;=</code>（以下）、<code>&gt;&gt;</code>（右シフト）が並び、うっかり <code>&lt;</code> と <code>&lt;=</code> を取り違えたり、写経のとき記号を落としたりしがちです。<strong>「以下（<code>&lt;=</code>）」と「未満（<code>&lt;</code>）」は違う</strong>という点に注意してください。ここが <code>&lt;</code> だと、offset がちょうど行頭に一致するとき（カーソルが行の先頭にいるとき）に1つ前の行を返してしまい、微妙にずれます。行頭ぴったりも「その行」に含めたいので <code>&lt;=</code> が正解です。<br>
+      なお <code>&gt;&gt;</code>（符号付き右シフト）と、他所で出てくる <code>&gt;&gt;&gt;</code>（符号<strong>なし</strong>右シフト）は別物です。負になり得る値のシフトでは差が出ますが、ここでは <code>lo + hi</code> が必ず非負なので <code>&gt;&gt;</code> で問題ありません。</p>
+    </div>
+
+    <div class="gonote"><div class="box-k">TS メモ · なぜ二分探索なのか — O(n) と O(log n)</div>
+      <p>「行頭が単調増加なら、先頭から順に <code>lineStarts[i] &lt;= offset</code> を確かめて、最初に破れたところの手前」で答えは出せます。これは<strong>線形探索</strong>で、書くのは簡単。ただし行数 <code>n</code> に比例した <code>O(n)</code> の時間がかかります。10万行なら最悪10万回の比較。<br>
+      二分探索は毎回<strong>候補を半分に割る</strong>ので、10万行でも <code>log2(100000) ≒ 17</code> 回で終わります。<code>lineAt</code> はオフセット↔Position 変換の土台で、カーソル移動・クリック・スクロールのたびに何度も呼ばれます。だから<strong>ここを速くしておく価値がある</strong>。「単調な配列で位置を引くなら二分探索」は、エディタに限らず何度も出会う定石です。この定石が効くのは <code>lineStarts</code> が常にソート済みだからで、そのソート済み性を守るのが Step 6 の差分更新の仕事です。</p>
+    </div>
+
+    <h2 class="step" id="step-4"><span class="step-no">Step 4</span>2つの座標系を往復する — toPosition / toOffset と行のヘルパー</h2>
+    <p><code>lineAt</code> という土台ができたので、その上に「オフセット ↔ <code>(行, 桁)</code>」の往復と、行を扱う小さなヘルパー群を積みます。まとめて読みます（同じ <code>document.ts</code> の続き）。</p>
+
+    <div class="file-tag">core/document.ts（つづき）</div>
+    <pre><code>  lineStartOffset(line: <span class="ty">number</span>): <span class="ty">number</span> {
+    <span class="kw">return</span> <span class="kw">this</span>.lineStarts[clamp(line, <span class="st">0</span>, <span class="kw">this</span>.lineCount - <span class="st">1</span>)];
+  }
+
+  <span class="cm">/** 行末（改行文字を含まない）のオフセット */</span>
+  lineEndOffset(line: <span class="ty">number</span>): <span class="ty">number</span> {
+    line = clamp(line, <span class="st">0</span>, <span class="kw">this</span>.lineCount - <span class="st">1</span>);
+    <span class="kw">return</span> line === <span class="kw">this</span>.lineCount - <span class="st">1</span> ? <span class="kw">this</span>.length : <span class="kw">this</span>.lineStarts[line + <span class="st">1</span>] - <span class="st">1</span>;
+  }
+
+  getLine(line: <span class="ty">number</span>): <span class="ty">string</span> {
+    <span class="kw">return</span> <span class="kw">this</span>.buffer.slice(<span class="kw">this</span>.lineStartOffset(line), <span class="kw">this</span>.lineEndOffset(line));
+  }
+
+  getLineLength(line: <span class="ty">number</span>): <span class="ty">number</span> {
+    <span class="kw">return</span> <span class="kw">this</span>.lineEndOffset(line) - <span class="kw">this</span>.lineStartOffset(line);
+  }
+
+  toPosition(offset: <span class="ty">number</span>): <span class="ty">Position</span> {
+    offset = clamp(offset, <span class="st">0</span>, <span class="kw">this</span>.length);
+    <span class="kw">const</span> line = <span class="kw">this</span>.lineAt(offset);
+    <span class="kw">return</span> { line, column: offset - <span class="kw">this</span>.lineStarts[line] };
+  }
+
+  toOffset(line: <span class="ty">number</span>, column: <span class="ty">number</span>): <span class="ty">number</span> {
+    line = clamp(line, <span class="st">0</span>, <span class="kw">this</span>.lineCount - <span class="st">1</span>);
+    <span class="kw">const</span> start = <span class="kw">this</span>.lineStarts[line];
+    <span class="kw">const</span> maxCol = <span class="kw">this</span>.lineEndOffset(line) - start;
+    <span class="kw">return</span> start + clamp(column, <span class="st">0</span>, maxCol);
+  }
+
+  clampOffset(offset: <span class="ty">number</span>): <span class="ty">number</span> {
+    <span class="kw">return</span> clamp(offset, <span class="st">0</span>, <span class="kw">this</span>.length);
+  }</code></pre>
+
+    <p>そしてファイル末尾に、これらが頼る小さなクランプ関数があります。</p>
+
+    <div class="file-tag">core/document.ts（モジュール関数・つづき）</div>
+    <pre><code><span class="kw">function</span> clamp(v: <span class="ty">number</span>, min: <span class="ty">number</span>, max: <span class="ty">number</span>): <span class="ty">number</span> {
+  <span class="kw">return</span> v &lt; min ? min : v &gt; max ? max : v;
+}</code></pre>
+
+    <p>先に <code>clamp</code> を押さえます。「値 <code>v</code> を <code>[min, max]</code> の範囲に<strong>押し込める</strong>」だけの関数です。<code>v</code> が下限より小さければ <code>min</code>、上限より大きければ <code>max</code>、それ以外はそのまま。三項演算子が2段ネストしていますが、読み下すと「<code>v &lt; min</code> なら <code>min</code>、そうでなくて <code>v &gt; max</code> なら <code>max</code>、どちらでもなければ <code>v</code>」。<code>Document</code> の座標系メソッドは、<strong>ほぼ全部この <code>clamp</code> を通して</strong>、範囲外の行番号・桁・オフセットが渡されても壊れないように守っています。「入力が汚れていても正しく丸める」——エディタのように外から雑な座標が飛んでくる世界では、この防御が効きます。</p>
+    <p>個々のメソッドを見ます。</p>
+    <ul>
+      <li><code>lineStartOffset(line)</code> —— 指定行の<strong>先頭オフセット</strong>。<code>lineStarts[line]</code> を引くだけですが、<code>line</code> を <code>clamp</code> して配列外アクセスを防いでいます。</li>
+      <li><code>lineEndOffset(line)</code> —— 指定行の<strong>末尾オフセット（改行を含まない）</strong>。ここに小さな場合分けがあります。<strong>最終行なら文書の末尾 <code>this.length</code></strong>（その先に次の行頭がないから）、<strong>それ以外なら「次の行頭 − 1」</strong>。「− 1」は行と行を区切る <code>\n</code> のぶんです。次の行頭は改行の<strong>次</strong>だったので、そこから1つ戻ると改行の位置、つまり今の行の「改行を含まない末尾」になります。三項演算子 <code>line === this.lineCount - 1 ? A : B</code> がこの分岐です。</li>
+      <li><code>getLine(line)</code> —— 行頭から行末までを <code>buffer.slice</code> で切り出す。改行を含まない1行の文字列です。<code>lineStartOffset</code> と <code>lineEndOffset</code> の合わせ技で、バッファのオフセット世界から「行の文字列」を取り出しています。</li>
+      <li><code>getLineLength(line)</code> —— 行末 − 行頭。その行の<strong>文字数</strong>（改行を除く）です。</li>
+    </ul>
+    <p>そして往復の主役、<code>toPosition</code> と <code>toOffset</code>。</p>
+    <p><strong><code>toPosition(offset)</code></strong> は「オフセット → <code>{line, column}</code>」。まず <code>offset</code> を <code>[0, length]</code> に <code>clamp</code>、<code>lineAt(offset)</code> で行番号を引き、<strong>桁は「オフセット − その行の先頭オフセット」</strong>で求まります。行頭からの距離がそのまま桁だからです。<code>{ line, column: offset - this.lineStarts[line] }</code> —— たったこれだけ。Step 3 の <code>lineAt</code> が効いているのが分かります。</p>
+    <p><strong><code>toOffset(line, column)</code></strong> はその逆、「<code>(行, 桁)</code> → オフセット」。行頭 <code>start = lineStarts[line]</code> に桁を足せばオフセットですが、桁が行の長さを超えていたら困る。そこで <code>maxCol = lineEndOffset(line) - start</code>（その行に入る最大の桁 = 行の長さ）を求め、<code>clamp(column, 0, maxCol)</code> で桁を行内に丸めてから足します。だから <code>toOffset(0, 99)</code> のように行の長さを超える桁を渡しても、<strong>行末に丸められて破綻しません</strong>。テスト「<strong>toOffset は桁を行末に丸める</strong>」がこれを保証します（<code>"ab\ncdef"</code> で <code>toOffset(0, 99)</code> は 2、<code>toOffset(1, 99)</code> は 7）。</p>
+    <p><code>clampOffset(offset)</code> は「オフセットを <code>[0, length]</code> に丸める」だけの公開ヘルパー。カーソル移動の結果が文書の外に出ないよう、上の層が使います。</p>
+
+    <div class="box hazard"><div class="box-k">⚠ 落とし穴 — toPosition と toOffset は必ず「往復して同じ」になること</div>
+      <p>座標変換の正しさは、<strong>往復（round-trip）</strong>で検査するのが定石です。あるオフセット <code>off</code> を <code>toPosition</code> して得た <code>(line, column)</code> を、そのまま <code>toOffset</code> に戻したら、<strong>また <code>off</code> に戻らなければならない</strong>。1つでも戻らないオフセットがあれば、変換のどこかがずれています。テスト「<strong>toPosition / toOffset の往復</strong>」は、<code>"hello\nworld\n日本語"</code> の<strong>全オフセット</strong>（0 から <code>length</code> まで）でこの往復を回し、完全一致を要求します。<code>日本語</code> を混ぜているのは、行の途中に「1文字が UTF-16 で複数単位」になる文字が来ても桁計算が破綻しないかを見るため。座標変換を書いたら、まず往復テストで固める——これを習慣にしてください。</p>
+    </div>
+
+    <h2 class="step" id="step-5"><span class="step-no">Step 5</span>編集をまとめて適用し、逆向きを返す — applyEdits</h2>
+    <p>ここから <code>Document</code> は「読む係」から「<strong>書く係</strong>」になります。<code>Edit</code> の列を受け取り、バッファに適用し、<code>lineStarts</code> を更新し、そして<strong>元に戻すための逆向き編集列</strong>を返す。これが <code>applyEdits</code> です。</p>
+
+    <div class="file-tag">core/document.ts（つづき）</div>
+    <pre><code>  <span class="cm">/**
+   * 編集列をまとめて適用する。
+   * 前提: edits は from 昇順・互いに重複しない。
+   * 返り値: 適用後の文書の座標系で有効な逆向き編集列（昇順・非重複）。
+   */</span>
+  applyEdits(edits: <span class="kw">readonly</span> <span class="ty">Edit</span>[]): <span class="ty">Edit</span>[] {
+    <span class="kw">const</span> inverses: <span class="ty">Edit</span>[] = [];
+    <span class="kw">let</span> delta = <span class="st">0</span>;
+    <span class="kw">for</span> (<span class="kw">const</span> e <span class="kw">of</span> edits) {
+      <span class="kw">const</span> from = e.from + delta;
+      <span class="kw">const</span> to = e.to + delta;
+      <span class="kw">const</span> removed = <span class="kw">this</span>.buffer.slice(from, to);
+      <span class="kw">this</span>.buffer.replace(from, to, e.text);
+      <span class="kw">this</span>.updateLineStarts(from, to, e.text);
+      inverses.push({ from, to: from + e.text.length, text: removed });
+      delta += e.text.length - (to - from);
+    }
+    <span class="kw">this</span>.version++;
+    <span class="kw">return</span> inverses;
+  }</code></pre>
+
+    <p>まず<strong>前提</strong>を読みます。コメントいわく「<code>edits</code> は <code>from</code> 昇順・互いに重複しない」。つまり呼ぶ側が、複数の編集を「左から右へ、重ならないように」並べて渡す約束です。この前提があるおかげで、<code>applyEdits</code> は編集を<strong>並べ替えたり衝突を解決したりせず</strong>、素直に前から順に適用できます。複数カーソルで同時に編集するとき、この「昇順・非重複」を保証するのが第06章の <code>selection</code> まわりの仕事です（Step 7 の <code>normalizeSelections</code> がその一端）。</p>
+    <p>核心は <code>delta</code> という1つの変数です。編集を1つ適用すると、文書の長さが変わります。挿入なら伸び、削除なら縮む。すると、<strong>まだ適用していない後続の編集のオフセットが、ぜんぶずれる</strong>。たとえば offset 3 に「XY」を挿入したら、それより後ろの位置はすべて +2 されます。この累積のずれを追いかけるのが <code>delta</code> です。</p>
+    <p>ループを1周分たどります。<code>e</code> は元の座標系での編集。実際に適用すべき位置は、これまでの編集で生じたずれを足した <code>from = e.from + delta</code> と <code>to = e.to + delta</code> です。</p>
+    <ul>
+      <li><code>const removed = this.buffer.slice(from, to)</code> —— <strong>置き換えで消える文字列を、消す前に控えておく</strong>。これが逆向き編集の材料になります。「元に戻す」とは「消したものを書き戻す」ことなので、消える中身をここで記録するのが決定的に重要です。</li>
+      <li><code>this.buffer.replace(from, to, e.text)</code> —— バッファを実際に書き換える。第00章の <code>replace</code> 1本が、挿入・削除・置換のすべてをこなします。</li>
+      <li><code>this.updateLineStarts(from, to, e.text)</code> —— <code>lineStarts</code> を差分更新する（中身は Step 6）。バッファと <code>lineStarts</code> を<strong>同じタイミングで</strong>そろえて更新するのがミソです。</li>
+      <li><code>inverses.push({ from, to: from + e.text.length, text: removed })</code> —— 逆向き編集を1つ記録。「いま <code>text</code> を入れた範囲（<code>[from, from + e.text.length)</code>）を、消したはずの <code>removed</code> で置き換え直せ」という編集です。これを適用すれば元通り。</li>
+      <li><code>delta += e.text.length - (to - from)</code> —— <code>delta</code> を更新。「入れた文字数 − 消した文字数」がこの編集による長さの増減で、それを累積します。挿入なら正、削除なら負、同じ長さの置換なら 0。</li>
+    </ul>
+    <p>ループを抜けたら <code>this.version++</code> で版数を進め（＝「中身が変わった」の合図）、<code>inverses</code> を返します。ここで返る逆向き編集列の性質が絶妙です。コメントの「<strong>適用後の文書の座標系で有効</strong>」がそれ。<code>inverses</code> の各 <code>from</code> は、すでに <code>delta</code> を足した<strong>適用後の座標</strong>で記録されているので、返り値をそのまま <code>applyEdits(inverses)</code> に流し込めば、何の座標変換もなしに元へ戻ります。</p>
+
+    <div class="ascii">applyEdits の逆向き編集で元に戻る（単発の例）
+
+  doc = "hello world"
+  applyEdits([{ from:0, to:5, text:"goodbye" }])
+      → buffer: "goodbye world"
+      → removed = "hello"（消える前に控えた）
+      → 返り値 inv = [{ from:0, to:7, text:"hello" }]
+                              +- 0 + "goodbye".length = 7
+
+  applyEdits(inv)  →  [0,7) "goodbye" を "hello" に戻す
+      → buffer: "hello world"   OK 元通り</div>
+
+    <p>テスト「<strong>applyEdits の逆向き編集で元に戻る（単発）</strong>」がまさにこの往復を確かめます。さらに「<strong>applyEdits はバッチ（複数編集）を昇順座標で適用し、逆向きも一括で戻せる</strong>」では、3つの編集を一度に渡し（<code>{from:0,to:3}</code> / <code>{from:4,to:7}</code> / <code>{from:8,to:11}</code>、長さの伸縮もバラバラ）、返ってきた逆向き列を丸ごと <code>applyEdits</code> するだけで元に戻ることを検証します。<code>delta</code> の累積が正しくないと、2つ目以降の編集位置がずれてこのテストは即座に落ちます。</p>
+
+    <div class="gonote"><div class="box-k">TS メモ · readonly Edit[] と、Undo が「ただの再適用」になる理由</div>
+      <p>引数の型 <code>readonly Edit[]</code> は「<strong>要素を書き換えない配列</strong>」を意味します。<code>applyEdits</code> は渡された <code>edits</code> を並べ替えたり中身を破壊したりしない、という約束を型で表明しているわけです。呼ぶ側は自分の配列が壊されない安心を得られます。<br>
+      設計として味わい深いのは、<strong>Undo が特別な処理ではなく「逆向き編集列をもう一度 <code>applyEdits</code> するだけ」</strong>になっている点です。「取り消し」専用のコードは一切要りません。編集を <code>Edit</code> 1形に畳み（第00章）、適用時に逆向きを一緒に生む（この章）。この2つが揃うと、第03章の Undo / Redo は「編集列と逆向き編集列を、履歴スタックに積んで出し入れするだけ」に痩せます。境界を小さく、操作を一様に —— その積み重ねが、上の章を驚くほど簡単にするのです。</p>
+    </div>
+
+    <h2 class="step" id="step-6"><span class="step-no">Step 6</span>行の目次を差分更新する — updateLineStarts（この章の核心）</h2>
+    <p>いよいよこの章の心臓です。編集で <code>[from, to)</code> が新しいテキストに置き換わると、<code>lineStarts</code> の一部が崩れます。それを<strong>全部作り直さず、崩れた範囲だけ</strong>直すのが <code>updateLineStarts</code>。<code>applyEdits</code> のループから、編集1つごとに呼ばれます。</p>
+
+    <div class="file-tag">core/document.ts（つづき・これでクラス終わり）</div>
+    <pre><code>  <span class="cm">/** [from, to) が inserted に置き換わったときの行開始オフセットの差分更新 */</span>
+  <span class="kw">private</span> updateLineStarts(from: <span class="ty">number</span>, to: <span class="ty">number</span>, inserted: <span class="ty">string</span>): <span class="ty">void</span> {
+    <span class="kw">const</span> startLine = <span class="kw">this</span>.lineAt(from);
+    <span class="kw">const</span> endLine = <span class="kw">this</span>.lineAt(to);
+    <span class="kw">const</span> delta = inserted.length - (to - from);
+
+    <span class="cm">// 挿入テキスト内の改行が生む、新しい行開始</span>
+    <span class="kw">const</span> newStarts: <span class="ty">number</span>[] = [];
+    <span class="kw">let</span> idx = inserted.indexOf(<span class="st">"\n"</span>);
+    <span class="kw">while</span> (idx !== <span class="st">-1</span>) {
+      newStarts.push(from + idx + <span class="st">1</span>);
+      idx = inserted.indexOf(<span class="st">"\n"</span>, idx + <span class="st">1</span>);
+    }
+
+    <span class="cm">// (startLine+1 .. endLine) の行開始は消え、newStarts に置き換わる。</span>
+    <span class="cm">// それ以降の行開始は delta だけずれる。</span>
+    <span class="kw">const</span> tail = <span class="kw">this</span>.lineStarts.slice(endLine + <span class="st">1</span>);
+    <span class="kw">for</span> (<span class="kw">let</span> i = <span class="st">0</span>; i &lt; tail.length; i++) tail[i] += delta;
+    <span class="kw">this</span>.lineStarts = <span class="kw">this</span>.lineStarts.slice(<span class="st">0</span>, startLine + <span class="st">1</span>).concat(newStarts, tail);
+  }
+}</code></pre>
+
+    <p>編集が <code>lineStarts</code> に及ぼす影響を、3つの領域に分けて考えるのがコツです。編集は <code>[from, to)</code> を <code>inserted</code> に差し替えます。<code>from</code> は <code>startLine</code>（<code>lineAt(from)</code>）に、<code>to</code> は <code>endLine</code>（<code>lineAt(to)</code>）に乗っています。すると <code>lineStarts</code> は次の3つに割れます。</p>
+    <ol>
+      <li><strong>編集より前の行頭</strong>（添字 <code>0 .. startLine</code>）—— <code>from</code> より左にあるので、<strong>1文字も動きません</strong>。据え置き。</li>
+      <li><strong>編集にまたがる行頭</strong>（添字 <code>startLine+1 .. endLine</code>）—— 消された範囲の内側にあった行頭たちです。編集で消え、代わりに <code>inserted</code> の中の改行が生む<strong>新しい行頭</strong>に置き換わります。</li>
+      <li><strong>編集より後ろの行頭</strong>（添字 <code>endLine+1 以降</code>）—— <code>to</code> より右にあるので順序も個数も変わりませんが、長さが <code>delta</code> だけ伸縮したぶん、<strong>全員が <code>delta</code> ずれます</strong>。</li>
+    </ol>
+    <p>コードはこの3領域をそのまま組み立てます。順に見ます。</p>
+    <ul>
+      <li><code>const startLine = this.lineAt(from)</code> / <code>const endLine = this.lineAt(to)</code> —— 編集の左端・右端が乗っている行。Step 3 の <code>lineAt</code> がここで働きます。</li>
+      <li><code>const delta = inserted.length - (to - from)</code> —— この編集による長さの増減（入れた文字数 − 消した文字数）。<code>applyEdits</code> の <code>delta</code> と同じ計算ですが、こちらは<strong>この1編集ぶんだけ</strong>のローカルな値です。</li>
+      <li><strong>新しい行頭の収集</strong> —— <code>inserted</code> の中の <code>\n</code> を <code>indexOf</code> ループで探し、<code>newStarts.push(from + idx + 1)</code> で「<strong>挿入位置 <code>from</code> からの相対位置 <code>idx</code> に <code>+1</code></strong>」した絶対オフセットを積みます。<code>computeLineStarts</code> と同じ改行探索ですが、起点が文書先頭ではなく <code>from</code> なので <code>from +</code> が付く。挿入テキストの中に改行がなければ <code>newStarts</code> は空のまま（＝行が増えない）。</li>
+      <li><strong>後ろの再構築</strong> —— <code>const tail = this.lineStarts.slice(endLine + 1)</code> で「編集より後ろの行頭」を切り出し、<code>for</code> ループで各要素に <code>delta</code> を足してずらします。</li>
+      <li><strong>組み立て</strong> —— <code>this.lineStarts.slice(0, startLine + 1)</code>（据え置きの前半）<code>.concat(newStarts, tail)</code>（新しい行頭 ＋ ずらした後半）。3つを繋げて新しい <code>lineStarts</code> の完成です。</li>
+    </ul>
+    <p>言葉だけでは掴みにくいので、テスト「<strong>編集で lineStarts が正しく差分更新される</strong>」の実例を、配列がどう組み変わるかまで完全にトレースします。</p>
+
+    <div class="ascii">差分更新の実例 — "aaa\nbbb\nccc" の [4,7) を "xx\nyy\nzz" に置換
+
+  before: a a a \n b b b \n c c c
+          ｵﾌｾｯﾄ 0..2 3  4..6 7  8..10
+          lineStarts = [0, 4, 8]
+
+  from=4 → startLine = lineAt(4) = 1  （"bbb" の行）
+  to  =7 → endLine   = lineAt(7) = 1
+  delta = inserted.length - (to-from) = 8 - 3 = +5
+
+  (1) 据え置き : slice(0, startLine+1) = slice(0,2) = [0, 4]
+  (2) 置き換え : inserted "xx\nyy\nzz" の \n は相対 2, 5
+                newStarts = [4+2+1, 4+5+1] = [7, 10]
+  (3) ずらす   : tail = slice(endLine+1) = slice(2) = [8]
+                各 +delta(=5) → [13]
+
+  after:  a a a \n x x \n y y \n z z \n c c c
+          lineStarts = [0,4] ++ [7,10] ++ [13] = [0, 4, 7, 10, 13]
+                        据置    新規       ずれ
+
+  → lineCount = 5, getLine(2)="yy", getLine(4)="ccc"  OK</div>
+
+    <p>1行だった「bbb」の場所に、3行ぶんのテキスト「xx / yy / zz」が入ったので、行数は 3 → 5 に増えました。据え置きの前半 <code>[0, 4]</code>、挿入が生んだ新行頭 <code>[7, 10]</code>、そして元の末尾行頭 <code>8</code> が <code>+5</code> されて <code>13</code>。全部つなぐと <code>[0, 4, 7, 10, 13]</code>。<code>computeLineStarts("aaa\nxx\nyy\nzz\nccc")</code> をゼロから計算しても同じ答えになります。<strong>差分更新の結果と、全再計算の結果が一致する</strong> —— これこそが正しさの定義です。</p>
+
+    <div class="box hazard"><div class="box-k">⚠ 落とし穴 — なぜ startLine+1 から? そして endLine を含める理由</div>
+      <p>据え置くのは <code>slice(0, startLine+1)</code>、つまり <strong><code>startLine</code> 自身は残す</strong>。これは <code>from</code> がその行の<strong>途中</strong>（あるいは先頭）にあっても、その行の<strong>先頭オフセットは動かない</strong>から。編集は <code>from</code> 以降を触るだけで、行頭 <code>startLine</code> は <code>from</code> 以下なので無傷です。<br>
+      消えるのは <code>startLine+1 .. endLine</code>。これは「編集範囲の内側に完全に入っていた行頭」で、置換後は意味を失います。<code>tail</code> を <code>slice(endLine+1)</code> から取る（<code>endLine</code> の<strong>次</strong>から）のもここに対応します。<code>startLine === endLine</code>（1行内で完結する編集）なら消える行頭は0個、複数行にまたがればその行数ぶん消える。境界の <code>+1</code> を1つ間違えると、行が1つ余ったり足りなくなったりします。<strong>この境界の正しさを人力で見張るのは危うい</strong>——だから次のテストで機械に見張らせます。</p>
+    </div>
+
+    <div class="box do"><div class="box-k">▸ 動かして確認 — 差分更新は「全再計算」と常に一致する</div>
+      <p>この章のコードが正しいかを、<code>document.test.ts</code> で検収します。とりわけ最後のテストが強力です。</p>
+      <pre class="term"><code><span class="ps">$</span> cd src
+<span class="ps">$</span> npx vitest run src/core/document.test.ts
+<span class="out">✓ src/core/document.test.ts (8 tests)
+   ✓ 行の取得と行数
+   ✓ 末尾改行は空の最終行を作る
+   ✓ toPosition / toOffset の往復
+   ✓ toOffset は桁を行末に丸める
+   ✓ 編集で lineStarts が正しく差分更新される
+   ✓ applyEdits の逆向き編集で元に戻る（単発）
+   ✓ applyEdits はバッチ（複数編集）を昇順座標で適用し、逆向きも一括で戻せる
+   ✓ ランダム編集後も lineStarts が全再計算と一致する
+ Test Files  1 passed (1)
+      Tests  8 passed (8)</span></code></pre>
+      <p>最後の「<strong>ランダム編集後も lineStarts が全再計算と一致する</strong>」が、Step 6 の差分更新を守る番人です。乱数で <code>from</code> / <code>to</code> / 挿入テキスト（空・<code>"x"</code>・<code>"\n"</code>・<code>"ab\ncd"</code>・<code>"あ\nい\nう"</code>・<code>"zzz"</code>）を選び、500回の編集を浴びせます。1編集ごとに、<strong>差分更新した <code>lineStarts</code></strong> と、<strong>その時点の全文から <code>computeLineStarts</code> でゼロから作り直した配列</strong>を突き合わせ、完全一致を要求する。第00章の「素朴実装をオラクルにする」発想とまったく同じ二段構えです。速い差分更新（間違えやすい）を、遅いが自明な全再計算（正しい物差し）で見張る。日本語 <code>"あ\nい\nう"</code> を混ぜて、マルチバイトでも桁がずれないことまで確かめています。</p>
+    </div>
+
+    <h2 class="step" id="step-7"><span class="step-no">Step 7</span>カーソルを配列で持つ — selection.ts と正規化</h2>
+    <p>ここまでで文書とオフセットの橋はできました。最後に、その上を歩く<strong>カーソル</strong>の土台を <code>core/selection.ts</code> に用意します。第00章で <code>SelRange { anchor, head }</code> を「幅ゼロならただのカーソル」と決めたのを思い出してください。この章では、そのカーソルを<strong>常に配列で持つ</strong>という一手を打ちます。</p>
+
+    <div class="file-tag">core/selection.ts（全文）</div>
+    <pre><code><span class="kw">import type</span> { <span class="ty">SelRange</span> } <span class="kw">from</span> <span class="st">"./types"</span>;
+<span class="kw">import</span> { rangeMax, rangeMin } <span class="kw">from</span> <span class="st">"./types"</span>;
+
+<span class="cm">/**
+ * 選択範囲（複数カーソル）のユーティリティ。
+ *
+ * エディタはカーソルを常に「SelRange の配列」として持つ。
+ * 1本のときも配列長 1。複数カーソルは特別扱いではなく、これが標準形。
+ * 編集や移動のあとは normalizeSelections で「昇順・重複なし」に直す。
+ */</span>
+
+<span class="cm">/** 昇順に整列し、重なる・接するカーソルを1つに統合する */</span>
+<span class="kw">export function</span> normalizeSelections(sels: <span class="kw">readonly</span> <span class="ty">SelRange</span>[]): <span class="ty">SelRange</span>[] {
+  <span class="kw">if</span> (sels.length === <span class="st">0</span>) <span class="kw">return</span> [{ anchor: <span class="st">0</span>, head: <span class="st">0</span> }];
+  <span class="kw">const</span> sorted = [...sels].sort((a, b) => rangeMin(a) - rangeMin(b) || rangeMax(a) - rangeMax(b));
+  <span class="kw">const</span> out: <span class="ty">SelRange</span>[] = [sorted[<span class="st">0</span>]];
+  <span class="kw">for</span> (<span class="kw">let</span> i = <span class="st">1</span>; i &lt; sorted.length; i++) {
+    <span class="kw">const</span> prev = out[out.length - <span class="st">1</span>];
+    <span class="kw">const</span> cur = sorted[i];
+    <span class="kw">const</span> overlap =
+      rangeMin(cur) &lt; rangeMax(prev) ||
+      <span class="cm">// 空カーソル同士が同位置なら1つにする</span>
+      (rangeMin(cur) === rangeMax(prev) &amp;&amp; (rangeMin(cur) === rangeMax(cur) || rangeMin(prev) === rangeMax(prev)) &amp;&amp; rangeMin(cur) === rangeMin(prev));
+    <span class="kw">if</span> (overlap) {
+      <span class="cm">// 統合: 範囲は和集合、向きは後から来た方に合わせる</span>
+      <span class="kw">const</span> lo = <span class="ty">Math</span>.min(rangeMin(prev), rangeMin(cur));
+      <span class="kw">const</span> hi = <span class="ty">Math</span>.max(rangeMax(prev), rangeMax(cur));
+      <span class="kw">const</span> headForward = cur.head &gt;= cur.anchor;
+      out[out.length - <span class="st">1</span>] = headForward ? { anchor: lo, head: hi } : { anchor: hi, head: lo };
+    } <span class="kw">else</span> {
+      out.push(cur);
+    }
+  }
+  <span class="kw">return</span> out;
+}
+
+<span class="cm">// 「編集後のオフセット付け替え」の汎用関数（mapOffset）は置いていない。
+// カーソルの付け替えは editor.ts の各コマンドが delta の足し込みで直接計算する。
+// 同じロジックを2か所に持つと、どちらが正か迷う資産になるため（レビュー指摘）。</span></code></pre>
+
+    <p>ファイル冒頭のコメントが設計の全部です。<strong>「カーソルを常に <code>SelRange</code> の配列として持つ。1本のときも配列長 1。複数カーソルは特別扱いではなく、これが標準形」</strong>。ここが効きます。多くのエディタは「単一カーソル」を基本にして、複数カーソルを後付けの特別機能として実装し、あちこちに <code>if (複数カーソル) { ... }</code> の分岐を撒き散らして破綻します。mint editor は逆。<strong>最初から配列</strong>にしておけば、1本も N 本も同じコードで扱えます。カーソルが1つとは「長さ1の配列」というだけのこと。第00章で <code>SelRange</code> を「選択もカーソルも同じ型」に畳んだのと、まったく同じ「特別扱いをなくす」思想です。</p>
+    <p>import が2行に分かれているのに注目してください。<code>import type { SelRange }</code> は型だけ（コンパイルで消える）、<code>import { rangeMax, rangeMin }</code> は実体のある関数なのでふつうの import。Step 1 で触れた「型は <code>import type</code>、値は <code>import</code>」がここでも徹底されています。<code>rangeMin</code> / <code>rangeMax</code> は第00章の小道具で、「<code>anchor</code> と <code>head</code> のどちらが前かを気にせず範囲の左端・右端を返す」関数でした。逆向き選択があり得るので、範囲を比べるときは必ずこれを通します。</p>
+    <p>本体の <code>normalizeSelections</code> は、カーソルの配列を受け取って「<strong>昇順に並べ、重なった/同位置のものを1つに統合した</strong>」きれいな配列を返す関数です。編集や移動のあとにカーソルが交差・重複することがあるので、そのたびにこれを通して整えます。上から追います。</p>
+    <ul>
+      <li><code>if (sels.length === 0) return [{ anchor: 0, head: 0 }]</code> —— カーソルが空になったら、文書先頭に1本立て直す。<strong>「カーソルは最低1本」を保証</strong>する安全網です。カーソルゼロのエディタは存在してはいけないので。</li>
+      <li><code>const sorted = [...sels].sort(...)</code> —— まず昇順ソート。<code>[...sels]</code> と<strong>コピーしてから</strong>ソートするのは、引数（<code>readonly</code> で受けた他人の配列）を破壊しないため。比較キーは <code>rangeMin(a) - rangeMin(b) || rangeMax(a) - rangeMax(b)</code>、つまり<strong>左端で並べ、同じなら右端で並べる</strong>。<code>||</code> は「左端が同点（差が 0）なら右端で決める」タイブレークです。テスト「<strong>昇順に並べ替える</strong>」がこれを確認します。</li>
+      <li>ループは <code>sorted[0]</code> を <code>out</code> の種にして、2番目以降を1つずつ見ます。<code>prev</code> は「<code>out</code> の最後に積んだカーソル」、<code>cur</code> は今見ているカーソル。</li>
+      <li><strong>重なり判定 <code>overlap</code></strong> —— 2つの条件の OR です。(1) <code>rangeMin(cur) &lt; rangeMax(prev)</code>: <code>cur</code> の左端が <code>prev</code> の右端より<strong>内側</strong>にある＝範囲が食い込んでいる。(2) 空カーソル同士が同じ位置にある場合（コメント「空カーソル同士が同位置なら1つにする」）。(2) は、幅ゼロのカーソルが2本まったく同じ場所に重なったとき、1本に畳むための特別扱いです。</li>
+      <li><strong>統合</strong> —— 重なっていたら、範囲は<strong>和集合</strong>（<code>lo = min</code>、<code>hi = max</code>）にまとめます。向きは <code>headForward = cur.head &gt;= cur.anchor</code>（後から来た <code>cur</code> が順方向の選択か）で決め、順方向なら <code>{anchor: lo, head: hi}</code>、逆方向なら <code>{anchor: hi, head: lo}</code>。「向きは後から来た方に合わせる」——直近のユーザー操作の方向を尊重する、という自然な振る舞いです。</li>
+      <li>重なっていなければ <code>out.push(cur)</code> で独立したカーソルとして積む。</li>
+    </ul>
+    <p>この「統合するか、独立させるか」の境目が微妙です。テストが3つの代表ケースを固定しています。「<strong>重なる範囲は統合される</strong>」（<code>[0,5)</code> と <code>[3,8)</code> は食い込むので <code>[0,8)</code> の1本に）、「<strong>同じ位置の空カーソルは1つになる</strong>」（<code>{4,4}</code> が2本なら1本に）、そして「<strong>接しているだけの範囲は統合しない</strong>」。最後が肝です。</p>
+
+    <div class="ascii">「重なる」と「接する」は違う — 統合の境目
+
+  重なる : [0,5) と [3,8)   3 &lt; 5 なので食い込む → 統合 [0,8)
+           0-------5
+                3--------8
+
+  接する : [0,3) と [3,6)   3 &lt; 3 ではない → 別々のまま
+           0----3
+                3----6      境界を共有するだけ。2本のカーソルとして残す</div>
+
+    <p><code>[0,3)</code> と <code>[3,6)</code> は端点 3 を共有しますが、<strong>重なってはいません</strong>（半開区間なので <code>[0,3)</code> は 3 を含まない）。判定 <code>rangeMin(cur) &lt; rangeMax(prev)</code> は <code>3 &lt; 3</code> で偽になり、統合されず2本のまま残ります。ここが <code>&lt;=</code> だったら誤って1本に潰れてしまう。<strong>「未満」であって「以下」ではない</strong>——第00章の半開区間 <code>[from, to)</code> の作法が、こんなところで正しさを支えています。テスト「<strong>接しているだけの範囲は統合しない</strong>」がこの1文字を守っています。</p>
+    <p>ファイル末尾のコメントも読み飛ばさないでください。「<strong>mapOffset は置いていない</strong>」——編集後にカーソルのオフセットを付け替える汎用関数を、あえて作らなかった、と明記しています。理由は「同じロジックを2か所に持つと、どちらが正か迷う資産になるため（レビュー指摘）」。カーソルの付け替えは <code>editor.ts</code> の各コマンドが <code>delta</code> の足し込みで直接やる、と役割を1か所に寄せている。<strong>「便利そうな共通関数を作らない」という判断もまた設計</strong>です。重複した真実の源を持たない、という規律がここに残されています。</p>
+
+    <div class="gonote"><div class="box-k">TS メモ · スプレッド [...sels] と sort の破壊性</div>
+      <p>JavaScript の <code>Array.prototype.sort</code> は<strong>元の配列をその場で並べ替える（破壊的）</strong>メソッドです。引数 <code>sels</code> をそのまま <code>sels.sort(...)</code> すると、呼び出し側の配列まで書き換わってしまい、思わぬバグの温床になります。そこで <code>[...sels]</code> —— <strong>スプレッド構文</strong>で要素を新しい配列へ浅くコピーしてからソートする。これで元は無傷です。引数の型が <code>readonly SelRange[]</code>（書き換え禁止）なのも、この「他人の配列を壊さない」規律を型で後押ししています。「破壊的メソッドを使う前にコピーする」は、純粋関数を保つための基本作法。<code>core/</code> の関数はどれもこの規律で書かれています。</p>
+    </div>
+
+    <div class="box do"><div class="box-k">▸ 動かして確認 — カーソルの正規化</div>
+      <p><code>selection.ts</code> の正規化を <code>selection.test.ts</code> で検収します。</p>
+      <pre class="term"><code><span class="ps">$</span> npx vitest run src/core/selection.test.ts
+<span class="out">✓ src/core/selection.test.ts (4 tests)
+   ✓ 昇順に並べ替える
+   ✓ 重なる範囲は統合される
+   ✓ 同じ位置の空カーソルは1つになる
+   ✓ 接しているだけの範囲は統合しない
+ Test Files  1 passed (1)
+      Tests  4 passed (4)</span></code></pre>
+      <p>4件とも緑になれば、複数カーソルの<strong>土台</strong>が固まりました。カーソルを<strong>実際に増やす</strong> UI（<code>Alt</code>+クリックなど）と、複数カーソルへの一括編集の適用は第06章の仕事です。この章では「カーソルは配列」「正規化で昇順・重複なしに保つ」という<strong>不変条件</strong>だけを先に据えました。第06章はこの不変条件の上に安心して機能を積めます。</p>
+    </div>
+
+    <h2 class="step" id="step-8"><span class="step-no">Step 8</span>演習: Document を手で動かす</h2>
+    <p>座標変換と差分更新の手触りを、頭ではなく<strong>手で</strong>確かめます。小さなテストファイルを1つ作って走らせてみましょう。<code>SimpleBuffer</code> を注入して、<code>Document</code> のロジックだけを裸で試します。</p>
+
+    <div class="file-tag">core/document.playground.test.ts（自分で作る・演習用）</div>
+    <pre><code><span class="kw">import</span> { describe, expect, it } <span class="kw">from</span> <span class="st">"vitest"</span>;
+<span class="kw">import</span> { TextDocument } <span class="kw">from</span> <span class="st">"./document"</span>;
+<span class="kw">import</span> { SimpleBuffer } <span class="kw">from</span> <span class="st">"./buffer"</span>;
+
+describe(<span class="st">"Document で遊ぶ"</span>, () => {
+  it(<span class="st">"行と桁を往復し、編集で行が増える"</span>, () => {
+    <span class="kw">const</span> doc = <span class="kw">new</span> TextDocument(<span class="st">"one\ntwo"</span>, <span class="kw">new</span> SimpleBuffer(<span class="st">"one\ntwo"</span>));
+
+    <span class="cm">// オフセット 5 は 1行目 "two" の 't' の次、'w' の位置</span>
+    expect(doc.toPosition(<span class="st">5</span>)).toEqual({ line: <span class="st">1</span>, column: <span class="st">1</span> });
+    expect(doc.toOffset(<span class="st">1</span>, <span class="st">1</span>)).toBe(<span class="st">5</span>);
+
+    <span class="cm">// 行末を超える桁は丸められる</span>
+    expect(doc.toOffset(<span class="st">0</span>, <span class="st">99</span>)).toBe(<span class="st">3</span>);
+
+    <span class="cm">// 1行目の頭で改行つきテキストを挿入 → 行が1つ増える</span>
+    doc.applyEdits([{ from: <span class="st">4</span>, to: <span class="st">4</span>, text: <span class="st">"X\n"</span> }]);
+    expect(doc.getText()).toBe(<span class="st">"one\nX\ntwo"</span>);
+    expect(doc.lineCount).toBe(<span class="st">3</span>);
+    expect(doc.getLine(<span class="st">1</span>)).toBe(<span class="st">"X"</span>);
+  });
+});</code></pre>
+
+    <p>これを <code>src/src/core/</code> に置いて <code>npx vitest run src/core/document.playground.test.ts</code> で走らせると PASS します。<code>toPosition(5)</code> が <code>{line:1, column:1}</code> になり、<code>toOffset(1,1)</code> で 5 に戻る往復。<code>toOffset(0,99)</code> が行末 3 に丸められること。そして <code>from==to==4</code>（1行目の先頭）に <code>"X\n"</code> を挿入すると <code>lineCount</code> が 2 → 3 に増える —— Step 6 の差分更新が、あなたの手元で動く瞬間です。</p>
+
+    <div class="box do"><div class="box-k">▸ さらに手を動かすなら</div>
+      <p>余力があれば、次を試してみてください。答えは自分の目で確かめられます。</p>
+      <ol>
+        <li><strong>逆向きで戻す</strong>: <code>const inv = doc.applyEdits([...])</code> の戻り値を受け取り、続けて <code>doc.applyEdits(inv)</code> して <code>doc.getText()</code> が元に戻ることを確かめる。第03章の Undo の原型です。</li>
+        <li><strong>差分と全再計算を比べる</strong>: 適当な編集を数回浴びせたあと、<code>Array.from({length: doc.lineCount}, (_, i) =&gt; doc.lineStartOffset(i))</code> と <code>computeLineStarts(doc.getText())</code> が一致することを自分で <code>expect</code> してみる。番人テストの縮小版です。</li>
+        <li><strong>末尾改行の行数</strong>: <code>new TextDocument("a\nb\n")</code> の <code>lineCount</code> はいくつか。<strong>3</strong>（<code>"a"</code>, <code>"b"</code>, 空行）になる理由を、Step 2 の落とし穴に戻って説明してみる。</li>
+      </ol>
+    </div>
+
+    <h2>つまずき FAQ</h2>
+    <details class="qa"><summary>なぜ <code>lineStarts</code> を状態として持つの? 毎回 <code>computeLineStarts</code> で作り直せば単純では?</summary>
+      <div class="qa-body"><p>単純さと速さのトレードオフです。作り直すのは <code>O(n)</code>（文書全体を走査）。ところが「この offset は何行目?」という問い合わせは、カーソル移動・クリック・スクロール・描画のたびに<strong>大量に発生</strong>します。そのたびに全文を舐めていたら、大きなファイルでカクつきます。だから <code>lineStarts</code> を保持し、問い合わせは二分探索 <code>O(log n)</code>、更新は差分（編集の周辺 ＋ 後続要素のシフト）に抑える。「重い計算は編集時に一度だけ、あとは軽い問い合わせ」——エディタの性能設計の定番の型です。正しさは番人テスト（全再計算との一致）が保証してくれるので、速さと正しさを両取りできます。</p></div>
+    </details>
+    <details class="qa"><summary><code>applyEdits</code> の <code>delta</code> は何のためにある? なくても動く気がするけど。</summary>
+      <div class="qa-body"><p>編集を<strong>複数まとめて</strong>渡すときに必要になります。1つ目の編集で文書の長さが変わると、まだ適用していない2つ目以降の編集のオフセットが全部ずれます。<code>delta</code> は「これまでの編集で生じた累積のずれ」を覚えていて、<code>from = e.from + delta</code> のように後続の位置を補正します。編集が1つだけなら <code>delta</code> は常に 0 のままなので、確かに「なくても動く」ように見える。でも複数カーソルで一括編集する第06章では、<code>delta</code> がないと2つ目以降が確実にずれます。テスト「applyEdits はバッチを昇順座標で適用し…」がこれを守っています。前提の「<code>from</code> 昇順・非重複」も、<code>delta</code> を単純な足し込みで済ませるための条件です。</p></div>
+    </details>
+    <details class="qa"><summary><code>anchor</code>/<code>head</code> と、正規化で使う <code>rangeMin</code>/<code>rangeMax</code> の関係は?</summary>
+      <div class="qa-body"><p>第00章の復習になります。<code>anchor</code>/<code>head</code> は<strong>方向</strong>（どちらが固定でどちらが動くか）、<code>rangeMin</code>/<code>rangeMax</code> は<strong>位置</strong>（どちらが前でどちらが後ろか）。逆向き選択（<code>head &lt; anchor</code>）があり得るので、正規化で「重なりを判定する / 範囲を統合する」ときは、方向に惑わされないよう必ず <code>rangeMin</code>/<code>rangeMax</code> を通して<strong>位置</strong>で比べます。一方、統合後の向きを決めるときだけは <code>cur.head &gt;= cur.anchor</code> で<strong>方向</strong>を見て、直近の操作方向を残す。位置で並べ・重なりを見て、方向で仕上げる——この使い分けが <code>normalizeSelections</code> の骨格です。</p></div>
+    </details>
+
+    <h2>理解度チェック</h2>
+    <p>次の問いに<strong>自分の言葉で</strong>答えられたら、この章は卒業です。</p>
+    <details class="qa"><summary>1. <code>lineStarts</code> とは何か。オフセット <code>off</code> から行番号を求める <code>lineAt</code> は、なぜ二分探索でよいのか。</summary>
+      <div class="qa-body"><p><code>lineStarts</code> は<strong>各行の開始オフセットを並べた配列</strong>（行の目次）。<code>lineStarts.length</code> が行数。行頭は必ず前の行頭より右にあるので <code>lineStarts</code> は<strong>単調増加（ソート済み）</strong>。だから「<code>lineStarts[i] &lt;= off</code> を満たす最大の <code>i</code>」を、線形の <code>O(n)</code> ではなく二分探索 <code>O(log n)</code> で射止められる。その最大の <code>i</code> が「<code>off</code> の乗っている行」。カーソル移動やクリックのたびに何度も呼ばれるので、ここを対数時間にする価値がある。</p></div>
+    </details>
+    <details class="qa"><summary>2. <code>updateLineStarts</code> は、編集で崩れた <code>lineStarts</code> をどの3領域に分けて組み直すか。</summary>
+      <div class="qa-body"><p>編集 <code>[from, to)</code> → <code>inserted</code> に対し、(1) <strong>据え置き</strong>: <code>from</code> より前の行頭（<code>slice(0, startLine+1)</code>）はそのまま。(2) <strong>置き換え</strong>: 編集範囲内にあった行頭（<code>startLine+1 .. endLine</code>）は消え、<code>inserted</code> 内の改行が生む新しい行頭 <code>newStarts</code>（<code>from + idx + 1</code>）に差し替わる。(3) <strong>ずらす</strong>: <code>to</code> より後ろの行頭（<code>slice(endLine+1)</code>）は個数・順序はそのままで、長さの増減 <code>delta = inserted.length - (to-from)</code> だけ加算。この3つを <code>concat</code> して新しい <code>lineStarts</code> にする。全再計算と常に一致することを番人テストが保証する。</p></div>
+    </details>
+    <details class="qa"><summary>3. 「カーソルを常に <code>SelRange</code> の配列で持つ」ことの利点は何か。<code>normalizeSelections</code> は何を保証するか。</summary>
+      <div class="qa-body"><p>利点は<strong>単一カーソルと複数カーソルを同じコードで扱える</strong>こと。カーソル1本は「長さ1の配列」というだけで、複数カーソルを後付けの特別分岐にしなくて済む（第06章が楽になる）。<code>normalizeSelections</code> は、カーソルの配列を<strong>昇順に並べ、重なる/同位置のものを統合</strong>して、「昇順・重複なし」という不変条件に直す。空なら文書先頭に1本立て直して「カーソルは最低1本」も保証。ただし端点を共有するだけ（<code>[0,3)</code> と <code>[3,6)</code>）は半開区間なので重なりとみなさず、2本のまま残す。この整った配列が <code>applyEdits</code> の「昇順・非重複」前提を満たす。</p></div>
+    </details>
+
+    <h2>まとめ — 次の層へ</h2>
+    <p>この章で、バッファのオフセット世界と、人間の <code>(行, 桁)</code> 世界のあいだに<strong>橋</strong>が架かりました。橋げたは <code>lineStarts</code> —— 各行の先頭オフセットだけを覚えた小さな配列。これを <code>computeLineStarts</code> で作り、<code>lineAt</code> の二分探索で「オフセット → 行」を引き、<code>toPosition</code> / <code>toOffset</code> で座標系を往復し、そして編集のたびに <code>updateLineStarts</code> で<strong>崩れた範囲だけを差分更新</strong>する。さらに <code>applyEdits</code> は、編集をまとめて適用しながら<strong>そのまま元に戻せる逆向き編集列</strong>を返し、<code>selection.ts</code> はカーソルを「特別扱いしない配列」として持つ土台を据えました。差分更新の正しさは、全再計算をオラクルにした番人テストが永遠に見張ります —— 第00章の「素朴実装で速い実装を検証する」思想が、ここでも生きています。</p>
+    <p>次の第03章では、この章が返した<strong>逆向き編集列</strong>を主役に据えます。<code>applyEdits</code> が「編集列」と「その逆向き編集列」を対で吐くようにしておいたおかげで、Undo / Redo は<strong>専用の巻き戻しロジックを一切書かず</strong>、履歴スタックに編集列を積んで出し入れするだけで実現します。連続したタイプを1回の Undo にまとめる「編集のグルーピング」も含めて、「過去に戻る」を <code>Edit</code> の再適用だけで組み上げます。エディタが<strong>時間をさかのぼれる</strong>ようになる章です。</p>
+
+    <div class="chap-foot">
+      <a class="pager" href="01-buffer.html"><span class="dir">← 前へ</span>第01章 · テキストを持つ</a>
+      <a class="pager next" href="03-history.html"><span class="dir">次へ →</span>第03章 · 編集と取り消し</a>
+    </div>
+  </main>
+</div>
+</body>
+</html>

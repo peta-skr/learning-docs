@@ -3,32 +3,105 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>learning-docs</title>
+  <title>learning-docs — つくって学ぶ教材集</title>
   <style>
-    body {
-      font-family: system-ui, -apple-system, "Segoe UI", sans-serif;
-      max-width: 42rem;
-      margin: 4rem auto;
-      padding: 0 1.5rem;
-      line-height: 1.8;
-      color: #24292f;
+    :root {
+      --bg: #fffdfa;
+      --fg: #24292f;
+      --muted: #6b7280;
+      --line: #e5e0d8;
+      --accent: #8a5a2b;
     }
-    code { background: #f6f8fa; padding: .15em .4em; border-radius: 4px; }
-    ul { padding-left: 1.2rem; }
+    @media (prefers-color-scheme: dark) {
+      :root {
+        --bg: #16181d;
+        --fg: #e6e1d8;
+        --muted: #9aa0a6;
+        --line: #2e323a;
+        --accent: #d6a469;
+      }
+    }
+    * { box-sizing: border-box; }
+    body {
+      font-family: "Noto Serif JP", Georgia, serif;
+      background: var(--bg);
+      color: var(--fg);
+      max-width: 46rem;
+      margin: 0 auto;
+      padding: 4rem 1.5rem 6rem;
+      line-height: 1.9;
+    }
+    h1 { font-size: 1.9rem; margin: 0 0 .3rem; letter-spacing: .02em; }
+    .lead { color: var(--muted); margin: 0 0 3rem; font-size: .95rem; }
+    ul { list-style: none; padding: 0; margin: 0; }
+    li { border-top: 1px solid var(--line); }
+    li:last-child { border-bottom: 1px solid var(--line); }
+    a.card {
+      display: flex;
+      align-items: baseline;
+      gap: .9rem;
+      padding: 1.1rem .3rem;
+      text-decoration: none;
+      color: inherit;
+    }
+    a.card:hover { background: rgba(138, 90, 43, .07); }
+    a.card:hover .title { color: var(--accent); }
+    .title { font-weight: 600; flex: 1; }
+    .chapters {
+      font-family: ui-monospace, "SFMono-Regular", Menlo, monospace;
+      font-size: .8rem;
+      color: var(--muted);
+      white-space: nowrap;
+    }
+    footer {
+      margin-top: 3rem;
+      padding-top: 1.2rem;
+      border-top: 1px solid var(--line);
+      color: var(--muted);
+      font-size: .85rem;
+    }
   </style>
 </head>
 <body>
-  <h1>learning-docs</h1>
-  <p>
-    個人学習教材の公開サイト集。まだ教材は配置されていない
-    <strong>配信経路の確認用プレースホルダ</strong>。
+  <h1>つくって学ぶ教材集</h1>
+  <p class="lead">
+    仕組みを知りたいものを、実際に自分の手で小さく作りながら理解していく教材。
+    各教材は独立した1サイトで、序章から順に積み上げて読む構成になっている。
   </p>
-  <p>
-    このページが表示されていれば、GitHub Actions からの Pages 配信が動いている。
-    教材は今後 <code>/learning-docs/&lt;教材名&gt;/</code> に1件ずつ追加していく。
-  </p>
+
   <ul>
-    <li><a href="./_probe/">_probe/ — サブパス配下の相対パス解決の確認</a></li>
+    <li><a class="card" href="./rdb/">
+      <span class="title">ディスクからつくるデータベース</span>
+      <span class="chapters">全8章</span>
+    </a></li>
+    <li><a class="card" href="./redis/">
+      <span class="title">Redis をつくる</span>
+      <span class="chapters">全10章</span>
+    </a></li>
+    <li><a class="card" href="./leetcode/">
+      <span class="title">手を動かして作るオンラインジャッジ</span>
+      <span class="chapters">全10章</span>
+    </a></li>
+    <li><a class="card" href="./twitter/">
+      <span class="title">Twitter をつくる</span>
+      <span class="chapters">全10章</span>
+    </a></li>
+    <li><a class="card" href="./vscode/">
+      <span class="title">ゼロから作るテキストエディタ</span>
+      <span class="chapters">全10章</span>
+    </a></li>
+    <li><a class="card" href="./stock-dashboard/">
+      <span class="title">指数ダッシュボードを作る</span>
+      <span class="chapters">全9章</span>
+    </a></li>
+    <li><a class="card" href="./youtube/">
+      <span class="title">動画サービスをつくる</span>
+      <span class="chapters">全10章</span>
+    </a></li>
   </ul>
+
+  <footer>
+    教材は順次追加していく。
+  </footer>
 </body>
 </html>

@@ -1,0 +1,683 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>第04章 動画を届ける — 動画サービスをつくる</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500;600&family=Source+Serif+4:opsz,wght@8..60,400;8..60,600;8..60,700&family=Noto+Serif+JP:wght@400;600;700&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<div class="shell">
+
+  <aside class="spine">
+    <a class="wordmark" href="index.html">VIDEO-STREAM · from scratch</a>
+    <div class="book-title">動画サービスを<br>つくる</div>
+    <div class="book-sub">Go と ffmpeg で presigned から HLS 配信まで</div>
+
+    <div class="legend"><span>受け取る <b>↓</b></span><span>届ける <b>↑</b></span></div>
+
+    <nav aria-label="目次">
+      <ul class="toc">
+        <li><a class="nav-item" href="index.html"><span class="nav-num">序</span><span class="nav-label">はじめに・準備<span class="nav-tag">Setup</span></span></a></li>
+        <li><a class="nav-item" href="00-setup.html"><span class="nav-num">00</span><span class="nav-label">土台をつくる<span class="nav-tag">Setup</span></span></a></li>
+        <li><a class="nav-item" href="01-auth.html"><span class="nav-num">01</span><span class="nav-label">人を扱う<span class="nav-tag">Auth</span></span></a></li>
+        <li><a class="nav-item" href="02-upload.html"><span class="nav-num">02</span><span class="nav-label">動画を受け取る<span class="nav-tag">Upload</span></span></a></li>
+        <li><a class="nav-item" href="03-transcode.html"><span class="nav-num">03</span><span class="nav-label">動画を変換する<span class="nav-tag">Transcode</span></span></a></li>
+        <li><a class="nav-item current" aria-current="page" href="04-deliver.html"><span class="nav-num">04</span><span class="nav-label">動画を届ける<span class="nav-tag">Deliver</span></span></a></li>
+        <li><a class="nav-item" href="05-social.html"><span class="nav-num">05</span><span class="nav-label">反応をつくる<span class="nav-tag">Social</span></span></a></li>
+        <li><a class="nav-item" href="06-discover.html"><span class="nav-num">06</span><span class="nav-label">見つけてもらう<span class="nav-tag">Discover</span></span></a></li>
+        <li><a class="nav-item" href="07-notify.html"><span class="nav-num">07</span><span class="nav-label">つながりを届ける<span class="nav-tag">Notify</span></span></a></li>
+        <li><a class="nav-item" href="08-web.html"><span class="nav-num">08</span><span class="nav-label">画面をつける<span class="nav-tag">Web</span></span></a></li>
+        <li><a class="nav-item" href="09-beyond.html"><span class="nav-num">09</span><span class="nav-label">仕上げと次の一歩<span class="nav-tag">Beyond</span></span></a></li>
+      </ul>
+    </nav>
+
+    <div class="spine-foot">
+      各章は動画が通る道の一区間。<br>受け取る（下）から届ける（上）へ、<br>1本の動画を最後まで運びきる。
+    </div>
+  </aside>
+
+  <main class="reading">
+    <div class="progress-tag">第04章 / 全10章 · 層: Deliver</div>
+    <div class="eyebrow"><span>Deliver</span><span class="depth">— 最上層 · 届ける</span></div>
+    <h1>動画を届ける</h1>
+    <p class="lede">第03章で、職人が動画を<strong>複数画質の HLS</strong> に変換し、<code>ready</code> の宣言と同時に <code>media_prefix</code> という「配信してよい成果物の置き場」を確定させました。この章は、その成果物を<strong>視聴者の画面まで運びきる</strong>最後の一区間です。まず配信の門番 —— <code>media.go</code> の <code>handleMedia</code> —— が、保管庫（MinIO）を絶対に直接公開せず、<strong>DB の状態と権限を確認してから</strong>目次（<code>.m3u8</code>）と断片（<code>.ts</code>）を渡す仕組みを読みます。次に受け取る側、React の <code>Player.tsx</code> が <strong>hls.js</strong> を使って、回線に合わせて画質を自動で切り替えながら再生する「適応的配信」の実装を読み解きます。この章を終えたとき、投稿された動画が、非公開なら持ち主にだけ、回線が細ければ 360p で、太ければ 1080p で、途切れず流れるようになります。</p>
+
+    <div class="box goal"><div class="box-k">◈ この章のゴール</div>
+      <p>次の3つを、コードと自分の言葉で説明できたら達成です。</p>
+      <ol>
+        <li><strong>なぜ保管庫を直接公開せず、必ず受付（api）を通すのか</strong> —— <code>handleMedia</code> の「<code>ready</code> でなければ渡さない」「<code>media_prefix</code> 配下からしか渡さない」「パスのすり抜けを塞ぐ」の3つの門を説明できる。</li>
+        <li><strong>HLS の3層構造</strong>（総目次 <code>master.m3u8</code> → 画質別目次 <code>playlist.m3u8</code> → 断片 <code>seg000.ts</code>）が、どう繋がって1本の動画になるかを図で描ける。</li>
+        <li><strong>hls.js が「回線に合わせて画質を切り替える」仕組み</strong>と、なぜ Safari だけ扱いが違うのか、そして非公開動画の断片取得に <code>?token=</code> やヘッダで会員証を添える理由を説明できる。</li>
+      </ol>
+    </div>
+
+    <div class="box map"><div class="box-k">☰ この章のステップ</div>
+      <ol>
+        <li><a href="#step-1">HLS とは何か — 1本の動画を「目次＋断片」に割る</a></li>
+        <li><a href="#step-2">配信の門番を1本の関数で — <code>handleMedia</code> の全体像</a></li>
+        <li><a href="#step-3">第1の門: 誰に見せてよいか — <code>getViewableVideo</code> と権限</a></li>
+        <li><a href="#step-4">第2の門: <code>ready</code> でない動画は絶対に渡さない — 状態と <code>media_prefix</code></a></li>
+        <li><a href="#step-5">第3の門: パスのすり抜けを塞ぐ — <code>path.Clean</code> と <code>..</code></a></li>
+        <li><a href="#step-6">拡張子で扱いを変える — Content-Type とキャッシュ方針</a></li>
+        <li><a href="#step-7">保管庫から読み出して流す — <code>Storage.Get</code> と <code>io.Copy</code></a></li>
+        <li><a href="#step-8">受け取る側 — hls.js で総目次を読み、画質を切り替える</a></li>
+        <li><a href="#step-9">なぜ <code>?token=</code> を受け付けるのか — ヘッダを付けられない相手</a></li>
+        <li><a href="#step-10">立ち上げて、動画を届ける</a></li>
+      </ol>
+    </div>
+
+    <h2>なぜ「配信」を最後に、しかも慎重に作るのか</h2>
+    <p>ここまでの3章で、動画は「受け取られ（第02章）」「変換され（第03章）」、いま保管庫（MinIO）の中に、複数画質の HLS 成果物として静かに眠っています。この章の仕事は、それを<strong>視聴者の目の前まで運ぶ</strong>こと —— 動画が通る道の、最後の一区間です。</p>
+    <p>一見、配信は簡単そうに見えます。「保管庫にあるファイルを、そのまま返せばいいのでは?」と。しかし、ここに本書で最も守るべき約束が2つ潜んでいます。</p>
+    <ul>
+      <li><strong>見せてよい人にだけ見せる</strong> —— 非公開の動画が、権限のない人に1バイトも漏れてはいけません（要件 NFR-6）。もし保管庫を <code>localhost:9000</code> でそのまま公開してしまえば、URL を推測した誰でもが非公開動画を覗けてしまう。だから配信は<strong>必ず受付（api）を通し、受付が権限を確認してから</strong>渡します。</li>
+      <li><strong>まだ完成していない動画を配信しない</strong> —— 変換の途中で、断片が半分しか書けていない動画を配信したら、視聴者の画面は途中で止まります。だから配信は「DB の <code>status</code> が <code>ready</code> の動画だけ」に厳しく限ります。第00章で刻んだ「DB の状態こそ唯一の真実」が、ここでいちばん強く効きます。</li>
+    </ul>
+    <p>この2つの約束を守る門番が <code>media.go</code> の <code>handleMedia</code> です。たった54行の関数ですが、そこには「状態」「権限」「置き場」「パス安全」という4つの防具が畳み込まれています。その前に、そもそも配信する中身 —— HLS —— が何なのかを掴んでおきましょう。</p>
+
+    <h2>この層が上（視聴者）に約束すること</h2>
+    <p>この配信層が、最終的に視聴者に約束するのは次の3つです。</p>
+    <ul>
+      <li><strong>見られる動画しか見えない</strong> —— <code>ready</code> かつ、その人に閲覧権限のある動画だけが再生できる。存在の有無すら漏らさない。</li>
+      <li><strong>回線に合わせて途切れず流れる</strong> —— 細い回線なら 360p、太い回線なら 1080p を、視聴者が意識せず自動で選ぶ（適応的配信）。</li>
+      <li><strong>近くの写しから速く届く余地を残す</strong> —— 不変の断片（<code>.ts</code>）には長いキャッシュを許し、将来 CDN を挟めば「近くに置いた写し」から返せる設計にしておく（第09章）。</li>
+    </ul>
+
+    <h2 class="step" id="step-1"><span class="step-no">Step 1</span>HLS とは何か — 1本の動画を「目次＋断片」に割る</h2>
+    <p>コードを読む前に、配信する<strong>中身の形</strong>を理解します。第03章で職人（worker）が ffmpeg を使って作ったのは、1個の巨大な mp4 ファイルではなく、<strong>HLS（HTTP Live Streaming）</strong>という形式の、たくさんの小さなファイルの集まりでした。</p>
+    <p>HLS の発想はシンプルです。<strong>1本の動画を、数秒ずつの小さな断片（セグメント）に割り、「どの断片を、どの順で繋げば動画になるか」を書いた目次（プレイリスト）を添える。</strong>本書では断片を4秒ごとに割っています（第03章の ffmpeg 引数 <code>-hls_time 4</code>）。プレイヤーは目次を読み、断片を1つずつ順に取ってきて繋げて再生する。</p>
+    <p>そして本書の HLS は、<strong>3層の入れ子</strong>になっています。第03章で読んだ <code>writeMaster</code> と ffmpeg の出力を思い出すと、その構造がそのまま配信する形です。</p>
+
+    <div class="file-tag">internal/transcode/transcode.go（第03章で読んだ writeMaster — 再掲）</div>
+    <pre><code><span class="cm">// writeMaster は「どの画質があるか」を束ねる総目次を書き出す。</span>
+<span class="kw">func</span> writeMaster(outDir <span class="ty">string</span>, rends []rendition) <span class="ty">error</span> {
+	<span class="kw">var</span> b strings.<span class="ty">Builder</span>
+	b.WriteString(<span class="st">"#EXTM3U\n#EXT-X-VERSION:3\n"</span>)
+	<span class="kw">for</span> _, r := <span class="kw">range</span> rends {
+		fmt.Fprintf(&amp;b, <span class="st">"#EXT-X-STREAM-INF:BANDWIDTH=%d,RESOLUTION=%dx%d\n%s/playlist.m3u8\n"</span>,
+			r.BandKbs*<span class="st">1000</span>, r.Width, r.Height, r.Name)
+	}
+	<span class="kw">return</span> os.WriteFile(filepath.Join(outDir, <span class="st">"master.m3u8"</span>), []<span class="ty">byte</span>(b.String()), <span class="st">0o644</span>)
+}</code></pre>
+
+    <p>この <code>writeMaster</code> が書き出す <code>master.m3u8</code> が<strong>総目次</strong>です。中身は「360p の目次はこっち、720p の目次はこっち、1080p の目次はこっち」という案内板でしかありません。それぞれの行の <code>#EXT-X-STREAM-INF</code> が、<strong>その画質の帯域（BANDWIDTH）と解像度（RESOLUTION）</strong>を宣言し、次の行の <code>360p/playlist.m3u8</code> が「その画質の実際の目次」を指しています。第03章の <code>ladder</code>（360p / 720p / 1080p の3段）が、ここで案内板の3行になります。</p>
+    <p>保管庫（MinIO）の中で、この成果物は次のような入れ子で並んでいます。<code>media_prefix</code>（例: <code>hls/&lt;id&gt;/g2-&lt;乱数hex&gt;/</code>）を根として —</p>
+
+    <div class="ascii">HLS の3層構造 — 保管庫の media_prefix 配下
+
+  hls/&lt;id&gt;/g2-3f8a…/            ← media_prefix（ready 時に確定した配信領域）
+  │
+  ├─ master.m3u8               【総目次】どの画質があるかの案内板（writeMaster が生成）
+  │     #EXT-X-STREAM-INF:BANDWIDTH=1000000,RESOLUTION=640x360
+  │     360p/playlist.m3u8
+  │     #EXT-X-STREAM-INF:BANDWIDTH=3000000,RESOLUTION=1280x720
+  │     720p/playlist.m3u8
+  │     #EXT-X-STREAM-INF:BANDWIDTH=6000000,RESOLUTION=1920x1080
+  │     1080p/playlist.m3u8
+  │
+  ├─ 360p/                     【画質別目次＋断片】
+  │    ├─ playlist.m3u8        seg000.ts, seg001.ts … を4秒ずつ順に並べた目次
+  │    ├─ seg000.ts            ← 0〜4秒の映像断片
+  │    ├─ seg001.ts            ← 4〜8秒
+  │    └─ …
+  ├─ 720p/
+  │    ├─ playlist.m3u8
+  │    └─ seg000.ts …
+  ├─ 1080p/
+  │    ├─ playlist.m3u8
+  │    └─ seg000.ts …
+  └─ thumbnail.jpg             サムネイル（別枠）
+
+  再生の流れ: プレイヤーは master.m3u8 を読む → 回線から画質を選ぶ
+           → その画質の playlist.m3u8 を読む → seg000.ts, seg001.ts … を順に取って繋げる</div>
+
+    <p>この3層を頭に入れておくと、この後のコードがすべて「この入れ子のどのファイルを、どう安全に渡すか」の話だと分かります。プレイヤーがまず取りに来るのは <code>master.m3u8</code>（総目次）1枚。次に選んだ画質の <code>playlist.m3u8</code>。最後に <code>360p/seg000.ts</code>、<code>360p/seg001.ts</code>… と断片を順に。<strong>1本の動画の再生が、何十回もの小さなファイル取得に分解される</strong>——これが HLS です。</p>
+
+    <div class="gonote"><div class="box-k">実装メモ · なぜ「1個の mp4」ではなく「目次＋断片」なのか</div>
+      <p>もし1個の巨大な mp4 をそのまま配ると、(1) <strong>回線に合わせて画質を変えられない</strong>（最初に選んだ1つの画質で最後まで行くしかない）、(2) <strong>途中から見るのが重い</strong>（10分の動画の8分目を見たいのに、頭から取り直す必要が出やすい）という問題が出ます。HLS のように「4秒ずつの断片＋目次」に割っておくと、プレイヤーは<strong>断片ごとに画質を選び直せる</strong>し、見たい断片だけを取れる。しかも断片は普通の HTTP GET で取れるファイルなので、特別なストリーミングサーバが要らず、<strong>ただのファイル配信（と CDN キャッシュ）で世界中に届く</strong>。「大きなものは小さく割って、目次で束ねる」——動画配信の定石です。断片が普通の HTTP GET で取れる、という性質が、この章の <code>handleMedia</code>（ただのファイル返却）を成立させています。</p>
+    </div>
+
+    <h2 class="step" id="step-2"><span class="step-no">Step 2</span>配信の門番を1本の関数で — handleMedia の全体像</h2>
+    <p>いよいよ配信の心臓部、<code>internal/httpapi/media.go</code> の <code>handleMedia</code> です。まず全文を通して眺め、そのあと門を1つずつ分解します。この1関数が、目次も断片もサムネイルも、すべての「保管庫の中身を返す」リクエストを引き受けます。</p>
+
+    <div class="file-tag">internal/httpapi/media.go（全文）</div>
+    <pre><code><span class="kw">package</span> httpapi
+
+<span class="kw">import</span> (
+	<span class="st">"io"</span>
+	<span class="st">"net/http"</span>
+	<span class="st">"path"</span>
+	<span class="st">"strconv"</span>
+	<span class="st">"strings"</span>
+)
+
+<span class="cm">// handleMedia は保管庫の中身（目次・断片・サムネイル）を、権限を確認してから届ける。</span>
+<span class="cm">// 保管庫を直接公開しないことで「非公開・限定公開が権限のない人に見えない」を守る（NFR-6）。</span>
+<span class="kw">func</span> (s *<span class="ty">Server</span>) handleMedia(w http.<span class="ty">ResponseWriter</span>, r *http.<span class="ty">Request</span>) {
+	v, _, ok := s.getViewableVideo(w, r)
+	<span class="kw">if</span> !ok {
+		<span class="kw">return</span>
+	}
+	rel := r.PathValue(<span class="st">"path"</span>)
+
+	<span class="kw">var</span> key <span class="ty">string</span>
+	<span class="kw">switch</span> rel {
+	<span class="kw">case</span> <span class="st">"thumbnail"</span>:
+		<span class="kw">if</span> v.ThumbnailKey == <span class="st">""</span> {
+			httpError(w, http.StatusNotFound, <span class="st">"not found"</span>)
+			<span class="kw">return</span>
+		}
+		key = v.ThumbnailKey
+	<span class="kw">default</span>:
+		<span class="cm">// パスのすり抜け（../ など）を防いでから、この動画の現行世代のHLS領域に限定する</span>
+		clean := path.Clean(<span class="st">"/"</span> + rel)
+		<span class="kw">if</span> strings.Contains(clean, <span class="st">".."</span>) {
+			httpError(w, http.StatusBadRequest, <span class="st">"bad path"</span>)
+			<span class="kw">return</span>
+		}
+		<span class="kw">if</span> v.Status != <span class="st">"ready"</span> || v.MediaPrefix == <span class="st">""</span> {
+			httpError(w, http.StatusConflict, <span class="st">"この動画はまだ視聴できません"</span>)
+			<span class="kw">return</span>
+		}
+		<span class="cm">// media_prefix は ready の宣言と同時に確定した「配信してよい世代」の置き場。</span>
+		<span class="cm">// ゾンビ職人が別世代の場所に何を書いても、ここには現れない</span>
+		key = strings.TrimSuffix(v.MediaPrefix, <span class="st">"/"</span>) + clean
+	}
+
+	obj, info, err := s.St.Get(r.Context(), key)
+	<span class="kw">if</span> err != <span class="kw">nil</span> {
+		httpError(w, http.StatusNotFound, <span class="st">"not found"</span>)
+		<span class="kw">return</span>
+	}
+	<span class="kw">defer</span> obj.Close()
+
+	ct := info.ContentType
+	<span class="kw">switch</span> path.Ext(key) {
+	<span class="kw">case</span> <span class="st">".m3u8"</span>:
+		ct = <span class="st">"application/vnd.apple.mpegurl"</span>
+		w.Header().Set(<span class="st">"Cache-Control"</span>, <span class="st">"no-cache"</span>)
+	<span class="kw">case</span> <span class="st">".ts"</span>:
+		ct = <span class="st">"video/mp2t"</span>
+		<span class="cm">// 断片は不変。ここが「近くに置いた写しから返す」（CDN/キャッシュ）の効きどころ</span>
+		w.Header().Set(<span class="st">"Cache-Control"</span>, <span class="st">"public, max-age=31536000, immutable"</span>)
+	<span class="kw">default</span>:
+		w.Header().Set(<span class="st">"Cache-Control"</span>, <span class="st">"public, max-age=300"</span>)
+	}
+	w.Header().Set(<span class="st">"Content-Type"</span>, ct)
+	w.Header().Set(<span class="st">"Content-Length"</span>, strconv.FormatInt(info.Size, <span class="st">10</span>))
+	io.Copy(w, obj)
+}</code></pre>
+
+    <p>関数の骨格は、上から下へ<strong>4つの段</strong>に分かれます。この4段が、そのまま「門番の仕事」です。</p>
+    <ol>
+      <li><strong>権限の確認</strong>（<code>getViewableVideo</code>）—— 誰に見せてよいか。失敗したらここで終了（Step 3）。</li>
+      <li><strong>返す対象の特定</strong>（<code>switch rel</code>）—— サムネイルか、HLS の中身か。HLS なら状態・置き場・パス安全を全部確認して <code>key</code>（保管庫のキー）を組み立てる（Step 4・5）。</li>
+      <li><strong>保管庫から取得</strong>（<code>s.St.Get</code>）—— 特定した <code>key</code> のオブジェクトを MinIO から読み出す（Step 7）。</li>
+      <li><strong>ヘッダを整えて流す</strong>（<code>switch path.Ext</code> と <code>io.Copy</code>）—— Content-Type とキャッシュ方針を拡張子で決め、中身をそのまま応答に流し込む（Step 6・7）。</li>
+    </ol>
+    <p>まず、この関数がどの URL で呼ばれるかを押さえます。ルーティングは <code>server.go</code> に登録されています。</p>
+
+    <div class="file-tag">internal/httpapi/server.go（ルート登録・抜粋）</div>
+    <pre><code>	mux.HandleFunc(<span class="st">"GET /api/videos/{id}/media/{path...}"</span>, s.handleMedia)</code></pre>
+
+    <p><code>{id}</code> が動画の ID、<code>{path...}</code>（末尾の <code>...</code>）が<strong>スラッシュを含む残り全部</strong>を1つの値として受け取るワイルドカードです（Go 1.22+ の <code>net/http</code> ルータの機能）。だから <code>/api/videos/&lt;id&gt;/media/master.m3u8</code> なら <code>path</code> は <code>"master.m3u8"</code>、<code>/api/videos/&lt;id&gt;/media/360p/seg000.ts</code> なら <code>path</code> は <code>"360p/seg000.ts"</code>、<code>/api/videos/&lt;id&gt;/media/thumbnail</code> なら <code>"thumbnail"</code>。<strong>1つのハンドラで、総目次・画質別目次・断片・サムネイルの全部を受ける</strong>——だからこそ、この1関数に門を集約する価値があります。</p>
+    <p>そして関数の1行目、<code>v, _, ok := s.getViewableVideo(w, r)</code>。返り値の2つ目（利用者ID）は <code>_</code> で捨てています。この関数の中では「誰が見ているか」までは要らず、「見てよいか（ok）」と「動画のメタ情報（v）」だけあれば配信の判断ができるからです。では、その最初の門から。</p>
+
+    <h2 class="step" id="step-3"><span class="step-no">Step 3</span>第1の門: 誰に見せてよいか — getViewableVideo と権限</h2>
+    <p><code>handleMedia</code> が最初にすること —— <code>getViewableVideo</code> —— の中身を見ます。これは <code>server.go</code> にある共通の入口で、「動画を取得し、閲覧権限を確認する」までを1つにまとめたものです。第02章・第05章でも使い回される、本書の権限チェックの土台です。</p>
+
+    <div class="file-tag">internal/httpapi/server.go（getViewableVideo と canView）</div>
+    <pre><code><span class="cm">// getViewableVideo は取得と権限チェックをまとめた入口。失敗時はレスポンス済み。</span>
+<span class="kw">func</span> (s *<span class="ty">Server</span>) getViewableVideo(w http.<span class="ty">ResponseWriter</span>, r *http.<span class="ty">Request</span>) (videoMeta, <span class="ty">string</span>, <span class="ty">bool</span>) {
+	uid := s.currentUser(r)
+	v, err := s.loadVideo(r.Context(), r.PathValue(<span class="st">"id"</span>))
+	<span class="kw">if</span> err != <span class="kw">nil</span> {
+		httpError(w, http.StatusNotFound, <span class="st">"動画が見つかりません"</span>)
+		<span class="kw">return</span> videoMeta{}, uid, <span class="kw">false</span>
+	}
+	<span class="kw">if</span> !canView(v, uid) {
+		<span class="cm">// 存在の有無も漏らさない</span>
+		httpError(w, http.StatusNotFound, <span class="st">"動画が見つかりません"</span>)
+		<span class="kw">return</span> videoMeta{}, uid, <span class="kw">false</span>
+	}
+	<span class="kw">return</span> v, uid, <span class="kw">true</span>
+}
+
+<span class="cm">// canView: 非公開は持ち主だけ。限定公開はリンクを知っていれば誰でも（NFR-6）。</span>
+<span class="kw">func</span> canView(v videoMeta, userID <span class="ty">string</span>) <span class="ty">bool</span> {
+	<span class="kw">return</span> v.OwnerID == userID || v.Visibility != <span class="st">"private"</span>
+}</code></pre>
+
+    <p>3段の手続きです。</p>
+    <ol>
+      <li><code>s.currentUser(r)</code> —— リクエストから「今、誰が見ているか」の利用者IDを取り出す。未ログインなら空文字。この関数が <code>?token=</code> も受け付けるのが Step 9 の主題です。</li>
+      <li><code>s.loadVideo(...)</code> —— URL の <code>{id}</code> で動画のメタ情報（<code>videoMeta</code>）を DB から引く。見つからなければ、あるいは不正な UUID なら <code>404</code>。</li>
+      <li><code>canView(v, uid)</code> —— その動画を、その人が見てよいかを判定。ダメなら<strong>やはり <code>404</code></strong>。</li>
+    </ol>
+    <p><code>canView</code> の1行に、要件 NFR-6 が凝縮されています。<code>v.OwnerID == userID || v.Visibility != "private"</code> —— つまり「<strong>持ち主本人</strong>」か、「<strong>非公開（private）ではない</strong>」なら見てよい。裏を返すと、<code>private</code> の動画は持ち主にしか見えず、<code>public</code>（公開）と <code>unlisted</code>（限定公開・リンクを知る人だけ）は誰でも見られる。第00章の <code>visibility CHECK ('public','unlisted','private')</code> が、ここで意味を持ちます。</p>
+
+    <div class="box hazard"><div class="box-k">⚠ 落とし穴 — 権限がないときも 403 ではなく 404 を返す</div>
+      <p><code>canView</code> が <code>false</code> のとき、直感的には「あなたには権限がありません（<code>403 Forbidden</code>）」を返したくなります。しかし本書は<strong>あえて <code>404 Not Found</code></strong> を返し、コメントに <code>存在の有無も漏らさない</code> と書いています。なぜか。<code>403</code> を返すと、攻撃者に「この ID の動画は<strong>存在する</strong>が、あなたには見せない」という情報を与えてしまう。動画 ID を総当たりすれば「どの ID が実在するか」の地図が描けてしまうのです。<code>404</code> で統一すれば、「見つからない」のか「見せてもらえない」のかを区別できず、<strong>非公開動画の存在そのものが秘密</strong>になります。<code>loadVideo</code> が「不正な UUID すら <code>404</code> に丸める」のも同じ思想（<code>errNotFound</code> に統一）。<strong>権限の否定と不存在を同じ応答に揃える</strong>のは、情報漏洩を防ぐ定石です。</p>
+    </div>
+
+    <div class="gonote"><div class="box-k">実装メモ · 「失敗時はレスポンス済み」という契約</div>
+      <p><code>getViewableVideo</code> のコメントに <code>失敗時はレスポンス済み</code> とあります。これは、この関数が <code>false</code> を返すとき、<strong>すでに <code>httpError</code> でクライアントに応答を書き終えている</strong>という契約です。だから呼び出し側の <code>handleMedia</code> は <code>if !ok { return }</code> と<strong>ただ関数を抜けるだけ</strong>でよく、自分でエラー応答を書く必要がありません。「エラー応答を書く責任を、判定した関数の側に持たせる」——このパターンにすると、呼び出し側が権限チェックの詳細（どんなステータス・メッセージを返すか）を知らずに済み、権限ロジックを1か所に集約できます。似た入口に <code>getOwnedVideo</code>（持ち主本人であることまで要求）もあり、用途で使い分けます。</p>
+    </div>
+
+    <h2 class="step" id="step-4"><span class="step-no">Step 4</span>第2の門: ready でない動画は絶対に渡さない — 状態と media_prefix</h2>
+    <p>権限の門を通ったら、次は「何を返すか」を <code>switch rel</code> で分けます。<code>rel</code> が <code>"thumbnail"</code> ならサムネイル（<code>v.ThumbnailKey</code>）を返すだけ。本題は <code>default</code> ケース —— HLS の目次と断片です。ここに<strong>本書で最も大事な配信の門</strong>があります。</p>
+
+    <div class="file-tag">internal/httpapi/media.go（default ケースの状態チェック・再掲）</div>
+    <pre><code>	<span class="kw">default</span>:
+		<span class="cm">// パスのすり抜け（../ など）を防いでから、この動画の現行世代のHLS領域に限定する</span>
+		clean := path.Clean(<span class="st">"/"</span> + rel)
+		<span class="kw">if</span> strings.Contains(clean, <span class="st">".."</span>) {
+			httpError(w, http.StatusBadRequest, <span class="st">"bad path"</span>)
+			<span class="kw">return</span>
+		}
+		<span class="kw">if</span> v.Status != <span class="st">"ready"</span> || v.MediaPrefix == <span class="st">""</span> {
+			httpError(w, http.StatusConflict, <span class="st">"この動画はまだ視聴できません"</span>)
+			<span class="kw">return</span>
+		}
+		<span class="cm">// media_prefix は ready の宣言と同時に確定した「配信してよい世代」の置き場。</span>
+		<span class="cm">// ゾンビ職人が別世代の場所に何を書いても、ここには現れない</span>
+		key = strings.TrimSuffix(v.MediaPrefix, <span class="st">"/"</span>) + clean</code></pre>
+
+    <p>パス安全のチェック（<code>clean</code> と <code>..</code>）は次の Step 5 で詳しく見ます。ここでは、その次の2行 —— <strong>状態と置き場の門</strong> —— に集中します。</p>
+    <p><code>if v.Status != "ready" || v.MediaPrefix == "" { ... StatusConflict }</code>。この1行が、第00章から繰り返してきた<strong>「DB の状態こそ唯一の真実。<code>ready</code> でない動画は絶対に配信しない」</strong>を、実行するコードにしたものです。<code>status</code> が <code>ready</code> でなければ（=<code>uploading</code> / <code>uploaded</code> / <code>processing</code> / <code>failed</code> のいずれか）、あるいは <code>media_prefix</code> がまだ空なら、<code>409 Conflict</code> を返して<strong>1バイトも保管庫を触りません</strong>。</p>
+    <p>なぜこの門が決定的なのか。第03章の <code>ready</code> 宣言のコードを思い出してください。職人は変換が完全に終わったとき、<strong>1文の条件つき UPDATE</strong> で <code>status = 'ready'</code> と <code>media_prefix = &lt;この実行の置き場&gt;</code> を<strong>同時に</strong>確定させました。</p>
+
+    <div class="file-tag">internal/transcode/transcode.go（第03章の ready 宣言 — 再掲）</div>
+    <pre><code>	tag, err = d.DB.Exec(ctx,
+		<span class="st">`UPDATE videos SET status = 'ready', status_changed_at = now(), duration_sec = $2, error_message = '',
+		        media_prefix = $3,
+		        thumbnail_key = CASE WHEN thumbnail_key = '' THEN $4 ELSE thumbnail_key END,
+		        published_at = COALESCE(published_at, now())
+		 WHERE id = $1 AND job_generation = $5`</span>,
+		videoID, <span class="kw">int</span>(info.Duration), prefix, prefix+<span class="st">"thumbnail.jpg"</span>, job.Generation)</code></pre>
+
+    <p>つまり <code>status = 'ready'</code> と <code>media_prefix = &lt;置き場&gt;</code> は<strong>常にセットで真になる</strong>。片方だけが真になる瞬間は存在しません（1つの UPDATE 文だから）。だから配信側の門 <code>v.Status != "ready" || v.MediaPrefix == ""</code> は、「変換が本当に完了し、かつ配信領域が確定している」ことを<strong>一発で保証</strong>できます。変換途中の半端な断片も、失敗した動画も、この門で確実に弾かれます。</p>
+
+    <p>そしてもう一段深い話が、コメントの <code>ゾンビ職人が別世代の場所に何を書いても、ここには現れない</code> です。第03章の白眉 —— <strong><code>job_generation</code>（fencing token）とストレージの世代分離</strong> —— が、この配信の門で最終的な意味を持ちます。</p>
+
+    <div class="ascii">なぜ media_prefix からしか配信しないと安全なのか
+
+  再アップロードで世代が進んだ動画（現在の世代 = g2）を考える。
+
+  ┌── 保管庫（MinIO）の中 ────────────────────────────┐
+  │  hls/&lt;id&gt;/g1-旧乱数/…   ← 世代1の成果物（負けた実行のゴミ）  │
+  │  hls/&lt;id&gt;/g2-新乱数/…   ← 世代2の成果物（現行）              │
+  │  hls/&lt;id&gt;/g1-別乱数/…   ← 生き返ったゾンビ職人が書いた残骸    │
+  └───────────────────────────────────────────────┘
+                              │
+       DB: media_prefix = "hls/&lt;id&gt;/g2-新乱数/"  ← ready 宣言で確定した1つ
+                              │
+                              ▼
+   handleMedia は key = media_prefix + パス でしか読まない
+   → g1 のゴミにも、ゾンビの残骸にも、絶対に手が届かない
+   ★ 「どの実行の成果物を配信するか」は DB の1列だけが決める</div>
+
+    <p>保管庫には、負けた実行のゴミやゾンビ職人が書いた残骸が残ることがあります（第03章の「実行ごとに一意な置き場」の割り切り）。しかし配信は <code>key = strings.TrimSuffix(v.MediaPrefix, "/") + clean</code> —— <strong><code>media_prefix</code> を根としたパスからしか組み立てません</strong>。<code>media_prefix</code> は DB の1列で、<code>ready</code> 宣言のときに1つだけ確定します。だから「どの実行の成果物を視聴者に見せるか」は<strong>DB のこの1列が単独で決める</strong>。ストレージにどんなゴミが散らばっていようと、配信に混ざる余地がありません。これが第03章で言った<strong>「ストレージ側の fencing」</strong>の、配信側から見た姿です。DB の条件つき UPDATE（状態の fencing）と、<code>media_prefix</code> 経由の配信（ストレージの fencing）が、両輪で「古い世代の成果を絶対に配信しない」を守っています。</p>
+
+    <div class="gonote"><div class="box-k">実装メモ · なぜ 409 Conflict なのか（404 でも 403 でもなく）</div>
+      <p><code>ready</code> でない動画への配信要求に、<code>404</code>（無い）でも <code>403</code>（禁止）でもなく <code>409 Conflict</code> を返しているのがポイントです。この動画は<strong>存在するし、権限もある</strong>（第1の門を通っている）。ただ<strong>今はまだその状態にない</strong>——「リソースの現在の状態と、要求が噛み合わない」。これはまさに <code>409 Conflict</code> の意味です。フロント側（第08章 Watch ページ）は、<code>video.status</code> を見て「変換中です」の表示を出すので、通常この <code>409</code> にユーザーが出くわすことはありません。しかし変換完了の直前など、状態の境目でリクエストが飛んだときに、<strong>正しい意味のステータスで断る</strong>ことで、フロントが状況を判断しやすくなります。メッセージも日本語で <code>この動画はまだ視聴できません</code> と、そのまま表示できる形にしてあります。</p>
+    </div>
+
+    <h2 class="step" id="step-5"><span class="step-no">Step 5</span>第3の門: パスのすり抜けを塞ぐ — path.Clean と ..</h2>
+    <p>Step 4 で後回しにした、<code>default</code> ケースの最初の2行に戻ります。ここは<strong>パストラバーサル（path traversal）</strong>という古典的な攻撃を塞ぐ門です。</p>
+
+    <div class="file-tag">internal/httpapi/media.go（パス安全のチェック・再掲）</div>
+    <pre><code>		<span class="cm">// パスのすり抜け（../ など）を防いでから、この動画の現行世代のHLS領域に限定する</span>
+		clean := path.Clean(<span class="st">"/"</span> + rel)
+		<span class="kw">if</span> strings.Contains(clean, <span class="st">".."</span>) {
+			httpError(w, http.StatusBadRequest, <span class="st">"bad path"</span>)
+			<span class="kw">return</span>
+		}</code></pre>
+
+    <p>思い出してください。<code>rel</code> は URL の <code>{path...}</code> から来る、<strong>クライアントが自由に指定できる文字列</strong>です。もし何のチェックもせず <code>key = media_prefix + rel</code> としたら、攻撃者はこう打てます —— <code>/api/videos/&lt;id&gt;/media/../../other-video/g1/master.m3u8</code>。<code>..</code> は「1つ上のディレクトリ」を意味するので、<code>media_prefix</code> の外に抜け出して<strong>別の動画の非公開成果物にたどり着けてしまう</strong>かもしれません。</p>
+    <p>この攻撃を、2段構えで塞ぎます。</p>
+    <ol>
+      <li><code>path.Clean("/" + rel)</code> —— 先頭に <code>/</code> を付けてから <code>path.Clean</code> にかけます。<code>path.Clean</code> は <code>./</code> を消し、可能な限り <code>..</code> を解決してパスを正規化します。先頭に <code>/</code> を付けるのは、「絶対パスとして正規化させ、ルートより上には抜けられないようにする」ため。例えば <code>path.Clean("/" + "360p/../seg000.ts")</code> は <code>/seg000.ts</code> になります。</li>
+      <li><code>if strings.Contains(clean, "..")</code> —— <strong>正規化しても、なお <code>..</code> が残っていたら拒否</strong>する。<code>path.Clean("/" + "../../etc")</code> のように、ルートを超えて上へ抜けようとするパスは、正規化後も <code>..</code> が残ることがあります（あるいは正規化で <code>/</code> に丸められる）。ここで <code>..</code> の残存を最終チェックして、<code>400 Bad Request</code> で門前払いします。</li>
+    </ol>
+    <p>この2段を通った <code>clean</code> は、必ず <code>/</code> で始まる正規化済みのパスです。だから最後の <code>key = strings.TrimSuffix(v.MediaPrefix, "/") + clean</code> は、<code>media_prefix</code>（末尾の <code>/</code> を削ったもの）に <code>/360p/seg000.ts</code> のような安全なパスを繋ぐだけになり、<strong>絶対に <code>media_prefix</code> の外へ出ない</strong>ことが保証されます。</p>
+
+    <div class="box hazard"><div class="box-k">⚠ 落とし穴 — 「入力を組み立てる前に正規化して検証する」の順序</div>
+      <p>この門で大事なのは<strong>順序</strong>です。「先に <code>key</code> を組み立ててしまってから安全性を確かめる」のではなく、<strong>クライアントの入力（<code>rel</code>）を正規化・検証してから、初めて信頼できる部品として <code>key</code> に組み込む</strong>。もし順序を逆にすると、組み立てた文字列を後から検査することになり、境界の判定が難しくなります（<code>media_prefix</code> 自体に <code>..</code> が無いことを別途保証する必要が出る、など）。<strong>外から来た値は、使う前に正規化して検証する</strong>——ファイルパスに限らず、SQL・HTML・シェルコマンドなど「外部入力を何かに組み込む」すべての場面に共通する鉄則です。本書ではさらに、たとえこの門を破られても <code>media_prefix</code> 経由でしか読まないので<strong>その動画の領域からは出られる可能性が下がる</strong>——多層防御になっています。</p>
+    </div>
+
+    <h2 class="step" id="step-6"><span class="step-no">Step 6</span>拡張子で扱いを変える — Content-Type とキャッシュ方針</h2>
+    <p>3つの門を通り、安全な <code>key</code> が組み上がりました。保管庫から取得（Step 7）する前後で、<strong>返す中身の種類に応じてヘッダを整える</strong>のがこの Step です。</p>
+
+    <div class="file-tag">internal/httpapi/media.go（ヘッダの整え・再掲）</div>
+    <pre><code>	ct := info.ContentType
+	<span class="kw">switch</span> path.Ext(key) {
+	<span class="kw">case</span> <span class="st">".m3u8"</span>:
+		ct = <span class="st">"application/vnd.apple.mpegurl"</span>
+		w.Header().Set(<span class="st">"Cache-Control"</span>, <span class="st">"no-cache"</span>)
+	<span class="kw">case</span> <span class="st">".ts"</span>:
+		ct = <span class="st">"video/mp2t"</span>
+		<span class="cm">// 断片は不変。ここが「近くに置いた写しから返す」（CDN/キャッシュ）の効きどころ</span>
+		w.Header().Set(<span class="st">"Cache-Control"</span>, <span class="st">"public, max-age=31536000, immutable"</span>)
+	<span class="kw">default</span>:
+		w.Header().Set(<span class="st">"Cache-Control"</span>, <span class="st">"public, max-age=300"</span>)
+	}
+	w.Header().Set(<span class="st">"Content-Type"</span>, ct)
+	w.Header().Set(<span class="st">"Content-Length"</span>, strconv.FormatInt(info.Size, <span class="st">10</span>))
+	io.Copy(w, obj)</code></pre>
+
+    <p><code>path.Ext(key)</code> でキーの拡張子を取り、3通りに分けます。ここには<strong>「目次と断片は性質が違う」</strong>という HLS の本質が現れます。</p>
+    <ul>
+      <li><strong><code>.m3u8</code>（目次）</strong> —— Content-Type は <code>application/vnd.apple.mpegurl</code>（HLS プレイリストの正式な MIME タイプ。これが正しくないと hls.js が中身を目次と認識できません）。そして <code>Cache-Control: no-cache</code>。<strong>目次はキャッシュさせない</strong>のがミソです。本書は VOD（録画済み動画）なので目次は不変ですが、ライブ配信では目次が刻々と伸びるため、目次を強くキャッシュすると古い目次を掴んでしまう。VOD でも <code>no-cache</code> にしておけば、将来ライブに拡張しても安全側です。</li>
+      <li><strong><code>.ts</code>（断片）</strong> —— Content-Type は <code>video/mp2t</code>（MPEG-2 Transport Stream）。そして <code>Cache-Control: public, max-age=31536000, immutable</code> —— <strong>1年間（31536000秒）、不変として、公にキャッシュ可</strong>。断片は一度書かれたら中身が変わらない（<code>seg000.ts</code> はずっと 0〜4秒の映像）ので、思いきり長くキャッシュさせられます。コメントの <code>「近くに置いた写しから返す」（CDN/キャッシュ）の効きどころ</code> がこれ。第09章で CDN を挟むと、この <code>immutable</code> な断片が世界中のエッジにキャッシュされ、視聴者の近くから瞬時に届くようになります。<strong>配信の重い部分（断片）ほど、キャッシュが効く設計</strong>になっているわけです。</li>
+      <li><strong>それ以外</strong>（サムネイル <code>.jpg</code> など）—— <code>public, max-age=300</code>（5分）。ほどほどにキャッシュ。</li>
+    </ul>
+    <p><code>Content-Length</code> には <code>info.Size</code>（保管庫が知っているオブジェクトのバイト数）をそのまま入れます。これでブラウザは「あと何バイト来るか」を知り、進捗を出せます。<code>strconv.FormatInt(info.Size, 10)</code> の <code>10</code> は「10進数の文字列に変換」の指定です。</p>
+
+    <div class="gonote"><div class="box-k">実装メモ · immutable は「もう問い合わせなくていい」の約束</div>
+      <p><code>Cache-Control: immutable</code> は比較的新しいディレクティブで、「このリソースは<strong>絶対に変わらないので、有効期限内は再検証（サーバへの問い合わせ）すら不要</strong>」をブラウザに伝えます。<code>max-age</code> だけだと、ブラウザは念のため <code>If-Modified-Since</code> などで「まだ最新?」と聞きに来ることがあります（特にリロード時）。<code>immutable</code> を付けると、その問い合わせも省け、キャッシュから即座に返せます。動画の断片のように「一度作ったら未来永劫中身が変わらない」ファイルにこそ、この宣言が効きます。逆に <code>.m3u8</code> の目次に <code>immutable</code> を付けてはいけません——将来ライブ配信で目次が伸びる可能性を潰してしまうからです。<strong>「変わらないもの」と「変わりうるもの」でキャッシュ方針を分ける</strong>——ここに配信の設計が出ます。</p>
+    </div>
+
+    <h2 class="step" id="step-7"><span class="step-no">Step 7</span>保管庫から読み出して流す — Storage.Get と io.Copy</h2>
+    <p>ヘッダを整える間にはさまっていた、実際に保管庫から中身を取り出す部分 <code>s.St.Get</code> を見ます。第02章で <code>storage.go</code> の presigned URL 生成（合鍵）を読みましたが、こちらは<strong>受付が自分で読み出して中継する</strong>道です。</p>
+
+    <div class="file-tag">internal/httpapi/media.go（取得部分・再掲）</div>
+    <pre><code>	obj, info, err := s.St.Get(r.Context(), key)
+	<span class="kw">if</span> err != <span class="kw">nil</span> {
+		httpError(w, http.StatusNotFound, <span class="st">"not found"</span>)
+		<span class="kw">return</span>
+	}
+	<span class="kw">defer</span> obj.Close()</code></pre>
+
+    <p><code>s.St.Get</code> の中身は <code>storage.go</code> にあります。</p>
+
+    <div class="file-tag">internal/storage/storage.go（Get）</div>
+    <pre><code><span class="kw">func</span> (s *<span class="ty">Storage</span>) Get(ctx context.<span class="ty">Context</span>, key <span class="ty">string</span>) (io.<span class="ty">ReadCloser</span>, minio.<span class="ty">ObjectInfo</span>, <span class="ty">error</span>) {
+	obj, err := s.internal.GetObject(ctx, s.Bucket, key, minio.<span class="ty">GetObjectOptions</span>{})
+	<span class="kw">if</span> err != <span class="kw">nil</span> {
+		<span class="kw">return</span> <span class="kw">nil</span>, minio.<span class="ty">ObjectInfo</span>{}, err
+	}
+	info, err := obj.Stat()
+	<span class="kw">if</span> err != <span class="kw">nil</span> {
+		obj.Close()
+		<span class="kw">return</span> <span class="kw">nil</span>, minio.<span class="ty">ObjectInfo</span>{}, err
+	}
+	<span class="kw">return</span> obj, info, <span class="kw">nil</span>
+}</code></pre>
+
+    <p><code>Get</code> は <code>s.internal</code>（コンテナ内用の MinIO クライアント）を使ってオブジェクトを取り、<code>obj.Stat()</code> でサイズや Content-Type などのメタ情報を確かめてから、<code>io.ReadCloser</code>（読み出し用のストリーム）と <code>ObjectInfo</code> を返します。注目は <code>s.internal</code> を使う点。第02章で見た通り、<code>storage.go</code> は<strong>2つのクライアント</strong>を持っています —— コンテナ内用（<code>S3_ENDPOINT: minio:9000</code>）とブラウザ用（<code>S3_PUBLIC_ENDPOINT: localhost:9000</code>）。<code>Get</code> は受付自身が読むので、コンテナ内から届く <code>internal</code> クライアントを使う。ここでは presigned URL（ブラウザに渡す合鍵）は一切登場しません。</p>
+
+    <p>そして最後の1行、<code>io.Copy(w, obj)</code>。これが配信の実行そのものです。</p>
+
+    <div class="file-tag">internal/httpapi/media.go（最後の1行）</div>
+    <pre><code>	io.Copy(w, obj)</code></pre>
+
+    <p><code>io.Copy(w, obj)</code> は「<code>obj</code>（保管庫からの読み出しストリーム）から読んで、<code>w</code>（HTTP 応答）へ書く」を、<strong>ファイル全体をメモリに載せずに、少しずつ（内部で決まったサイズのバッファで）</strong>繰り返します。1GB の断片でも（本書ではそんなに大きくなりませんが）、メモリを 1GB 食うことなく、読んだそばから応答へ流していく。<code>defer obj.Close()</code> は、この関数を抜けるときに読み出しストリームを必ず閉じる予約です（第00章の <code>defer pool.Close()</code> と同じ発想）。</p>
+
+    <div class="box hazard"><div class="box-k">⚠ 落とし穴 — なぜ presigned URL で直接読ませず、受付が中継するのか</div>
+      <p>第02章では、アップロードを「受付を通さず、ブラウザが presigned URL で保管庫へ<strong>直接 PUT</strong>」しました。大容量ファイルで受付を塞がないためです。では、<strong>ダウンロード（視聴）も presigned URL で直接読ませればいいのでは?</strong> と思うかもしれません。実際それは有力な選択肢で、大規模サービスでは配信を CDN や署名付き URL に寄せます（第09章で論じます）。しかし本書が<strong>あえて受付経由（<code>io.Copy</code> 中継）</strong>にしているのは、<strong>権限チェックを毎リクエスト効かせるため</strong>です。presigned URL を一度発行してしまうと、その URL を知る人は（有効期限内なら）誰でもアクセスでき、<strong>あとから権限を剥奪できません</strong>。非公開動画の断片1つ1つに、<code>getViewableVideo</code> の権限判定を通したい——だから受付が門番として中継する。<strong>「速さ（直接配信）」と「制御（毎回の権限確認）」のトレードオフ</strong>を、学習用の本書は制御側に倒しています。この境界の引き直しが第09章の主題です。</p>
+    </div>
+
+    <h2 class="step" id="step-8"><span class="step-no">Step 8</span>受け取る側 — hls.js で総目次を読み、画質を切り替える</h2>
+    <p>ここまでが「届ける側（Go）」。ここからは「受け取る側（React）」、<code>frontend/src/components/Player.tsx</code> です。<code>handleMedia</code> が返す HLS を、<strong>hls.js</strong> というライブラリで再生し、回線に合わせて画質を自動で切り替える —— 適応的配信の受け手を読みます。まず心臓部の <code>useEffect</code> から。</p>
+
+    <div class="file-tag">frontend/src/components/Player.tsx（先頭〜hls.js セットアップ）</div>
+    <pre><code><span class="kw">import</span> Hls <span class="kw">from</span> <span class="st">"hls.js"</span>;
+<span class="kw">import</span> { useEffect, useRef, useState } <span class="kw">from</span> <span class="st">"react"</span>;
+<span class="kw">import</span> { getToken, mediaSrc } <span class="kw">from</span> <span class="st">"../api"</span>;
+
+<span class="kw">interface</span> <span class="ty">Props</span> {
+  src: <span class="ty">string</span>; <span class="cm">// /api/videos/{id}/media/master.m3u8</span>
+  resumeSec: <span class="ty">number</span>;
+  onProgress: (sec: <span class="ty">number</span>) =&gt; <span class="ty">void</span>; <span class="cm">// 定期的に再生位置を報告</span>
+  onViewed: () =&gt; <span class="ty">void</span>; <span class="cm">// 一定秒数見たら一度だけ呼ぶ</span>
+}
+
+<span class="cm">// hls.js が総目次を読み、回線に合わせて画質を切り替える（適応的配信）。</span>
+<span class="kw">export function</span> Player({ src, resumeSec, onProgress, onViewed }: <span class="ty">Props</span>) {
+  <span class="kw">const</span> videoRef = useRef&lt;<span class="ty">HTMLVideoElement</span>&gt;(<span class="kw">null</span>);
+  <span class="kw">const</span> [levels, setLevels] = useState&lt;{ height: <span class="ty">number</span> }[]&gt;([]);
+  <span class="kw">const</span> [currentLevel, setCurrentLevel] = useState(-<span class="st">1</span>); <span class="cm">// -1 = 自動</span>
+  <span class="kw">const</span> [activeHeight, setActiveHeight] = useState&lt;<span class="ty">number</span> | <span class="kw">null</span>&gt;(<span class="kw">null</span>);
+  <span class="kw">const</span> hlsRef = useRef&lt;<span class="ty">Hls</span> | <span class="kw">null</span>&gt;(<span class="kw">null</span>);
+
+  useEffect(() =&gt; {
+    <span class="kw">const</span> video = videoRef.current;
+    <span class="kw">if</span> (!video) <span class="kw">return</span>;
+
+    <span class="kw">let</span> hls: <span class="ty">Hls</span> | <span class="kw">null</span> = <span class="kw">null</span>;
+    <span class="kw">if</span> (Hls.isSupported()) {
+      hls = <span class="kw">new</span> <span class="ty">Hls</span>({
+        <span class="cm">// 非公開動画の断片取得にも会員証を添える</span>
+        xhrSetup: (xhr) =&gt; {
+          <span class="kw">const</span> token = getToken();
+          <span class="kw">if</span> (token) xhr.setRequestHeader(<span class="st">"Authorization"</span>, <span class="st">`Bearer ${token}`</span>);
+        },
+      });
+      hlsRef.current = hls;
+      hls.loadSource(src);
+      hls.attachMedia(video);
+      hls.on(Hls.Events.MANIFEST_PARSED, (_e, data) =&gt; {
+        setLevels(data.levels.map((l) =&gt; ({ height: l.height })));
+      });
+      hls.on(Hls.Events.LEVEL_SWITCHED, (_e, data) =&gt; {
+        <span class="kw">const</span> level = hls!.levels[data.level];
+        <span class="kw">if</span> (level) setActiveHeight(level.height);
+      });
+    } <span class="kw">else if</span> (video.canPlayType(<span class="st">"application/vnd.apple.mpegurl"</span>)) {
+      <span class="cm">// Safari はネイティブ再生（トークンはクエリで添える）</span>
+      video.src = mediaSrc(src)!;
+    }</code></pre>
+
+    <p>まず <code>Props</code>。<code>src</code> のコメント <code>/api/videos/{id}/media/master.m3u8</code> が、Step 2 で見た <code>handleMedia</code> のエンドポイントと繋がりました。<strong>プレイヤーが最初に取りに行くのは総目次1枚</strong>。ここから配信が始まります。（この <code>src</code> は第08章の Watch ページが <code>video.mediaUrl</code> として渡します。）</p>
+    <p>本体の <code>useEffect</code> は、大きく<strong>2つの道</strong>に分かれます。<code>if (Hls.isSupported())</code> と <code>else if (video.canPlayType(...))</code> です。</p>
+
+    <p><strong>道1: hls.js が使える場合（Chrome / Firefox / Edge など大半のブラウザ）</strong>。これらのブラウザは、実は <code>.m3u8</code> をネイティブでは再生できません。そこで hls.js が<strong>JavaScript で HLS を解釈する</strong>——目次を読み、断片を <code>fetch</code> し、<code>&lt;video&gt;</code> 要素に流し込む仕事を肩代わりします。手順はこうです。</p>
+    <ul>
+      <li><code>new Hls({ xhrSetup: ... })</code> —— hls.js を作る。<code>xhrSetup</code> は「hls.js が断片や目次を取りに行くとき、そのリクエストに手を加える」フック。ここで会員証（トークン）を <code>Authorization</code> ヘッダに載せています。<strong>非公開動画の断片取得も、受付の権限チェックを通る</strong>ため（Step 3 の <code>getViewableVideo</code> が <code>currentUser</code> でこのヘッダを読む）。コメントの <code>非公開動画の断片取得にも会員証を添える</code> がこれ。</li>
+      <li><code>hls.loadSource(src)</code> —— 総目次（<code>master.m3u8</code>）を読み込む。</li>
+      <li><code>hls.attachMedia(video)</code> —— hls.js を <code>&lt;video&gt;</code> 要素に繋ぐ。以降、hls.js が断片を <code>&lt;video&gt;</code> に供給する。</li>
+      <li><code>hls.on(Hls.Events.MANIFEST_PARSED, ...)</code> —— 総目次を解析し終えたら発火。<code>data.levels</code>（=総目次に並んでいた画質の一覧、本書なら 360p/720p/1080p）を <code>setLevels</code> で状態に保存し、画質選択の <code>&lt;select&gt;</code> を描く材料にする。</li>
+      <li><code>hls.on(Hls.Events.LEVEL_SWITCHED, ...)</code> —— <strong>実際に画質が切り替わった瞬間</strong>に発火。切り替わった先の高さ（<code>level.height</code>）を <code>setActiveHeight</code> で保存し、「いま何 p で再生中か」の表示を更新する。<strong>回線が細くなれば hls.js が自動で 360p に落とし、太くなれば 720p に上げる</strong>——そのたびにこのイベントが飛びます。</li>
+    </ul>
+
+    <p><strong>道2: Safari（と iOS）の場合</strong>。<code>else if (video.canPlayType("application/vnd.apple.mpegurl"))</code>。HLS は元々 Apple が作った規格なので、<strong>Safari は <code>.m3u8</code> をネイティブで直接再生できます</strong>。だから hls.js を使わず、<code>video.src = mediaSrc(src)</code> と、<code>&lt;video&gt;</code> に総目次の URL を直接渡すだけ。あとはブラウザが自前で HLS を解釈し、画質も自動で切り替えます。ここで <code>mediaSrc(src)</code> を使っているのが Step 9 の核心 —— <strong>ネイティブ再生はヘッダを付けられないので、トークンをクエリ（<code>?token=</code>）で添える</strong>。</p>
+
+    <div class="ascii">2つの再生経路 — 同じ HLS を、ブラウザに応じて別々に鳴らす
+
+  総目次 master.m3u8
+        │
+        ├─ Chrome/Firefox/Edge ──▶ hls.js（JSがHLSを解釈）
+        │        断片取得: xhrSetup で Authorization: Bearer ヘッダを添える
+        │        画質切替: hls.js が回線を見て自動 / ユーザーが手動選択も可
+        │
+        └─ Safari/iOS ──────────▶ &lt;video&gt; ネイティブ再生
+                 断片取得: ヘッダを付けられない → mediaSrc で ?token= を添える
+                 画質切替: ブラウザ任せ（自動のみ）</div>
+
+    <p>後半の <code>useEffect</code> は再生体験の細部です。<code>loadedmetadata</code> で <code>resumeSec</code>（前回どこまで見たか）へ <code>currentTime</code> を戻す「続きから再生」、<code>timeupdate</code> で累計10秒見たら <code>onViewed</code> を1度だけ呼ぶ「視聴カウント」（第05章・第06章の視聴数に繋がる）、5秒おきに <code>onProgress</code> で位置を記録する仕組み。そして <code>return () =&gt; { ... hls?.destroy(); }</code> のクリーンアップで、ページを離れるとき hls.js を破棄しリスナーを外す。この後片付けが無いと、別の動画に移ったときに前の hls.js が裏で断片を取り続けてしまいます。</p>
+
+    <p>最後に、画面下の画質バーと手動切り替え。</p>
+
+    <div class="file-tag">frontend/src/components/Player.tsx（画質選択 UI）</div>
+    <pre><code>  <span class="kw">const</span> selectLevel = (idx: <span class="ty">number</span>) =&gt; {
+    setCurrentLevel(idx);
+    <span class="kw">if</span> (hlsRef.current) hlsRef.current.currentLevel = idx;
+  };
+
+  <span class="kw">return</span> (
+    &lt;<span class="ty">div</span> className=<span class="st">"player"</span>&gt;
+      &lt;<span class="ty">video</span> ref={videoRef} controls autoPlay playsInline /&gt;
+      {levels.length &gt; <span class="st">0</span> &amp;&amp; (
+        &lt;<span class="ty">div</span> className=<span class="st">"player-bar"</span>&gt;
+          &lt;<span class="ty">span</span> className=<span class="st">"quality-now"</span>&gt;
+            {activeHeight ? <span class="st">`${activeHeight}p`</span> : <span class="st">"…"</span>}
+            {currentLevel === -<span class="st">1</span> &amp;&amp; <span class="st">"（自動）"</span>}
+          &lt;/<span class="ty">span</span>&gt;
+          &lt;<span class="ty">select</span> value={currentLevel} onChange={(e) =&gt; selectLevel(Number(e.target.value))}&gt;
+            &lt;<span class="ty">option</span> value={-<span class="st">1</span>}&gt;自動&lt;/<span class="ty">option</span>&gt;
+            {levels.map((l, i) =&gt; (
+              &lt;<span class="ty">option</span> key={i} value={i}&gt;
+                {l.height}p
+              &lt;/<span class="ty">option</span>&gt;
+            ))}
+          &lt;/<span class="ty">select</span>&gt;
+        &lt;/<span class="ty">div</span>&gt;
+      )}
+    &lt;/<span class="ty">div</span>&gt;
+  );
+}</code></pre>
+
+    <p><code>selectLevel</code> は、ユーザーが画質の <code>&lt;select&gt;</code> を選んだときに <code>hlsRef.current.currentLevel = idx</code> を設定します。hls.js では <code>currentLevel</code> が <strong><code>-1</code> なら自動（回線に合わせてお任せ）</strong>、<code>0</code> 以上なら「その画質に固定」を意味します。<code>&lt;option value={-1}&gt;自動&lt;/option&gt;</code> がデフォルトで、視聴者が「720p 固定」を選べばそこに釘付けにできる。<code>{levels.length &gt; 0 && ...}</code> は「画質が1つ以上あるときだけバーを描く」の条件付き描画。<code>quality-now</code> は「いま何 p か」＋自動なら「（自動）」を表示します。<strong>普段は自動でよしなに、こだわりたい人は手動で</strong>——という配信サービスらしい UI が、たった数十行で組めています。</p>
+
+    <div class="gonote"><div class="box-k">実装メモ · 「適応的配信（ABR）」の本質 — 切り替えは断片の境目で起きる</div>
+      <p>適応ビットレート（Adaptive Bitrate, ABR）配信の肝は、<strong>画質の切り替えが「断片（4秒）の境目」で起きる</strong>ことです。hls.js は1つの断片を取るのにかかった時間から回線速度を推定し、「次の断片は 720p を取っても間に合うか、360p に落とすべきか」を<strong>断片ごとに</strong>判断します。だから HLS が「1本の動画を4秒ずつに割る」(Step 1) 構造になっているのは、この画質切り替えを成立させるためでもあります。もし1個の mp4 なら、途中で画質を変えることはできません。<strong>細かく割る → 断片ごとに画質を選び直せる → 回線の変動に追従できる</strong>——「割る」という第03章の判断が、ここで視聴体験として実る。ユーザーは「電車でトンネルに入って回線が細くなったら勝手に画質が落ち、抜けたら戻る」を、何も操作せず享受します。</p>
+    </div>
+
+    <h2 class="step" id="step-9"><span class="step-no">Step 9</span>なぜ ?token= を受け付けるのか — ヘッダを付けられない相手</h2>
+    <p>Step 8 で2度、<strong>トークンの添え方が2通り</strong>あることに触れました。hls.js は <code>xhrSetup</code> で <code>Authorization</code> ヘッダに載せ、Safari のネイティブ再生は <code>mediaSrc</code> で <code>?token=</code> クエリに載せる。この違いは、本書の <code>?token=</code> 受け付けという設計判断の核心です。</p>
+    <p>まず受け取る側、<code>server.go</code> の <code>currentUser</code>。第01章で認証を作ったときのこの関数が、配信でも効いています。</p>
+
+    <div class="file-tag">internal/httpapi/server.go（currentUser — ?token= の受け付け）</div>
+    <pre><code><span class="cm">// currentUser は会員証（トークン）から利用者IDを取り出す。未ログインなら空文字。</span>
+<span class="cm">// SSE や &lt;img&gt;/&lt;video&gt; などヘッダを付けられない場所のために ?token= も受け付ける。</span>
+<span class="kw">func</span> (s *<span class="ty">Server</span>) currentUser(r *http.<span class="ty">Request</span>) <span class="ty">string</span> {
+	tok := <span class="st">""</span>
+	<span class="kw">if</span> h := r.Header.Get(<span class="st">"Authorization"</span>); strings.HasPrefix(h, <span class="st">"Bearer "</span>) {
+		tok = strings.TrimPrefix(h, <span class="st">"Bearer "</span>)
+	} <span class="kw">else if</span> t := r.URL.Query().Get(<span class="st">"token"</span>); t != <span class="st">""</span> {
+		tok = t
+	}
+	<span class="kw">if</span> tok == <span class="st">""</span> {
+		<span class="kw">return</span> <span class="st">""</span>
+	}
+	uid, err := auth.ParseToken(s.Cfg.JWTSecret, tok)
+	<span class="kw">if</span> err != <span class="kw">nil</span> {
+		<span class="kw">return</span> <span class="st">""</span>
+	}
+	<span class="kw">return</span> uid
+}</code></pre>
+
+    <p><code>currentUser</code> はトークンを<strong>2か所から探します</strong>。まず <code>Authorization: Bearer &lt;token&gt;</code> ヘッダ。無ければ <code>?token=&lt;token&gt;</code> クエリ。どちらかで見つかれば <code>auth.ParseToken</code> で検証し、利用者IDを返す。<strong>なぜ2通りも用意するのか。</strong>——普通の API 呼び出し（<code>fetch</code>）ならヘッダを付けられます。第2章で見た <code>api.ts</code> の <code>request</code> 関数も、<code>headers.set("Authorization", ...)</code> でヘッダに載せていました。しかし、世の中には<strong>「リクエストにヘッダを付けられない」相手</strong>がいます。</p>
+    <ul>
+      <li><strong>Safari のネイティブ HLS 再生</strong>（<code>&lt;video src="...m3u8"&gt;</code>）—— ブラウザが自前で断片を取りに行くので、こちらから <code>Authorization</code> ヘッダを挿し込む隙がない。</li>
+      <li><strong><code>&lt;img src="..."&gt;</code>（サムネイル画像）</strong> —— 画像タグのリクエストにヘッダは付けられない。</li>
+      <li><strong><code>EventSource</code>（SSE 通知・第07章）</strong> —— サーバからの一方向通知。標準の <code>EventSource</code> はヘッダを付けられない。</li>
+    </ul>
+    <p>これらに対しては、<strong>URL のクエリ文字列にトークンを載せる</strong>しかありません。だから <code>currentUser</code> は <code>?token=</code> も受け付ける。フロント側で URL にトークンを添えるのが <code>api.ts</code> の <code>mediaSrc</code> です。</p>
+
+    <div class="file-tag">frontend/src/api.ts（mediaSrc）</div>
+    <pre><code><span class="cm">// &lt;img&gt; や &lt;video&gt; はヘッダを付けられないので、必要なら ?token= を添える。</span>
+<span class="kw">export function</span> mediaSrc(url: <span class="ty">string</span> | <span class="ty">undefined</span>): <span class="ty">string</span> | <span class="ty">undefined</span> {
+  <span class="kw">if</span> (!url) <span class="kw">return</span> <span class="ty">undefined</span>;
+  <span class="kw">const</span> token = getToken();
+  <span class="kw">if</span> (!token) <span class="kw">return</span> url;
+  <span class="kw">return</span> url + (url.includes(<span class="st">"?"</span>) ? <span class="st">"&amp;"</span> : <span class="st">"?"</span>) + <span class="st">"token="</span> + encodeURIComponent(token);
+}</code></pre>
+
+    <p><code>mediaSrc</code> は、トークンがあれば URL の末尾に <code>?token=&lt;トークン&gt;</code>（既にクエリがあれば <code>&amp;token=</code>）を付けて返すだけの小さな関数です。<code>encodeURIComponent</code> でトークンを URL 安全にエスケープしています。Step 8 の Safari 経路 <code>video.src = mediaSrc(src)!</code> が、これで <code>...master.m3u8?token=...</code> になり、Safari が付けられないヘッダの代わりに、URL に会員証を忍ばせる。一方、hls.js 経路は <code>fetch</code>（XHR）ベースなので <code>xhrSetup</code> でヘッダを付けられ、そちらはヘッダ方式を使う。<strong>相手がヘッダを付けられるかどうかで、会員証の添え方を切り替えている</strong>わけです。</p>
+
+    <div class="box hazard"><div class="box-k">⚠ 落とし穴 — クエリにトークンを載せる危うさと、それでも受け付ける判断</div>
+      <p><code>?token=</code> でトークンを URL に載せるのは、<strong>本来はやや危うい</strong>手です。URL は、(1) サーバのアクセスログに残りやすい、(2) ブラウザ履歴に残る、(3) <code>Referer</code> ヘッダで外部サイトに漏れうる——ヘッダのトークンより露出しやすい。それでも本書が受け付けるのは、<strong>ネイティブ HLS・<code>&lt;img&gt;</code>・<code>EventSource</code> という「ヘッダを付けられない正当な相手」を動かすには他に手が無い</strong>からです。学習用としては割り切っていますが、本番なら緩和策があります —— 配信用に<strong>短命の使い捨てトークン</strong>を別途発行する（ログイン用の長命 JWT をそのまま URL に載せない）、URL にトークンではなく<strong>署名付き URL</strong>（有効期限とスコープを署名に埋める）を使う、など。第09章で「配信をどこまで受付から切り離すか」を論じるとき、この露出とのトレードオフが再び顔を出します。いまは<strong>「ヘッダを付けられない相手のために <code>?token=</code> を開けている。それは意図的な妥協である」</strong>と理解しておけば十分です。</p>
+    </div>
+
+    <h2 class="step" id="step-10"><span class="step-no">Step 10</span>立ち上げて、動画を届ける</h2>
+    <p>配信の両側（届ける Go・受け取る React）が揃いました。実際に動画を上げ、変換の完了を待ち、配信の門が正しく働くことを確認します。第00〜03章の流れ（起動 → アップロード → 変換）は済んでいる前提です。</p>
+
+    <div class="box do"><div class="box-k">▸ 動かして確認 — 総目次（master.m3u8）が門を通って返る</div>
+      <p><code>ready</code> になった公開動画の総目次を、受付経由で取ります。HLS の案内板（<code>#EXT-X-STREAM-INF</code>）が返れば、Step 2〜6 の門を全部通り、Step 7 の <code>io.Copy</code> で中身が流れています。</p>
+      <pre class="term"><code><span class="cm"># &lt;id&gt; は ready になった公開動画の ID に置き換える</span>
+<span class="ps">$</span> curl -s http://localhost:8080/api/videos/&lt;id&gt;/media/master.m3u8
+<span class="out">#EXTM3U
+#EXT-X-VERSION:3
+#EXT-X-STREAM-INF:BANDWIDTH=1000000,RESOLUTION=640x360
+360p/playlist.m3u8
+#EXT-X-STREAM-INF:BANDWIDTH=3000000,RESOLUTION=1280x720
+720p/playlist.m3u8
+#EXT-X-STREAM-INF:BANDWIDTH=6000000,RESOLUTION=1920x1080
+1080p/playlist.m3u8</span>
+
+<span class="cm"># Content-Type とキャッシュ方針も見る（-I でヘッダだけ）</span>
+<span class="ps">$</span> curl -sI http://localhost:8080/api/videos/&lt;id&gt;/media/master.m3u8 | grep -i "content-type\|cache"
+<span class="out">Content-Type: application/vnd.apple.mpegurl
+Cache-Control: no-cache</span></code></pre>
+      <p>目次が <code>no-cache</code>、この後の断片が <code>immutable</code> になることを、次で確かめます。</p>
+    </div>
+
+    <div class="box do"><div class="box-k">▸ 動かして確認 — 断片（.ts）は1年キャッシュ・immutable</div>
+      <p>画質別目次をたどり、断片のヘッダを見ます。断片は不変なので長いキャッシュが付いているはずです。</p>
+      <pre class="term"><code><span class="ps">$</span> curl -sI http://localhost:8080/api/videos/&lt;id&gt;/media/360p/seg000.ts | grep -i "content-type\|cache"
+<span class="out">Content-Type: video/mp2t
+Cache-Control: public, max-age=31536000, immutable</span></code></pre>
+    </div>
+
+    <div class="box do"><div class="box-k">▸ 動かして確認 — 「まだ ready でない動画」は 409 で断られる</div>
+      <p>変換中（<code>processing</code>）や未変換（<code>uploaded</code>）の動画に配信を要求すると、Step 4 の門で <code>409</code> が返り、保管庫には一切触れません。</p>
+      <pre class="term"><code><span class="cm"># まだ変換が終わっていない動画の ID を使う</span>
+<span class="ps">$</span> curl -s -o /dev/null -w "%{http_code}\n" \
+      http://localhost:8080/api/videos/&lt;processing-id&gt;/media/master.m3u8
+<span class="out">409</span></code></pre>
+    </div>
+
+    <div class="box do"><div class="box-k">▸ 動かして確認 — 非公開動画は権限がないと 404（存在も漏らさない）</div>
+      <p>他人の非公開動画（<code>private</code>）を、トークン無し（または別人のトークン）で叩くと <code>404</code>。<code>403</code> ではなく <code>404</code> なのが Step 3 の肝です。持ち主本人のトークンなら見られます。</p>
+      <pre class="term"><code><span class="cm"># トークン無し → 非公開なので「見つからない」に丸められる</span>
+<span class="ps">$</span> curl -s -o /dev/null -w "%{http_code}\n" \
+      http://localhost:8080/api/videos/&lt;private-id&gt;/media/master.m3u8
+<span class="out">404</span>
+
+<span class="cm"># 持ち主のトークンをヘッダで添えると通る</span>
+<span class="ps">$</span> curl -s -o /dev/null -w "%{http_code}\n" \
+      -H "Authorization: Bearer &lt;owner-token&gt;" \
+      http://localhost:8080/api/videos/&lt;private-id&gt;/media/master.m3u8
+<span class="out">200</span>
+
+<span class="cm"># ヘッダを付けられない相手のため ?token= でも通る（Safari/ネイティブHLS 用）</span>
+<span class="ps">$</span> curl -s -o /dev/null -w "%{http_code}\n" \
+      "http://localhost:8080/api/videos/&lt;private-id&gt;/media/master.m3u8?token=&lt;owner-token&gt;"
+<span class="out">200</span></code></pre>
+    </div>
+
+    <div class="box do"><div class="box-k">▸ 動かして確認 — ブラウザで再生し、画質を切り替える</div>
+      <p>最後は目で見ます。<code>http://localhost:3000</code> を開き、<code>ready</code> の動画を再生。画面下のバーに「720p（自動）」のような表示が出て、<code>&lt;select&gt;</code> で画質を手動固定できれば、hls.js の適応配信が生きています。ブラウザの開発者ツール（Network タブ）を開くと、<code>master.m3u8</code> → <code>360p/playlist.m3u8</code> → <code>seg000.ts, seg001.ts …</code> と、HLS の3層が順に取得されていく様子が観察できます。回線を絞る（DevTools の Throttling で Slow 3G 等）と、hls.js が自動で低い画質に落とすのも確認できます。</p>
+    </div>
+
+    <h2>つまずき FAQ</h2>
+    <details class="qa"><summary>ブラウザで再生が始まらない。Network を見ると <code>master.m3u8</code> は 200 だが断片が来ない</summary>
+      <div class="qa-body"><p>まず総目次が返っているなら、状態・権限・パスの門は通っています。断片が来ない原因で多いのは、<strong>非公開動画の断片取得に会員証が添えられていない</strong>ケース。hls.js 経路なら <code>xhrSetup</code> で <code>Authorization</code> ヘッダを付けているはずですが、Safari のネイティブ再生に落ちていると <code>mediaSrc</code> の <code>?token=</code> 依存になります。<code>Hls.isSupported()</code> が <code>true</code> か（=hls.js 経路に入っているか）をコンソールで確認してください。もう一つは、動画が本当に <code>ready</code> か。<code>processing</code> のまま止まっていると総目次自体が <code>409</code> になるはずなので、200 が返る時点で <code>ready</code> のはずですが、断片だけ保管庫にアップロードし損ねている（第03章の <code>uploadDir</code> 失敗）可能性もあります。MinIO コンソール（<code>localhost:9001</code>）で <code>media_prefix</code> 配下に断片が揃っているか見ましょう。</p></div>
+    </details>
+    <details class="qa"><summary>アップロードは presigned URL で受付を通さず直接だったのに、なぜ配信は受付を通すの? 遅くない?</summary>
+      <div class="qa-body"><p>鋭い問いで、Step 7 の落とし穴の核心です。アップロードを直接にしたのは「大容量で受付を塞がない」ため。配信を受付経由にしたのは「<strong>毎リクエスト権限を確認したい</strong>」ため。presigned URL（合鍵）を配信に使うと、一度渡した URL は有効期限内なら誰でも使え、<strong>後から権限を剥奪できません</strong>。非公開動画の断片1つ1つに <code>canView</code> の判定を効かせたいので、受付が門番として中継します。たしかに受付の負荷は上がり、<code>io.Copy</code> の分だけ遅くなりますが、学習用の本書は「制御」を優先しました。実運用で速度が問題になれば、断片だけを CDN や署名付き URL に逃がす——その<strong>境界の引き直し</strong>が第09章の主題です。「速さ」と「制御」はトレードオフで、どちらが正解かはサービスの規模と要件で変わります。</p></div>
+    </details>
+    <details class="qa"><summary><code>media_prefix</code> を使わず、常に <code>hls/&lt;id&gt;/</code> 直下に上書きで書けば、配信も単純になるのでは?</summary>
+      <div class="qa-body"><p>単純にはなりますが、<strong>再アップロードと at-least-once キューで壊れます</strong>。第03章で見た通り、注文は二重に配送されうるし、停滞リトライで生き返ったゾンビ職人が古い成果を書き戻すこともある。もし固定の <code>hls/&lt;id&gt;/</code> に上書きしていたら、<strong>視聴中の動画のファイルが、別の実行に書き換えられて壊れる</strong>瞬間が生まれます（半分だけ新しい断片、みたいな状態）。だから職人は「実行ごとに一意な置き場」（<code>g&lt;世代&gt;-&lt;乱数&gt;/</code>）に書き、<code>ready</code> 宣言で <code>media_prefix</code> に「どの実行を配信するか」を1つだけ確定する。配信は <code>media_prefix</code> からしか読まないので、他の実行がどこに何を書こうと混ざらない。<strong>「書き込みは衝突させない・配信は1つの正解だけを指す」</strong>——この分離が、配信を壊さないための代償として <code>media_prefix</code> の存在意義です。DB の状態 fencing とストレージの世代分離が両輪で効いています。</p></div>
+    </details>
+
+    <h2>理解度チェック</h2>
+    <p>次の問いに<strong>自分の言葉で</strong>答えられたら、この章は卒業です。</p>
+    <details class="qa"><summary>1. <code>handleMedia</code> が保管庫（MinIO）を直接公開せず、受付を通して配信する理由を2つ挙げよ。そのうち「状態」の門は具体的にどのコードで、なぜ <code>media_prefix</code> と <code>status</code> をセットで見るのか。</summary>
+      <div class="qa-body"><p>理由は (1) <strong>権限を毎リクエスト確認するため</strong>（非公開動画を権限のない人に見せない・NFR-6）、(2) <strong><code>ready</code> でない動画を配信しないため</strong>（変換途中の半端な断片を渡さない）。状態の門は <code>if v.Status != "ready" || v.MediaPrefix == "" { ... 409 }</code>。<code>status</code> と <code>media_prefix</code> をセットで見るのは、第03章の <code>ready</code> 宣言が<strong>1文の条件つき UPDATE で両方を同時に確定させる</strong>から。片方だけ真になる瞬間が存在しないので、この2条件で「変換が完了し配信領域が確定している」を一発で保証できる。さらに <code>media_prefix</code> からしか <code>key</code> を組み立てないことで、ゾンビ職人や負けた実行がストレージのどこに何を書いても配信に混ざらない（ストレージの fencing）。</p></div>
+    </details>
+    <details class="qa"><summary>2. 権限が無いとき <code>403</code> ではなく <code>404</code> を返すのはなぜか。<code>path.Clean</code> と <code>strings.Contains(clean, "..")</code> の2段は、何の攻撃を、どういう順序で塞いでいるか。</summary>
+      <div class="qa-body"><p><code>404</code> にするのは<strong>存在の有無を漏らさない</strong>ため。<code>403</code> だと「この ID は実在するが見せない」と分かり、ID 総当たりで非公開動画の存在地図を描かれてしまう。<code>404</code> で統一すれば「無い」のか「見せない」のか区別できず、存在自体が秘密になる。パスの2段は<strong>パストラバーサル</strong>（<code>../</code> で <code>media_prefix</code> の外へ抜けて別動画の成果物に到達する攻撃）対策。順序が肝で、<strong>クライアント入力 <code>rel</code> を先に <code>path.Clean("/"+rel)</code> で正規化し、なお <code>..</code> が残れば <code>400</code> で拒否してから</strong>、初めて信頼できる部品として <code>key = media_prefix + clean</code> に組み込む。「外部入力は、使う前に正規化して検証する」の実践。</p></div>
+    </details>
+    <details class="qa"><summary>3. hls.js 経路と Safari ネイティブ経路で、非公開動画の断片取得に会員証を添える方法が違うのはなぜか。<code>?token=</code> を受け付ける利点とリスクを説明せよ。</summary>
+      <div class="qa-body"><p>hls.js は <code>fetch</code>（XHR）で断片を取るので <code>xhrSetup</code> フックで <code>Authorization: Bearer</code> ヘッダを付けられる。Safari のネイティブ HLS 再生（<code>&lt;video src&gt;</code>）はブラウザが自前で断片を取りに行くため<strong>ヘッダを挿し込む隙がない</strong>ので、<code>mediaSrc</code> で URL に <code>?token=</code> を添える。<code>currentUser</code> はヘッダとクエリの両方からトークンを探すので、どちらでも権限チェックが効く。<code>?token=</code> の利点は「ヘッダを付けられない相手（ネイティブHLS・<code>&lt;img&gt;</code>・<code>EventSource</code>）を動かせる」こと。リスクは URL がアクセスログ・ブラウザ履歴・<code>Referer</code> に残りやすく、ヘッダより露出すること。本番なら短命の使い捨てトークンや署名付き URL で緩和する。本書は学習用として意図的に妥協している。</p></div>
+    </details>
+
+    <h2>まとめ — 次の層へ</h2>
+    <p>この章で、動画は<strong>視聴者の画面まで運びきられました</strong>。届ける側の門番 <code>handleMedia</code> は、権限（誰に見せてよいか）・状態（<code>ready</code> か）・置き場（<code>media_prefix</code> からのみ）・パス安全（<code>..</code> を塞ぐ）の4つの門を通してから、初めて保管庫の中身を <code>io.Copy</code> で流す。受け取る側の <code>Player.tsx</code> は、hls.js が総目次を読んで回線に合わせ画質を自動で切り替え、Safari にはネイティブ再生でフォールバックし、非公開動画の断片にはヘッダか <code>?token=</code> で会員証を添える。第00章で刻んだ「DB の状態こそ唯一の真実」と、第03章で作った「世代とストレージの fencing」が、この配信の門で<strong>最終的な意味</strong>を持ちました —— <code>ready</code> でない動画は絶対に、古い世代の成果は絶対に、配信されない。</p>
+    <p>ここまでで、動画は「受け取られ・変換され・届けられる」という一生の背骨を通り抜けました。次の第05章では、その動画に<strong>反応</strong>を足します —— コメント、チャンネル登録。<code>social.go</code> と <code>Comments.tsx</code> を読み、木構造のコメント（返信の返信）や、同じ人が二度いいねできない仕組みを見ていきます。動画が「見られるだけのもの」から「人と人がつながる場」へ変わる、その最初の一歩です。</p>
+
+    <div class="chap-foot">
+      <a class="pager" href="03-transcode.html"><span class="dir">← 前へ</span>第03章 · 動画を変換する</a>
+      <a class="pager next" href="05-social.html"><span class="dir">次へ →</span>第05章 · 反応をつくる</a>
+    </div>
+  </main>
+</div>
+</body>
+</html>

@@ -1,0 +1,2239 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>第05章 SQL を実行する — ディスクからつくるデータベース</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500;600&family=Source+Serif+4:opsz,wght@8..60,400;8..60,600;8..60,700&family=Noto+Serif+JP:wght@400;600;700&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<div class="shell">
+
+  <aside class="spine">
+    <a class="wordmark" href="index.html">MINIDB · from scratch</a>
+    <div class="book-title">ディスクから<br>つくるデータベース</div>
+    <div class="book-sub">Go で B+Tree から SQL まで</div>
+
+    <div class="legend"><span>読む <b>↓</b></span><span>組む <b>↑</b></span></div>
+
+    <nav aria-label="目次">
+      <ul class="toc">
+        <li><a class="nav-item" href="index.html"><span class="nav-num">序</span><span class="nav-label">はじめに・準備<span class="nav-tag">Setup</span></span></a></li>
+        <li><a class="nav-item" href="00-disk.html"><span class="nav-num">00</span><span class="nav-label">ディスクとページ<span class="nav-tag">Disk</span></span></a></li>
+        <li><a class="nav-item" href="01-page.html"><span class="nav-num">01</span><span class="nav-label">ページの中身<span class="nav-tag">Page</span></span></a></li>
+        <li><a class="nav-item" href="02-buffer.html"><span class="nav-num">02</span><span class="nav-label">バッファプール<span class="nav-tag">Buffer</span></span></a></li>
+        <li><a class="nav-item" href="03-btree.html"><span class="nav-num">03</span><span class="nav-label">B+Tree 索引<span class="nav-tag">Index</span></span></a></li>
+        <li><a class="nav-item" href="04-catalog.html"><span class="nav-num">04</span><span class="nav-label">表とカタログ<span class="nav-tag">Catalog</span></span></a></li>
+        <li><a class="nav-item current" aria-current="page" href="05-sql.html"><span class="nav-num">05</span><span class="nav-label">SQL を実行する<span class="nav-tag">Query</span></span></a></li>
+        <li><a class="nav-item" href="06-wal.html"><span class="nav-num">06</span><span class="nav-label">壊れない仕組み<span class="nav-tag">WAL</span></span></a></li>
+        <li><a class="nav-item" href="07-txn.html"><span class="nav-num">07</span><span class="nav-label">索引とトランザクション<span class="nav-tag">Txn</span></span></a></li>
+      </ul>
+    </nav>
+
+    <div class="spine-foot">
+      各章は一つの層。<br>下（ディスク）から上（SQL）へ<br>積み上げて動かしていく。
+    </div>
+  </aside>
+
+  <main class="reading">
+    <div class="progress-tag">第05章 / 全8章 · 層: QUERY · 読了目安 5〜6時間</div>
+    <div class="eyebrow"><span>Query</span><span class="depth">— 言葉から結果へ</span></div>
+    <h1>SQL を実行する</h1>
+    <p class="lede">前の章までで、ディスクの上に「名前と型を持つ表」ができました。この章ではいよいよ最上層 — 文字列の SQL を受け取り、<strong>字句解析 → 構文解析 → 型検査 → 実行</strong>と運んで行を返す、クエリの通り道を作ります。この章を終えると、序章で触った対話シェルの中身が全部説明できるようになります。</p>
+
+    <div class="box goal"><div class="box-k">◈ この章のゴール</div>
+      <p>文字列 <code>"SELECT name FROM users WHERE age &gt; 28 ORDER BY age DESC"</code> を実行して行が返ること。そして、誤った SQL に対しては<strong>位置付きの構文エラー</strong>や<strong>実行前の型エラー</strong>を、理由を添えて報告できること。検収コマンドは <code>go test . -run TestM5QueryAndErrors -v</code> です。</p>
+    </div>
+
+    <div class="box map"><div class="box-k">☰ この章のステップ</div>
+      <ol>
+        <li><a href="#step-1">字句解析 — 文字列をトークンに刻む</a></li>
+        <li><a href="#step-2">AST — 文と式を「木」で表す</a></li>
+        <li><a href="#step-3">文のパース — 文法規則がそのまま関数になる</a></li>
+        <li><a href="#step-4">式のパース — 優先順位は「関数の階段」で作る</a></li>
+        <li><a href="#step-5">型検査 — 実行する前に間違いを見つける</a></li>
+        <li><a href="#step-6">実行の骨格 — Execute と CREATE TABLE / INSERT</a></li>
+        <li><a href="#step-7">プラン選択と残余フィルタ — 索引は候補を絞るだけ</a></li>
+        <li><a href="#step-8">SELECT パイプライン — filter → sort → project</a></li>
+        <li><a href="#step-9">db.go と REPL — 束ねて対話する</a></li>
+      </ol>
+    </div>
+
+    <h2>三段の変換 — コンパイラの前半戦と同じ</h2>
+    <p>まず、この章の主役になる例文をひとつ決めます。この 1 文を、章の最後まで追いかけ続けます。</p>
+    <pre><code><span class="st">"SELECT name FROM users WHERE age &gt; 28 ORDER BY age DESC"</span></code></pre>
+    <p>プログラムから見れば、これは<strong>ただの文字列</strong>です。55 文字のバイト列であって、「users という表から」も「age が 28 より大きい」も、まだどこにも存在しません。文字列を「実行できる何か」に変えるには、段階を踏んだ変換が必要です。minidb では次の 5 段を通ります。</p>
+
+    <div class="ascii">"SELECT name FROM users WHERE age &gt; 28 ORDER BY age DESC"
+                     │
+       ┌─────────────▼─────────────┐
+       │ ① 字句解析   lexer.go     │ 文字の並び → トークンの列
+       └─────────────┬─────────────┘
+                     │  [SELECT] [name] [FROM] [users] [WHERE] [age] [&gt;] [28] …
+       ┌─────────────▼─────────────┐
+       │ ② 構文解析   parser.go    │ トークンの列 → 構文木（AST）
+       └─────────────┬─────────────┘
+                     │  SelectStmt{ Table:users, Where:(age &gt; 28), OrderBy:age DESC }
+       ┌─────────────▼─────────────┐
+       │ ③ 型検査     eval.go      │ 実行せずに式の型を検査（空の表でも効く）
+       └─────────────┬─────────────┘
+       ┌─────────────▼─────────────┐
+       │ ④ 計画       exec.go      │ 索引で候補を絞れるか？ seqscan / indexscan
+       └─────────────┬─────────────┘
+       ┌─────────────▼─────────────┐
+       │ ⑤ 実行       exec.go      │ scan → filter → sort → project
+       └─────────────┬─────────────┘
+                     ▼
+          | name  | age |          ← 結果の行 ＋ 使ったプラン</div>
+
+    <p>①と②は、コンパイラの教科書の最初の 2 章とまったく同じ構図です。Go コンパイラも、ブラウザの JavaScript エンジンも、そして PostgreSQL も、テキストを受け取るソフトウェアはみなこの「<strong>字句解析 → 構文解析</strong>」から始まります。ここで一度作り方を身につけると、SQL に限らず「言葉を処理するプログラム」全般の土台になります。</p>
+    <p>それぞれの段に、初出の用語を一言ずつ定義しておきます。</p>
+    <ul>
+      <li><strong>字句解析（lexing）</strong> — 文字の並びを、意味の最小単位である<strong>トークン</strong>（<code>SELECT</code> という予約語、<code>name</code> という識別子、<code>28</code> という数値、<code>&gt;</code> という記号…）の列に刻むこと。担当は <code>lexer.go</code>。</li>
+      <li><strong>構文解析（parsing）</strong> — トークンの列を文法に照らして、<strong>AST（抽象構文木, Abstract Syntax Tree）</strong>という木構造に組み上げること。担当は <code>parser.go</code>。「木」である理由は Step 2 で説明します。</li>
+      <li><strong>型検査（type check）</strong> — AST を<strong>実行する前に</strong>眺めて、「INT の列と文字列を比較している」といった型の誤りを検出すること。担当は <code>eval.go</code>。</li>
+      <li><strong>実行計画（プラン）</strong> — 行をどう集めるかの選択。全行を順に読む <code>seqscan</code> か、B+Tree 索引で候補を絞る <code>indexscan</code> か。担当は <code>exec.go</code>。</li>
+      <li><strong>実行</strong> — 選んだ経路で行を集め、WHERE で絞り、ORDER BY で並べ、選択リストの列だけに絞って返すこと。同じく <code>exec.go</code>。</li>
+    </ul>
+    <p>大事なのは、各段が<strong>小さな入出力を持つただの関数</strong>だということです。<code>lex(string) → []token</code>、<code>Parse(string) → Stmt</code>、<code>Execute(Stmt) → *Result</code>。段と段のあいだには明確な受け渡し型があるので、1 段ずつ独立に理解できますし、独立にテストもできます。この章のコード量は本書で最大ですが、怖がる必要はありません。<strong>一度にひとつの段だけ</strong>を見ればいいのです。</p>
+    <p>なお、この章で使う下の層の道具は第03〜04章で作ったものだけです。思い出しておきましょう: <code>catalog.Value</code>（INT / TEXT / NULL を表す 1 セルの値）、<code>catalog.Schema</code>（列定義の並び。行のバイト列との相互変換 <code>Encode</code> / <code>Decode</code> を持つ）、<strong>ヒープ</strong>（行の置き場。行の物理的な住所が <strong>TID</strong>）、そして <strong>B+Tree</strong>（キー → TID の索引）です。</p>
+
+    <h2 class="step" id="step-1"><span class="step-no">Step 1</span>字句解析 — 文字列をトークンに刻む</h2>
+    <p>最初の段は字句解析です。作るのは <code>lex(input string) ([]token, error)</code> という関数ひとつ。仕事は、文字列を先頭から 1 文字ずつ眺めて、トークンの列に刻むことです。</p>
+    <p>なぜこの段を独立させるのでしょうか。パーサ（次の段）が文字を直接扱うと、「空白を読み飛ばす」「<code>&gt;=</code> は 2 文字で 1 個の記号」「<code>'it''s'</code> のクォートのエスケープ」といった<strong>文字レベルの雑事</strong>が、文法の処理と混ざってしまいます。先に文字の世界を片付けて、パーサには「きれいなトークンの列」だけを渡す。関心の分離です。</p>
+    <p>例文の先頭部分がどう刻まれるかを図にします。トークンには<strong>種類</strong>と<strong>元の文字列中の位置（pos）</strong>が付きます。この pos が、あとでエラー報告の主役になります。</p>
+
+    <div class="ascii">位置:  0      7    12   17    23    29  33 35 38    44 47  51
+入力:  SELECT name FROM users WHERE age &gt;  28 ORDER BY age DESC
+       ├────┤ ├──┤ ├──┤ ├───┤ ├───┤ ├─┤ ├┤ ├┤ ├───┤ ├┤ ├─┤ ├──┤
+種類:  Ident  Ident Ident Ident Ident Ident Sym Num Ident … 最後に EOF
+
+・空白はトークンにしない（読み飛ばす）
+・予約語（SELECT 等）も識別子（name 等）も、種類は同じ tkIdent
+  — 区別は「予約語表に載っているか」だけで行う</div>
+
+    <p>それでは全文です。約 130 行、この章でいちばん短いファイルです。</p>
+
+    <div class="file-tag">internal/sql/lexer.go</div>
+    <pre><code><span class="kw">package</span> sql
+
+<span class="kw">import</span> (
+	<span class="st">"fmt"</span>
+	<span class="st">"strings"</span>
+	<span class="st">"unicode"</span>
+)
+
+<span class="cm">// tokenKind はトークンの種類。</span>
+<span class="kw">type</span> <span class="ty">tokenKind</span> <span class="kw">int</span>
+
+<span class="kw">const</span> (
+	tkEOF <span class="ty">tokenKind</span> = <span class="kw">iota</span>
+	tkIdent          <span class="cm">// 識別子（テーブル名・列名）または予約語</span>
+	tkNumber         <span class="cm">// 整数リテラル</span>
+	tkString         <span class="cm">// '...' 文字列リテラル</span>
+	tkSymbol         <span class="cm">// ( ) , * = != &lt;&gt; &lt; &lt;= &gt; &gt;=</span>
+)
+
+<span class="kw">type</span> <span class="ty">token</span> <span class="kw">struct</span> {
+	kind <span class="ty">tokenKind</span>
+	text <span class="kw">string</span> <span class="cm">// 予約語は大文字化して保持。識別子は小文字化</span>
+	pos  <span class="kw">int</span>    <span class="cm">// 入力文字列中の位置（エラー報告用）</span>
+}
+
+<span class="cm">// keywords は予約語。識別子と区別するためだけに持つ（大文字小文字は区別しない）。</span>
+<span class="kw">var</span> keywords = <span class="kw">map</span>[<span class="kw">string</span>]<span class="kw">bool</span>{
+	<span class="st">"CREATE"</span>: <span class="kw">true</span>, <span class="st">"TABLE"</span>: <span class="kw">true</span>, <span class="st">"INDEX"</span>: <span class="kw">true</span>, <span class="st">"ON"</span>: <span class="kw">true</span>,
+	<span class="st">"INSERT"</span>: <span class="kw">true</span>, <span class="st">"INTO"</span>: <span class="kw">true</span>, <span class="st">"VALUES"</span>: <span class="kw">true</span>,
+	<span class="st">"SELECT"</span>: <span class="kw">true</span>, <span class="st">"FROM"</span>: <span class="kw">true</span>, <span class="st">"WHERE"</span>: <span class="kw">true</span>,
+	<span class="st">"AND"</span>: <span class="kw">true</span>, <span class="st">"OR"</span>: <span class="kw">true</span>, <span class="st">"ORDER"</span>: <span class="kw">true</span>, <span class="st">"BY"</span>: <span class="kw">true</span>,
+	<span class="st">"ASC"</span>: <span class="kw">true</span>, <span class="st">"DESC"</span>: <span class="kw">true</span>, <span class="st">"LIMIT"</span>: <span class="kw">true</span>,
+	<span class="st">"UPDATE"</span>: <span class="kw">true</span>, <span class="st">"SET"</span>: <span class="kw">true</span>, <span class="st">"DELETE"</span>: <span class="kw">true</span>,
+	<span class="st">"INT"</span>: <span class="kw">true</span>, <span class="st">"TEXT"</span>: <span class="kw">true</span>, <span class="st">"COUNT"</span>: <span class="kw">true</span>, <span class="st">"NULL"</span>: <span class="kw">true</span>,
+	<span class="st">"BEGIN"</span>: <span class="kw">true</span>, <span class="st">"COMMIT"</span>: <span class="kw">true</span>, <span class="st">"ROLLBACK"</span>: <span class="kw">true</span>,
+}
+
+<span class="cm">// lex は SQL 文字列をトークン列にする。</span>
+<span class="kw">func</span> lex(input <span class="kw">string</span>) ([]<span class="ty">token</span>, <span class="ty">error</span>) {
+	<span class="kw">var</span> toks []<span class="ty">token</span>
+	i := <span class="st">0</span>
+	<span class="kw">for</span> i &lt; <span class="kw">len</span>(input) {
+		c := input[i]
+		<span class="kw">switch</span> {
+		<span class="kw">case</span> c == <span class="st">' '</span> || c == <span class="st">'\t'</span> || c == <span class="st">'\n'</span> || c == <span class="st">'\r'</span>:
+			i++
+		<span class="kw">case</span> c == <span class="st">'\''</span>: <span class="cm">// 文字列リテラル（'' でクォートをエスケープ）</span>
+			start := i
+			i++
+			<span class="kw">var</span> sb strings.Builder
+			<span class="kw">for</span> {
+				<span class="kw">if</span> i &gt;= <span class="kw">len</span>(input) {
+					<span class="kw">return</span> <span class="kw">nil</span>, fmt.Errorf(<span class="st">"構文エラー: 位置 %d の文字列リテラルが閉じていない"</span>, start)
+				}
+				<span class="kw">if</span> input[i] == <span class="st">'\''</span> {
+					<span class="kw">if</span> i+<span class="st">1</span> &lt; <span class="kw">len</span>(input) &amp;&amp; input[i+<span class="st">1</span>] == <span class="st">'\''</span> {
+						sb.WriteByte(<span class="st">'\''</span>)
+						i += <span class="st">2</span>
+						<span class="kw">continue</span>
+					}
+					i++
+					<span class="kw">break</span>
+				}
+				sb.WriteByte(input[i])
+				i++
+			}
+			toks = <span class="kw">append</span>(toks, <span class="ty">token</span>{tkString, sb.String(), start})
+		<span class="kw">case</span> c &gt;= <span class="st">'0'</span> &amp;&amp; c &lt;= <span class="st">'9'</span> || (c == <span class="st">'-'</span> &amp;&amp; i+<span class="st">1</span> &lt; <span class="kw">len</span>(input) &amp;&amp; input[i+<span class="st">1</span>] &gt;= <span class="st">'0'</span> &amp;&amp; input[i+<span class="st">1</span>] &lt;= <span class="st">'9'</span>):
+			start := i
+			i++
+			<span class="kw">for</span> i &lt; <span class="kw">len</span>(input) &amp;&amp; input[i] &gt;= <span class="st">'0'</span> &amp;&amp; input[i] &lt;= <span class="st">'9'</span> {
+				i++
+			}
+			toks = <span class="kw">append</span>(toks, <span class="ty">token</span>{tkNumber, input[start:i], start})
+		<span class="kw">case</span> isIdentStart(<span class="kw">rune</span>(c)):
+			start := i
+			<span class="kw">for</span> i &lt; <span class="kw">len</span>(input) &amp;&amp; isIdentPart(<span class="kw">rune</span>(input[i])) {
+				i++
+			}
+			word := input[start:i]
+			up := strings.ToUpper(word)
+			<span class="kw">if</span> keywords[up] {
+				toks = <span class="kw">append</span>(toks, <span class="ty">token</span>{tkIdent, up, start})
+			} <span class="kw">else</span> {
+				toks = <span class="kw">append</span>(toks, <span class="ty">token</span>{tkIdent, strings.ToLower(word), start})
+			}
+		<span class="kw">case</span> strings.ContainsRune(<span class="st">"(),*="</span>, <span class="kw">rune</span>(c)):
+			toks = <span class="kw">append</span>(toks, <span class="ty">token</span>{tkSymbol, <span class="kw">string</span>(c), i})
+			i++
+		<span class="kw">case</span> c == <span class="st">'!'</span>:
+			<span class="kw">if</span> i+<span class="st">1</span> &lt; <span class="kw">len</span>(input) &amp;&amp; input[i+<span class="st">1</span>] == <span class="st">'='</span> {
+				toks = <span class="kw">append</span>(toks, <span class="ty">token</span>{tkSymbol, <span class="st">"!="</span>, i})
+				i += <span class="st">2</span>
+			} <span class="kw">else</span> {
+				<span class="kw">return</span> <span class="kw">nil</span>, fmt.Errorf(<span class="st">"構文エラー: 位置 %d の '!' が解釈できない"</span>, i)
+			}
+		<span class="kw">case</span> c == <span class="st">'&lt;'</span>:
+			<span class="kw">switch</span> {
+			<span class="kw">case</span> i+<span class="st">1</span> &lt; <span class="kw">len</span>(input) &amp;&amp; input[i+<span class="st">1</span>] == <span class="st">'='</span>:
+				toks = <span class="kw">append</span>(toks, <span class="ty">token</span>{tkSymbol, <span class="st">"&lt;="</span>, i})
+				i += <span class="st">2</span>
+			<span class="kw">case</span> i+<span class="st">1</span> &lt; <span class="kw">len</span>(input) &amp;&amp; input[i+<span class="st">1</span>] == <span class="st">'&gt;'</span>:
+				toks = <span class="kw">append</span>(toks, <span class="ty">token</span>{tkSymbol, <span class="st">"&lt;&gt;"</span>, i})
+				i += <span class="st">2</span>
+			<span class="kw">default</span>:
+				toks = <span class="kw">append</span>(toks, <span class="ty">token</span>{tkSymbol, <span class="st">"&lt;"</span>, i})
+				i++
+			}
+		<span class="kw">case</span> c == <span class="st">'&gt;'</span>:
+			<span class="kw">if</span> i+<span class="st">1</span> &lt; <span class="kw">len</span>(input) &amp;&amp; input[i+<span class="st">1</span>] == <span class="st">'='</span> {
+				toks = <span class="kw">append</span>(toks, <span class="ty">token</span>{tkSymbol, <span class="st">"&gt;="</span>, i})
+				i += <span class="st">2</span>
+			} <span class="kw">else</span> {
+				toks = <span class="kw">append</span>(toks, <span class="ty">token</span>{tkSymbol, <span class="st">"&gt;"</span>, i})
+				i++
+			}
+		<span class="kw">case</span> c == <span class="st">';'</span>:
+			i++ <span class="cm">// 文末のセミコロンは読み飛ばす</span>
+		<span class="kw">default</span>:
+			<span class="kw">return</span> <span class="kw">nil</span>, fmt.Errorf(<span class="st">"構文エラー: 位置 %d に解釈できない文字 %q"</span>, i, <span class="kw">string</span>(c))
+		}
+	}
+	toks = <span class="kw">append</span>(toks, <span class="ty">token</span>{tkEOF, <span class="st">""</span>, <span class="kw">len</span>(input)})
+	<span class="kw">return</span> toks, <span class="kw">nil</span>
+}
+
+<span class="kw">func</span> isIdentStart(r <span class="kw">rune</span>) <span class="kw">bool</span> {
+	<span class="kw">return</span> unicode.IsLetter(r) || r == <span class="st">'_'</span>
+}
+
+<span class="kw">func</span> isIdentPart(r <span class="kw">rune</span>) <span class="kw">bool</span> {
+	<span class="kw">return</span> unicode.IsLetter(r) || unicode.IsDigit(r) || r == <span class="st">'_'</span>
+}
+</code></pre>
+
+    <p>上から順に、初見でつまずきやすいところを拾います。</p>
+    <ul>
+      <li><strong><code>token</code> は3点セット</strong> — 種類（<code>kind</code>）と文字列（<code>text</code>）に加えて、<strong>位置（<code>pos</code>）</strong>を必ず持ち歩きます。パーサ書きの労力の 9 割は実はエラー報告に費やされる、と言われます。トークンに位置を 1 個持たせるだけで、「構文エラー（位置 23）」と指させるようになる。費用対効果が最高の、たった 1 フィールドです。</li>
+      <li><strong>予約語は「表」で区別する</strong> — <code>keywords</code> は <code>map[string]bool</code> を集合として使うイディオムです。字句解析の時点では <code>SELECT</code> も <code>users</code> も同じ「単語」で、予約語表に載っていれば大文字化、載っていなければ小文字化して保持します（81〜86 行目）。おかげで <code>select NAME from USERS</code> のような大文字小文字の揺れが、この段で全部吸収されます。</li>
+      <li><strong>文字列リテラルのエスケープ</strong> — SQL の流儀では、文字列の中のクォートは <code>''</code> と 2 個重ねて書きます（<code>'it''s'</code> → <code>it's</code>）。56〜60 行目がその処理で、「閉じクォートかと思ったら次もクォートだった」場合に 1 個のクォートとして書き足して先へ進みます。閉じないまま入力が尽きたら、開始位置付きでエラーです。</li>
+      <li><strong>2 文字記号は先読みで</strong> — <code>&lt;=</code> <code>&lt;&gt;</code> <code>&gt;=</code> <code>!=</code> は、1 文字目を見た時点で次の 1 文字を覗いて（<code>input[i+1]</code>）決めます。<code>&lt;</code> の case が三択（<code>&lt;=</code> / <code>&lt;&gt;</code> / <code>&lt;</code>）になっているのがその形です。順序に注意 — 長い候補から試さないと、<code>&lt;=</code> が <code>&lt;</code> と <code>=</code> に割れてしまいます。</li>
+      <li><strong>負の数はここで食べる</strong> — 68 行目の条件は「数字で始まる、<strong>または</strong> <code>-</code> の直後に数字が続く」です。文法に引き算がない minidb では、<code>-5</code> を最初から 1 個の数値トークンにしてしまうのが一番簡単です。</li>
+      <li><strong>最後に EOF の番兵</strong> — 123 行目で、入力の終わりに <code>tkEOF</code> トークンを 1 個置きます。これがあると、パーサは「トークンが尽きたか」をいちいち境界チェックせずに、「いま EOF トークンを見ているか」で判定できます。配列の末尾に置く見張り（番兵, sentinel）という古典的なテクニックです。</li>
+    </ul>
+
+    <div class="gonote"><div class="box-k">GO メモ · 条件なし switch と strings.Builder</div>
+      <p><code>switch { case 条件A: … case 条件B: … }</code> のように式を持たない <code>switch</code> は、<code>if / else if</code> の梯子を平らに書き直せる Go の構文です。上から順に評価され、最初に真になった case だけが実行されます（C と違い、勝手に次の case へ落ちません）。<code>lex</code> のように「先頭文字で分岐する」処理と相性抜群です。</p>
+      <p><code>strings.Builder</code> は文字列を少しずつ組み立てるためのバッファです。Go の文字列は不変なので、ループ内で <code>s += ...</code> と繋ぐと毎回コピーが走ります。<code>WriteByte</code> で溜めて最後に <code>String()</code> で取り出すのが定石です。</p>
+    </div>
+
+    <div class="box do"><div class="box-k">▸ 動かして確認</div>
+      <p><code>lex</code> は小文字始まりの非公開関数なので、パッケージの中から覗きます。<code>src/internal/sql/peek_test.go</code> という<strong>使い捨てのテストファイル</strong>を一時的に作ってください（確認が済んだら削除します）。まずは前半の <code>TestPeekTokens</code> だけで構いません。</p>
+      <div class="file-tag">internal/sql/peek_test.go（一時ファイル。確認後に削除）</div>
+      <pre><code><span class="kw">package</span> sql
+
+<span class="kw">import</span> (
+	<span class="st">"fmt"</span>
+	<span class="st">"testing"</span>
+)
+
+<span class="cm">// TestPeekTokens は字句解析の結果を覗くだけの使い捨てテスト。</span>
+<span class="kw">func</span> TestPeekTokens(t *testing.T) {
+	toks, err := lex(<span class="st">"SELECT name FROM users WHERE age &gt; 28 ORDER BY age DESC"</span>)
+	<span class="kw">if</span> err != <span class="kw">nil</span> {
+		t.Fatal(err)
+	}
+	kinds := <span class="kw">map</span>[<span class="ty">tokenKind</span>]<span class="kw">string</span>{
+		tkEOF: <span class="st">"EOF"</span>, tkIdent: <span class="st">"Ident"</span>, tkNumber: <span class="st">"Number"</span>,
+		tkString: <span class="st">"String"</span>, tkSymbol: <span class="st">"Symbol"</span>,
+	}
+	<span class="kw">for</span> _, tk := <span class="kw">range</span> toks {
+		fmt.Printf(<span class="st">"pos=%2d  %-6s  %q\n"</span>, tk.pos, kinds[tk.kind], tk.text)
+	}
+}
+
+<span class="cm">// TestPeekAST は構文木の形を覗くだけの使い捨てテスト。</span>
+<span class="kw">func</span> TestPeekAST(t *testing.T) {
+	stmt, err := Parse(<span class="st">"SELECT name FROM users WHERE age &gt; 28 AND name != 'bob'"</span>)
+	<span class="kw">if</span> err != <span class="kw">nil</span> {
+		t.Fatal(err)
+	}
+	fmt.Printf(<span class="st">"%#v\n"</span>, stmt)
+}
+</code></pre>
+      <pre class="term"><code><span class="ps">$</span> go test ./internal/sql -run TestPeekTokens -v
+<span class="out">=== RUN   TestPeekTokens
+pos= 0  Ident   "SELECT"
+pos= 7  Ident   "name"
+pos=12  Ident   "FROM"
+pos=17  Ident   "users"
+pos=23  Ident   "WHERE"
+pos=29  Ident   "age"
+pos=33  Symbol  "&gt;"
+pos=35  Number  "28"
+pos=38  Ident   "ORDER"
+pos=44  Ident   "BY"
+pos=47  Ident   "age"
+pos=51  Ident   "DESC"
+pos=55  EOF     ""
+--- PASS: TestPeekTokens (0.00s)
+PASS
+ok  	minidb/internal/sql	0.739s</span></code></pre>
+      <p>55 文字の文字列が、位置付きの 13 個のトークンになりました。空白が消え、<code>&gt;</code> と <code>28</code> が別々の種類になっていることを確かめてください。</p>
+    </div>
+
+    <h2 class="step" id="step-2"><span class="step-no">Step 2</span>AST — 文と式を「木」で表す</h2>
+    <p>次の段に進む前に、<strong>出力の形</strong>を先に決めます。パーサはトークン列を受け取って何を返すべきでしょうか。答えが AST（抽象構文木）です。</p>
+    <p>なぜ「木」なのか。SQL の WHERE 句を見てください: <code>age &gt; 28 AND name != 'bob'</code>。この式には<strong>入れ子構造</strong>があります。AND の左辺はそれ自体がひとつの比較式で、比較式の左辺は列参照、右辺はリテラル。「式の部品がまた式である」という再帰的な構造は、平らな配列では表せません。部品が子、全体が親になる<strong>木</strong>がぴったりなのです。</p>
+
+    <div class="ascii">SELECT name FROM users WHERE age &gt; 28 AND name != 'bob'
+                                └───────────┬───────────┘
+                                     この部分の AST:
+
+              AND                ← BinExpr{Op: OpAnd}
+           ┌───┴───┐
+           &gt;       !=            ← 比較も同じ BinExpr（Op が違うだけ）
+         ┌─┴─┐   ┌─┴──┐
+       age    28  name  'bob'
+     ColRef  Lit  ColRef  Lit    ← 葉は「列参照」か「リテラル」
+
+文全体はこの木を Where フィールドに抱えた構造体:
+  SelectStmt{ Items:[name], Table:"users", Where:(上の木), Limit:-1 }</div>
+
+    <p>コードにしましょう。<code>ast.go</code> は「minidb が話せる SQL の全文法」を型で書き下したカタログです。ロジックはほぼゼロで、宣言だけが並びます。</p>
+
+    <div class="file-tag">internal/sql/ast.go</div>
+    <pre><code><span class="cm">// Package sql は SQL 文字列の解釈と実行（M5）。</span>
+<span class="cm">// lexer（文字→トークン）→ parser（トークン→構文木）→ executor（構文木→行）の 3 段。</span>
+<span class="kw">package</span> sql
+
+<span class="kw">import</span> <span class="st">"minidb/internal/catalog"</span>
+
+<span class="cm">// Stmt は SQL 文の構文木。</span>
+<span class="kw">type</span> <span class="ty">Stmt</span> <span class="kw">interface</span>{ stmt() }
+
+<span class="cm">// ColDef は CREATE TABLE の列定義。</span>
+<span class="kw">type</span> <span class="ty">ColDef</span> <span class="kw">struct</span> {
+	Name <span class="kw">string</span>
+	Type catalog.<span class="ty">ColType</span>
+}
+
+<span class="kw">type</span> <span class="ty">CreateTableStmt</span> <span class="kw">struct</span> {
+	Name <span class="kw">string</span>
+	Cols []<span class="ty">ColDef</span>
+}
+
+<span class="kw">type</span> <span class="ty">CreateIndexStmt</span> <span class="kw">struct</span> {
+	Name  <span class="kw">string</span>
+	<span class="ty">Table</span> <span class="kw">string</span>
+	Col   <span class="kw">string</span>
+}
+
+<span class="kw">type</span> <span class="ty">InsertStmt</span> <span class="kw">struct</span> {
+	<span class="ty">Table</span> <span class="kw">string</span>
+	Rows  [][]<span class="ty">Expr</span> <span class="cm">// 各行は列数分のリテラル</span>
+}
+
+<span class="cm">// SelectItem は選択リストの 1 項目。Star / CountStar / 列名のいずれか。</span>
+<span class="kw">type</span> <span class="ty">SelectItem</span> <span class="kw">struct</span> {
+	Star      <span class="kw">bool</span>
+	CountStar <span class="kw">bool</span>
+	Col       <span class="kw">string</span>
+}
+
+<span class="kw">type</span> <span class="ty">OrderBy</span> <span class="kw">struct</span> {
+	Col  <span class="kw">string</span>
+	Desc <span class="kw">bool</span>
+}
+
+<span class="kw">type</span> <span class="ty">SelectStmt</span> <span class="kw">struct</span> {
+	Items   []<span class="ty">SelectItem</span>
+	<span class="ty">Table</span>   <span class="kw">string</span>
+	Where   <span class="ty">Expr</span> <span class="cm">// nil なら全件</span>
+	<span class="ty">OrderBy</span> *<span class="ty">OrderBy</span>
+	Limit   <span class="kw">int</span> <span class="cm">// 負なら無制限</span>
+}
+
+<span class="kw">type</span> <span class="ty">SetClause</span> <span class="kw">struct</span> {
+	Col  <span class="kw">string</span>
+	<span class="ty">Expr</span> <span class="ty">Expr</span>
+}
+
+<span class="kw">type</span> <span class="ty">UpdateStmt</span> <span class="kw">struct</span> {
+	<span class="ty">Table</span> <span class="kw">string</span>
+	Sets  []<span class="ty">SetClause</span>
+	Where <span class="ty">Expr</span>
+}
+
+<span class="kw">type</span> <span class="ty">DeleteStmt</span> <span class="kw">struct</span> {
+	<span class="ty">Table</span> <span class="kw">string</span>
+	Where <span class="ty">Expr</span>
+}
+
+<span class="kw">type</span> <span class="ty">BeginStmt</span> <span class="kw">struct</span>{}
+<span class="kw">type</span> <span class="ty">CommitStmt</span> <span class="kw">struct</span>{}
+<span class="kw">type</span> <span class="ty">RollbackStmt</span> <span class="kw">struct</span>{}
+
+<span class="kw">func</span> (<span class="ty">CreateTableStmt</span>) stmt() {}
+<span class="kw">func</span> (<span class="ty">CreateIndexStmt</span>) stmt() {}
+<span class="kw">func</span> (<span class="ty">InsertStmt</span>) stmt()      {}
+<span class="kw">func</span> (<span class="ty">SelectStmt</span>) stmt()      {}
+<span class="kw">func</span> (<span class="ty">UpdateStmt</span>) stmt()      {}
+<span class="kw">func</span> (<span class="ty">DeleteStmt</span>) stmt()      {}
+<span class="kw">func</span> (<span class="ty">BeginStmt</span>) stmt()       {}
+<span class="kw">func</span> (<span class="ty">CommitStmt</span>) stmt()      {}
+<span class="kw">func</span> (<span class="ty">RollbackStmt</span>) stmt()    {}
+
+<span class="cm">// Expr は WHERE / VALUES / SET に現れる式。</span>
+<span class="kw">type</span> <span class="ty">Expr</span> <span class="kw">interface</span>{ expr() }
+
+<span class="cm">// Lit はリテラル値。</span>
+<span class="kw">type</span> <span class="ty">Lit</span> <span class="kw">struct</span> {
+	Val catalog.<span class="ty">Value</span>
+}
+
+<span class="cm">// ColRef は列参照。</span>
+<span class="kw">type</span> <span class="ty">ColRef</span> <span class="kw">struct</span> {
+	Name <span class="kw">string</span>
+}
+
+<span class="cm">// BinOp は二項演算の種類。</span>
+<span class="kw">type</span> <span class="ty">BinOp</span> <span class="kw">int</span>
+
+<span class="kw">const</span> (
+	OpEq <span class="ty">BinOp</span> = <span class="kw">iota</span> <span class="cm">// =</span>
+	OpNe              <span class="cm">// != / &lt;&gt;</span>
+	OpLt              <span class="cm">// &lt;</span>
+	OpLe              <span class="cm">// &lt;=</span>
+	OpGt              <span class="cm">// &gt;</span>
+	OpGe              <span class="cm">// &gt;=</span>
+	OpAnd
+	OpOr
+)
+
+<span class="kw">func</span> (o <span class="ty">BinOp</span>) String() <span class="kw">string</span> {
+	<span class="kw">switch</span> o {
+	<span class="kw">case</span> OpEq:
+		<span class="kw">return</span> <span class="st">"="</span>
+	<span class="kw">case</span> OpNe:
+		<span class="kw">return</span> <span class="st">"&lt;&gt;"</span>
+	<span class="kw">case</span> OpLt:
+		<span class="kw">return</span> <span class="st">"&lt;"</span>
+	<span class="kw">case</span> OpLe:
+		<span class="kw">return</span> <span class="st">"&lt;="</span>
+	<span class="kw">case</span> OpGt:
+		<span class="kw">return</span> <span class="st">"&gt;"</span>
+	<span class="kw">case</span> OpGe:
+		<span class="kw">return</span> <span class="st">"&gt;="</span>
+	<span class="kw">case</span> OpAnd:
+		<span class="kw">return</span> <span class="st">"AND"</span>
+	<span class="kw">case</span> OpOr:
+		<span class="kw">return</span> <span class="st">"OR"</span>
+	}
+	<span class="kw">return</span> <span class="st">"?"</span>
+}
+
+<span class="cm">// BinExpr は二項演算。</span>
+<span class="kw">type</span> <span class="ty">BinExpr</span> <span class="kw">struct</span> {
+	Op   <span class="ty">BinOp</span>
+	L, R <span class="ty">Expr</span>
+}
+
+<span class="kw">func</span> (<span class="ty">Lit</span>) expr()     {}
+<span class="kw">func</span> (<span class="ty">ColRef</span>) expr()  {}
+<span class="kw">func</span> (<span class="ty">BinExpr</span>) expr() {}
+</code></pre>
+
+    <p>設計の要点は 2 つのインターフェース、<code>Stmt</code>（文）と <code>Expr</code>（式）です。</p>
+    <ul>
+      <li><strong><code>Stmt</code> は「SQL 文の種類」の直和</strong> — SELECT 文、INSERT 文、CREATE TABLE 文…。「このどれか 1 つ」を表したいとき、Go ではインターフェースを使います。<code>stmt()</code> は何もしない<strong>マーカーメソッド</strong>で、「この型は Stmt の仲間です」という所属表明だけが仕事です。これがないと、<code>string</code> でも何でも <code>Stmt</code> を名乗れてしまいます。</li>
+      <li><strong><code>Expr</code> は 3 種類しかない</strong> — リテラル <code>Lit</code>、列参照 <code>ColRef</code>、二項演算 <code>BinExpr</code>。<code>BinExpr</code> が左右に <code>Expr</code> を抱えているのが再帰の入口で、これだけで任意の深さの式の木が作れます。値の入れ物には第04章の <code>catalog.Value</code> をそのまま使うので、リテラルの型（INT / TEXT / NULL）の表現を新しく発明する必要はありません。</li>
+      <li><strong><code>SelectStmt</code> のフィールドは SQL の句と 1 対 1</strong> — <code>Items</code> が選択リスト、<code>Table</code> が FROM、<code>Where</code> が WHERE（<code>nil</code> なら句なし = 全件）、<code>OrderBy</code> がポインタ（<code>nil</code> なら句なし）、<code>Limit</code> は負なら無制限。「省略された句」を <code>nil</code> や負数で表す約束をここで決めています。</li>
+      <li><strong><code>BinOp</code> は演算子の列挙</strong> — <code>=</code> から <code>OR</code> までの 8 種を <code>iota</code> で番号付けし、<code>String()</code> でエラーメッセージ用の表示名を返します。比較も論理結合も同じ <code>BinExpr</code> で表し、<code>Op</code> だけで区別する — 型検査（Step 5）でこの割り切りが効いてきます。</li>
+    </ul>
+
+    <div class="gonote"><div class="box-k">GO メモ · マーカーメソッドで「どれか 1 つ」を表す</div>
+      <p>関数型言語の「直和型（この型は A か B か C のどれか）」を、Go では<strong>小さなインターフェース + 空実装メソッド</strong>で真似るのが定番です。<code>type Stmt interface{ stmt() }</code> と宣言し、仲間に入れたい各型に <code>func (CreateTableStmt) stmt() {}</code> のような空メソッドを生やします。使う側は type switch（Step 5 の GO メモ）で「実際はどの型か」を調べて分岐します。Go コンパイラ自身の AST（標準ライブラリ <code>go/ast</code>）もまったく同じ設計です。</p>
+    </div>
+
+    <div class="box do"><div class="box-k">▸ 動かして確認</div>
+      <p>Step 1 で作った <code>peek_test.go</code> の後半 <code>TestPeekAST</code> を実行します。パーサ（次の Step で読む <code>Parse</code>）に例文を食わせ、返ってきた構文木を <code>%#v</code>（Go の構造体をフィールド名付きで印字する書式）でそのまま出力するものです。</p>
+      <pre class="term"><code><span class="ps">$</span> go test ./internal/sql -run TestPeekAST -v
+<span class="out">=== RUN   TestPeekAST
+sql.SelectStmt{Items:[]sql.SelectItem{sql.SelectItem{Star:false, CountStar:false, Col:"name"}}, Table:"users", Where:sql.BinExpr{Op:6, L:sql.BinExpr{Op:4, L:sql.ColRef{Name:"age"}, R:sql.Lit{Val:catalog.Value{Type:0x1, Null:false, Int:28, Str:""}}}, R:sql.BinExpr{Op:1, L:sql.ColRef{Name:"name"}, R:sql.Lit{Val:catalog.Value{Type:0x2, Null:false, Int:0, Str:"bob"}}}}, OrderBy:(*sql.OrderBy)(nil), Limit:-1}
+--- PASS: TestPeekAST (0.00s)
+PASS
+ok  	minidb/internal/sql	0.892s</span></code></pre>
+      <p>1 行にひしゃげていますが、よく見ると先ほどの図と同じ木です。<code>Where</code> のルートが <code>BinExpr{Op:6, …}</code>（<code>Op</code> 6 番 = <code>OpAnd</code>）、その左が <code>Op:4</code>（= <code>OpGt</code>）で <code>age</code> と <code>28</code>、右が <code>Op:1</code>（= <code>OpNe</code>）で <code>name</code> と <code>"bob"</code>。<code>ast.go</code> の <code>const</code> 宣言と番号を突き合わせてみてください。確認が済んだら <code>peek_test.go</code> は削除して構いません（以降の確認では使いません）。</p>
+    </div>
+
+    <h2 class="step" id="step-3"><span class="step-no">Step 3</span>文のパース — 文法規則がそのまま関数になる</h2>
+    <p>入力（トークン列）と出力（AST）が揃ったので、いよいよ変換器を書きます。</p>
+    <p>まず素朴に考えてみましょう。トークン列を先頭から見て、<code>if toks[0] == "SELECT" { ... }</code> と場合分けしていけばよさそうです。実際 <code>SELECT name FROM users</code> 程度なら、それで書けてしまいます。</p>
+    <p>ところが <code>WHERE (age &gt; 28 AND name != 'bob') OR id = 1</code> を扱おうとした瞬間に破綻します。<strong>括弧の中には、また式が入るからです。</strong> そしてその式の中に、また括弧が入りうる。<code>((a AND b) OR (c AND d))</code> のように、<strong>入れ子の深さに上限がありません</strong>。if の入れ子を 5 段書いても 10 段書いても、その 1 つ深いものを書かれたら負けです。</p>
+    <p>「深さが決まらないもの」を扱う道具は、プログラミングには一つしかありません。<strong>再帰</strong>です。そして文法の側の「式の中に式が入る」という再帰を、そのままコードの「関数が自分（や仲間）を呼び戻す」という再帰に写しとったのが、これから書く<strong>再帰下降パーサ（recursive descent parser）</strong>です。</p>
+    <p>minidb のパーサは、この方式を手書きで実装します。再帰下降とは、「<strong>文法の規則 1 個につき、関数を 1 個書く</strong>」という方式のこと。たとえば「SELECT 文とは、SELECT・選択リスト・FROM・テーブル名・省略可能な WHERE 句…の並びである」という規則は、そのまま <code>parseSelect</code> という関数になります。規則が別の規則を参照していれば、関数が関数を呼ぶ。文法書がそのままコールグラフになる、いちばん素直なパーサの書き方です。</p>
+
+    <div class="ascii">Parse("SELECT name FROM users WHERE age &gt; 28 ORDER BY age DESC")
+│
+└─ parseStmt()            ← 先頭トークンで文の種類を見分ける
+   └─ parseSelect()       ← 規則: SELECT 選択リスト FROM テーブル名
+      │                            [WHERE 式] [ORDER BY 列 [DESC]] [LIMIT n]
+      ├─ ident("列名")               … name
+      ├─ expect(FROM) → ident(…)     … users
+      ├─ parseExpr()      ← WHERE の式（Step 4 で読む）
+      │   └─ parseOr() → parseAnd() → parseComparison()
+      │                                ├─ parsePrimary() … ColRef{age}
+      │                                └─ parsePrimary() … Lit{28}
+      └─ ORDER BY / LIMIT を読む      … OrderBy{age, Desc:true}
+
+規則 1 個 = 関数 1 個。文法書がそのままコールグラフになる。</div>
+
+    <p>ツールでパーサを自動生成する道（yacc など）もありますが、この規模なら手書きが最良です。生成ツールの学習コストがゼロで、エラーメッセージを 1 行単位で自分好みにでき、デバッガでそのまま追えます。実務のデータベースでも、たとえば SQLite のパーサは（生成ツール併用ながら）事実上手書きに近い密度で調整されています。</p>
+    <p>まずはファイルの前半 — パーサの部品と、6 種類の文のパースです。</p>
+
+    <div class="file-tag">internal/sql/parser.go（前半 — 文のパース。式のパースは Step 4）</div>
+    <pre><code><span class="kw">package</span> sql
+
+<span class="kw">import</span> (
+	<span class="st">"fmt"</span>
+	<span class="st">"strconv"</span>
+
+	<span class="st">"minidb/internal/catalog"</span>
+)
+
+<span class="cm">// Parse は SQL 文字列 1 文を構文木にする。</span>
+<span class="cm">// 誤った SQL は位置付きのエラーとして報告する（FR-09）。</span>
+<span class="kw">func</span> Parse(input <span class="kw">string</span>) (<span class="ty">Stmt</span>, <span class="ty">error</span>) {
+	toks, err := lex(input)
+	<span class="kw">if</span> err != <span class="kw">nil</span> {
+		<span class="kw">return</span> <span class="kw">nil</span>, err
+	}
+	p := &amp;<span class="ty">parser</span>{toks: toks}
+	stmt, err := p.parseStmt()
+	<span class="kw">if</span> err != <span class="kw">nil</span> {
+		<span class="kw">return</span> <span class="kw">nil</span>, err
+	}
+	<span class="kw">if</span> !p.at(tkEOF, <span class="st">""</span>) {
+		<span class="kw">return</span> <span class="kw">nil</span>, p.errorf(<span class="st">"文の後に余分なトークン %q がある"</span>, p.cur().text)
+	}
+	<span class="kw">return</span> stmt, <span class="kw">nil</span>
+}
+
+<span class="kw">type</span> <span class="ty">parser</span> <span class="kw">struct</span> {
+	toks []<span class="ty">token</span>
+	i    <span class="kw">int</span>
+}
+
+<span class="kw">func</span> (p *<span class="ty">parser</span>) cur() <span class="ty">token</span>  { <span class="kw">return</span> p.toks[p.i] }
+<span class="kw">func</span> (p *<span class="ty">parser</span>) advance()    { p.i++ }
+<span class="kw">func</span> (p *<span class="ty">parser</span>) at(k <span class="ty">tokenKind</span>, text <span class="kw">string</span>) <span class="kw">bool</span> {
+	t := p.cur()
+	<span class="kw">return</span> t.kind == k &amp;&amp; (text == <span class="st">""</span> || t.text == text)
+}
+
+<span class="cm">// accept は一致したら読み進めて true。</span>
+<span class="kw">func</span> (p *<span class="ty">parser</span>) accept(k <span class="ty">tokenKind</span>, text <span class="kw">string</span>) <span class="kw">bool</span> {
+	<span class="kw">if</span> p.at(k, text) {
+		p.advance()
+		<span class="kw">return</span> <span class="kw">true</span>
+	}
+	<span class="kw">return</span> <span class="kw">false</span>
+}
+
+<span class="cm">// expect は一致しなければ構文エラー。</span>
+<span class="kw">func</span> (p *<span class="ty">parser</span>) expect(k <span class="ty">tokenKind</span>, text <span class="kw">string</span>) (<span class="ty">token</span>, <span class="ty">error</span>) {
+	<span class="kw">if</span> p.at(k, text) {
+		t := p.cur()
+		p.advance()
+		<span class="kw">return</span> t, <span class="kw">nil</span>
+	}
+	want := text
+	<span class="kw">if</span> want == <span class="st">""</span> {
+		want = <span class="kw">map</span>[<span class="ty">tokenKind</span>]<span class="kw">string</span>{tkIdent: <span class="st">"識別子"</span>, tkNumber: <span class="st">"数値"</span>, tkString: <span class="st">"文字列"</span>}[k]
+	}
+	<span class="kw">return</span> <span class="ty">token</span>{}, p.errorf(<span class="st">"%q を期待したが %q が来た"</span>, want, p.cur().text)
+}
+
+<span class="kw">func</span> (p *<span class="ty">parser</span>) errorf(format <span class="kw">string</span>, args ...<span class="kw">any</span>) <span class="ty">error</span> {
+	<span class="kw">return</span> fmt.Errorf(<span class="st">"構文エラー（位置 %d）: %s"</span>, p.cur().pos, fmt.Sprintf(format, args...))
+}
+
+<span class="cm">// ident は予約語でない識別子を読む。</span>
+<span class="kw">func</span> (p *<span class="ty">parser</span>) ident(what <span class="kw">string</span>) (<span class="kw">string</span>, <span class="ty">error</span>) {
+	t := p.cur()
+	<span class="kw">if</span> t.kind != tkIdent || keywords[t.text] {
+		<span class="kw">return</span> <span class="st">""</span>, p.errorf(<span class="st">"%s を期待したが %q が来た"</span>, what, t.text)
+	}
+	p.advance()
+	<span class="kw">return</span> t.text, <span class="kw">nil</span>
+}
+
+<span class="kw">func</span> (p *<span class="ty">parser</span>) parseStmt() (<span class="ty">Stmt</span>, <span class="ty">error</span>) {
+	<span class="kw">switch</span> {
+	<span class="kw">case</span> p.accept(tkIdent, <span class="st">"CREATE"</span>):
+		<span class="kw">if</span> p.accept(tkIdent, <span class="st">"TABLE"</span>) {
+			<span class="kw">return</span> p.parseCreateTable()
+		}
+		<span class="kw">if</span> p.accept(tkIdent, <span class="st">"INDEX"</span>) {
+			<span class="kw">return</span> p.parseCreateIndex()
+		}
+		<span class="kw">return</span> <span class="kw">nil</span>, p.errorf(<span class="st">"CREATE の後は TABLE か INDEX"</span>)
+	<span class="kw">case</span> p.accept(tkIdent, <span class="st">"INSERT"</span>):
+		<span class="kw">return</span> p.parseInsert()
+	<span class="kw">case</span> p.accept(tkIdent, <span class="st">"SELECT"</span>):
+		<span class="kw">return</span> p.parseSelect()
+	<span class="kw">case</span> p.accept(tkIdent, <span class="st">"UPDATE"</span>):
+		<span class="kw">return</span> p.parseUpdate()
+	<span class="kw">case</span> p.accept(tkIdent, <span class="st">"DELETE"</span>):
+		<span class="kw">return</span> p.parseDelete()
+	<span class="kw">case</span> p.accept(tkIdent, <span class="st">"BEGIN"</span>):
+		<span class="kw">return</span> <span class="ty">BeginStmt</span>{}, <span class="kw">nil</span>
+	<span class="kw">case</span> p.accept(tkIdent, <span class="st">"COMMIT"</span>):
+		<span class="kw">return</span> <span class="ty">CommitStmt</span>{}, <span class="kw">nil</span>
+	<span class="kw">case</span> p.accept(tkIdent, <span class="st">"ROLLBACK"</span>):
+		<span class="kw">return</span> <span class="ty">RollbackStmt</span>{}, <span class="kw">nil</span>
+	}
+	<span class="kw">return</span> <span class="kw">nil</span>, p.errorf(<span class="st">"SQL 文の先頭として %q は解釈できない"</span>, p.cur().text)
+}
+
+<span class="kw">func</span> (p *<span class="ty">parser</span>) parseCreateTable() (<span class="ty">Stmt</span>, <span class="ty">error</span>) {
+	name, err := p.ident(<span class="st">"テーブル名"</span>)
+	<span class="kw">if</span> err != <span class="kw">nil</span> {
+		<span class="kw">return</span> <span class="kw">nil</span>, err
+	}
+	<span class="kw">if</span> _, err := p.expect(tkSymbol, <span class="st">"("</span>); err != <span class="kw">nil</span> {
+		<span class="kw">return</span> <span class="kw">nil</span>, err
+	}
+	<span class="kw">var</span> cols []<span class="ty">ColDef</span>
+	<span class="kw">for</span> {
+		colName, err := p.ident(<span class="st">"列名"</span>)
+		<span class="kw">if</span> err != <span class="kw">nil</span> {
+			<span class="kw">return</span> <span class="kw">nil</span>, err
+		}
+		<span class="kw">var</span> typ catalog.<span class="ty">ColType</span>
+		<span class="kw">switch</span> {
+		<span class="kw">case</span> p.accept(tkIdent, <span class="st">"INT"</span>):
+			typ = catalog.IntType
+		<span class="kw">case</span> p.accept(tkIdent, <span class="st">"TEXT"</span>):
+			typ = catalog.TextType
+		<span class="kw">default</span>:
+			<span class="kw">return</span> <span class="kw">nil</span>, p.errorf(<span class="st">"列 %s の型は INT か TEXT"</span>, colName)
+		}
+		cols = <span class="kw">append</span>(cols, <span class="ty">ColDef</span>{Name: colName, Type: typ})
+		<span class="kw">if</span> p.accept(tkSymbol, <span class="st">","</span>) {
+			<span class="kw">continue</span>
+		}
+		<span class="kw">break</span>
+	}
+	<span class="kw">if</span> _, err := p.expect(tkSymbol, <span class="st">")"</span>); err != <span class="kw">nil</span> {
+		<span class="kw">return</span> <span class="kw">nil</span>, err
+	}
+	<span class="kw">return</span> <span class="ty">CreateTableStmt</span>{Name: name, Cols: cols}, <span class="kw">nil</span>
+}
+
+<span class="kw">func</span> (p *<span class="ty">parser</span>) parseCreateIndex() (<span class="ty">Stmt</span>, <span class="ty">error</span>) {
+	name, err := p.ident(<span class="st">"索引名"</span>)
+	<span class="kw">if</span> err != <span class="kw">nil</span> {
+		<span class="kw">return</span> <span class="kw">nil</span>, err
+	}
+	<span class="kw">if</span> _, err := p.expect(tkIdent, <span class="st">"ON"</span>); err != <span class="kw">nil</span> {
+		<span class="kw">return</span> <span class="kw">nil</span>, err
+	}
+	table, err := p.ident(<span class="st">"テーブル名"</span>)
+	<span class="kw">if</span> err != <span class="kw">nil</span> {
+		<span class="kw">return</span> <span class="kw">nil</span>, err
+	}
+	<span class="kw">if</span> _, err := p.expect(tkSymbol, <span class="st">"("</span>); err != <span class="kw">nil</span> {
+		<span class="kw">return</span> <span class="kw">nil</span>, err
+	}
+	col, err := p.ident(<span class="st">"列名"</span>)
+	<span class="kw">if</span> err != <span class="kw">nil</span> {
+		<span class="kw">return</span> <span class="kw">nil</span>, err
+	}
+	<span class="kw">if</span> _, err := p.expect(tkSymbol, <span class="st">")"</span>); err != <span class="kw">nil</span> {
+		<span class="kw">return</span> <span class="kw">nil</span>, err
+	}
+	<span class="kw">return</span> <span class="ty">CreateIndexStmt</span>{Name: name, <span class="ty">Table</span>: table, Col: col}, <span class="kw">nil</span>
+}
+
+<span class="kw">func</span> (p *<span class="ty">parser</span>) parseInsert() (<span class="ty">Stmt</span>, <span class="ty">error</span>) {
+	<span class="kw">if</span> _, err := p.expect(tkIdent, <span class="st">"INTO"</span>); err != <span class="kw">nil</span> {
+		<span class="kw">return</span> <span class="kw">nil</span>, err
+	}
+	table, err := p.ident(<span class="st">"テーブル名"</span>)
+	<span class="kw">if</span> err != <span class="kw">nil</span> {
+		<span class="kw">return</span> <span class="kw">nil</span>, err
+	}
+	<span class="kw">if</span> _, err := p.expect(tkIdent, <span class="st">"VALUES"</span>); err != <span class="kw">nil</span> {
+		<span class="kw">return</span> <span class="kw">nil</span>, err
+	}
+	<span class="kw">var</span> rows [][]<span class="ty">Expr</span>
+	<span class="kw">for</span> {
+		<span class="kw">if</span> _, err := p.expect(tkSymbol, <span class="st">"("</span>); err != <span class="kw">nil</span> {
+			<span class="kw">return</span> <span class="kw">nil</span>, err
+		}
+		<span class="kw">var</span> <span class="ty">row</span> []<span class="ty">Expr</span>
+		<span class="kw">for</span> {
+			e, err := p.parsePrimary()
+			<span class="kw">if</span> err != <span class="kw">nil</span> {
+				<span class="kw">return</span> <span class="kw">nil</span>, err
+			}
+			<span class="ty">row</span> = <span class="kw">append</span>(<span class="ty">row</span>, e)
+			<span class="kw">if</span> p.accept(tkSymbol, <span class="st">","</span>) {
+				<span class="kw">continue</span>
+			}
+			<span class="kw">break</span>
+		}
+		<span class="kw">if</span> _, err := p.expect(tkSymbol, <span class="st">")"</span>); err != <span class="kw">nil</span> {
+			<span class="kw">return</span> <span class="kw">nil</span>, err
+		}
+		rows = <span class="kw">append</span>(rows, <span class="ty">row</span>)
+		<span class="kw">if</span> p.accept(tkSymbol, <span class="st">","</span>) {
+			<span class="kw">continue</span>
+		}
+		<span class="kw">break</span>
+	}
+	<span class="kw">return</span> <span class="ty">InsertStmt</span>{<span class="ty">Table</span>: table, Rows: rows}, <span class="kw">nil</span>
+}
+
+<span class="kw">func</span> (p *<span class="ty">parser</span>) parseSelect() (<span class="ty">Stmt</span>, <span class="ty">error</span>) {
+	<span class="kw">var</span> items []<span class="ty">SelectItem</span>
+	<span class="kw">for</span> {
+		<span class="kw">switch</span> {
+		<span class="kw">case</span> p.accept(tkSymbol, <span class="st">"*"</span>):
+			items = <span class="kw">append</span>(items, <span class="ty">SelectItem</span>{Star: <span class="kw">true</span>})
+		<span class="kw">case</span> p.accept(tkIdent, <span class="st">"COUNT"</span>):
+			<span class="kw">if</span> _, err := p.expect(tkSymbol, <span class="st">"("</span>); err != <span class="kw">nil</span> {
+				<span class="kw">return</span> <span class="kw">nil</span>, err
+			}
+			<span class="kw">if</span> _, err := p.expect(tkSymbol, <span class="st">"*"</span>); err != <span class="kw">nil</span> {
+				<span class="kw">return</span> <span class="kw">nil</span>, err
+			}
+			<span class="kw">if</span> _, err := p.expect(tkSymbol, <span class="st">")"</span>); err != <span class="kw">nil</span> {
+				<span class="kw">return</span> <span class="kw">nil</span>, err
+			}
+			items = <span class="kw">append</span>(items, <span class="ty">SelectItem</span>{CountStar: <span class="kw">true</span>})
+		<span class="kw">default</span>:
+			col, err := p.ident(<span class="st">"列名"</span>)
+			<span class="kw">if</span> err != <span class="kw">nil</span> {
+				<span class="kw">return</span> <span class="kw">nil</span>, err
+			}
+			items = <span class="kw">append</span>(items, <span class="ty">SelectItem</span>{Col: col})
+		}
+		<span class="kw">if</span> p.accept(tkSymbol, <span class="st">","</span>) {
+			<span class="kw">continue</span>
+		}
+		<span class="kw">break</span>
+	}
+	<span class="kw">if</span> _, err := p.expect(tkIdent, <span class="st">"FROM"</span>); err != <span class="kw">nil</span> {
+		<span class="kw">return</span> <span class="kw">nil</span>, err
+	}
+	table, err := p.ident(<span class="st">"テーブル名"</span>)
+	<span class="kw">if</span> err != <span class="kw">nil</span> {
+		<span class="kw">return</span> <span class="kw">nil</span>, err
+	}
+	stmt := <span class="ty">SelectStmt</span>{Items: items, <span class="ty">Table</span>: table, Limit: -<span class="st">1</span>}
+	<span class="kw">if</span> p.accept(tkIdent, <span class="st">"WHERE"</span>) {
+		w, err := p.parseExpr()
+		<span class="kw">if</span> err != <span class="kw">nil</span> {
+			<span class="kw">return</span> <span class="kw">nil</span>, err
+		}
+		stmt.Where = w
+	}
+	<span class="kw">if</span> p.accept(tkIdent, <span class="st">"ORDER"</span>) {
+		<span class="kw">if</span> _, err := p.expect(tkIdent, <span class="st">"BY"</span>); err != <span class="kw">nil</span> {
+			<span class="kw">return</span> <span class="kw">nil</span>, err
+		}
+		col, err := p.ident(<span class="st">"列名"</span>)
+		<span class="kw">if</span> err != <span class="kw">nil</span> {
+			<span class="kw">return</span> <span class="kw">nil</span>, err
+		}
+		ob := &amp;<span class="ty">OrderBy</span>{Col: col}
+		<span class="kw">if</span> p.accept(tkIdent, <span class="st">"DESC"</span>) {
+			ob.Desc = <span class="kw">true</span>
+		} <span class="kw">else</span> {
+			p.accept(tkIdent, <span class="st">"ASC"</span>)
+		}
+		stmt.<span class="ty">OrderBy</span> = ob
+	}
+	<span class="kw">if</span> p.accept(tkIdent, <span class="st">"LIMIT"</span>) {
+		t, err := p.expect(tkNumber, <span class="st">""</span>)
+		<span class="kw">if</span> err != <span class="kw">nil</span> {
+			<span class="kw">return</span> <span class="kw">nil</span>, err
+		}
+		n, err := strconv.Atoi(t.text)
+		<span class="kw">if</span> err != <span class="kw">nil</span> || n &lt; <span class="st">0</span> {
+			<span class="kw">return</span> <span class="kw">nil</span>, p.errorf(<span class="st">"LIMIT の値 %q が不正"</span>, t.text)
+		}
+		stmt.Limit = n
+	}
+	<span class="kw">return</span> stmt, <span class="kw">nil</span>
+}
+
+<span class="kw">func</span> (p *<span class="ty">parser</span>) parseUpdate() (<span class="ty">Stmt</span>, <span class="ty">error</span>) {
+	table, err := p.ident(<span class="st">"テーブル名"</span>)
+	<span class="kw">if</span> err != <span class="kw">nil</span> {
+		<span class="kw">return</span> <span class="kw">nil</span>, err
+	}
+	<span class="kw">if</span> _, err := p.expect(tkIdent, <span class="st">"SET"</span>); err != <span class="kw">nil</span> {
+		<span class="kw">return</span> <span class="kw">nil</span>, err
+	}
+	<span class="kw">var</span> sets []<span class="ty">SetClause</span>
+	<span class="kw">for</span> {
+		col, err := p.ident(<span class="st">"列名"</span>)
+		<span class="kw">if</span> err != <span class="kw">nil</span> {
+			<span class="kw">return</span> <span class="kw">nil</span>, err
+		}
+		<span class="kw">if</span> _, err := p.expect(tkSymbol, <span class="st">"="</span>); err != <span class="kw">nil</span> {
+			<span class="kw">return</span> <span class="kw">nil</span>, err
+		}
+		e, err := p.parsePrimary()
+		<span class="kw">if</span> err != <span class="kw">nil</span> {
+			<span class="kw">return</span> <span class="kw">nil</span>, err
+		}
+		sets = <span class="kw">append</span>(sets, <span class="ty">SetClause</span>{Col: col, <span class="ty">Expr</span>: e})
+		<span class="kw">if</span> p.accept(tkSymbol, <span class="st">","</span>) {
+			<span class="kw">continue</span>
+		}
+		<span class="kw">break</span>
+	}
+	stmt := <span class="ty">UpdateStmt</span>{<span class="ty">Table</span>: table, Sets: sets}
+	<span class="kw">if</span> p.accept(tkIdent, <span class="st">"WHERE"</span>) {
+		w, err := p.parseExpr()
+		<span class="kw">if</span> err != <span class="kw">nil</span> {
+			<span class="kw">return</span> <span class="kw">nil</span>, err
+		}
+		stmt.Where = w
+	}
+	<span class="kw">return</span> stmt, <span class="kw">nil</span>
+}
+
+<span class="kw">func</span> (p *<span class="ty">parser</span>) parseDelete() (<span class="ty">Stmt</span>, <span class="ty">error</span>) {
+	<span class="kw">if</span> _, err := p.expect(tkIdent, <span class="st">"FROM"</span>); err != <span class="kw">nil</span> {
+		<span class="kw">return</span> <span class="kw">nil</span>, err
+	}
+	table, err := p.ident(<span class="st">"テーブル名"</span>)
+	<span class="kw">if</span> err != <span class="kw">nil</span> {
+		<span class="kw">return</span> <span class="kw">nil</span>, err
+	}
+	stmt := <span class="ty">DeleteStmt</span>{<span class="ty">Table</span>: table}
+	<span class="kw">if</span> p.accept(tkIdent, <span class="st">"WHERE"</span>) {
+		w, err := p.parseExpr()
+		<span class="kw">if</span> err != <span class="kw">nil</span> {
+			<span class="kw">return</span> <span class="kw">nil</span>, err
+		}
+		stmt.Where = w
+	}
+	<span class="kw">return</span> stmt, <span class="kw">nil</span>
+}
+</code></pre>
+
+    <p>読み解きの鍵は、<code>parser</code> 構造体が持つ<strong>たった 2 つの状態</strong>と、<strong>4 つの小さな動詞</strong>です。</p>
+    <ul>
+      <li><strong>状態はトークン列と現在位置だけ</strong> — <code>toks</code> と添字 <code>i</code>。パーサは左から右へ 1 方向に進むだけで、後戻りしません。<code>cur()</code> がいま見ているトークン、<code>advance()</code> が 1 個進む。</li>
+      <li><strong><code>at</code> = 見るだけ</strong> — いまのトークンが期待どおりか調べるだけで、進みません。</li>
+      <li><strong><code>accept</code> = あれば食べる</strong> — 一致したら進んで <code>true</code>。<strong>省略可能</strong>なもの（WHERE 句、ORDER BY 句…）に使います。<code>if p.accept(tkIdent, "WHERE") { … }</code> は「WHERE があったら読む、なくても構わない」と読めます。</li>
+      <li><strong><code>expect</code> = ないと事故</strong> — 一致したら進み、しなければ<strong>位置付きの構文エラー</strong>。文法上<strong>必須</strong>のもの（INSERT の後の INTO、括弧の閉じ…）に使います。エラーメッセージは <code>errorf</code> が一手に整形し、いま見ているトークンの <code>pos</code> を必ず添えます。Step 1 で仕込んだ 4 バイトがここで回収されます。</li>
+    </ul>
+    <p>この 4 つの動詞さえ頭に入れば、あとは文法書を読むのと同じです。いくつか拾って読んでみます。</p>
+    <ul>
+      <li><strong><code>parseStmt</code> は玄関</strong> — 先頭のトークンで <code>CREATE / INSERT / SELECT / UPDATE / DELETE / BEGIN / COMMIT / ROLLBACK</code> の 8 方向に分岐します。再帰下降パーサでは、このように「次のトークン 1 個を見れば進む道が決まる」よう文法を設計しておくのがコツです（LL(1) 文法と呼ばれます）。どの道にも進めなければ、<code>SELEKT</code> のような打ち間違いがここで「位置 0」のエラーになります。</li>
+      <li><strong><code>ident</code> は予約語を弾く</strong> — テーブル名や列名を読むとき、<code>tkIdent</code> であることに加えて<strong>予約語表に載っていない</strong>ことを確かめます。これがないと <code>CREATE TABLE select (...)</code> が通ってしまい、後で SELECT 文が壊れます。</li>
+      <li><strong>「カンマが続く限りループ」パターン</strong> — 列定義の並び、VALUES の値の並び、選択リスト。すべて<code>for { 要素を 1 個読む; カンマがあれば continue; break }</code> という同じ形です。<code>parseInsert</code> はこれが二重（行のループ × 行内の値のループ）になっています。</li>
+      <li><strong>省略可能な句は <code>accept</code> の連なり</strong> — <code>parseSelect</code> の後半は、WHERE → ORDER BY → LIMIT を順に <code>accept</code> で試していくだけ。あった句だけがフィールドに入り、なかった句は <code>nil</code> や <code>-1</code> のまま残ります（Step 2 で決めた約束です）。</li>
+    </ul>
+
+    <div class="gonote"><div class="box-k">GO メモ · fmt.Errorf と %q、可変長引数 any</div>
+      <p><code>errorf</code> の引数 <code>args ...any</code> は<strong>可変長引数</strong>です（<code>any</code> = 任意の型。<code>interface{}</code> の別名）。受け取った引数の束をそのまま <code>fmt.Sprintf(format, args...)</code> に横流ししています（末尾の <code>...</code> はスライスの展開）。書式 <code>%q</code> は値をクォート付きで印字するもので、エラーメッセージで <code>"selekt" は解釈できない</code> のように<strong>問題の文字列がどこからどこまでか</strong>をはっきりさせたいときに便利です。</p>
+    </div>
+
+    <div class="box do"><div class="box-k">▸ 動かして確認</div>
+      <p>正しい SQL が通ることの確認は Step 8 でまとめて行うので、ここでは<strong>壊れた SQL がちゃんと壊れる</strong>ことを確認します。REPL（対話シェル）を起動して、わざと間違えてみてください。作業用の DB ファイルは何でも構いません。</p>
+      <pre class="term"><code><span class="ps">$</span> go run ./cmd/minidb-repl ch05.db
+<span class="out">minidb — 単一ファイル組み込み RDBMS（.exit で終了 / .stats で統計）</span>
+<span class="ps">minidb&gt;</span> SELEKT * FROM users
+<span class="out">エラー: 構文エラー（位置 0）: SQL 文の先頭として "selekt" は解釈できない</span>
+<span class="ps">minidb&gt;</span> SELECT * FROM users WHERE
+<span class="out">エラー: 構文エラー（位置 25）: 式を期待したが "" が来た</span>
+<span class="ps">minidb&gt;</span> SELECT name FROM users ODER BY age
+<span class="out">エラー: 構文エラー（位置 23）: 文の後に余分なトークン "oder" がある</span>
+<span class="ps">minidb&gt;</span> SELECT * FROM users WHERE name = 'abc
+<span class="out">エラー: 構文エラー: 位置 33 の文字列リテラルが閉じていない</span></code></pre>
+      <p>4 つのエラーの<strong>出どころ</strong>を言い当てられるか試してみてください。1 つ目は <code>parseStmt</code> の最後、2 つ目は式のパース（Step 4 の <code>parsePrimary</code>）が EOF トークンに出会ったもの、3 つ目は <code>Parse</code> の「文の後に余分なトークン」検査（<code>ODER</code> は WHERE でも ORDER でもないので、文が位置 23 で終わったと解釈された）、4 つ目だけはパーサではなく<strong>字句解析</strong>のエラーです。位置の数字が、どれも問題の起点を正しく指していることに注目してください。</p>
+    </div>
+
+    <h2 class="step" id="step-4"><span class="step-no">Step 4</span>式のパース — 優先順位は「関数の階段」で作る</h2>
+    <p><code>parser.go</code> の後半、式のパースに進みます。ここには再帰下降パーサでいちばん美しい仕掛け — <strong>演算子の優先順位を関数の呼び出し関係で作る</strong> — が入っています。</p>
+    <p>まず問題をはっきりさせます。<code>a = 1 OR b = 2 AND c = 3</code> という式は、2 通りに読めます。<code>(a=1 OR b=2) AND c=3</code> と読むか、<code>a=1 OR (b=2 AND c=3)</code> と読むか。SQL の約束は後者です — <strong>AND は OR より結び付きが強い</strong>（優先順位が高い）。算数で × が ＋ より先に計算されるのと同じ話です。パーサは、括弧のない入力からこの約束どおりの木を組み立てなければなりません。</p>
+    <p>再帰下降での答えは拍子抜けするほど単純です。<strong>優先順位の弱い順に関数を 1 段ずつ積む</strong>。それだけです。</p>
+
+    <div class="ascii">parseExpr
+└─ parseOr          「OR で繋がる限り左から畳む」   ← いちばん弱い
+   └─ parseAnd        「AND で繋がる限り左から畳む」
+      └─ parseComparison 「= != &lt;&gt; &lt; &lt;= &gt; &gt;= を高々 1 回」
+         └─ parsePrimary  「数値・文字列・NULL・列名・( 式 )」 ← いちばん強い
+
+各関数は「自分より 1 段強い関数」を呼んで部品を作らせ、
+自分の担当の演算子だけを繋ぐ。
+→ 強い演算子ほど深い場所で先に固まり、木の下に沈む。
+
+a = 1 OR b = 2 AND c = 3  の結果:
+
+            OR               ← 弱い演算子ほど木の上（＝あとで結合）
+         ┌───┴───┐
+       a = 1    AND          ← 強い AND が先に固まって下に沈む
+              ┌──┴──┐
+            b = 2   c = 3</div>
+
+    <p>コードで確かめましょう。<code>parser.go</code> の残り全部です。</p>
+
+    <div class="file-tag">internal/sql/parser.go（後半 — 式のパース）</div>
+    <pre><code><span class="cm">// ---- 式のパース（優先順位: OR &lt; AND &lt; 比較 &lt; 単項）----</span>
+
+<span class="kw">func</span> (p *<span class="ty">parser</span>) parseExpr() (<span class="ty">Expr</span>, <span class="ty">error</span>) { <span class="kw">return</span> p.parseOr() }
+
+<span class="kw">func</span> (p *<span class="ty">parser</span>) parseOr() (<span class="ty">Expr</span>, <span class="ty">error</span>) {
+	l, err := p.parseAnd()
+	<span class="kw">if</span> err != <span class="kw">nil</span> {
+		<span class="kw">return</span> <span class="kw">nil</span>, err
+	}
+	<span class="kw">for</span> p.accept(tkIdent, <span class="st">"OR"</span>) {
+		r, err := p.parseAnd()
+		<span class="kw">if</span> err != <span class="kw">nil</span> {
+			<span class="kw">return</span> <span class="kw">nil</span>, err
+		}
+		l = <span class="ty">BinExpr</span>{Op: OpOr, L: l, R: r}
+	}
+	<span class="kw">return</span> l, <span class="kw">nil</span>
+}
+
+<span class="kw">func</span> (p *<span class="ty">parser</span>) parseAnd() (<span class="ty">Expr</span>, <span class="ty">error</span>) {
+	l, err := p.parseComparison()
+	<span class="kw">if</span> err != <span class="kw">nil</span> {
+		<span class="kw">return</span> <span class="kw">nil</span>, err
+	}
+	<span class="kw">for</span> p.accept(tkIdent, <span class="st">"AND"</span>) {
+		r, err := p.parseComparison()
+		<span class="kw">if</span> err != <span class="kw">nil</span> {
+			<span class="kw">return</span> <span class="kw">nil</span>, err
+		}
+		l = <span class="ty">BinExpr</span>{Op: OpAnd, L: l, R: r}
+	}
+	<span class="kw">return</span> l, <span class="kw">nil</span>
+}
+
+<span class="kw">var</span> compOps = <span class="kw">map</span>[<span class="kw">string</span>]<span class="ty">BinOp</span>{
+	<span class="st">"="</span>: OpEq, <span class="st">"!="</span>: OpNe, <span class="st">"&lt;&gt;"</span>: OpNe,
+	<span class="st">"&lt;"</span>: OpLt, <span class="st">"&lt;="</span>: OpLe, <span class="st">"&gt;"</span>: OpGt, <span class="st">"&gt;="</span>: OpGe,
+}
+
+<span class="kw">func</span> (p *<span class="ty">parser</span>) parseComparison() (<span class="ty">Expr</span>, <span class="ty">error</span>) {
+	l, err := p.parsePrimary()
+	<span class="kw">if</span> err != <span class="kw">nil</span> {
+		<span class="kw">return</span> <span class="kw">nil</span>, err
+	}
+	<span class="kw">if</span> p.cur().kind == tkSymbol {
+		<span class="kw">if</span> op, ok := compOps[p.cur().text]; ok {
+			p.advance()
+			r, err := p.parsePrimary()
+			<span class="kw">if</span> err != <span class="kw">nil</span> {
+				<span class="kw">return</span> <span class="kw">nil</span>, err
+			}
+			<span class="kw">return</span> <span class="ty">BinExpr</span>{Op: op, L: l, R: r}, <span class="kw">nil</span>
+		}
+	}
+	<span class="kw">return</span> l, <span class="kw">nil</span>
+}
+
+<span class="kw">func</span> (p *<span class="ty">parser</span>) parsePrimary() (<span class="ty">Expr</span>, <span class="ty">error</span>) {
+	t := p.cur()
+	<span class="kw">switch</span> {
+	<span class="kw">case</span> t.kind == tkNumber:
+		p.advance()
+		v, err := strconv.ParseInt(t.text, <span class="st">10</span>, <span class="st">64</span>)
+		<span class="kw">if</span> err != <span class="kw">nil</span> {
+			<span class="kw">return</span> <span class="kw">nil</span>, p.errorf(<span class="st">"数値 %q が解釈できない"</span>, t.text)
+		}
+		<span class="kw">return</span> <span class="ty">Lit</span>{Val: catalog.NewInt(v)}, <span class="kw">nil</span>
+	<span class="kw">case</span> t.kind == tkString:
+		p.advance()
+		<span class="kw">return</span> <span class="ty">Lit</span>{Val: catalog.NewText(t.text)}, <span class="kw">nil</span>
+	<span class="kw">case</span> t.kind == tkIdent &amp;&amp; t.text == <span class="st">"NULL"</span>:
+		p.advance()
+		<span class="kw">return</span> <span class="ty">Lit</span>{Val: catalog.<span class="ty">Value</span>{Null: <span class="kw">true</span>}}, <span class="kw">nil</span>
+	<span class="kw">case</span> t.kind == tkIdent &amp;&amp; !keywords[t.text]:
+		p.advance()
+		<span class="kw">return</span> <span class="ty">ColRef</span>{Name: t.text}, <span class="kw">nil</span>
+	<span class="kw">case</span> p.accept(tkSymbol, <span class="st">"("</span>):
+		e, err := p.parseExpr()
+		<span class="kw">if</span> err != <span class="kw">nil</span> {
+			<span class="kw">return</span> <span class="kw">nil</span>, err
+		}
+		<span class="kw">if</span> _, err := p.expect(tkSymbol, <span class="st">")"</span>); err != <span class="kw">nil</span> {
+			<span class="kw">return</span> <span class="kw">nil</span>, err
+		}
+		<span class="kw">return</span> e, <span class="kw">nil</span>
+	}
+	<span class="kw">return</span> <span class="kw">nil</span>, p.errorf(<span class="st">"式を期待したが %q が来た"</span>, t.text)
+}
+</code></pre>
+
+    <p>4 つの関数を上から読みます。</p>
+    <ul>
+      <li><strong><code>parseOr</code> と <code>parseAnd</code> は同じ形</strong> — まず 1 段強い関数を呼んで左辺 <code>l</code> を作らせる。そのあと「自分の担当演算子が続く限り」ループして、<code>l = BinExpr{l, r}</code> と<strong>左から畳み込み</strong>ます。<code>a OR b OR c</code> はループ 2 周で <code>(a OR b) OR c</code> という左結合の木になります。再帰ではなくループで繋ぐのは、左結合を素直に作るためです。</li>
+      <li><strong><code>parseComparison</code> はループしない</strong> — 比較は「高々 1 回」です。<code>a &lt; b &lt; c</code> のような連鎖を許さないため、if 文で 1 回だけ演算子を調べます。比較演算子の対応表 <code>compOps</code> は、字句解析が作った記号（<code>"&lt;="</code> など）から <code>BinOp</code> への変換辞書です。</li>
+      <li><strong><code>parsePrimary</code> は葉を作る</strong> — 数値・文字列・NULL はリテラル <code>Lit</code> に、予約語でない単語は列参照 <code>ColRef</code> になります。数値は <code>strconv.ParseInt</code> でこの場で int64 に変換し、リテラルの入れ物には第04章の <code>catalog.NewInt</code> / <code>NewText</code> をそのまま使います。</li>
+      <li><strong>括弧は「振り出しに戻る」</strong> — <code>parsePrimary</code> が <code>(</code> を見つけると、いちばん弱い <code>parseExpr</code> を<strong>呼び直します</strong>。これが再帰下降の「再帰」の正体で、括弧の中では優先順位がリセットされ、どんな式でも書ける。閉じ括弧は <code>expect</code> なので、閉じ忘れは位置付きエラーです。</li>
+    </ul>
+    <p>「強い演算子が先に固まる」感覚を、例文 <code>a = 1 OR b = 2 AND c = 3</code> の実行順で追ってみます。<code>parseOr</code> がまず <code>parseAnd</code> を呼び、<code>parseAnd</code> は <code>parseComparison</code> から <code>a = 1</code> を受け取ります。次のトークンは <code>OR</code> — AND ではないので <code>parseAnd</code> はここで手を引き、<code>a = 1</code> をそのまま返します。<code>parseOr</code> は OR を食べて、右辺のためにもう一度 <code>parseAnd</code> を呼ぶ。今度は <code>b = 2</code> の後ろに <code>AND</code> が続いているので、<code>parseAnd</code> がループを回して <code>(b=2 AND c=3)</code> を固めてから返します。結果、OR の右の子に AND の木がぶら下がる — 図のとおりです。</p>
+
+    <div class="gonote"><div class="box-k">GO メモ · strconv — 文字列と数値の変換</div>
+      <p>字句解析が切り出した <code>"28"</code> はまだ文字列です。<code>strconv.ParseInt(s, 10, 64)</code> が「10 進・64 ビットの整数として読む」変換で、失敗（桁あふれ等）はエラーで返ります。<code>parseSelect</code> の LIMIT で使った <code>strconv.Atoi</code> は int 用の短縮形です。逆方向（数値→文字列）は <code>strconv.Itoa</code> や <code>fmt.Sprintf</code>。「文字列の世界」と「値の世界」の橋は必ずこの関数群で渡ります。</p>
+    </div>
+
+    <div class="box hazard"><div class="box-k">⚠ 落とし穴 — 比較の連鎖は「文の後の余分なトークン」になる</div>
+      <p><code>WHERE 1 = 1 = 1</code> と書くと、<code>parseComparison</code> は <code>1 = 1</code> を作った時点で満足して返るため、2 個目の <code>=</code> が誰にも読まれずに残ります。すると <code>Parse</code> の最後の「文の後に余分なトークン」検査に引っかかります。エラーの文面だけ見ると不思議ですが、「式は取れるだけ取り、残りは文の検査に任せる」という再帰下降の性質そのものです。エラーメッセージの位置を頼りに、どこでパーサが手を止めたかを推理できるようになれば一人前です。</p>
+    </div>
+
+    <div class="box do"><div class="box-k">▸ 動かして確認</div>
+      <p>優先順位が結果を変えることを、実データで確かめます。REPL で <code>users</code> 表（Step 8 で使うのと同じ 3 行: alice/30, bob/25, carol/35）に対して、括弧あり・なしの 2 通りを打ちます。</p>
+      <pre class="term"><code><span class="ps">minidb&gt;</span> SELECT name FROM users WHERE id = 2 OR id = 3 AND age &gt; 34
+<span class="out">| name  |
+| ----- |
+| bob   |
+| carol |
+（2 行 / plan: seqscan(users)）</span>
+<span class="ps">minidb&gt;</span> SELECT name FROM users WHERE (id = 2 OR id = 3) AND age &gt; 34
+<span class="out">| name  |
+| ----- |
+| carol |
+（1 行 / plan: seqscan(users)）</span></code></pre>
+      <p>1 つ目は <code>id = 2 OR (id = 3 AND age &gt; 34)</code> と解釈されるので bob が生き残り、2 つ目は括弧が優先順位をひっくり返すので carol だけになります。「AND が先に固まる」を目で見た瞬間です。</p>
+    </div>
+
+    <h2 class="step" id="step-5"><span class="step-no">Step 5</span>型検査 — 実行する前に間違いを見つける</h2>
+    <p>パースが通れば文法的には正しい SQL です。しかし<strong>文法的に正しくても、意味的に壊れている</strong>ことがあります。<code>WHERE price = 'abc'</code> — 形は完璧な比較式ですが、INT の列と文字列は比べられません。これを検出するのが型検査です。</p>
+    <p>方針が重要です。minidb は型エラーを<strong>実行前に、静的に</strong>検査します。「静的に」とは、<strong>行を 1 行も読まずに</strong>という意味です。検査に使うのは式の木（AST）と、第04章のカタログが持つスキーマ（各列の型）だけ。行の実物が要らないので、<strong>表が空っぽでも</strong>型エラーを検出できます。もし「実行しながら行ごとに型を確かめる」方式にしていたら、空の表では 1 行も評価されず、エラーは静かに素通りしてしまうでしょう。バグは、早く・大きな音で見つかるほど安く済みます。</p>
+    <p>仕組みは<strong>型の推論を木に沿って再帰させる</strong>だけです。葉の型は自明（リテラルは自分の型、列参照はスキーマを引く）。内部ノード <code>BinExpr</code> は、左右の子の型を先に求めてから、演算子ごとの規則 — 比較の両辺は同じ型、AND/OR の両辺は BOOL — を確かめます。木を登りながら型が積み上がっていき、最後に「WHERE 全体が BOOL か」を確認して終わりです。</p>
+
+    <div class="file-tag">internal/sql/eval.go</div>
+    <pre><code><span class="kw">package</span> sql
+
+<span class="kw">import</span> (
+	<span class="st">"fmt"</span>
+
+	<span class="st">"minidb/internal/catalog"</span>
+)
+
+<span class="cm">// ---- 式の型検査と評価 ----</span>
+<span class="cm">//</span>
+<span class="cm">// WHERE 式は実行前に typeCheck で静的に検査する（FR-09: 型エラーの報告）。</span>
+<span class="cm">// 表が空でも「INT 列と文字列の比較」のような誤りを検出できる。</span>
+
+<span class="cm">// exprType は式の型。tNull は NULL リテラル（どの型とも比較可、結果は常に偽）。</span>
+<span class="kw">type</span> <span class="ty">exprType</span> <span class="kw">int</span>
+
+<span class="kw">const</span> (
+	tInt <span class="ty">exprType</span> = <span class="kw">iota</span>
+	tText
+	tBool
+	tNull
+)
+
+<span class="kw">func</span> (t <span class="ty">exprType</span>) String() <span class="kw">string</span> {
+	<span class="kw">return</span> <span class="kw">map</span>[<span class="ty">exprType</span>]<span class="kw">string</span>{tInt: <span class="st">"INT"</span>, tText: <span class="st">"TEXT"</span>, tBool: <span class="st">"BOOL"</span>, tNull: <span class="st">"NULL"</span>}[t]
+}
+
+<span class="kw">func</span> colExprType(t catalog.<span class="ty">ColType</span>) <span class="ty">exprType</span> {
+	<span class="kw">if</span> t == catalog.IntType {
+		<span class="kw">return</span> tInt
+	}
+	<span class="kw">return</span> tText
+}
+
+<span class="cm">// typeCheck は式の型を検査して返す。WHERE 全体は BOOL であること。</span>
+<span class="kw">func</span> typeCheck(e <span class="ty">Expr</span>, sch *catalog.<span class="ty">Schema</span>) <span class="ty">error</span> {
+	t, err := inferType(e, sch)
+	<span class="kw">if</span> err != <span class="kw">nil</span> {
+		<span class="kw">return</span> err
+	}
+	<span class="kw">if</span> t != tBool {
+		<span class="kw">return</span> fmt.Errorf(<span class="st">"型エラー: WHERE 句は真偽値でなければならない（%s が来た）"</span>, t)
+	}
+	<span class="kw">return</span> <span class="kw">nil</span>
+}
+
+<span class="kw">func</span> inferType(e <span class="ty">Expr</span>, sch *catalog.<span class="ty">Schema</span>) (<span class="ty">exprType</span>, <span class="ty">error</span>) {
+	<span class="kw">switch</span> x := e.(<span class="kw">type</span>) {
+	<span class="kw">case</span> <span class="ty">Lit</span>:
+		<span class="kw">if</span> x.Val.Null {
+			<span class="kw">return</span> tNull, <span class="kw">nil</span>
+		}
+		<span class="kw">return</span> colExprType(x.Val.Type), <span class="kw">nil</span>
+	<span class="kw">case</span> <span class="ty">ColRef</span>:
+		i := sch.ColIndex(x.Name)
+		<span class="kw">if</span> i &lt; <span class="st">0</span> {
+			<span class="kw">return</span> <span class="st">0</span>, fmt.Errorf(<span class="st">"列 %s が存在しない"</span>, x.Name)
+		}
+		<span class="kw">return</span> colExprType(sch.Cols[i].Type), <span class="kw">nil</span>
+	<span class="kw">case</span> <span class="ty">BinExpr</span>:
+		lt, err := inferType(x.L, sch)
+		<span class="kw">if</span> err != <span class="kw">nil</span> {
+			<span class="kw">return</span> <span class="st">0</span>, err
+		}
+		rt, err := inferType(x.R, sch)
+		<span class="kw">if</span> err != <span class="kw">nil</span> {
+			<span class="kw">return</span> <span class="st">0</span>, err
+		}
+		<span class="kw">switch</span> x.Op {
+		<span class="kw">case</span> OpAnd, OpOr:
+			<span class="kw">if</span> lt != tBool || rt != tBool {
+				<span class="kw">return</span> <span class="st">0</span>, fmt.Errorf(<span class="st">"型エラー: %s の両辺は真偽値でなければならない（%s %s %s）"</span>, x.Op, lt, x.Op, rt)
+			}
+			<span class="kw">return</span> tBool, <span class="kw">nil</span>
+		<span class="kw">default</span>: <span class="cm">// 比較</span>
+			<span class="kw">if</span> lt == tBool || rt == tBool {
+				<span class="kw">return</span> <span class="st">0</span>, fmt.Errorf(<span class="st">"型エラー: 真偽値は %s で比較できない"</span>, x.Op)
+			}
+			<span class="kw">if</span> lt != tNull &amp;&amp; rt != tNull &amp;&amp; lt != rt {
+				<span class="kw">return</span> <span class="st">0</span>, fmt.Errorf(<span class="st">"型エラー: %s と %s は比較できない"</span>, lt, rt)
+			}
+			<span class="kw">return</span> tBool, <span class="kw">nil</span>
+		}
+	}
+	<span class="kw">return</span> <span class="st">0</span>, fmt.Errorf(<span class="st">"未知の式"</span>)
+}
+
+<span class="cm">// evalBool は WHERE 式を 1 行に対して評価する（typeCheck 済み前提）。</span>
+<span class="cm">// NULL が絡む比較は偽（三値論理は導入しない簡易版）。</span>
+<span class="kw">func</span> evalBool(e <span class="ty">Expr</span>, sch *catalog.<span class="ty">Schema</span>, vals []catalog.<span class="ty">Value</span>) (<span class="kw">bool</span>, <span class="ty">error</span>) {
+	x, ok := e.(<span class="ty">BinExpr</span>)
+	<span class="kw">if</span> !ok {
+		<span class="kw">return</span> <span class="kw">false</span>, fmt.Errorf(<span class="st">"WHERE 句が比較式になっていない"</span>)
+	}
+	<span class="kw">switch</span> x.Op {
+	<span class="kw">case</span> OpAnd:
+		l, err := evalBool(x.L, sch, vals)
+		<span class="kw">if</span> err != <span class="kw">nil</span> || !l {
+			<span class="kw">return</span> <span class="kw">false</span>, err
+		}
+		<span class="kw">return</span> evalBool(x.R, sch, vals)
+	<span class="kw">case</span> OpOr:
+		l, err := evalBool(x.L, sch, vals)
+		<span class="kw">if</span> err != <span class="kw">nil</span> || l {
+			<span class="kw">return</span> l, err
+		}
+		<span class="kw">return</span> evalBool(x.R, sch, vals)
+	<span class="kw">default</span>:
+		lv, err := evalValue(x.L, sch, vals)
+		<span class="kw">if</span> err != <span class="kw">nil</span> {
+			<span class="kw">return</span> <span class="kw">false</span>, err
+		}
+		rv, err := evalValue(x.R, sch, vals)
+		<span class="kw">if</span> err != <span class="kw">nil</span> {
+			<span class="kw">return</span> <span class="kw">false</span>, err
+		}
+		<span class="kw">if</span> lv.Null || rv.Null {
+			<span class="kw">return</span> <span class="kw">false</span>, <span class="kw">nil</span> <span class="cm">// NULL との比較は常に偽</span>
+		}
+		cmp := catalog.Compare(lv, rv)
+		<span class="kw">switch</span> x.Op {
+		<span class="kw">case</span> OpEq:
+			<span class="kw">return</span> cmp == <span class="st">0</span>, <span class="kw">nil</span>
+		<span class="kw">case</span> OpNe:
+			<span class="kw">return</span> cmp != <span class="st">0</span>, <span class="kw">nil</span>
+		<span class="kw">case</span> OpLt:
+			<span class="kw">return</span> cmp &lt; <span class="st">0</span>, <span class="kw">nil</span>
+		<span class="kw">case</span> OpLe:
+			<span class="kw">return</span> cmp &lt;= <span class="st">0</span>, <span class="kw">nil</span>
+		<span class="kw">case</span> OpGt:
+			<span class="kw">return</span> cmp &gt; <span class="st">0</span>, <span class="kw">nil</span>
+		<span class="kw">case</span> OpGe:
+			<span class="kw">return</span> cmp &gt;= <span class="st">0</span>, <span class="kw">nil</span>
+		}
+		<span class="kw">return</span> <span class="kw">false</span>, fmt.Errorf(<span class="st">"未知の比較演算 %s"</span>, x.Op)
+	}
+}
+
+<span class="kw">func</span> evalValue(e <span class="ty">Expr</span>, sch *catalog.<span class="ty">Schema</span>, vals []catalog.<span class="ty">Value</span>) (catalog.<span class="ty">Value</span>, <span class="ty">error</span>) {
+	<span class="kw">switch</span> x := e.(<span class="kw">type</span>) {
+	<span class="kw">case</span> <span class="ty">Lit</span>:
+		<span class="kw">return</span> x.Val, <span class="kw">nil</span>
+	<span class="kw">case</span> <span class="ty">ColRef</span>:
+		i := sch.ColIndex(x.Name)
+		<span class="kw">if</span> i &lt; <span class="st">0</span> {
+			<span class="kw">return</span> catalog.<span class="ty">Value</span>{}, fmt.Errorf(<span class="st">"列 %s が存在しない"</span>, x.Name)
+		}
+		<span class="kw">return</span> vals[i], <span class="kw">nil</span>
+	}
+	<span class="kw">return</span> catalog.<span class="ty">Value</span>{}, fmt.Errorf(<span class="st">"値として評価できない式"</span>)
+}
+</code></pre>
+
+    <p>このファイルには型検査（<code>typeCheck</code> / <code>inferType</code>）と、実行時の式評価（<code>evalBool</code> / <code>evalValue</code>）が同居しています。前者は<strong>実行前に 1 回</strong>、後者は<strong>実行中に行ごと</strong>に呼ばれる、という時間差に注意してください。</p>
+    <ul>
+      <li><strong><code>exprType</code> は「式の型」で、「列の型」より 1 つ多い</strong> — INT / TEXT に加えて、比較の結果である <code>tBool</code> と、NULL リテラルの <code>tNull</code> があります。<code>tNull</code> は「どの型とも比較してよい」ワイルドカードで、<code>WHERE name = NULL</code> を型エラーにしないための特例です（結果は常に偽になりますが、それは評価側の話）。</li>
+      <li><strong><code>inferType</code> の規則は 2 つだけ</strong> — AND/OR の両辺は BOOL であること。比較の両辺は BOOL 以外の同じ型（または片方が NULL）であること。<code>WHERE age &gt; 20 AND name</code> がエラーになるのは 1 つ目の規則（<code>name</code> は TEXT であって BOOL ではない）、<code>price = 'abc'</code> は 2 つ目の規則です。存在しない列への参照もここで検出されます — 型を推論しようとしてスキーマを引き、見つからないからです。</li>
+      <li><strong><code>evalBool</code> は短絡評価</strong> — AND は左辺が偽なら右辺を<strong>評価せずに</strong>偽を返し、OR は左辺が真なら右辺を見ません。Go の <code>&amp;&amp;</code> / <code>||</code> と同じ流儀です。行 100 万件 × 式の右辺、という掛け算を思えば、地味に効く節約です。</li>
+      <li><strong>NULL の比較は常に偽</strong> — <code>lv.Null || rv.Null</code> なら比較結果を見ずに <code>false</code>。本物の SQL は真・偽・不明の<strong>三値論理</strong>を持ちますが、minidb は「NULL が絡んだら偽」という二値の簡易版に割り切っています（コメントに明記してあるのがその印です）。大小比較の本体は第04章で作った <code>catalog.Compare</code> にそのまま任せます。</li>
+      <li><strong><code>typeCheck</code> 済みが前提</strong> — <code>evalBool</code> は「型はもう正しい」と信じて動きます。検査と評価を分けたおかげで、評価側は型の場合分けを一切持たずに済んでいます。</li>
+    </ul>
+
+    <div class="gonote"><div class="box-k">GO メモ · type switch — インターフェースの中身で分岐する</div>
+      <p><code>switch x := e.(type) { case Lit: … case ColRef: … }</code> は <strong>type switch</strong> という構文で、インターフェース値 <code>e</code> の<strong>実際の型</strong>を調べて分岐します。各 case の中では <code>x</code> がその型として使える（<code>case Lit:</code> の中では <code>x.Val</code> に触れる）のが便利なところです。Step 2 で「マーカーメソッドで直和型を作る」と書きましたが、その受け側がこれです。AST を歩く処理（型検査・評価・実行）はぜんぶ type switch でできています。似た構文の <code>l, ok := e.(Lit)</code>（型アサーション）は「この型だったら取り出す」の 1 分岐版です。</p>
+    </div>
+
+    <div class="box do"><div class="box-k">▸ 動かして確認</div>
+      <p>まず、型エラーの言い分けを 3 種類。どれも <code>inferType</code> のどの規則に当たったか言えるはずです。</p>
+      <pre class="term"><code><span class="ps">minidb&gt;</span> SELECT * FROM users WHERE age = 'abc'
+<span class="out">エラー: 型エラー: INT と TEXT は比較できない</span>
+<span class="ps">minidb&gt;</span> SELECT * FROM users WHERE age &gt; 20 AND name
+<span class="out">エラー: 型エラー: AND の両辺は真偽値でなければならない（BOOL AND TEXT）</span>
+<span class="ps">minidb&gt;</span> SELECT * FROM users WHERE name
+<span class="out">エラー: 型エラー: WHERE 句は真偽値でなければならない（TEXT が来た）</span></code></pre>
+      <p>次が本命、「<strong>空の表でも</strong>型エラーが出る」ことの確認です。作りたてで 0 行の表に対して型の壊れた WHERE を投げます。</p>
+      <pre class="term"><code><span class="ps">minidb&gt;</span> CREATE TABLE stock (sku TEXT, price INT)
+<span class="out">OK（0 行）</span>
+<span class="ps">minidb&gt;</span> SELECT COUNT(*) FROM stock
+<span class="out">| count |
+| ----- |
+| 0     |
+（1 行 / plan: seqscan(stock)）</span>
+<span class="ps">minidb&gt;</span> SELECT * FROM stock WHERE price = 'free'
+<span class="out">エラー: 型エラー: INT と TEXT は比較できない</span></code></pre>
+      <p>評価すべき行が 1 行もないのにエラーが出ました。検査の材料が「行」ではなく「式の木とスキーマ」だからです。</p>
+    </div>
+
+    <h2 class="step" id="step-6"><span class="step-no">Step 6</span>実行の骨格 — Execute と CREATE TABLE / INSERT</h2>
+    <p>AST を検査に通したら、あとは実行です。<code>exec.go</code> はこの章最大のファイルなので、3 つの Step（6・7・8）に分けて読みます。まずは骨格 — 結果の型、実行の玄関、そして単純な 2 つの文（CREATE TABLE / INSERT）です。</p>
+    <p>ここで、この章と第07章の<strong>分担</strong>をはっきりさせておきます。<code>exec.go</code> には B+Tree 索引を<strong>維持する</strong>コード（INSERT した行を索引にも登録する、CREATE INDEX で木を組み立てる…）も書かれていますが、それは<strong>第07章の主題</strong>です。この章では該当箇所を <code>// …（第07章で）</code> と明示して省き、「索引がまだ 1 本もない世界」として読みます。省いても動作は完結します — 索引がなければ、これらのコードは何もしないからです。</p>
+
+    <div class="file-tag">internal/sql/exec.go（1/3 — 骨格と CREATE TABLE / INSERT）</div>
+    <pre><code><span class="kw">package</span> sql
+
+<span class="kw">import</span> (
+	<span class="st">"bytes"</span>
+	<span class="st">"fmt"</span>
+	<span class="st">"sort"</span>
+
+	<span class="st">"minidb/internal/btree"</span>
+	<span class="st">"minidb/internal/catalog"</span>
+	<span class="st">"minidb/internal/storage"</span>
+)
+
+<span class="cm">// Result は 1 文の実行結果。</span>
+<span class="kw">type</span> <span class="ty">Result</span> <span class="kw">struct</span> {
+	Cols     []<span class="kw">string</span>
+	Rows     [][]catalog.<span class="ty">Value</span>
+	Affected <span class="kw">int</span>    <span class="cm">// INSERT/UPDATE/DELETE の対象行数</span>
+	Plan     <span class="kw">string</span> <span class="cm">// 使ったアクセス経路（NFR-05: seqscan / indexscan）</span>
+}
+
+<span class="cm">// Execute は構文木を実行する。BEGIN/COMMIT/ROLLBACK はエンジン層（minidb パッケージ）が</span>
+<span class="cm">// 処理するため、ここに来たらエラー。</span>
+<span class="kw">func</span> Execute(st storage.<span class="ty">Store</span>, cat *catalog.<span class="ty">Catalog</span>, stmt <span class="ty">Stmt</span>) (*<span class="ty">Result</span>, <span class="ty">error</span>) {
+	<span class="kw">switch</span> s := stmt.(<span class="kw">type</span>) {
+	<span class="kw">case</span> <span class="ty">CreateTableStmt</span>:
+		<span class="kw">return</span> execCreateTable(st, cat, s)
+	<span class="kw">case</span> <span class="ty">CreateIndexStmt</span>:
+		<span class="kw">return</span> execCreateIndex(st, cat, s)
+	<span class="kw">case</span> <span class="ty">InsertStmt</span>:
+		<span class="kw">return</span> execInsert(st, cat, s)
+	<span class="kw">case</span> <span class="ty">SelectStmt</span>:
+		<span class="kw">return</span> execSelect(st, cat, s)
+	<span class="kw">case</span> <span class="ty">UpdateStmt</span>:
+		<span class="kw">return</span> execUpdate(st, cat, s)
+	<span class="kw">case</span> <span class="ty">DeleteStmt</span>:
+		<span class="kw">return</span> execDelete(st, cat, s)
+	<span class="kw">default</span>:
+		<span class="kw">return</span> <span class="kw">nil</span>, fmt.Errorf(<span class="st">"sql: この文は実行層では扱えない: %T"</span>, stmt)
+	}
+}
+
+<span class="kw">func</span> execCreateTable(st storage.<span class="ty">Store</span>, cat *catalog.<span class="ty">Catalog</span>, s <span class="ty">CreateTableStmt</span>) (*<span class="ty">Result</span>, <span class="ty">error</span>) {
+	cols := <span class="kw">make</span>([]catalog.<span class="ty">Column</span>, <span class="kw">len</span>(s.Cols))
+	<span class="kw">for</span> i, c := <span class="kw">range</span> s.Cols {
+		cols[i] = catalog.<span class="ty">Column</span>{Name: c.Name, Type: c.Type}
+	}
+	<span class="kw">if</span> _, err := cat.CreateTable(st, s.Name, cols); err != <span class="kw">nil</span> {
+		<span class="kw">return</span> <span class="kw">nil</span>, err
+	}
+	<span class="kw">return</span> &amp;<span class="ty">Result</span>{}, <span class="kw">nil</span>
+}
+
+<span class="kw">func</span> execCreateIndex(st storage.<span class="ty">Store</span>, cat *catalog.<span class="ty">Catalog</span>, s <span class="ty">CreateIndexStmt</span>) (*<span class="ty">Result</span>, <span class="ty">error</span>) {
+	<span class="cm">// …（第07章で: ヒープを全走査して B+Tree 索引を構築する）</span>
+}
+
+<span class="cm">// litValue は式がリテラルであることを要求し、列型に合わせて解決する。</span>
+<span class="kw">func</span> litValue(e <span class="ty">Expr</span>, col catalog.<span class="ty">Column</span>) (catalog.<span class="ty">Value</span>, <span class="ty">error</span>) {
+	l, ok := e.(<span class="ty">Lit</span>)
+	<span class="kw">if</span> !ok {
+		<span class="kw">return</span> catalog.<span class="ty">Value</span>{}, fmt.Errorf(<span class="st">"列 %s の値はリテラルのみ指定できる"</span>, col.Name)
+	}
+	<span class="kw">if</span> l.Val.Null {
+		<span class="kw">return</span> catalog.NewNull(col.Type), <span class="kw">nil</span>
+	}
+	<span class="kw">if</span> l.Val.Type != col.Type {
+		<span class="kw">return</span> catalog.<span class="ty">Value</span>{}, fmt.Errorf(<span class="st">"型エラー: 列 %s は %s だが %s が渡された"</span>,
+			col.Name, col.Type, l.Val.Type)
+	}
+	<span class="kw">return</span> l.Val, <span class="kw">nil</span>
+}
+
+<span class="kw">func</span> execInsert(st storage.<span class="ty">Store</span>, cat *catalog.<span class="ty">Catalog</span>, s <span class="ty">InsertStmt</span>) (*<span class="ty">Result</span>, <span class="ty">error</span>) {
+	tab, ok := cat.<span class="ty">Table</span>(s.<span class="ty">Table</span>)
+	<span class="kw">if</span> !ok {
+		<span class="kw">return</span> <span class="kw">nil</span>, fmt.Errorf(<span class="st">"テーブル %s が存在しない"</span>, s.<span class="ty">Table</span>)
+	}
+	heap := catalog.OpenHeap(st, tab.HeapFirst)
+	<span class="cm">// …（第07章で: この表に張られた索引の一覧を取得する）</span>
+	<span class="kw">for</span> _, rowExprs := <span class="kw">range</span> s.Rows {
+		<span class="kw">if</span> <span class="kw">len</span>(rowExprs) != <span class="kw">len</span>(tab.<span class="ty">Schema</span>.Cols) {
+			<span class="kw">return</span> <span class="kw">nil</span>, fmt.Errorf(<span class="st">"型エラー: 値の数 %d が列数 %d と一致しない"</span>, <span class="kw">len</span>(rowExprs), <span class="kw">len</span>(tab.<span class="ty">Schema</span>.Cols))
+		}
+		vals := <span class="kw">make</span>([]catalog.<span class="ty">Value</span>, <span class="kw">len</span>(rowExprs))
+		<span class="kw">for</span> i, e := <span class="kw">range</span> rowExprs {
+			v, err := litValue(e, tab.<span class="ty">Schema</span>.Cols[i])
+			<span class="kw">if</span> err != <span class="kw">nil</span> {
+				<span class="kw">return</span> <span class="kw">nil</span>, err
+			}
+			vals[i] = v
+		}
+		rec, err := tab.<span class="ty">Schema</span>.Encode(vals)
+		<span class="kw">if</span> err != <span class="kw">nil</span> {
+			<span class="kw">return</span> <span class="kw">nil</span>, err
+		}
+		tid, err := heap.Insert(rec)
+		<span class="kw">if</span> err != <span class="kw">nil</span> {
+			<span class="kw">return</span> <span class="kw">nil</span>, err
+		}
+		<span class="cm">// …（第07章で: 挿入した行を各索引 B+Tree にも登録する）</span>
+	}
+	<span class="kw">return</span> &amp;<span class="ty">Result</span>{Affected: <span class="kw">len</span>(s.Rows)}, <span class="kw">nil</span>
+}
+</code></pre>
+
+    <ul>
+      <li><strong><code>Result</code> は 1 文の結果の入れ物</strong> — SELECT なら列名 <code>Cols</code> と行 <code>Rows</code>、書き込み系なら対象行数 <code>Affected</code>。そして <code>Plan</code> — この実行が <code>seqscan</code>（全走査）だったか <code>indexscan</code>（索引走査）だったかの記録です。REPL が毎回表示してくれるこの 1 行は、第07章で「索引を張ったら本当に速くなったか」を観測する窓になります。</li>
+      <li><strong><code>Execute</code> は type switch 一発の受付係</strong> — 文の型で担当関数に配るだけです。引数の <code>storage.Store</code> は序章で紹介した「3 メソッドの顔」で、実行器は自分が生のディスクの上で動いているのか、バッファプールの上か、トランザクションの中かを<strong>知りません</strong>。BEGIN / COMMIT / ROLLBACK だけは <code>default</code> でエラーにしています — トランザクションの開始や確定は 1 個上の層（<code>db.go</code>、Step 9）の仕事で、実行層に降りてくることはないからです。</li>
+      <li><strong><code>execCreateTable</code> は翻訳して依頼するだけ</strong> — AST の列定義を <code>catalog.Column</code> に写して、第04章の <code>cat.CreateTable</code> を呼ぶ。10 行で終わりです。表の実体（カタログページへの登録、ヒープの確保）は全部第04章で作り済みなので、この章では「呼ぶだけ」で済む — 層を積み上げてきたご利益です。</li>
+      <li><strong><code>litValue</code> は INSERT 側の型検査</strong> — WHERE の型検査（Step 5）とは別に、「値の型は列の型と一致するか」をここで見ます。NULL リテラルだけは特別で、どの型の列にも <code>catalog.NewNull(col.Type)</code> として収まります。</li>
+      <li><strong><code>execInsert</code> の流れは 3 拍子</strong> — 値を検証（数と型）→ <code>Schema.Encode</code> でバイト列に → ヒープに <code>Insert</code>。戻り値の TID（行の住所）は、省略した第07章のコードが索引への登録に使います。<code>VALUES (1,'a'),(2,'b')</code> のような複数行 INSERT は、外側のループが行の数だけ回るだけです。</li>
+    </ul>
+
+    <div class="box do"><div class="box-k">▸ 動かして確認</div>
+      <p>INSERT 側の検査が働くことを確認します。<code>users</code> の 1 列目 <code>id</code> は INT です。</p>
+      <pre class="term"><code><span class="ps">minidb&gt;</span> INSERT INTO users VALUES ('x', 'y', 1)
+<span class="out">エラー: 型エラー: 列 id は INT だが TEXT が渡された</span></code></pre>
+      <p>エラーの出どころは <code>litValue</code> です。WHERE の型エラー（<code>inferType</code>）と文面の流儀が揃えてあるので、利用者からは同じ「型エラー」に見えます。</p>
+    </div>
+
+    <h2 class="step" id="step-7"><span class="step-no">Step 7</span>プラン選択と残余フィルタ — 索引は候補を絞るだけ</h2>
+    <p>SELECT / UPDATE / DELETE に共通する最初の仕事は「<strong>条件に合う行を集める</strong>」ことです。集め方には 2 通りある — 表の全行を順に読む<strong>全走査（seqscan）</strong>と、第03章の B+Tree で候補を絞る<strong>索引走査（indexscan）</strong>。どちらを使うかを決める部品を<strong>プランナ</strong>と呼びます。ここが、データベースの「頭の良さ」が宿る場所です。</p>
+    <p>minidb のプランナはルール 1 個の素朴なものです: <strong>WHERE の AND 連言の中に「索引の張られた列 op リテラル」の形があれば索引走査、なければ全走査</strong>。コスト計算も統計情報もありません。それでも設計として一級品にできる工夫があります — 先に図で全体を見てください。</p>
+
+    <div class="ascii">WHERE age &gt; 28 AND name != 'bob'
+   │
+   │ flattenAnd: AND の木を「連言のリスト」にほどく
+   ▼
+[ age &gt; 28 ,  name != 'bob' ]
+   │
+   │ 各連言を normalizeComparison: 「列 op リテラル」の形か？
+   │ その列に索引はあるか？
+   ▼
+使える述語あり → indexscan(索引名)     なければ → seqscan(テーブル名)
+   │  B+Tree から候補の TID を範囲取得        │  ヒープを先頭から全部読む
+   └──────────────┬─────────────────────┘
+                  ▼
+   ★ どちらの経路でも、集めた行に WHERE「全体」を
+     もう一度評価する = 残余フィルタ（residual filter）
+                  ▼
+              条件に合う行だけが残る</div>
+
+    <p>コードです。行の入れ物 <code>row</code>、プランの表現 <code>pathPlan</code>、選択ロジック <code>choosePath</code>、そして行集めの本体 <code>collectRows</code>。</p>
+
+    <div class="file-tag">internal/sql/exec.go（2/3 — プラン選択と行集め）</div>
+    <pre><code><span class="cm">// row は実行中の 1 行（元の TID 付き。UPDATE/DELETE が使う）。</span>
+<span class="kw">type</span> <span class="ty">row</span> <span class="kw">struct</span> {
+	tid  btree.<span class="ty">TID</span>
+	vals []catalog.<span class="ty">Value</span>
+}
+
+<span class="cm">// ---- アクセス経路の選択（プランナ）----</span>
+
+<span class="cm">// pathPlan は「どう行を集めるか」。</span>
+<span class="kw">type</span> <span class="ty">pathPlan</span> <span class="kw">struct</span> {
+	index  *catalog.<span class="ty">Index</span>
+	lo, hi []<span class="kw">byte</span> <span class="cm">// 順序保存キーでの範囲（nil = 無限端）。等値は lo == hi</span>
+	desc   <span class="kw">string</span>
+}
+
+<span class="cm">// choosePath は WHERE の AND 連言から索引が使える述語を探す。</span>
+<span class="cm">// 見つからなければ全走査。境界の厳密さ（&gt; と &gt;= の違い）は気にしない —</span>
+<span class="cm">// どのみち全行に WHERE を再評価する（残余フィルタ）ので、正しさは保たれる。</span>
+<span class="kw">func</span> choosePath(cat *catalog.<span class="ty">Catalog</span>, table <span class="kw">string</span>, where <span class="ty">Expr</span>) <span class="ty">pathPlan</span> {
+	indexes := cat.Indexes(table)
+	<span class="kw">if</span> where == <span class="kw">nil</span> || <span class="kw">len</span>(indexes) == <span class="st">0</span> {
+		<span class="kw">return</span> <span class="ty">pathPlan</span>{desc: <span class="st">"seqscan("</span> + table + <span class="st">")"</span>}
+	}
+	conjuncts := flattenAnd(where)
+	byCol := <span class="kw">map</span>[<span class="kw">string</span>]*catalog.<span class="ty">Index</span>{}
+	<span class="kw">for</span> _, ix := <span class="kw">range</span> indexes {
+		<span class="kw">if</span> _, dup := byCol[ix.Col]; !dup {
+			byCol[ix.Col] = ix
+		}
+	}
+	<span class="kw">var</span> best *<span class="ty">pathPlan</span>
+	<span class="kw">for</span> _, c := <span class="kw">range</span> conjuncts {
+		be, ok := c.(<span class="ty">BinExpr</span>)
+		<span class="kw">if</span> !ok {
+			<span class="kw">continue</span>
+		}
+		col, lit, op, ok := normalizeComparison(be)
+		<span class="kw">if</span> !ok {
+			<span class="kw">continue</span>
+		}
+		ix, ok := byCol[col]
+		<span class="kw">if</span> !ok || lit.Null {
+			<span class="kw">continue</span>
+		}
+		key := catalog.EncodeKey(lit)
+		<span class="kw">var</span> p <span class="ty">pathPlan</span>
+		<span class="kw">switch</span> op {
+		<span class="kw">case</span> OpEq:
+			p = <span class="ty">pathPlan</span>{index: ix, lo: key, hi: key}
+		<span class="kw">case</span> OpGt, OpGe:
+			p = <span class="ty">pathPlan</span>{index: ix, lo: key, hi: <span class="kw">nil</span>}
+		<span class="kw">case</span> OpLt, OpLe:
+			p = <span class="ty">pathPlan</span>{index: ix, lo: <span class="kw">nil</span>, hi: key}
+		<span class="kw">default</span>:
+			<span class="kw">continue</span>
+		}
+		p.desc = fmt.Sprintf(<span class="st">"indexscan(%s)"</span>, ix.Name)
+		<span class="kw">if</span> op == OpEq {
+			<span class="kw">return</span> p <span class="cm">// 等値が最優先</span>
+		}
+		<span class="kw">if</span> best == <span class="kw">nil</span> {
+			best = &amp;p
+		} <span class="kw">else</span> <span class="kw">if</span> best.index == ix { <span class="cm">// 同じ索引の範囲を両側から締める</span>
+			<span class="kw">if</span> p.lo != <span class="kw">nil</span> &amp;&amp; (best.lo == <span class="kw">nil</span> || bytes.Compare(p.lo, best.lo) &gt; <span class="st">0</span>) {
+				best.lo = p.lo
+			}
+			<span class="kw">if</span> p.hi != <span class="kw">nil</span> &amp;&amp; (best.hi == <span class="kw">nil</span> || bytes.Compare(p.hi, best.hi) &lt; <span class="st">0</span>) {
+				best.hi = p.hi
+			}
+		}
+	}
+	<span class="kw">if</span> best != <span class="kw">nil</span> {
+		<span class="kw">return</span> *best
+	}
+	<span class="kw">return</span> <span class="ty">pathPlan</span>{desc: <span class="st">"seqscan("</span> + table + <span class="st">")"</span>}
+}
+
+<span class="cm">// flattenAnd は AND の木を連言のリストにほどく。</span>
+<span class="kw">func</span> flattenAnd(e <span class="ty">Expr</span>) []<span class="ty">Expr</span> {
+	<span class="kw">if</span> be, ok := e.(<span class="ty">BinExpr</span>); ok &amp;&amp; be.Op == OpAnd {
+		<span class="kw">return</span> <span class="kw">append</span>(flattenAnd(be.L), flattenAnd(be.R)...)
+	}
+	<span class="kw">return</span> []<span class="ty">Expr</span>{e}
+}
+
+<span class="cm">// normalizeComparison は「列 op リテラル」の形に正規化する（リテラルが左でもよい）。</span>
+<span class="kw">func</span> normalizeComparison(be <span class="ty">BinExpr</span>) (col <span class="kw">string</span>, lit catalog.<span class="ty">Value</span>, op <span class="ty">BinOp</span>, ok <span class="kw">bool</span>) {
+	flip := <span class="kw">map</span>[<span class="ty">BinOp</span>]<span class="ty">BinOp</span>{OpEq: OpEq, OpNe: OpNe, OpLt: OpGt, OpLe: OpGe, OpGt: OpLt, OpGe: OpLe}
+	<span class="kw">if</span> c, isCol := be.L.(<span class="ty">ColRef</span>); isCol {
+		<span class="kw">if</span> l, isLit := be.R.(<span class="ty">Lit</span>); isLit {
+			<span class="kw">return</span> c.Name, l.Val, be.Op, <span class="kw">true</span>
+		}
+	}
+	<span class="kw">if</span> l, isLit := be.L.(<span class="ty">Lit</span>); isLit {
+		<span class="kw">if</span> c, isCol := be.R.(<span class="ty">ColRef</span>); isCol {
+			<span class="kw">return</span> c.Name, l.Val, flip[be.Op], <span class="kw">true</span>
+		}
+	}
+	<span class="kw">return</span> <span class="st">""</span>, catalog.<span class="ty">Value</span>{}, <span class="st">0</span>, <span class="kw">false</span>
+}
+
+<span class="cm">// collectRows は選択した経路で行を集め、WHERE を残余フィルタとして適用する。</span>
+<span class="kw">func</span> collectRows(st storage.<span class="ty">Store</span>, cat *catalog.<span class="ty">Catalog</span>, tab *catalog.<span class="ty">Table</span>, where <span class="ty">Expr</span>) ([]<span class="ty">row</span>, <span class="kw">string</span>, <span class="ty">error</span>) {
+	<span class="kw">if</span> where != <span class="kw">nil</span> {
+		<span class="kw">if</span> err := typeCheck(where, &amp;tab.<span class="ty">Schema</span>); err != <span class="kw">nil</span> {
+			<span class="kw">return</span> <span class="kw">nil</span>, <span class="st">""</span>, err
+		}
+	}
+	plan := choosePath(cat, tab.Name, where)
+	heap := catalog.OpenHeap(st, tab.HeapFirst)
+	<span class="kw">var</span> rows []<span class="ty">row</span>
+
+	appendIfMatch := <span class="kw">func</span>(tid btree.<span class="ty">TID</span>, rec []<span class="kw">byte</span>) <span class="ty">error</span> {
+		vals, err := tab.<span class="ty">Schema</span>.Decode(rec)
+		<span class="kw">if</span> err != <span class="kw">nil</span> {
+			<span class="kw">return</span> err
+		}
+		<span class="kw">if</span> where != <span class="kw">nil</span> {
+			ok, err := evalBool(where, &amp;tab.<span class="ty">Schema</span>, vals)
+			<span class="kw">if</span> err != <span class="kw">nil</span> {
+				<span class="kw">return</span> err
+			}
+			<span class="kw">if</span> !ok {
+				<span class="kw">return</span> <span class="kw">nil</span>
+			}
+		}
+		rows = <span class="kw">append</span>(rows, <span class="ty">row</span>{tid: tid, vals: vals})
+		<span class="kw">return</span> <span class="kw">nil</span>
+	}
+
+	<span class="kw">if</span> plan.index != <span class="kw">nil</span> {
+		tree := btree.Open(st, plan.index.Meta)
+		tids, err := tree.SearchRange(plan.lo, plan.hi)
+		<span class="kw">if</span> err != <span class="kw">nil</span> {
+			<span class="kw">return</span> <span class="kw">nil</span>, <span class="st">""</span>, err
+		}
+		<span class="kw">for</span> _, tid := <span class="kw">range</span> tids {
+			rec, err := heap.Get(tid)
+			<span class="kw">if</span> err != <span class="kw">nil</span> {
+				<span class="kw">return</span> <span class="kw">nil</span>, <span class="st">""</span>, err
+			}
+			<span class="kw">if</span> err := appendIfMatch(tid, rec); err != <span class="kw">nil</span> {
+				<span class="kw">return</span> <span class="kw">nil</span>, <span class="st">""</span>, err
+			}
+		}
+		<span class="kw">return</span> rows, plan.desc, <span class="kw">nil</span>
+	}
+	<span class="kw">if</span> err := heap.Scan(appendIfMatch); err != <span class="kw">nil</span> {
+		<span class="kw">return</span> <span class="kw">nil</span>, <span class="st">""</span>, err
+	}
+	<span class="kw">return</span> rows, plan.desc, <span class="kw">nil</span>
+}
+</code></pre>
+
+    <ul>
+      <li><strong><code>flattenAnd</code> — AND の木をリストにほどく</strong> — <code>a AND b AND c</code> は AST 上では 2 段の木ですが、プランナにとっては「3 つの条件が全部成り立つ」というだけのこと。再帰でほどいて平らなリストにします。<strong>OR が混ざった枝はほどかれず 1 個の塊のまま</strong>残る点が重要です。<code>a = 1 OR b = 2</code> は「a の索引だけ」では答えられない（b = 2 の行を取りこぼす）ので、塊のまま <code>normalizeComparison</code> に弾かれ、自然に全走査へ落ちます。正しさがルールの単純さで守られています。</li>
+      <li><strong><code>normalizeComparison</code> — 向きを揃える</strong> — 使えるのは「列 op リテラル」の形だけですが、人間は <code>28 &lt; age</code> とも書きます。リテラルが左に来ていたら、演算子を反転（<code>&lt;</code> → <code>&gt;</code>）して「列が左」に正規化します。<code>flip</code> の対応表がその反転辞書です。</li>
+      <li><strong><code>choosePath</code> — 等値は即決、範囲は両側から締める</strong> — 等値（<code>id = 1500</code>）が見つかったら文句なしに最良なので即 return。範囲述語は、同じ索引に対する <code>lo</code>（下限）と <code>hi</code>（上限）を突き合わせて、<code>age &gt;= 500 AND age &lt;= 800</code> のような両側の条件から 1 個の範囲走査を組み立てます。キーの表現には第04章の <code>EncodeKey</code>（値を「バイト列の大小 = 値の大小」になるよう焼き直す変換）を使うので、B+Tree はバイト比較だけで範囲を辿れます。</li>
+      <li><strong>境界の緩さはわざと</strong> — コメントにあるとおり、<code>&gt;</code> と <code>&gt;=</code> の違いを索引側では<strong>気にしません</strong>。<code>age &gt; 28</code> でも <code>age &gt;= 28</code> でも、同じ「28 から上」を候補として取ります。境界ぴったりの行（age = 28）が余分に混ざりますが、かまわない — 次の残余フィルタが落とすからです。</li>
+      <li><strong><code>collectRows</code> — 残余フィルタが正しさの砦</strong> — 型検査を済ませてから経路を選び、行を集めます。心臓部は <code>appendIfMatch</code>: 行をデコードし、<strong>WHERE 式全体</strong>を <code>evalBool</code> で評価して、合格した行だけを溜める。注目すべきは、この関数が<strong>索引経路でも全走査経路でも同じように呼ばれる</strong>ことです。索引はあくまで「読む行の候補を減らす」だけで、<strong>条件判定そのものは常に WHERE の完全な再評価が行う</strong>。これが<strong>残余フィルタ</strong>です。</li>
+    </ul>
+    <p>この最後の一点が、この章でいちばん伝えたい設計思想です。<strong>速くする仕組み（プランナ・索引）と、正しさを守る仕組み（残余フィルタ）を分離する。</strong>分離しておくと、プランナがどれだけ雑でも — 極端な話、述語の解釈を間違えて無関係な候補を集めてきても — 最終結果は壊れません。プランナのバグは<strong>性能バグにはなっても、正しさバグにはならない</strong>のです。逆に「索引が返した行はもう検査しない」設計にすると、境界条件（<code>&gt;</code> と <code>&gt;=</code>、NULL の扱い…）の 1 個のミスがそのまま<strong>間違った結果</strong>になります。小さな実装ほど、この保険はよく効きます。</p>
+
+    <div class="box hazard"><div class="box-k">⚠ 落とし穴 — 「索引だけを信じる」最適化の誘惑</div>
+      <p>「候補は索引で絞ったのだから、WHERE の再評価は無駄では？」と思ったら要注意です。この再評価を消してよいのは、<strong>索引が述語を完全に表現できている</strong>と証明できる場合だけ。<code>age &gt; 28 AND name != 'bob'</code> では、age の索引は 2 つ目の条件を何も知りません。本物の DB はこの証明を精密にやって残余を最小化しますが、その複雑さこそがプランナのバグの温床でもあります。minidb は「常に全部再評価」に倒して、正しさを構造で保証しています。</p>
+    </div>
+
+    <div class="gonote"><div class="box-k">GO メモ · クロージャ — 外の変数を捕まえる関数</div>
+      <p><code>appendIfMatch</code> は関数の中で作った関数（無名関数）で、外側の変数 <code>rows</code> や <code>where</code> を<strong>参照したまま</strong>持ち歩きます。これを<strong>クロージャ</strong>と呼びます。<code>heap.Scan(appendIfMatch)</code> のように「1 行見つけるたびに呼んでほしい処理」を関数値として渡すスタイル（コールバック）と組み合わせると、「走査の仕方」と「行ごとの処理」をきれいに分業できます。<code>appendIfMatch</code> の中の <code>rows = append(rows, …)</code> が外側の <code>rows</code> を書き換えていることを確かめてください。</p>
+    </div>
+
+    <div class="box do"><div class="box-k">▸ 動かして確認</div>
+      <p>いまはまだ索引が 1 本もないので、プランナの答えは常に全走査です。REPL の結果の末尾に必ず <code>plan: seqscan(...)</code> と出ていることを、ここまでの実行例で見返してください。<code>choosePath</code> の最初の if（<code>len(indexes) == 0</code>）を通った証拠です。同じクエリが <code>indexscan</code> に変わる瞬間は、第07章で <code>CREATE INDEX</code> を実装したときに観測します。予告として、第07章で通すテストの期待値だけ見ておきましょう。</p>
+      <div class="file-tag">e2e_test.go（TestM7IndexAndTransactions より抜粋 — 第07章で通す）</div>
+      <pre><code>	<span class="cm">// 索引なしのプラン確認</span>
+	res := mustExec(t, db, <span class="st">"SELECT owner FROM accounts WHERE id = 1500"</span>)
+	<span class="kw">if</span> res.Plan != <span class="st">"seqscan(accounts)"</span> {
+		t.Fatalf(<span class="st">"索引なしなのにプランが %s"</span>, res.Plan)
+	}
+
+	<span class="cm">// CREATE INDEX → 同じクエリが索引経由になる</span>
+	mustExec(t, db, <span class="st">"CREATE INDEX idx_accounts_id ON accounts (id)"</span>)
+	res = mustExec(t, db, <span class="st">"SELECT owner FROM accounts WHERE id = 1500"</span>)
+	<span class="kw">if</span> res.Plan != <span class="st">"indexscan(idx_accounts_id)"</span> {
+		t.Fatalf(<span class="st">"索引が使われていない: plan=%s"</span>, res.Plan)
+	}
+	<span class="kw">if</span> <span class="kw">len</span>(res.Rows) != <span class="st">1</span> || res.Rows[<span class="st">0</span>][<span class="st">0</span>].Str != <span class="st">"owner-1500"</span> {
+		t.Fatalf(<span class="st">"索引検索の結果が不正: %+v"</span>, res.Rows)
+	}
+</code></pre>
+      <p>とはいえ「予告だけ」で終わるのは物足りません。<strong>手元の <code>src/</code> は完成版</strong>なので（教材の掲載コードから省いただけで、実物には <code>CREATE INDEX</code> の中身が書かれています）、プランナが切り替わる瞬間だけは<strong>いま体験できます</strong>。REPL でそのまま打ってみてください。</p>
+      <pre class="term"><code><span class="ps">$</span> go run ./cmd/minidb-repl ch05plan.db
+<span class="out">minidb — 単一ファイル組み込み RDBMS（.exit で終了 / .stats で統計）</span>
+<span class="ps">minidb&gt;</span> CREATE TABLE users (id INT, name TEXT, age INT)
+<span class="out">OK（0 行）</span>
+<span class="ps">minidb&gt;</span> INSERT INTO users VALUES (1, 'alice', 30)
+<span class="out">OK（1 行）</span>
+<span class="ps">minidb&gt;</span> INSERT INTO users VALUES (2, 'bob', 25)
+<span class="out">OK（1 行）</span>
+<span class="ps">minidb&gt;</span> INSERT INTO users VALUES (3, 'carol', 35)
+<span class="out">OK（1 行）</span>
+<span class="ps">minidb&gt;</span> SELECT name FROM users WHERE age &gt; 28
+<span class="out">| name  |
+| ----- |
+| alice |
+| carol |
+（2 行 / plan: seqscan(users)）</span>
+<span class="ps">minidb&gt;</span> CREATE INDEX idx_users_age ON users (age)
+<span class="out">OK（3 行）</span>
+<span class="ps">minidb&gt;</span> SELECT name FROM users WHERE age &gt; 28
+<span class="out">| name  |
+| ----- |
+| alice |
+| carol |
+（2 行 / plan: indexscan(idx_users_age)）</span></code></pre>
+      <p><strong>まったく同じ SELECT が、<code>seqscan</code> から <code>indexscan</code> に変わりました。</strong> 結果の行はもちろん同じです。変わったのは「どうやって取りに行ったか」だけ — <code>choosePath</code> がこの表に張られた索引を見つけ、<code>age &gt; 28</code> という条件を <code>[29, +∞)</code> という範囲に翻訳して、B+Tree を使う道を選んだのです。</p>
+      <p>ついでに、<strong>索引に落ちない条件</strong>も試してみてください。Step 7 で読んだ「使えるものだけ拾う」規則が、そのまま観測できます。</p>
+      <pre class="term"><code><span class="ps">minidb&gt;</span> SELECT name FROM users WHERE age != 28
+<span class="out">（3 行 / plan: seqscan(users)）</span>
+<span class="ps">minidb&gt;</span> SELECT name FROM users WHERE age = 30 OR name = 'bob'
+<span class="out">（2 行 / plan: seqscan(users)）</span></code></pre>
+      <p><code>!=</code> は「範囲」に翻訳できないので落ちる。<code>OR</code> は <code>flattenAnd</code> が AND しか分解しないので、条件全体がひとかたまりのまま残って落ちる。<strong>どちらも答えは正しいまま、道だけが全走査に戻っています。</strong> これが「索引が使えないだけで、間違いにはならない」という残余フィルタ方式の安心感です。理解度チェック Q6 は、この 2 行を打てば自分の目で確かめられます。</p>
+    </div>
+
+    <h2 class="step" id="step-8"><span class="step-no">Step 8</span>SELECT パイプライン — filter → sort → project</h2>
+    <p><code>exec.go</code> の最後の 3 分の 1 です。行を集めたあと、SELECT は並べ替え（ORDER BY）・切り詰め（LIMIT）・列の絞り込み（選択リスト）を順に適用します。この一連の流れを<strong>実行パイプライン</strong>と呼びます。どの段が「1 行ずつ流せる」のか、どの段で「全行を溜めざるを得ない」のか — それを意識するのが、実行モデル理解の本丸です。</p>
+
+    <div class="ascii">SELECT name FROM users WHERE age &gt; 28 ORDER BY age DESC の実行:
+
+  scan     ヒープ（または索引の候補）から 1 行ずつ読む      ─┐
+    │                                                     │ 1 行ずつ
+  filter   WHERE を評価し、合格した行だけ通す               │ 流れる
+    │      （= collectRows の appendIfMatch）             ─┘
+    ▼
+━━ rows []row ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+   ★ ここで全行を溜める。ORDER BY は「最後の行」を見るまで
+     1 行目の順位すら確定できないから
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+    │
+  sort     溜めた全体を並べ替える（sort.SliceStable）
+    │
+  limit    先頭 n 行に切る（sort の後でないと意味が変わる）
+    │
+  project  選択リストの列だけに絞る（射影）
+    ▼
+  Result{Cols, Rows, Plan}</div>
+
+    <p>本物のデータベースの多くは、この図の各段を「1 行くれ、と下の段に頼む」イテレータとして実装します（Volcano モデルと呼ばれます）。minidb は規模が小さいので、filter までを 1 パスで済ませて <code>[]row</code> に溜め、あとはスライス操作で片付ける素直な形にしています。それでも「<strong>ORDER BY が全行を溜める境界線である</strong>」という本質は同じです。イテレータ実装なら scan と filter はメモリをほぼ食いません（1 行ずつ上へ流すだけだから）。一方 minidb は、そこまで凝らず <code>collectRows</code> が<strong>ORDER BY の有無にかかわらず</strong>条件に合った行を <code>[]row</code> に全部溜める簡易形です。どちらの形でも、条件に合った行が<strong>全部メモリに載る</strong> — 100 万行ヒットすれば 100 万行分 — という点は変わりません。ORDER BY が本質的にストリーミングを不可能にする（全体が揃わないと並べ替えられない）境界である点も同じで、<code>LIMIT 3</code> と書いてあっても先に全行が要ります。</p>
+
+    <div class="file-tag">internal/sql/exec.go（3/3 — SELECT / UPDATE / DELETE）</div>
+    <pre><code><span class="kw">func</span> execSelect(st storage.<span class="ty">Store</span>, cat *catalog.<span class="ty">Catalog</span>, s <span class="ty">SelectStmt</span>) (*<span class="ty">Result</span>, <span class="ty">error</span>) {
+	tab, ok := cat.<span class="ty">Table</span>(s.<span class="ty">Table</span>)
+	<span class="kw">if</span> !ok {
+		<span class="kw">return</span> <span class="kw">nil</span>, fmt.Errorf(<span class="st">"テーブル %s が存在しない"</span>, s.<span class="ty">Table</span>)
+	}
+	<span class="cm">// 選択リストの検証</span>
+	countOnly := <span class="kw">false</span>
+	<span class="kw">var</span> projCols []<span class="kw">int</span>
+	<span class="kw">var</span> colNames []<span class="kw">string</span>
+	<span class="kw">for</span> _, item := <span class="kw">range</span> s.Items {
+		<span class="kw">switch</span> {
+		<span class="kw">case</span> item.CountStar:
+			<span class="kw">if</span> <span class="kw">len</span>(s.Items) != <span class="st">1</span> {
+				<span class="kw">return</span> <span class="kw">nil</span>, fmt.Errorf(<span class="st">"COUNT(*) は単独でのみ使える"</span>)
+			}
+			countOnly = <span class="kw">true</span>
+		<span class="kw">case</span> item.Star:
+			<span class="kw">for</span> i, c := <span class="kw">range</span> tab.<span class="ty">Schema</span>.Cols {
+				projCols = <span class="kw">append</span>(projCols, i)
+				colNames = <span class="kw">append</span>(colNames, c.Name)
+			}
+		<span class="kw">default</span>:
+			i := tab.<span class="ty">Schema</span>.ColIndex(item.Col)
+			<span class="kw">if</span> i &lt; <span class="st">0</span> {
+				<span class="kw">return</span> <span class="kw">nil</span>, fmt.Errorf(<span class="st">"列 %s が存在しない"</span>, item.Col)
+			}
+			projCols = <span class="kw">append</span>(projCols, i)
+			colNames = <span class="kw">append</span>(colNames, item.Col)
+		}
+	}
+
+	rows, plan, err := collectRows(st, cat, tab, s.Where)
+	<span class="kw">if</span> err != <span class="kw">nil</span> {
+		<span class="kw">return</span> <span class="kw">nil</span>, err
+	}
+
+	<span class="kw">if</span> countOnly {
+		<span class="kw">return</span> &amp;<span class="ty">Result</span>{
+			Cols: []<span class="kw">string</span>{<span class="st">"count"</span>},
+			Rows: [][]catalog.<span class="ty">Value</span>{{catalog.NewInt(<span class="kw">int64</span>(<span class="kw">len</span>(rows)))}},
+			Plan: plan,
+		}, <span class="kw">nil</span>
+	}
+
+	<span class="kw">if</span> s.<span class="ty">OrderBy</span> != <span class="kw">nil</span> {
+		ci := tab.<span class="ty">Schema</span>.ColIndex(s.<span class="ty">OrderBy</span>.Col)
+		<span class="kw">if</span> ci &lt; <span class="st">0</span> {
+			<span class="kw">return</span> <span class="kw">nil</span>, fmt.Errorf(<span class="st">"ORDER BY の列 %s が存在しない"</span>, s.<span class="ty">OrderBy</span>.Col)
+		}
+		desc := s.<span class="ty">OrderBy</span>.Desc
+		sort.SliceStable(rows, <span class="kw">func</span>(a, b <span class="kw">int</span>) <span class="kw">bool</span> {
+			cmp := catalog.Compare(rows[a].vals[ci], rows[b].vals[ci])
+			<span class="kw">if</span> desc {
+				<span class="kw">return</span> cmp &gt; <span class="st">0</span>
+			}
+			<span class="kw">return</span> cmp &lt; <span class="st">0</span>
+		})
+	}
+	<span class="kw">if</span> s.Limit &gt;= <span class="st">0</span> &amp;&amp; <span class="kw">len</span>(rows) &gt; s.Limit {
+		rows = rows[:s.Limit]
+	}
+
+	out := <span class="kw">make</span>([][]catalog.<span class="ty">Value</span>, <span class="kw">len</span>(rows))
+	<span class="kw">for</span> i, r := <span class="kw">range</span> rows {
+		vals := <span class="kw">make</span>([]catalog.<span class="ty">Value</span>, <span class="kw">len</span>(projCols))
+		<span class="kw">for</span> j, ci := <span class="kw">range</span> projCols {
+			vals[j] = r.vals[ci]
+		}
+		out[i] = vals
+	}
+	<span class="kw">return</span> &amp;<span class="ty">Result</span>{Cols: colNames, Rows: out, Plan: plan}, <span class="kw">nil</span>
+}
+
+<span class="kw">func</span> execUpdate(st storage.<span class="ty">Store</span>, cat *catalog.<span class="ty">Catalog</span>, s <span class="ty">UpdateStmt</span>) (*<span class="ty">Result</span>, <span class="ty">error</span>) {
+	tab, ok := cat.<span class="ty">Table</span>(s.<span class="ty">Table</span>)
+	<span class="kw">if</span> !ok {
+		<span class="kw">return</span> <span class="kw">nil</span>, fmt.Errorf(<span class="st">"テーブル %s が存在しない"</span>, s.<span class="ty">Table</span>)
+	}
+	<span class="cm">// SET 句の検証（型チェックは litValue が行う）</span>
+	<span class="kw">type</span> setOp <span class="kw">struct</span> {
+		colIdx <span class="kw">int</span>
+		val    catalog.<span class="ty">Value</span>
+	}
+	<span class="kw">var</span> ops []setOp
+	<span class="kw">for</span> _, sc := <span class="kw">range</span> s.Sets {
+		ci := tab.<span class="ty">Schema</span>.ColIndex(sc.Col)
+		<span class="kw">if</span> ci &lt; <span class="st">0</span> {
+			<span class="kw">return</span> <span class="kw">nil</span>, fmt.Errorf(<span class="st">"列 %s が存在しない"</span>, sc.Col)
+		}
+		v, err := litValue(sc.<span class="ty">Expr</span>, tab.<span class="ty">Schema</span>.Cols[ci])
+		<span class="kw">if</span> err != <span class="kw">nil</span> {
+			<span class="kw">return</span> <span class="kw">nil</span>, err
+		}
+		ops = <span class="kw">append</span>(ops, setOp{ci, v})
+	}
+
+	rows, plan, err := collectRows(st, cat, tab, s.Where)
+	<span class="kw">if</span> err != <span class="kw">nil</span> {
+		<span class="kw">return</span> <span class="kw">nil</span>, err
+	}
+	heap := catalog.OpenHeap(st, tab.HeapFirst)
+	<span class="cm">// …（第07章で: この表に張られた索引の一覧を取得する）</span>
+	<span class="kw">for</span> _, r := <span class="kw">range</span> rows {
+		newVals := <span class="kw">make</span>([]catalog.<span class="ty">Value</span>, <span class="kw">len</span>(r.vals))
+		<span class="kw">copy</span>(newVals, r.vals)
+		<span class="kw">for</span> _, op := <span class="kw">range</span> ops {
+			newVals[op.colIdx] = op.val
+		}
+		rec, err := tab.<span class="ty">Schema</span>.Encode(newVals)
+		<span class="kw">if</span> err != <span class="kw">nil</span> {
+			<span class="kw">return</span> <span class="kw">nil</span>, err
+		}
+		<span class="cm">// 行の移動 = 削除 + 挿入。TID が変わるので索引も張り替える</span>
+		<span class="kw">if</span> err := heap.Delete(r.tid); err != <span class="kw">nil</span> {
+			<span class="kw">return</span> <span class="kw">nil</span>, err
+		}
+		newTid, err := heap.Insert(rec)
+		<span class="kw">if</span> err != <span class="kw">nil</span> {
+			<span class="kw">return</span> <span class="kw">nil</span>, err
+		}
+		<span class="cm">// …（第07章で: 旧 TID の索引エントリを消し、新 TID で張り直す）</span>
+	}
+	<span class="kw">return</span> &amp;<span class="ty">Result</span>{Affected: <span class="kw">len</span>(rows), Plan: plan}, <span class="kw">nil</span>
+}
+
+<span class="kw">func</span> execDelete(st storage.<span class="ty">Store</span>, cat *catalog.<span class="ty">Catalog</span>, s <span class="ty">DeleteStmt</span>) (*<span class="ty">Result</span>, <span class="ty">error</span>) {
+	tab, ok := cat.<span class="ty">Table</span>(s.<span class="ty">Table</span>)
+	<span class="kw">if</span> !ok {
+		<span class="kw">return</span> <span class="kw">nil</span>, fmt.Errorf(<span class="st">"テーブル %s が存在しない"</span>, s.<span class="ty">Table</span>)
+	}
+	rows, plan, err := collectRows(st, cat, tab, s.Where)
+	<span class="kw">if</span> err != <span class="kw">nil</span> {
+		<span class="kw">return</span> <span class="kw">nil</span>, err
+	}
+	heap := catalog.OpenHeap(st, tab.HeapFirst)
+	<span class="cm">// …（第07章で: この表に張られた索引の一覧を取得する）</span>
+	<span class="kw">for</span> _, r := <span class="kw">range</span> rows {
+		<span class="kw">if</span> err := heap.Delete(r.tid); err != <span class="kw">nil</span> {
+			<span class="kw">return</span> <span class="kw">nil</span>, err
+		}
+		<span class="cm">// …（第07章で: 索引からもエントリを消す）</span>
+	}
+	<span class="kw">return</span> &amp;<span class="ty">Result</span>{Affected: <span class="kw">len</span>(rows), Plan: plan}, <span class="kw">nil</span>
+}
+</code></pre>
+
+    <ul>
+      <li><strong>選択リストの検証が先</strong> — <code>*</code> は全列の並びに展開し、列名はスキーマ上の位置（添字）に解決して <code>projCols</code> に持ちます。存在しない列（<code>SELECT nope FROM …</code>）はここでエラーです。<code>COUNT(*)</code> は minidb 唯一の集計で、<strong>単独でのみ</strong>使える制約もここで検査します（<code>SELECT COUNT(*), name</code> のような文は、行の集計と行そのものを同時に返せないため）。</li>
+      <li><strong><code>COUNT(*)</code> は「溜めた行の数」</strong> — 集めた <code>rows</code> の長さを 1 行 1 列の結果に包んで返すだけです。集計とは「行の集合を 1 個の値に潰す」操作だ、という最小の見本です。</li>
+      <li><strong>ORDER BY は比較関数を差し込むだけ</strong> — 並べ替えの対象列を添字 <code>ci</code> に解決し、<code>sort.SliceStable</code> に「a 行と b 行、どちらが先か」の関数を渡します。大小の定義は例によって <code>catalog.Compare</code>。DESC は比較の向きを逆にするだけです。</li>
+      <li><strong>LIMIT は sort の後</strong> — <code>rows = rows[:s.Limit]</code> はただのスライス切り詰めですが、置き場所が命です。並べ替える<strong>前</strong>に切ると「たまたま先に読めた 3 行を並べ替えたもの」になり、「上位 3 行」とは別物になります。</li>
+      <li><strong>射影（projection）は最後</strong> — 行の中から <code>projCols</code> の列だけを抜き出して詰め直します。<code>SELECT name FROM …</code> の結果が name 1 列になるのはこの 10 行の仕事です。</li>
+      <li><strong>UPDATE は「削除 + 挿入」</strong> — 対象行の集め方は SELECT と同じ <code>collectRows</code> の再利用です。更新そのものは、新しい値で行を作り直し、古い行をヒープから消して入れ直す。行のサイズが変わってもページ内の空きを気にしなくてよい、いちばん単純な実装です。代償として行の住所（TID）が変わるため、索引の張り替えが必要になります — が、それは第07章のお楽しみです。DELETE は同じ流れの削除だけ版です。</li>
+    </ul>
+
+    <div class="gonote"><div class="box-k">GO メモ · sort.SliceStable — 比較関数を渡すソート</div>
+      <p><code>sort.SliceStable(s, less)</code> は、スライス <code>s</code> を関数 <code>less(a, b int)</code>（添字 a の要素は添字 b の要素より前か？）に従って並べ替えます。比較ロジックをクロージャで渡せるので、「i 番目の列で比較する」「DESC なら逆」のような動的な条件がそのまま書けます。<code>Stable</code> 付きは<strong>同順位の行の元の順序を保つ</strong>安定ソートです。同じ age の行が実行のたびに入れ替わらないのは、テストの再現性に効きます。</p>
+    </div>
+
+    <div class="box do"><div class="box-k">▸ 動かして確認</div>
+      <p>章の冒頭から追いかけてきた例文を、ついに最初から最後まで通します。新しい DB ファイルで、表を作り、行を入れ、WHERE・ORDER BY・COUNT(*) を打ちます。</p>
+      <pre class="term"><code><span class="ps">$</span> go run ./cmd/minidb-repl ch05.db
+<span class="out">minidb — 単一ファイル組み込み RDBMS（.exit で終了 / .stats で統計）</span>
+<span class="ps">minidb&gt;</span> CREATE TABLE users (id INT, name TEXT, age INT)
+<span class="out">OK（0 行）</span>
+<span class="ps">minidb&gt;</span> INSERT INTO users VALUES (1, 'alice', 30), (2, 'bob', 25), (3, 'carol', 35)
+<span class="out">OK（3 行）</span>
+<span class="ps">minidb&gt;</span> SELECT name, age FROM users WHERE age &gt; 28 ORDER BY age DESC
+<span class="out">| name  | age |
+| ----- | --- |
+| carol | 35  |
+| alice | 30  |
+（2 行 / plan: seqscan(users)）</span>
+<span class="ps">minidb&gt;</span> SELECT COUNT(*) FROM users WHERE age &gt; 28
+<span class="out">| count |
+| ----- |
+| 2     |
+（1 行 / plan: seqscan(users)）</span></code></pre>
+      <p>bob（25 歳）が filter で落ち、carol と alice が sort で降順に並び、project で name と age の 2 列だけになりました。図の 1 段 1 段と突き合わせてください。仕上げに、この章の検収テストを回します。M5 の受け入れ基準を書き下したテストの主要部も引用しておきます。</p>
+      <div class="file-tag">e2e_test.go（TestM5QueryAndErrors — この章の検収テスト）</div>
+      <pre><code><span class="cm">// M5 受け入れ基準: WHERE / ORDER BY が動作し、誤った SQL を報告できる。</span>
+<span class="kw">func</span> TestM5QueryAndErrors(t *testing.T) {
+	db := open(t, filepath.Join(t.TempDir(), <span class="st">"m5.db"</span>))
+	<span class="kw">defer</span> db.Close()
+	mustExec(t, db, <span class="st">"CREATE TABLE items (id INT, name TEXT, price INT)"</span>)
+	<span class="kw">for</span> i := <span class="st">1</span>; i &lt;= <span class="st">20</span>; i++ {
+		mustExec(t, db, fmt.Sprintf(<span class="st">"INSERT INTO items VALUES (%d, 'item-%02d', %d)"</span>, i, i, i*<span class="st">100</span>))
+	}
+
+	<span class="cm">// WHERE: 等値・範囲・論理結合</span>
+	res := mustExec(t, db, <span class="st">"SELECT name FROM items WHERE price &gt;= 500 AND price &lt;= 800"</span>)
+	<span class="kw">if</span> <span class="kw">len</span>(res.Rows) != <span class="st">4</span> {
+		t.Fatalf(<span class="st">"範囲 WHERE が %d 行, want 4"</span>, <span class="kw">len</span>(res.Rows))
+	}
+	res = mustExec(t, db, <span class="st">"SELECT name FROM items WHERE id = 1 OR id = 20"</span>)
+	<span class="kw">if</span> <span class="kw">len</span>(res.Rows) != <span class="st">2</span> {
+		t.Fatalf(<span class="st">"OR が %d 行, want 2"</span>, <span class="kw">len</span>(res.Rows))
+	}
+
+	<span class="cm">// ORDER BY DESC</span>
+	res = mustExec(t, db, <span class="st">"SELECT id FROM items ORDER BY price DESC LIMIT 3"</span>)
+	<span class="kw">if</span> <span class="kw">len</span>(res.Rows) != <span class="st">3</span> || res.Rows[<span class="st">0</span>][<span class="st">0</span>].Int != <span class="st">20</span> || res.Rows[<span class="st">2</span>][<span class="st">0</span>].Int != <span class="st">18</span> {
+		t.Fatalf(<span class="st">"ORDER BY DESC LIMIT の結果が不正: %+v"</span>, res.Rows)
+	}
+
+	<span class="cm">// 集計</span>
+	res = mustExec(t, db, <span class="st">"SELECT COUNT(*) FROM items WHERE price &gt; 1500"</span>)
+	<span class="kw">if</span> res.Rows[<span class="st">0</span>][<span class="st">0</span>].Int != <span class="st">5</span> {
+		t.Fatalf(<span class="st">"COUNT(*) = %d, want 5"</span>, res.Rows[<span class="st">0</span>][<span class="st">0</span>].Int)
+	}
+
+	<span class="cm">// FR-09: 構文エラーの報告</span>
+	<span class="kw">if</span> _, err := db.Exec(<span class="st">"SELEKT * FROM items"</span>); err == <span class="kw">nil</span> || !strings.Contains(err.Error(), <span class="st">"構文エラー"</span>) {
+		t.Fatalf(<span class="st">"誤った SQL が構文エラーにならない: %v"</span>, err)
+	}
+	<span class="kw">if</span> _, err := db.Exec(<span class="st">"SELECT * FROM items WHERE"</span>); err == <span class="kw">nil</span> {
+		t.Fatal(<span class="st">"不完全な WHERE がエラーにならない"</span>)
+	}
+	<span class="cm">// FR-09: 型エラーの報告（INT 列と文字列の比較）</span>
+	<span class="kw">if</span> _, err := db.Exec(<span class="st">"SELECT * FROM items WHERE price = 'abc'"</span>); err == <span class="kw">nil</span> || !strings.Contains(err.Error(), <span class="st">"型エラー"</span>) {
+		t.Fatalf(<span class="st">"型エラーが報告されない: %v"</span>, err)
+	}
+	<span class="cm">// 存在しない列・テーブル</span>
+	<span class="kw">if</span> _, err := db.Exec(<span class="st">"SELECT nope FROM items"</span>); err == <span class="kw">nil</span> {
+		t.Fatal(<span class="st">"存在しない列がエラーにならない"</span>)
+	}
+	<span class="kw">if</span> _, err := db.Exec(<span class="st">"SELECT * FROM nope"</span>); err == <span class="kw">nil</span> {
+		t.Fatal(<span class="st">"存在しないテーブルがエラーにならない"</span>)
+	}
+}
+</code></pre>
+      <pre class="term"><code><span class="ps">$</span> go test . -run TestM5QueryAndErrors -v
+<span class="out">=== RUN   TestM5QueryAndErrors
+--- PASS: TestM5QueryAndErrors (0.04s)
+PASS
+ok  	minidb	0.782s</span></code></pre>
+    </div>
+
+    <h2 class="step" id="step-9"><span class="step-no">Step 9</span>db.go と REPL — 束ねて対話する</h2>
+    <p>部品は出揃いました。最後に、全部の層を 1 つに束ねる公開 API（<code>db.go</code>）と、人間が対話するためのシェル（REPL）を読みます。<code>db.go</code> の <code>minidb</code> パッケージは、外部から <code>import</code> できる唯一のパッケージ（<code>cmd/minidb-repl</code> も <code>internal/</code> の外にありますが <code>package main</code> なので取り込めません）で、利用者に見えるのは <code>Open</code> / <code>Exec</code> / <code>Close</code> / <code>Stats</code> と <code>Result</code> だけ。8 章分の内部構造が、この数個の名前の後ろに全部隠れます。</p>
+
+    <div class="file-tag">db.go（前半 — DB 構造体と Open）</div>
+    <pre><code><span class="cm">// Package minidb は単一ファイル・組み込み型のミニ RDBMS。</span>
+<span class="cm">// 使い方:</span>
+<span class="cm">//</span>
+<span class="cm">//	db, err := minidb.Open("app.db")</span>
+<span class="cm">//	defer db.Close()</span>
+<span class="cm">//	res, err := db.Exec("SELECT * FROM users WHERE id = 1")</span>
+<span class="cm">//</span>
+<span class="cm">// すべての層（ディスク → バッファ → ヒープ/B+Tree → SQL）をここで束ねる。</span>
+<span class="kw">package</span> minidb
+
+<span class="kw">import</span> (
+	<span class="st">"fmt"</span>
+
+	<span class="st">"minidb/internal/buffer"</span>
+	<span class="st">"minidb/internal/catalog"</span>
+	<span class="st">"minidb/internal/sql"</span>
+	<span class="st">"minidb/internal/storage"</span>
+	<span class="st">"minidb/internal/txn"</span>
+	<span class="st">"minidb/internal/wal"</span>
+)
+
+<span class="cm">// Result は SQL 1 文の実行結果（sql.Result の別名公開）。</span>
+<span class="kw">type</span> <span class="ty">Result</span> = sql.<span class="ty">Result</span>
+
+<span class="cm">// DB は開いているデータベース。並行モデルは単一ライタ・複数リーダ（NFR-07）を</span>
+<span class="cm">// 前提とし、DB 自体はゴルーチン安全ではない。</span>
+<span class="kw">type</span> <span class="ty">DB</span> <span class="kw">struct</span> {
+	disk *storage.<span class="ty">DiskManager</span>
+	wal  *wal.<span class="ty">WAL</span>
+	pool *buffer.<span class="ty">Pool</span>
+	cat  *catalog.<span class="ty">Catalog</span>
+
+	active        *txn.<span class="ty">Tx</span> <span class="cm">// BEGIN 中の明示トランザクション（なければ nil）</span>
+	activeDDL     <span class="kw">bool</span>    <span class="cm">// 明示 Tx 中に DDL を実行したか（ロールバック時にカタログ再読込が要る）</span>
+	activeAborted <span class="kw">bool</span>    <span class="cm">// 明示 Tx 中の文がエラーになったか（以後 COMMIT 不可）</span>
+	lastPlan      <span class="kw">string</span>
+}
+
+<span class="cm">// Open は DB ファイルを開く。手順は常に:</span>
+<span class="cm">// ① WAL を再生してコミット済み状態へ回復（M6）→ ② 空ならブートストラップ → ③ カタログ読込。</span>
+<span class="kw">func</span> Open(path <span class="kw">string</span>) (*<span class="ty">DB</span>, <span class="ty">error</span>) {
+	disk, err := storage.OpenDiskManager(path)
+	<span class="kw">if</span> err != <span class="kw">nil</span> {
+		<span class="kw">return</span> <span class="kw">nil</span>, err
+	}
+	w, err := wal.Open(path + <span class="st">".wal"</span>)
+	<span class="kw">if</span> err != <span class="kw">nil</span> {
+		disk.Close()
+		<span class="kw">return</span> <span class="kw">nil</span>, err
+	}
+	<span class="cm">// クラッシュ回復: コミット済みの変更をデータファイルへ適用し、ログを空にする</span>
+	<span class="kw">if</span> _, err := w.Recover(disk); err != <span class="kw">nil</span> {
+		w.Close()
+		disk.Close()
+		<span class="kw">return</span> <span class="kw">nil</span>, fmt.Errorf(<span class="st">"minidb: WAL 回復に失敗: %w"</span>, err)
+	}
+	<span class="kw">if</span> err := w.Truncate(); err != <span class="kw">nil</span> {
+		w.Close()
+		disk.Close()
+		<span class="kw">return</span> <span class="kw">nil</span>, err
+	}
+
+	pool := buffer.New(disk, <span class="st">128</span>)
+	<span class="kw">if</span> disk.NumPages() == <span class="st">0</span> {
+		<span class="cm">// 新規 DB: メタページとカタログを作って土台を固める</span>
+		<span class="kw">if</span> err := catalog.Bootstrap(pool); err != <span class="kw">nil</span> {
+			w.Close()
+			disk.Close()
+			<span class="kw">return</span> <span class="kw">nil</span>, err
+		}
+		<span class="kw">if</span> err := pool.FlushAll(); err != <span class="kw">nil</span> {
+			w.Close()
+			disk.Close()
+			<span class="kw">return</span> <span class="kw">nil</span>, err
+		}
+	}
+	cat, err := catalog.Load(pool)
+	<span class="kw">if</span> err != <span class="kw">nil</span> {
+		w.Close()
+		disk.Close()
+		<span class="kw">return</span> <span class="kw">nil</span>, err
+	}
+	<span class="kw">return</span> &amp;<span class="ty">DB</span>{disk: disk, wal: w, pool: pool, cat: cat}, <span class="kw">nil</span>
+}
+</code></pre>
+
+    <p><code>DB</code> 構造体は、これまでの章で作った層の束そのものです — ディスク（第00章）、WAL（第06章）、バッファプール（第02章）、カタログ（第04章）。<code>active</code> 以下の 3 フィールドは明示トランザクション（BEGIN〜COMMIT）の管理用で、第07章の主役です。いまは「そういう席が空けてある」とだけ見ておいてください。</p>
+    <p><code>Open</code> の手順①にある <strong>WAL の再生（クラッシュ回復）</strong>は、この章では中身に立ち入りません — 「前回強制終了していても、コミット済みの状態に直してから開く」という約束だけ覚えて、<strong>実装は第06章に譲ります</strong>。②以降は既に知っている部品です: ディスクの上にバッファプールを重ね、ファイルが空なら第04章の <code>Bootstrap</code> で土台（メタページとカタログ）を作り、カタログをメモリに読み込む。</p>
+
+    <div class="file-tag">db.go（後半 — Exec と Stats）</div>
+    <pre><code><span class="cm">// Exec は SQL 1 文を実行する。</span>
+<span class="cm">// BEGIN〜COMMIT の外では文ごとの自動コミット（1 文 = 1 トランザクション）。</span>
+<span class="kw">func</span> (db *<span class="ty">DB</span>) Exec(sqlStr <span class="kw">string</span>) (*<span class="ty">Result</span>, <span class="ty">error</span>) {
+	stmt, err := sql.Parse(sqlStr)
+	<span class="kw">if</span> err != <span class="kw">nil</span> {
+		<span class="kw">return</span> <span class="kw">nil</span>, err
+	}
+
+	<span class="kw">switch</span> stmt.(<span class="kw">type</span>) {
+	<span class="kw">case</span> sql.<span class="ty">BeginStmt</span>:
+		<span class="cm">// …（第07章で: 明示トランザクションの開始）</span>
+	<span class="kw">case</span> sql.<span class="ty">CommitStmt</span>:
+		<span class="cm">// …（第07章で: 溜めた変更を WAL で耐久化して確定する）</span>
+	<span class="kw">case</span> sql.<span class="ty">RollbackStmt</span>:
+		<span class="cm">// …（第07章で: 溜めた変更を巻き戻す）</span>
+	}
+
+	<span class="kw">if</span> db.active != <span class="kw">nil</span> {
+		<span class="cm">// …（第07章で: BEGIN 中の文は変更をトランザクションに溜める）</span>
+	}
+
+	<span class="cm">// 自動コミット: 文ごとに Tx を作り、成功したらコミット</span>
+	tx := txn.Begin(db.pool)
+	res, err := sql.Execute(tx, db.cat, stmt)
+	<span class="kw">if</span> err != <span class="kw">nil</span> {
+		tx.Rollback()
+		<span class="kw">if</span> isDDL(stmt) {
+			<span class="cm">// 失敗した DDL がメモリ上のカタログを汚した可能性に備えて読み直す</span>
+			<span class="kw">if</span> cat, lerr := catalog.Load(db.pool); lerr == <span class="kw">nil</span> {
+				db.cat = cat
+			} <span class="kw">else</span> {
+				<span class="kw">return</span> <span class="kw">nil</span>, fmt.Errorf(<span class="st">"%w（さらにカタログ再読込にも失敗: %v）"</span>, err, lerr)
+			}
+		}
+		<span class="kw">return</span> <span class="kw">nil</span>, err
+	}
+	<span class="kw">if</span> err := tx.Commit(db.wal); err != <span class="kw">nil</span> {
+		<span class="kw">return</span> <span class="kw">nil</span>, err
+	}
+	db.lastPlan = res.Plan
+	<span class="kw">return</span> res, <span class="kw">nil</span>
+}
+
+<span class="kw">func</span> isDDL(stmt sql.<span class="ty">Stmt</span>) <span class="kw">bool</span> {
+	<span class="kw">switch</span> stmt.(<span class="kw">type</span>) {
+	<span class="kw">case</span> sql.<span class="ty">CreateTableStmt</span>, sql.<span class="ty">CreateIndexStmt</span>:
+		<span class="kw">return</span> <span class="kw">true</span>
+	}
+	<span class="kw">return</span> <span class="kw">false</span>
+}
+
+<span class="cm">// Stats は観測用の統計を返す（NFR-05）。</span>
+<span class="kw">func</span> (db *<span class="ty">DB</span>) Stats() <span class="kw">string</span> {
+	s := db.pool.Stats()
+	<span class="kw">return</span> fmt.Sprintf(<span class="st">"buffer: hits=%d misses=%d evictions=%d / last plan: %s"</span>,
+		s.Hits, s.Misses, s.Evictions, db.lastPlan)
+}
+</code></pre>
+
+    <p><code>Exec</code> がこの章の総仕上げです。1 文の一生がこの関数に凝縮されています。</p>
+    <ul>
+      <li><strong>まず <code>sql.Parse</code></strong> — 字句解析と構文解析（Step 1〜4）。ここで返るエラーが「構文エラー（位置 n）」です。</li>
+      <li><strong>トランザクション制御文の仕分け</strong> — BEGIN / COMMIT / ROLLBACK と、BEGIN 中の文の扱いは<strong>第07章に譲って</strong>省略しています。この章の範囲では、すべての文が最後の「自動コミット」ブロックに流れます。</li>
+      <li><strong>自動コミット</strong> — 文ごとにトランザクション <code>tx</code> を作り、その上で <code>sql.Execute</code>（Step 5〜8。型検査もプラン選択もこの中）を走らせ、成功したらコミット、失敗したらロールバック。<code>tx</code> は例の <code>storage.Store</code> の顔をしているので、実行層は自分がトランザクションの上で動いていることに気づいてすらいません。仕組みは第07章で作りますが、「<strong>1 文 = 1 トランザクション</strong>」という約束はここで決まっています。</li>
+      <li><strong>失敗した DDL の後始末</strong> — CREATE 系の文が途中で失敗すると、ディスクは巻き戻せてもメモリ上のカタログに作りかけの定義が残る可能性があります。そこで <code>catalog.Load</code> でディスクから読み直して、メモリとディスクの食い違いを消します。「エラーからの復帰こそ設計の見せ場」という好例です。</li>
+      <li><strong><code>Stats</code> は観測窓</strong> — バッファプールのヒット率と、直近のプラン。REPL の <code>.stats</code> コマンドの中身はこれだけです。</li>
+    </ul>
+    <p>最後に REPL です。標準入力から 1 行読んでは <code>db.Exec</code> に渡し、結果を表に整形して印字する — それだけの 90 行です。</p>
+
+    <div class="file-tag">cmd/minidb-repl/main.go</div>
+    <pre><code><span class="cm">// minidb-repl は minidb の対話シェル。</span>
+<span class="cm">//</span>
+<span class="cm">//	go run ./cmd/minidb-repl mydata.db</span>
+<span class="cm">//</span>
+<span class="cm">// SQL を 1 行ずつ実行する。`.stats` で統計、`.exit` で終了。</span>
+<span class="kw">package</span> main
+
+<span class="kw">import</span> (
+	<span class="st">"bufio"</span>
+	<span class="st">"fmt"</span>
+	<span class="st">"os"</span>
+	<span class="st">"strings"</span>
+
+	minidb <span class="st">"minidb"</span>
+)
+
+<span class="kw">func</span> main() {
+	<span class="kw">if</span> <span class="kw">len</span>(os.Args) != <span class="st">2</span> {
+		fmt.Fprintln(os.Stderr, <span class="st">"使い方: minidb-repl &lt;DBファイル&gt;"</span>)
+		os.Exit(<span class="st">1</span>)
+	}
+	db, err := minidb.Open(os.Args[<span class="st">1</span>])
+	<span class="kw">if</span> err != <span class="kw">nil</span> {
+		fmt.Fprintln(os.Stderr, <span class="st">"オープン失敗:"</span>, err)
+		os.Exit(<span class="st">1</span>)
+	}
+	<span class="kw">defer</span> db.Close()
+
+	fmt.Println(<span class="st">"minidb — 単一ファイル組み込み RDBMS（.exit で終了 / .stats で統計）"</span>)
+	sc := bufio.NewScanner(os.Stdin)
+	<span class="kw">for</span> {
+		fmt.Print(<span class="st">"minidb&gt; "</span>)
+		<span class="kw">if</span> !sc.Scan() {
+			<span class="kw">break</span>
+		}
+		line := strings.TrimSpace(sc.Text())
+		<span class="kw">switch</span> {
+		<span class="kw">case</span> line == <span class="st">""</span>:
+			<span class="kw">continue</span>
+		<span class="kw">case</span> line == <span class="st">".exit"</span> || line == <span class="st">".quit"</span>:
+			<span class="kw">return</span>
+		<span class="kw">case</span> line == <span class="st">".stats"</span>:
+			fmt.Println(db.Stats())
+			<span class="kw">continue</span>
+		}
+		res, err := db.Exec(line)
+		<span class="kw">if</span> err != <span class="kw">nil</span> {
+			fmt.Println(<span class="st">"エラー:"</span>, err)
+			<span class="kw">continue</span>
+		}
+		printResult(res)
+	}
+}
+
+<span class="kw">func</span> printResult(res *minidb.<span class="ty">Result</span>) {
+	<span class="kw">if</span> <span class="kw">len</span>(res.Cols) == <span class="st">0</span> {
+		fmt.Printf(<span class="st">"OK（%d 行）\n"</span>, res.Affected)
+		<span class="kw">return</span>
+	}
+	widths := <span class="kw">make</span>([]<span class="kw">int</span>, <span class="kw">len</span>(res.Cols))
+	<span class="kw">for</span> i, c := <span class="kw">range</span> res.Cols {
+		widths[i] = <span class="kw">len</span>(c)
+	}
+	cells := <span class="kw">make</span>([][]<span class="kw">string</span>, <span class="kw">len</span>(res.Rows))
+	<span class="kw">for</span> r, rowVals := <span class="kw">range</span> res.Rows {
+		cells[r] = <span class="kw">make</span>([]<span class="kw">string</span>, <span class="kw">len</span>(rowVals))
+		<span class="kw">for</span> i, v := <span class="kw">range</span> rowVals {
+			cells[r][i] = v.String()
+			<span class="kw">if</span> <span class="kw">len</span>(cells[r][i]) &gt; widths[i] {
+				widths[i] = <span class="kw">len</span>(cells[r][i])
+			}
+		}
+	}
+	printRow := <span class="kw">func</span>(vals []<span class="kw">string</span>) {
+		parts := <span class="kw">make</span>([]<span class="kw">string</span>, <span class="kw">len</span>(vals))
+		<span class="kw">for</span> i, v := <span class="kw">range</span> vals {
+			parts[i] = fmt.Sprintf(<span class="st">"%-*s"</span>, widths[i], v)
+		}
+		fmt.Println(<span class="st">"| "</span> + strings.Join(parts, <span class="st">" | "</span>) + <span class="st">" |"</span>)
+	}
+	printRow(res.Cols)
+	sep := <span class="kw">make</span>([]<span class="kw">string</span>, <span class="kw">len</span>(res.Cols))
+	<span class="kw">for</span> i := <span class="kw">range</span> sep {
+		sep[i] = strings.Repeat(<span class="st">"-"</span>, widths[i])
+	}
+	printRow(sep)
+	<span class="kw">for</span> _, r := <span class="kw">range</span> cells {
+		printRow(r)
+	}
+	fmt.Printf(<span class="st">"（%d 行 / plan: %s）\n"</span>, <span class="kw">len</span>(res.Rows), res.Plan)
+}
+</code></pre>
+
+    <p><code>printResult</code> が少しだけ凝っています。<code>Cols</code> が空なら書き込み系なので <code>OK（n 行）</code>、そうでなければ全セルを文字列化して<strong>列ごとの最大幅</strong>を測り、<code>%-*s</code>（幅を引数で渡す左詰め書式）で桁を揃えて罫線付きの表を描きます。結果の末尾には必ず <code>plan:</code> を添える — 実行の中身を利用者から見える場所に出しておくという、この本を貫く「観測できるように作る」方針の小さな実践です。</p>
+
+    <div class="gonote"><div class="box-k">GO メモ · 型エイリアスと bufio.Scanner</div>
+      <p><code>type Result = sql.Result</code> の <code>=</code> 付き宣言は<strong>型エイリアス</strong>で、「別名を付ける」だけです（新しい型を作る <code>type A B</code> とは別物）。internal パッケージの型を、そのまま公開 API の名前として輸出するのに使っています。</p>
+      <p><code>bufio.Scanner</code> は入力を 1 行ずつ読む定番の道具です。<code>sc.Scan()</code> が「次の行を読めたか」を返し、<code>sc.Text()</code> で行の中身を取り出します。Ctrl+D（Windows は Ctrl+Z → Enter）で入力が尽きると <code>Scan</code> が false になり、ループが終わります。</p>
+    </div>
+
+    <div class="box do"><div class="box-k">▸ 動かして確認</div>
+      <p><code>.stats</code> で観測窓を覗いてみます。開き直した DB で 1 回 SELECT すると、バッファプールのミス（ディスクからの読み込み）が 3 ページ分記録されています。</p>
+      <pre class="term"><code><span class="ps">$</span> go run ./cmd/minidb-repl ch05.db
+<span class="out">minidb — 単一ファイル組み込み RDBMS（.exit で終了 / .stats で統計）</span>
+<span class="ps">minidb&gt;</span> SELECT * FROM users
+<span class="out">| id | name  | age |
+| -- | ----- | --- |
+| 1  | alice | 30  |
+| 2  | bob   | 25  |
+| 3  | carol | 35  |
+（3 行 / plan: seqscan(users)）</span>
+<span class="ps">minidb&gt;</span> .stats
+<span class="out">buffer: hits=0 misses=3 evictions=0 / last plan: seqscan(users)</span>
+<span class="ps">minidb&gt;</span> .exit</code></pre>
+      <p>第02章（バッファプール）と第05章（プラン）の観測値が 1 行に並びました。層が積み上がっている実感が持てる出力です。</p>
+    </div>
+
+    <h2>つまずき FAQ</h2>
+
+    <details class="qa"><summary>yacc や ANTLR のようなパーサ生成ツールを使わないのはなぜ？</summary>
+      <div class="qa-body"><p>この規模（文法規則が十数個）なら、手書きの再帰下降が総合的に勝つからです。生成ツールは文法定義ファイルの書き方・生成コードとの付き合い方という別の学習を要求しますし、エラーメッセージの細かい調整が難しくなりがちです。手書きなら、デバッガでそのまま追え、エラー文面を 1 か所ずつ日本語で磨けます。実際、本章のパーサの美点（位置付きエラー、<code>expect</code> / <code>accept</code> の読みやすさ）はぜんぶ手書きだから安く手に入ったものです。文法が巨大になったり、頻繁に変わったりする場合は生成ツールが逆転します。</p></div>
+    </details>
+
+    <details class="qa"><summary>SELECT を小文字で打っても動くのはどこのおかげ？ 逆に、列名の大文字小文字は区別される？</summary>
+      <div class="qa-body"><p>字句解析（Step 1）の識別子処理です。単語を読んだら、予約語表に載っていれば大文字へ、載っていなければ小文字へ正規化します。だから <code>select</code> / <code>SELECT</code> / <code>Select</code> は全部同じトークンになり、パーサは大文字だけを相手にすれば済みます。副作用として、列名・テーブル名も小文字に潰されるので、<code>NAME</code> と <code>name</code> は同じ列です（本物の SQL の既定動作にも近い挙動です）。ちなみに日本語のテーブル名は使えません — 字句解析が 1 バイトずつ走査する簡易実装のためで、マルチバイト文字を正しく識別子として扱えないのです。</p></div>
+    </details>
+
+    <details class="qa"><summary>SQLite では <code>price = 'abc'</code> が動くのに、minidb が型エラーにするのはなぜ？</summary>
+      <div class="qa-body"><p>設計思想の違いです。SQLite は歴史的に「型は緩く、値ごとに柔軟に変換する」動的型付けを選びました（近年は STRICT テーブルも選べます）。一方 PostgreSQL はスキーマの型を強く守ります（MySQL は既定では <code>price = 'abc'</code> を暗黙の型変換で通してしまい、警告を出すだけのことがあります）。minidb は PostgreSQL 寄り、しかも<strong>実行前の静的検査</strong>という最も厳しい側に倒しました。理由は 2 つ。学習用として「空の表でも検査できる」ことの気持ちよさを体験してほしいこと、そして暗黙の型変換はバグの名産地であること（<code>'10' &gt; 9</code> が文字列比較になって偽、のような事故）。厳しくする方が、実装も仕様もむしろ簡単になります。</p></div>
+    </details>
+
+    <details class="qa"><summary><code>price * 2 &gt; 100</code> のような算術式が書けないのはなぜ？ 足すとしたらどこ？</summary>
+      <div class="qa-body"><p>MVP の文法から意図的に落としているだけで、構造上の障害はありません。足すなら Step 4 の「関数の階段」に段を増やします — <code>parseComparison</code> と <code>parsePrimary</code> のあいだに <code>parseAddSub</code>（+ -）と <code>parseMulDiv</code>（* /）の 2 段を挟み、<code>BinOp</code> に演算子を追加し、<code>inferType</code> に「算術の両辺は INT で結果も INT」の規則を、<code>evalValue</code> に計算を足す。階段構造のおかげで、優先順位（* が + より強い）は関数の並び順だけで正しくなります。腕試しにどうぞ。ただし字句解析にも 1 か所罠があります — <code>-</code> 始まりの数値の扱い（68 行目）と衝突するので、<code>1-2</code> が「1 と -2」に割れないよう調整が要ります。</p>
+      <p>そしてもう 1 つ、<strong>階段の図には描かれていない落とし穴</strong>があります。<code>parsePrimary</code> を呼んでいるのは <code>parseComparison</code> だけではありません。<strong><code>parseInsert</code> と <code>parseUpdate</code> も直接呼んでいます</strong>（<code>parser.go</code> の 183 行目と 296 行目）。つまり階段は一本道ではなく、<code>parsePrimary</code> に 3 方向から入ってくる形をしています。段を挟んだだけだと <code>WHERE</code> 句では算術が使えるようになる一方、<code>INSERT INTO t VALUES (1+1)</code> や <code>UPDATE t SET x = x+1</code> は<strong>何も変わりません</strong> — この 2 つが新しい段を飛び越えて <code>parsePrimary</code> を直接叩いているからです。そこも使えるようにするなら、2 か所の呼び先を新しい段に付け替え、さらに <code>execInsert</code> の <code>litValue</code>（「リテラルであること」を前提に値を取り出している）を式評価に置き換える必要があります。</p>
+      <p>なお、この 2 か所が <code>parseExpr</code> ではなく <code>parsePrimary</code> を直接呼んでいるのは<strong>意図的</strong>です。VALUES と SET の値に来てよいのはリテラルだけ、という制約を<strong>文法の段階で</strong>かけています。<code>litValue</code> がそれを前提にしているので、入口を塞ぐほうが実行時の検査より確実だ、という判断です。</p></div>
+    </details>
+
+    <details class="qa"><summary>エラーに「位置 25」とあるけれど、行番号・桁番号で出さないのはなぜ？</summary>
+      <div class="qa-body"><p>REPL が 1 行ずつ実行する前提なので、行内オフセットだけで足りるからです。複数行の SQL ファイルを受け付けるようになったら、位置 pos から「何行目・何桁目」を計算する変換を 1 枚挟めば済みます。トークンが元テキスト中のオフセットさえ持っていれば、表示形式は後からいくらでも変えられる — pos を最初から持ち歩く設計にしたのはそのためです。</p></div>
+    </details>
+
+    <h2>理解度チェック</h2>
+    <p>次の問いに自分の言葉で答えてから、答えを開いてください。</p>
+
+    <details class="qa"><summary>Q1. <code>WHERE a = 1 OR b = 2 AND c = 3</code> の式の AST はどんな木？ それはパーサのどの仕組みで決まる？</summary>
+      <div class="qa-body"><p>ルートが OR で、左の子が <code>a = 1</code>、右の子が <code>(b = 2 AND c = 3)</code> の AND の木です。AND は OR より優先順位が高いので、先に固まって木の深い側に沈みます。これを作っているのは「弱い演算子の関数が、1 段強い関数を呼んで部品を作らせる」という関数の階段（<code>parseOr</code> → <code>parseAnd</code> → <code>parseComparison</code>）です。<code>parseOr</code> が右辺を作らせるために呼んだ <code>parseAnd</code> が、AND の連なりを畳み切ってから返すので、AND の木がまるごと OR の子になります。</p></div>
+    </details>
+
+    <details class="qa"><summary>Q2. 行が 1 行もない表に対しても <code>WHERE price = 'abc'</code> が型エラーになるのはなぜ？</summary>
+      <div class="qa-body"><p>型検査（<code>typeCheck</code> / <code>inferType</code>）が行をまったく使わないからです。材料は式の木と、カタログのスキーマ（列名 → 型の対応）だけ。<code>price</code> の型はスキーマから INT と分かり、<code>'abc'</code> はリテラル自身が TEXT と知っているので、「INT と TEXT は比較できない」が行ゼロでも導けます。実行しながら行ごとに検査する方式だと、空の表では 1 行も評価されず、この誤りは検出されません。</p></div>
+    </details>
+
+    <details class="qa"><summary>Q3. <code>parseAnd</code> が（<code>parseOr</code> ではなく）<code>parseComparison</code> を呼ぶ理由を、優先順位の言葉で説明すると？</summary>
+      <div class="qa-body"><p>各関数は「自分の担当演算子の<strong>オペランド（被演算子）</strong>」を、自分より 1 段強い階層に作らせるからです。AND のオペランドになれるのは、AND より強く結合するもの — つまり比較式（とそれ以下）だけです。もし <code>parseAnd</code> が <code>parseOr</code> を呼んだら、「OR の式が AND のオペランドになる」ことを許してしまい、<code>a OR b AND c</code> が <code>(a OR b) AND c</code> に化けます。呼び出しの向きがそのまま優先順位の定義になっている、というのが再帰下降の階段の要点です。</p></div>
+    </details>
+
+    <details class="qa"><summary>Q4. 「残余フィルタ」とは何？ それがあると、なぜ <code>choosePath</code> のバグが「間違った結果」にならない？</summary>
+      <div class="qa-body"><p>残余フィルタとは、索引で集めた候補行にも <strong>WHERE 式全体をもう一度評価する</strong>仕組みです（<code>collectRows</code> の <code>appendIfMatch</code>）。索引の役割は「読む行の候補を減らす」ことだけに限定され、行を採用するかの最終判定は常に完全な WHERE 評価が行います。したがって <code>choosePath</code> が候補を<strong>広く取りすぎても</strong>（境界の緩さ、述語の取り違え）、余分な行は残余フィルタが落とすので結果は正しいまま — バグは「遅くなる」という性能問題に格下げされます。ただし候補を<strong>狭く取りすぎる</strong>（本来ヒットすべき行を索引が返さない）バグだけは守れないので、範囲の向き（lo / hi）だけは正しく書く必要があります。</p></div>
+    </details>
+
+    <details class="qa"><summary>Q5. <code>SELECT id FROM items ORDER BY price DESC LIMIT 3</code> で、実行パイプラインが「全行を溜める」のはどこ？ LIMIT を sort の前に動かせないのはなぜ？</summary>
+      <div class="qa-body"><p>溜めるのは filter と sort のあいだ、<code>collectRows</code> が返す <code>[]row</code> です。ORDER BY は「price が最大の行」を決めるために<strong>最後の 1 行まで</strong>見る必要があるので、ここでストリーミングが途切れます。LIMIT を sort の前に置くと「たまたま先に読めた 3 行」を並べ替えるだけになり、「price 上位 3 行」という意味が壊れます。だから <code>execSelect</code> では必ず sort → limit の順です。なお、本物の DB は「上位 n 件だけ保持するヒープ」で溜める量を n に抑える最適化（Top-N sort)をしますが、順序の意味は同じです。</p></div>
+    </details>
+
+    <details class="qa"><summary>Q6. <code>WHERE age &gt;= 500 AND age &lt;= 800</code>（age に索引がある場合）で <code>choosePath</code> は何を作る？ <code>WHERE age = 1 OR name = 'a'</code> では？</summary>
+      <div class="qa-body"><p>前者: <code>flattenAnd</code> が 2 つの連言にほどき、どちらも「列 op リテラル」なので、同じ索引に対する範囲が両側から締まります — <code>lo = 500 のキー, hi = 800 のキー</code> の 1 個の <code>indexscan</code> になります。後者: ルートが OR なので <code>flattenAnd</code> は式を 1 個の塊のまま返し、塊は <code>BinExpr</code> ではあっても <code>normalizeComparison</code> が要求する「列 op リテラル」の形ではない（子が比較式）ため候補になれず、<code>seqscan</code> に落ちます。OR を索引で処理するには両方の索引結果の和集合を取る仕掛け（本物の DB の bitmap OR など）が要るので、minidb は正しさ優先で全走査を選びます。</p></div>
+    </details>
+
+    <div class="box done"><div class="box-k">✓ 完了の合図</div>
+      <p>文字列の SQL から結果が返り、WHERE / ORDER BY / LIMIT / COUNT(*) が効くこと。壊れた SQL には位置付きの構文エラーを、型の合わない SQL には実行前の型エラーを、理由付きで返せること。次のテストが通れば、この章は完了です。</p>
+      <pre class="term"><code><span class="ps">$</span> go test . -run TestM5QueryAndErrors -v
+<span class="out">=== RUN   TestM5QueryAndErrors
+--- PASS: TestM5QueryAndErrors (0.04s)
+PASS
+ok  	minidb	0.782s</span></code></pre>
+    </div>
+
+    <h2>まとめ — 次の層へ</h2>
+    <p>この章で、minidb は「ライブラリ」から「データベース」になりました。文字列を刻む字句解析、文法を関数に写した再帰下降パーサ、実行前に誤りを捕まえる型検査、そして「索引は候補を絞るだけ、正しさは残余フィルタが守る」実行器。三段変換のどの段も、入出力のはっきりした小さな関数の集まりでした。SQL という言葉の処理は、もう魔法ではないはずです。</p>
+    <p>しかし、足元にはまだ大きな穴が空いています。<code>INSERT</code> は複数のページ（ヒープのページ、カタログのページ…）を書き換えますが、もし<strong>その途中で電源が落ちたら</strong>？ 1 ページ目だけ書けて 2 ページ目が書けていないファイルは、もはや表として読めない<strong>壊れたデータベース</strong>です。せっかく言葉が通じるようになったのに、信頼して物を預けられないのでは意味がありません。次の章では、この問題を「先にログへ書く」という一手で解決する仕組み — <strong>WAL（Write-Ahead Log）</strong>を作ります。<code>Open</code> の手順①で素通りした <code>w.Recover(disk)</code> の中身が、いよいよ明かされます。</p>
+
+    <div class="chap-foot">
+      <a class="pager" href="04-catalog.html"><span class="dir">← 前へ</span>第04章 · 表とカタログ</a>
+      <a class="pager next" href="06-wal.html"><span class="dir">次へ →</span>第06章 · 壊れない仕組み</a>
+    </div>
+  </main>
+</div>
+</body>
+</html>

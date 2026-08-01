@@ -1,0 +1,917 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>第07章 問題とテストケースを持つ — 手を動かして作るオンラインジャッジ</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500;600&family=Source+Serif+4:opsz,wght@8..60,400;8..60,600;8..60,700&family=Noto+Serif+JP:wght@400;600;700&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<div class="shell">
+
+  <aside class="spine">
+    <a class="wordmark" href="index.html">JUDGE · from scratch</a>
+    <div class="book-title">手を動かして作る<br>オンラインジャッジ</div>
+    <div class="book-sub">Go で サンドボックスから Web まで</div>
+
+    <div class="legend"><span>読む <b>↓</b></span><span>組む <b>↑</b></span></div>
+
+    <nav aria-label="目次">
+      <ul class="toc">
+        <li><a class="nav-item" href="index.html"><span class="nav-num">序</span><span class="nav-label">はじめに・準備<span class="nav-tag">Setup</span></span></a></li>
+        <li><a class="nav-item" href="00-smallest.html"><span class="nav-num">00</span><span class="nav-label">いちばん小さいジャッジ<span class="nav-tag">Judge</span></span></a></li>
+        <li><a class="nav-item" href="01-process.html"><span class="nav-num">01</span><span class="nav-label">プロセスと標準入出力<span class="nav-tag">IO</span></span></a></li>
+        <li><a class="nav-item" href="02-verdict.html"><span class="nav-num">02</span><span class="nav-label">verdict — 判定の種類<span class="nav-tag">Verdict</span></span></a></li>
+        <li><a class="nav-item" href="03-threat.html"><span class="nav-num">03</span><span class="nav-label">なぜ他人のコードは危険か<span class="nav-tag">Threat</span></span></a></li>
+        <li><a class="nav-item" href="04-sandbox.html"><span class="nav-num">04</span><span class="nav-label">コンテナに閉じ込める<span class="nav-tag">Sandbox</span></span></a></li>
+        <li><a class="nav-item" href="05-limits.html"><span class="nav-num">05</span><span class="nav-label">時間とメモリを断ち切る<span class="nav-tag">Limits</span></span></a></li>
+        <li><a class="nav-item" href="06-lang.html"><span class="nav-num">06</span><span class="nav-label">いろんな言語で<span class="nav-tag">Lang</span></span></a></li>
+        <li><a class="nav-item current" aria-current="page" href="07-store.html"><span class="nav-num">07</span><span class="nav-label">問題とテストケースを持つ<span class="nav-tag">Store</span></span></a></li>
+        <li><a class="nav-item" href="08-queue.html"><span class="nav-num">08</span><span class="nav-label">提出を「あとで」捌く<span class="nav-tag">Queue</span></span></a></li>
+        <li><a class="nav-item" href="09-web.html"><span class="nav-num">09</span><span class="nav-label">画面をつける<span class="nav-tag">Web</span></span></a></li>
+      </ul>
+    </nav>
+
+    <div class="spine-foot">
+      各章は「実行の心臓部」から<br>始めて「Web」へ登る。<br>下（採点の核）から上（画面）へ<br>積み上げて動かしていく。
+    </div>
+  </aside>
+
+  <main class="reading">
+    <div class="progress-tag">第07章 / 全10章 · 層: STORE · 読了目安 2.5〜3.5時間</div>
+    <div class="eyebrow"><span>STORE</span><span class="depth">— 永続化・問題と結果の保管庫</span></div>
+    <h1>問題とテストケースを持つ</h1>
+    <p class="lede">ここまでの7章で、コードを隔離環境で走らせ、出力を比べ、時間とメモリを測る<strong>採点の機構</strong>ができました。しかし機構だけでは何も採点できません。<strong>採点対象</strong>——問題文・制約・正解のテストケース——と、<strong>採点結果</strong>——提出・verdict・ケースごとの合否・履歴——を、どこかに<strong>覚えておく</strong>必要があります。この章では、その保管庫を SQLite で組みます。なぜ SQLite なのか、問題タイプ code/sql の違いがスキーマにどう出るのか、そしてケース結果をどう<strong>1件ずつ</strong>保存して、画面の途中経過への配管を通しておくのか——採点の「記憶」を作ります。</p>
+
+    <div class="box goal"><div class="box-k">◈ この章のゴール</div>
+      <p>次の 3 つを、自分の目と手で確認できたら達成です。</p>
+      <ol>
+        <li>データモデル <code>Problem</code> / <code>Testcase</code> / <code>Submission</code> / <code>SubmissionResult</code> の4つが「それぞれ何を覚え、どう繋がるか」を、自分の言葉で図に描ける。</li>
+        <li><strong>なぜ SQLite（<code>modernc.org/sqlite</code>、cgo 不要）を選んだのか</strong>を、単一ホスト・セルフホストという要件に照らして説明できる。問題タイプ <code>code</code> / <code>sql</code> の分岐が、スキーマの <code>type</code> 列と <code>sql_seed</code> 列にどう表れているかを指させる。</li>
+        <li>提出が「作成 → 実行中 → 完了」と状態遷移し、その途中でケース結果が <code>AddResult</code> で<strong>1件ずつ</strong>保存されていく流れ（<code>OnCaseResult</code> コールバック）を追える。</li>
+      </ol>
+    </div>
+
+    <div class="box map"><div class="box-k">☰ この章のステップ</div>
+      <ol>
+        <li><a href="#step-1">採点するには「問題」と「正解」が要る — 4つのモデル</a></li>
+        <li><a href="#step-2">なぜ SQLite か — 単一ホスト・cgo 不要 — <code>store.go</code> の <code>Open</code></a></li>
+        <li><a href="#step-3">スキーマを設計する — <code>migrate</code> の4テーブル</a></li>
+        <li><a href="#step-4">問題を取り出す — <code>GetProblemBySlug</code> と <code>tags</code> の JSON 詰め</a></li>
+        <li><a href="#step-5">問題を登録する — トランザクションで問題とケースを束ねる</a></li>
+        <li><a href="#step-6">提出を作り、状態を進める — <code>CreateSubmission</code> から <code>FinishSubmission</code> へ</a></li>
+        <li><a href="#step-7">ケース結果を逐次保存する — <code>AddResult</code> と <code>OnCaseResult</code> の接続</a></li>
+        <li><a href="#step-8">初期問題を投入する — <code>SeedIfEmpty</code></a></li>
+      </ol>
+    </div>
+
+    <h2>採点するには、問題と正解が要る</h2>
+    <p>ここまで作ってきた <code>judge</code> パッケージは、<strong>その場限りの採点機械</strong>でした。「このコードを、この入力で走らせ、この期待値と比べよ」と手渡せば verdict を返す。しかし手渡す側——「どの問題があって」「その正解は何で」「誰がいつ何を提出して、結果はどうだったか」——を覚える者がいません。オンラインジャッジが<strong>サービス</strong>である以上、これらは電源を切っても消えては困る。だから永続化します。</p>
+    <p>この章で作る <code>store</code> パッケージが引き受けるのは、次の2種類の記憶です。</p>
+    <ul>
+      <li><strong>採点対象</strong>（あらかじめ用意しておくもの） — <strong>問題</strong>（説明・制約・制限時間・問題タイプ）と、その<strong>テストケース</strong>（入力と期待出力の組）。これらは運営（＝自分）が事前に登録します。</li>
+      <li><strong>採点結果</strong>（提出のたびに増えていくもの） — <strong>提出</strong>（誰がどの言語で何を出したか、その全体 verdict）と、<strong>ケースごとの結果</strong>（各テストケースの合否・時間・メモリ）。これらは提出のたびに書き込まれ、履歴として積み上がります。</li>
+    </ul>
+    <p>序章の入れ子構成図を思い出してください。<code>judge</code>（採点の心臓部）と <code>store</code>（保管庫）は<strong>別パッケージ</strong>です。採点ロジックは「どこにデータがあるか」を知らず、保管庫は「どう採点するか」を知らない。両者を繋ぐのは第08章で作るワーカーです。この<strong>関心の分離</strong>——採点と永続化を混ぜない——が、この章を通じて効いてきます。<code>judge.go</code> が <code>store.Problem</code> や <code>store.Testcase</code> を<strong>受け取る側</strong>で、決して DB を触らないのはこのためです。</p>
+
+    <h2>SQLite を選ぶ理由</h2>
+    <p>永続化と聞けば PostgreSQL や MySQL を思い浮かべるかもしれません。しかしこのプロジェクトの要件は「<strong>単一ユーザー・セルフホスト・ローカル単一ホスト</strong>」です（プロジェクト <code>CLAUDE.md</code> の制約 C-01/C-04/C-05）。この条件下では、別プロセスの DB サーバを立ち上げて接続を管理する重さは、得るものより失うものが大きい。ここで選ぶのは <strong>SQLite</strong>——それも Go で書かれた <strong><code>modernc.org/sqlite</code></strong> ドライバです。理由を3つに畳んでおきます。</p>
+    <ul>
+      <li><strong>単一ホスト・セルフホストに最適。</strong> SQLite は「サーバのない DB」です。DB の実体はただ1つのファイル（本書では <code>data/app.db</code>）で、別プロセスも接続プールも要りません。バックエンドの Go プロセスがそのファイルを直接読み書きするだけ。単一ユーザーがローカルで動かすには、これ以上ないほど軽い。バックアップも「ファイルをコピーする」で済みます。</li>
+      <li><strong>cgo 不要——ビルドが単純。</strong> 定番の <code>mattn/go-sqlite3</code> は C の SQLite ライブラリを cgo 経由で呼ぶため、ビルドに C コンパイラが要り、クロスコンパイルで詰まりがちです。対して <code>modernc.org/sqlite</code> は <strong>SQLite を純 Go に移植</strong>したもので、C コンパイラ無しで <code>go build</code> が通り、Windows でも Linux でも同じように<strong>単一バイナリ</strong>に固められます（プロジェクトの技術スタックが「Go 単一バイナリ」を掲げる以上、これは必須条件でした）。</li>
+      <li><strong>SQL の演習環境をそのまま流用できる。</strong> このジャッジは <code>sql</code> 問題（第06章の結果セット採点）も扱います。提出された SQL を実際に走らせる先が SQLite なら、採点基盤と演習対象が同じエンジンで揃い、二重管理が要りません。</li>
+    </ul>
+    <p>もちろん SQLite には限界があります。同時書き込みに弱い（後述の WAL と <code>busy_timeout</code> で緩和します）、大規模な並行アクセスには向かない。しかし本書のジャッジは<strong>ワーカー並列度1・単一ユーザー</strong>（第08章）。書き込み手はほぼ1本に絞られるので、SQLite の弱点はほとんど露出しません。「要件が小さいなら、道具も小さく」——これが SQLite を選ぶ判断の芯です。</p>
+
+    <h2 class="step" id="step-1"><span class="step-no">Step 1</span>採点するには「問題」と「正解」が要る — 4つのモデル</h2>
+    <p>コードを書く前に、これから永続化する<strong>4つの型</strong>を目で押さえます。ファイルは <code>internal/store/models.go</code>。まずは絵で、4者の関係を掴んでください。</p>
+
+    <div class="ascii">store パッケージが覚える4つのもの
+
+  ┌── 採点対象（事前に登録） ──────────────────────┐
+  │                                                │
+  │   Problem  ───（1対多）───▶  Testcase          │
+  │   問題（説明・制約・         入力(stdin)と        │
+  │   TimeLimit・Type）          期待出力の組         │
+  │                                                │
+  └────────────────────────────────────────────────┘
+                         ▲ problem_id で参照
+  ┌── 採点結果（提出のたびに増える） ────────────────┐
+  │                                                │
+  │   Submission ──（1対多）──▶ SubmissionResult    │
+  │   1提出（言語・コード・       ケースごとの合否      │
+  │   全体 verdict・状態）        （時間・メモリ）      │
+  │                                                │
+  └────────────────────────────────────────────────┘</div>
+
+    <p>まず採点対象の <strong><code>Problem</code></strong> から。この型が「1つの問題」の全情報を持ちます。全文を載せます。</p>
+
+    <div class="file-tag">internal/store/models.go</div>
+    <pre><code><span class="kw">package</span> store
+
+<span class="kw">import</span> <span class="st">"time"</span>
+
+<span class="cm">// Problem は問題。type は "code"（標準入出力採点）または "sql"（結果セット採点）。</span>
+<span class="kw">type</span> <span class="ty">Problem</span> <span class="kw">struct</span> {
+	ID              <span class="ty">int64</span>     <span class="st">`json:"id"`</span>
+	Slug            <span class="ty">string</span>    <span class="st">`json:"slug"`</span>
+	Title           <span class="ty">string</span>    <span class="st">`json:"title"`</span>
+	Type            <span class="ty">string</span>    <span class="st">`json:"type"`</span>
+	Difficulty      <span class="ty">string</span>    <span class="st">`json:"difficulty"`</span>
+	Tags            []<span class="ty">string</span>  <span class="st">`json:"tags"`</span>
+	StatementMD     <span class="ty">string</span>    <span class="st">`json:"statement_md"`</span>
+	TimeLimitMS     <span class="ty">int</span>       <span class="st">`json:"time_limit_ms"`</span>
+	MemoryLimitMB   <span class="ty">int</span>       <span class="st">`json:"memory_limit_mb"`</span>
+	SQLSeed         <span class="ty">string</span>    <span class="st">`json:"sql_seed,omitempty"`</span>
+	SQLOrderMatters <span class="ty">bool</span>      <span class="st">`json:"sql_order_matters"`</span>
+	CreatedAt       time.<span class="ty">Time</span> <span class="st">`json:"created_at"`</span>
+	UpdatedAt       time.<span class="ty">Time</span> <span class="st">`json:"updated_at"`</span>
+}</code></pre>
+
+    <p>フィールドを、意味のかたまりで読み解きます。この <code>Problem</code> こそが、<strong>採点の全パラメータ</strong>を握っています。</p>
+    <ul>
+      <li><strong>身元</strong> — <code>ID</code>（DB の主キー）、<code>Slug</code>（URL に載る一意な短い名前、例 <code>"sum-two-numbers"</code>）、<code>Title</code>（表示名）。<code>Slug</code> は「人が URL で問題を指せる不変の名札」で、内部 ID と役割を分けています。</li>
+      <li><strong>採点の分岐を決める <code>Type</code></strong> — <code>"code"</code>（標準入出力を比較）か <code>"sql"</code>（結果セットを比較）か。第00章の <code>decideCase</code> が <code>if p.Type == "sql"</code> で <code>CompareResultSet</code> に分岐したのを覚えていますか。<strong>その分岐の起点がこの1文字列</strong>です。ここが「この問題はどう採点されるか」の根本を決めます。</li>
+      <li><strong>表示のための情報</strong> — <code>Difficulty</code>（easy/medium/hard）、<code>Tags</code>（<code>[]string</code>、"math" や "sql" など）、<code>StatementMD</code>（問題文の Markdown）。</li>
+      <li><strong>制限</strong> — <code>TimeLimitMS</code>（制限時間ミリ秒）と <code>MemoryLimitMB</code>（メモリ上限 MB）。<strong>この <code>TimeLimitMS</code> こそ、<code>decideCase</code> が <code>c.ElapsedMS &gt; p.TimeLimitMS</code> で TLE を判定するときに読む値</strong>です。採点機構が使うパラメータが、問題ごとにここへ格納されています。</li>
+      <li><strong>SQL 問題専用</strong> — <code>SQLSeed</code>（採点前にテーブルを作る初期化 SQL）と <code>SQLOrderMatters</code>（結果の行順を採点するか）。<code>code</code> 問題ではどちらも空/false で、<strong>使われるのは <code>Type=="sql"</code> のときだけ</strong>。「問題タイプで意味が変わるフィールド」がここに集約されています。</li>
+      <li><strong>監査情報</strong> — <code>CreatedAt</code> / <code>UpdatedAt</code>。<code>time.Time</code> で持ちます。</li>
+    </ul>
+    <p>各フィールドの後ろの <code>`json:"..."`</code> はタグで、この構造体をそのまま JSON にして API 応答に載せるときのキー名を決めます。<code>SQLSeed</code> の <code>omitempty</code> は「空なら JSON に出さない」——<code>code</code> 問題の応答に無駄な <code>"sql_seed":""</code> を出さないための気配りです。</p>
+
+    <p>次に、一覧画面用の軽量版 <strong><code>ProblemSummary</code></strong>。問題一覧では問題文や制約は要らず、代わりに「自分がこの問題を解いたか」の状態が要ります。</p>
+    <div class="file-tag">internal/store/models.go（つづき）</div>
+    <pre><code><span class="cm">// ProblemSummary は一覧用（解答状況つき）。</span>
+<span class="kw">type</span> <span class="ty">ProblemSummary</span> <span class="kw">struct</span> {
+	ID         <span class="ty">int64</span>    <span class="st">`json:"id"`</span>
+	Slug       <span class="ty">string</span>   <span class="st">`json:"slug"`</span>
+	Title      <span class="ty">string</span>   <span class="st">`json:"title"`</span>
+	Type       <span class="ty">string</span>   <span class="st">`json:"type"`</span>
+	Difficulty <span class="ty">string</span>   <span class="st">`json:"difficulty"`</span>
+	Tags       []<span class="ty">string</span> <span class="st">`json:"tags"`</span>
+	Status     <span class="ty">string</span>   <span class="st">`json:"status"`</span> <span class="cm">// "solved" | "attempted" | "unsolved"</span>
+}</code></pre>
+    <p><code>Status</code> は DB に「列」として存在しません。<strong>提出履歴から計算する</strong>派生値です（Step 4 で「1つでも AC があれば solved」を SQL で導きます）。問題そのものの属性ではなく「その問題に対する自分の状況」なので、<code>Problem</code> ではなくこの一覧専用型に持たせています。</p>
+
+    <p>そして採点対象のもう一方、<strong><code>Testcase</code></strong>。1つの問題は複数のケースを持ちます（サンプル＋隠しケース）。</p>
+    <div class="file-tag">internal/store/models.go（つづき）</div>
+    <pre><code><span class="cm">// Testcase は採点単位。code 問題では Input が stdin、Expected が期待 stdout。</span>
+<span class="cm">// sql 問題では Input が問題共通シードに追記する SQL（空可）、Expected が期待結果セット(JSON 行配列)。</span>
+<span class="kw">type</span> <span class="ty">Testcase</span> <span class="kw">struct</span> {
+	ID        <span class="ty">int64</span>  <span class="st">`json:"id"`</span>
+	ProblemID <span class="ty">int64</span>  <span class="st">`json:"problem_id"`</span>
+	Ord       <span class="ty">int</span>    <span class="st">`json:"ord"`</span>
+	Input     <span class="ty">string</span> <span class="st">`json:"input"`</span>
+	Expected  <span class="ty">string</span> <span class="st">`json:"expected"`</span>
+	IsSample  <span class="ty">bool</span>   <span class="st">`json:"is_sample"`</span>
+}</code></pre>
+    <p>ここで注目すべきは<strong>コメントの2行</strong>です。同じ <code>Input</code> / <code>Expected</code> という2つのフィールドが、<strong>問題タイプによって意味を変えます</strong>。<code>code</code> 問題では <code>Input</code> は「提出コードに流し込む標準入力」、<code>Expected</code> は「期待する標準出力」。<code>sql</code> 問題では <code>Input</code> は「シードに追記する SQL」（空でもよい）、<code>Expected</code> は「期待する結果セットの JSON 行配列」。<strong>型は同じでも、採点器がそれをどう食うかが <code>Type</code> で変わる</strong>——この「1つの器を2つの用途で兼ねる」設計は、後でスキーマにも表れます。<code>ProblemID</code> はどの問題に属すかの参照、<code>Ord</code> は表示・採点の順序、<code>IsSample</code> は「提出者に見せてよいサンプルか、隠しケースか」の区別です（隠しケースの中身は Step 4 で漏らさないよう気を配ります）。</p>
+
+    <p>採点対象は以上。次は採点結果です。まず <strong><code>Submission</code></strong>——1回の提出そのもの。</p>
+    <div class="file-tag">internal/store/models.go（つづき）</div>
+    <pre><code><span class="kw">type</span> <span class="ty">Submission</span> <span class="kw">struct</span> {
+	ID            <span class="ty">int64</span>     <span class="st">`json:"id"`</span>
+	ProblemID     <span class="ty">int64</span>     <span class="st">`json:"problem_id"`</span>
+	ProblemSlug   <span class="ty">string</span>    <span class="st">`json:"problem_slug,omitempty"`</span>
+	ProblemTitle  <span class="ty">string</span>    <span class="st">`json:"problem_title,omitempty"`</span>
+	Language      <span class="ty">string</span>    <span class="st">`json:"language"`</span>
+	Code          <span class="ty">string</span>    <span class="st">`json:"code,omitempty"`</span>
+	Status        <span class="ty">string</span>    <span class="st">`json:"status"`</span>  <span class="cm">// pending | running | done</span>
+	Verdict       <span class="ty">string</span>    <span class="st">`json:"verdict"`</span> <span class="cm">// AC/WA/TLE/MLE/RE/CE/IE、未確定は ""</span>
+	CompileOutput <span class="ty">string</span>    <span class="st">`json:"compile_output,omitempty"`</span>
+	TimeMS        <span class="ty">int</span>       <span class="st">`json:"time_ms"`</span>
+	MemoryKB      <span class="ty">int</span>       <span class="st">`json:"memory_kb"`</span>
+	CreatedAt     time.<span class="ty">Time</span> <span class="st">`json:"created_at"`</span>
+}</code></pre>
+    <p><code>Submission</code> の肝は<strong>2本の状態列</strong>です。<code>Status</code> は提出の<strong>ライフサイクル</strong>——<code>pending</code>（受け付けた、まだ採点していない）→ <code>running</code>（採点中）→ <code>done</code>（採点完了）——を表し、<code>Verdict</code> は<strong>採点結果</strong>——第00章の7つ（<code>AC/WA/…/IE</code>）——を表します。この2つを分けているのが要点です。<code>Status</code> は「採点がどこまで進んだか（処理の段階）」、<code>Verdict</code> は「その結果どうだったか（判定）」。だから <code>done</code> になって初めて <code>Verdict</code> が確定し、それまでは <code>Verdict</code> は空文字列 <code>""</code>（未確定）です。<code>TimeMS</code> / <code>MemoryKB</code> は全ケース中の最大値（最も重かったケースの計測値）。<code>ProblemSlug</code> / <code>ProblemTitle</code> は DB の列ではなく、応答を作るとき問題テーブルと結合して埋める表示用です（<code>omitempty</code> なので、埋めないときは JSON に出ません）。</p>
+
+    <p>最後に、採点結果の粒度を1段細かくした <strong><code>SubmissionResult</code></strong>——<strong>ケース1件ごと</strong>の結果。</p>
+    <div class="file-tag">internal/store/models.go（つづき）</div>
+    <pre><code><span class="kw">type</span> <span class="ty">SubmissionResult</span> <span class="kw">struct</span> {
+	ID            <span class="ty">int64</span>  <span class="st">`json:"id"`</span>
+	SubmissionID  <span class="ty">int64</span>  <span class="st">`json:"submission_id"`</span>
+	TestcaseID    <span class="ty">int64</span>  <span class="st">`json:"testcase_id"`</span>
+	Ord           <span class="ty">int</span>    <span class="st">`json:"ord"`</span>
+	IsSample      <span class="ty">bool</span>   <span class="st">`json:"is_sample"`</span>
+	Verdict       <span class="ty">string</span> <span class="st">`json:"verdict"`</span>
+	TimeMS        <span class="ty">int</span>    <span class="st">`json:"time_ms"`</span>
+	MemoryKB      <span class="ty">int</span>    <span class="st">`json:"memory_kb"`</span>
+	ActualSnippet <span class="ty">string</span> <span class="st">`json:"actual_snippet,omitempty"`</span>
+	StderrSnippet <span class="ty">string</span> <span class="st">`json:"stderr_snippet,omitempty"`</span>
+	<span class="cm">// サンプルケースのみ（F-12 差分表示用）</span>
+	Input    <span class="ty">string</span> <span class="st">`json:"input,omitempty"`</span>
+	Expected <span class="ty">string</span> <span class="st">`json:"expected,omitempty"`</span>
+}</code></pre>
+    <p>1提出が10ケースを持てば、<code>SubmissionResult</code> は最大10行できます（打ち切りがあるので実際はもっと少ないことも）。各行が「<code>SubmissionID</code> のうち <code>TestcaseID</code> のケースは、<code>Verdict</code> で、<code>TimeMS</code>/<code>MemoryKB</code> かかった」を記録します。<code>ActualSnippet</code>（実際の出力の断片）と <code>StderrSnippet</code>（エラー出力の断片）は、<strong>サンプルケースの WA でユーザーに「あなたの出力はこう、期待はこう」を見せる</strong>ための材料（要件 F-12 差分表示）。末尾の <code>Input</code> / <code>Expected</code> も同じく<strong>サンプルケース専用</strong>で、DB の列ではなくテストケースと結合して埋めます。隠しケースではこれらを空にして中身を漏らさない——その配慮を Step 4 の <code>GetResults</code> で実装します。</p>
+
+    <div class="gonote"><div class="box-k">GO メモ · 構造体タグと、DB 列を持たない「派生フィールド」</div>
+      <p>フィールド後ろの <code>`json:"snake_case"`</code> は<strong>構造体タグ</strong>で、リフレクションで読まれます。<code>encoding/json</code> はこのタグを見て JSON のキー名を決め、<code>,omitempty</code> があればゼロ値のとき出力を省きます。<br>
+      重要なのは、<strong>構造体のフィールドが必ずしも DB の列と1対1でない</strong>ことです。<code>ProblemSummary.Status</code>、<code>Submission.ProblemSlug/ProblemTitle</code>、<code>SubmissionResult.Ord/IsSample/Input/Expected</code> は<strong>DB に列として存在しません</strong>。これらは <code>SELECT</code> のとき別テーブルと結合したり、<code>EXISTS</code> で計算したりして<strong>その場で埋める派生値</strong>です。「モデルの形」と「テーブルの形」を無理に一致させず、<strong>用途（＝応答したい JSON の形）に合わせてモデルを設計し、SQL 側で辻褄を合わせる</strong>——このズレを許容する割り切りが、小さな DB 層を素直に保ちます。</p>
+    </div>
+
+    <h2 class="step" id="step-2"><span class="step-no">Step 2</span>なぜ SQLite か — 単一ホスト・cgo 不要 — store.go の Open</h2>
+    <p>モデルの形が見えたので、それを収める SQLite を開きます。ファイルは <code>internal/store/store.go</code>。まず <code>Store</code> 型と、DB を開く <code>Open</code> です。</p>
+
+    <div class="file-tag">internal/store/store.go</div>
+    <pre><code><span class="kw">package</span> store
+
+<span class="kw">import</span> (
+	<span class="st">"database/sql"</span>
+	<span class="st">"encoding/json"</span>
+	<span class="st">"fmt"</span>
+	<span class="st">"strings"</span>
+	<span class="st">"time"</span>
+
+	_ <span class="st">"modernc.org/sqlite"</span>
+)
+
+<span class="kw">type</span> <span class="ty">Store</span> <span class="kw">struct</span> {
+	db *sql.<span class="ty">DB</span>
+}
+
+<span class="kw">func</span> Open(path <span class="ty">string</span>) (*<span class="ty">Store</span>, <span class="ty">error</span>) {
+	<span class="cm">// WAL + busy_timeout: ジャッジワーカーと API ハンドラの同時書き込みで SQLITE_BUSY を避ける</span>
+	dsn := fmt.Sprintf(<span class="st">"file:%s?_pragma=journal_mode(WAL)&amp;_pragma=busy_timeout(5000)&amp;_pragma=foreign_keys(1)"</span>, path)
+	db, err := sql.Open(<span class="st">"sqlite"</span>, dsn)
+	<span class="kw">if</span> err != <span class="kw">nil</span> {
+		<span class="kw">return</span> <span class="kw">nil</span>, err
+	}
+	<span class="cm">// modernc/sqlite は単一コネクションに絞ると lock 競合が単純になる</span>
+	db.SetMaxOpenConns(<span class="st">1</span>)
+	s := &amp;<span class="ty">Store</span>{db: db}
+	<span class="kw">if</span> err := s.migrate(); err != <span class="kw">nil</span> {
+		db.Close()
+		<span class="kw">return</span> <span class="kw">nil</span>, err
+	}
+	<span class="kw">return</span> s, <span class="kw">nil</span>
+}
+
+<span class="kw">func</span> (s *<span class="ty">Store</span>) Close() <span class="ty">error</span> { <span class="kw">return</span> s.db.Close() }</code></pre>
+
+    <p>この短い関数に、SQLite 選定の判断が凝縮されています。上から効いている点を拾います。</p>
+    <p><strong>ドライバは <code>import _ "modernc.org/sqlite"</code> でブランク登録する。</strong> 先頭のアンダースコア付き import が肝です。<code>database/sql</code> は「SQL を扱う共通インターフェース」だけを提供し、実際の DB との会話は<strong>ドライバ</strong>が担います。ドライバは <code>init()</code> で自身を <code>database/sql</code> に登録するので、<strong>使うだけならブランク import で副作用（登録）だけ起こせばよい</strong>。ここで登録される名前が <code>"sqlite"</code> で、それが <code>sql.Open("sqlite", …)</code> の第一引数になります。この <code>modernc.org/sqlite</code> が<strong>純 Go 実装</strong>——だから cgo も C コンパイラも要らず、<code>go build</code> だけで単一バイナリになる。Step 2 冒頭の「なぜ SQLite か」の「cgo 不要」が、この1行に表れています。</p>
+    <p><strong>DSN の pragma で SQLite を「同時書き込みに強く」チューニングする。</strong> <code>dsn</code> の <code>?_pragma=…</code> は接続時に設定する SQLite の pragma です。3つ効かせています。<code>journal_mode(WAL)</code>——WAL（Write-Ahead Logging）モードは、書き込み中でも読み取りをブロックしにくくする方式で、「ジャッジワーカーが結果を書いている最中に、API ハンドラが履歴を読む」という並行を滑らかにします。<code>busy_timeout(5000)</code>——ロックが取れないとき即エラーにせず 5 秒待つ。SQLite は書き込みを直列化するので、瞬間的な競合はこの待ちで吸収されます（要件由来の <code>SQLITE_BUSY</code> エラーを避ける）。<code>foreign_keys(1)</code>——外部キー制約を有効化。SQLite は歴史的経緯で外部キーが既定オフなので、明示的に ON にして「存在しない問題を参照する提出」のような不整合を DB に拒ませます。</p>
+    <p><strong><code>SetMaxOpenConns(1)</code>——コネクションを1本に絞る。</strong> <code>database/sql</code> は既定でコネクションプールを作り、複数の接続を並行に使います。しかし SQLite はそもそも書き込みを直列化する DB。ここで<strong>接続を1本に固定</strong>すると、「誰がロックを持っているか」で悩む余地がなくなり、ロック競合の推論が単純になります。単一ユーザー・ワーカー並列度1という本書の前提なら、1本で性能は足ります。「小さい要件には小さい構成」の徹底です。</p>
+    <p><strong>開いたら即 <code>migrate()</code> でスキーマを用意する。</strong> <code>Open</code> の最後で <code>s.migrate()</code> を呼び、テーブルが無ければ作ります。マイグレーションツールを別に持たず、起動時に <code>CREATE TABLE IF NOT EXISTS</code> を流すだけ——これも「単一ホスト・自分専用」だから許される割り切りです。<code>migrate</code> が失敗したら <code>db.Close()</code> してエラーを返す（開きかけの DB を放置しない）のに注意してください。</p>
+
+    <div class="gonote"><div class="box-k">GO メモ · database/sql と「ドライバ」の分離、ブランク import</div>
+      <p>Go の <code>database/sql</code> は<strong>DB に依存しない共通 API</strong>（<code>Query</code> / <code>Exec</code> / <code>Begin</code> …）だけを定義し、実際の通信は各 DB の<strong>ドライバ</strong>に委ねる二層構造です。だから DB を PostgreSQL に替えても、呼び出し側のコードはほぼそのまま——import するドライバと DSN が変わるだけ。<br>
+      <code>import _ "modernc.org/sqlite"</code> の <code>_</code> は<strong>ブランク import</strong>で、「このパッケージの識別子は使わないが、<code>init()</code> の副作用だけ欲しい」という宣言です。ドライバは <code>init()</code> の中で <code>sql.Register("sqlite", …)</code> を呼んで自分を登録するので、ブランク import しておけば <code>sql.Open("sqlite", …)</code> がその登録済みドライバを見つけられます。使わないパッケージを import するとコンパイルエラーになる Go で、副作用目的の import を許す唯一の書き方がこれです。</p>
+    </div>
+
+    <div class="gonote"><div class="box-k">SQL メモ · ここから先を読むための SQL（この章で使うぶんだけ）</div>
+      <p>ここから <code>CREATE TABLE</code> や <code>SELECT</code> といった <strong>SQL</strong>（データベースに指示を出す言語）が本格的に出てきます。<strong>SQL を書けるようになる必要はありません</strong>——この章のコードを読むのに要る分だけ、先にまとめます。すでに知っている人は飛ばしてください。</p>
+
+      <p><strong>① データは「表」に入る。</strong> リレーショナルデータベースは、データを<strong>テーブル</strong>（表）として持ちます。Go でいえば「構造体のスライス」に近い形です。</p>
+      <div class="ascii">problems テーブル（＝ []Problem のようなもの）
+
+  id │ slug        │ title      │ difficulty     ← 列（column）＝構造体のフィールド
+ ────┼─────────────┼────────────┼───────────
+   1 │ two-sum     │ 2数の和    │ easy           ← 行（row）＝構造体1個ぶん
+   2 │ fizz-buzz   │ FizzBuzz   │ easy
+   3 │ top-sellers │ 売上上位   │ medium</div>
+
+      <p><strong>② 主キー（PRIMARY KEY）= 行を一意に指す番号。</strong> 上の <code>id</code> がそれです。「この行のことだ」と迷いなく指せる印で、本書では <code>INTEGER PRIMARY KEY AUTOINCREMENT</code>（新しい行を入れるたび自動で 1, 2, 3… と振られる）を使います。</p>
+
+      <p><strong>③ 外部キー（REFERENCES）= 別の表の行を指す列。</strong> 「このテストケースは、どの問題のものか」を表すには、<code>testcases</code> の行に <code>problem_id</code> という列を持たせ、<code>problems.id</code> を指させます。Go でいえばポインタに近い発想です。</p>
+
+      <p><strong>④ 使う文型は5つだけ。</strong> この章に出てくる SQL は、実質この5種類の組み合わせです。</p>
+      <div class="ascii">CREATE TABLE problems ( … )              表を作る（起動時に一度）
+INSERT INTO problems (slug,…) VALUES (?,…)  行を追加する
+SELECT id, slug FROM problems WHERE id = ?  条件に合う行を読む
+UPDATE problems SET title = ? WHERE id = ?  条件に合う行を書き換える
+DELETE FROM problems WHERE id = ?           条件に合う行を消す</div>
+      <p><strong><code>WHERE</code> が「どの行を対象にするか」</strong>の絞り込みです。<code>WHERE</code> を書き忘れた <code>UPDATE</code> や <code>DELETE</code> は<strong>全行に効いてしまう</strong>ので、この語は常に意識してください。</p>
+
+      <p><strong>⑤ <code>?</code> は「あとで値を入れる穴」（プレースホルダ）。</strong> 上の例に出てくる <code>?</code> がそれです。<strong>文字列を連結して SQL を組み立ててはいけません</strong>——値の中に SQL の断片が紛れ込むと、意図しない命令が実行されてしまう（<strong>SQL インジェクション</strong>）。<code>?</code> で穴を空けておき、値は別途渡す。こうすると値は<strong>あくまで値として</strong>扱われ、命令として解釈される余地がなくなります。本書のコードが<strong>値を渡すときは例外なく <code>?</code> を使っている</strong>のはこのためです（SQL の<strong>骨格</strong>を、開発者が書いた固定の文字列から組み立てるのは構いません——実際 <code>store.go</code> には列名リストを <code>+</code> で繋いでいる箇所があります。危険なのは<strong>外から来た値</strong>を繋ぐことです）。</p>
+
+      <p><strong>⑥ 列に付ける「決まりごと」。</strong> テーブルを作るとき、列には制約を添えられます。<strong>データベース自身に守らせるルール</strong>で、破る値は書き込みごと拒否されます。</p>
+      <div class="ascii">NOT NULL              空（未設定）を許さない
+UNIQUE                同じ値が2行に現れることを許さない（例: slug）
+DEFAULT '[]'          省略されたときの既定値
+CHECK(type IN ('code','sql'))   この2値以外を許さない</div>
+      <p>アプリ側のコードで確かめる手もありますが、<strong>DB に書いておけば「どの経路から書かれても」守られます</strong>。この違いは Step 3 以降で繰り返し出てきます。</p>
+
+      <p>この章に出てくる残りの SQL（<code>EXISTS</code> / <code>LEFT JOIN</code> / <code>COALESCE</code> / トランザクション）は、<strong>それぞれ初めて登場する場所で、なぜ必要になったかとセットで</strong>説明します。ここで覚える必要はありません。</p>
+    </div>
+
+    <h2 class="step" id="step-3"><span class="step-no">Step 3</span>スキーマを設計する — migrate の4テーブル</h2>
+    <p>Step 1 の4つのモデルを、SQLite のテーブルに落とします。<code>migrate</code> は起動時に一度だけ実行され、テーブルとインデックスを（無ければ）作ります。全文です。長いので、後で1テーブルずつ解きます。</p>
+
+    <div class="file-tag">internal/store/store.go（migrate）</div>
+    <pre><code><span class="kw">func</span> (s *<span class="ty">Store</span>) migrate() <span class="ty">error</span> {
+	_, err := s.db.Exec(<span class="st">`
+CREATE TABLE IF NOT EXISTS problems (
+	id INTEGER PRIMARY KEY AUTOINCREMENT,
+	slug TEXT NOT NULL UNIQUE,
+	title TEXT NOT NULL,
+	type TEXT NOT NULL CHECK(type IN ('code','sql')),
+	difficulty TEXT NOT NULL CHECK(difficulty IN ('easy','medium','hard')),
+	tags TEXT NOT NULL DEFAULT '[]',
+	statement_md TEXT NOT NULL DEFAULT '',
+	time_limit_ms INTEGER NOT NULL DEFAULT 2000,
+	memory_limit_mb INTEGER NOT NULL DEFAULT 256,
+	sql_seed TEXT NOT NULL DEFAULT '',
+	sql_order_matters INTEGER NOT NULL DEFAULT 0,
+	created_at TEXT NOT NULL,
+	updated_at TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS testcases (
+	id INTEGER PRIMARY KEY AUTOINCREMENT,
+	problem_id INTEGER NOT NULL REFERENCES problems(id) ON DELETE CASCADE,
+	ord INTEGER NOT NULL,
+	input TEXT NOT NULL DEFAULT '',
+	expected TEXT NOT NULL DEFAULT '',
+	is_sample INTEGER NOT NULL DEFAULT 0
+);
+CREATE TABLE IF NOT EXISTS submissions (
+	id INTEGER PRIMARY KEY AUTOINCREMENT,
+	problem_id INTEGER NOT NULL REFERENCES problems(id) ON DELETE CASCADE,
+	language TEXT NOT NULL,
+	code TEXT NOT NULL,
+	status TEXT NOT NULL DEFAULT 'pending' CHECK(status IN ('pending','running','done')),
+	verdict TEXT NOT NULL DEFAULT '',
+	compile_output TEXT NOT NULL DEFAULT '',
+	time_ms INTEGER NOT NULL DEFAULT 0,
+	memory_kb INTEGER NOT NULL DEFAULT 0,
+	created_at TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS submission_results (
+	id INTEGER PRIMARY KEY AUTOINCREMENT,
+	submission_id INTEGER NOT NULL REFERENCES submissions(id) ON DELETE CASCADE,
+	testcase_id INTEGER NOT NULL,
+	verdict TEXT NOT NULL,
+	time_ms INTEGER NOT NULL DEFAULT 0,
+	memory_kb INTEGER NOT NULL DEFAULT 0,
+	actual_snippet TEXT NOT NULL DEFAULT '',
+	stderr_snippet TEXT NOT NULL DEFAULT ''
+);
+CREATE INDEX IF NOT EXISTS idx_testcases_problem ON testcases(problem_id, ord);
+CREATE INDEX IF NOT EXISTS idx_submissions_problem ON submissions(problem_id, id);
+CREATE INDEX IF NOT EXISTS idx_results_submission ON submission_results(submission_id);
+`</span>)
+	<span class="kw">return</span> err
+}</code></pre>
+
+    <p>4つのテーブルは、Step 1 の4つのモデルにそのまま対応します。設計の読みどころを、テーブルごとに拾います。</p>
+
+    <p><strong>① <code>problems</code> — 問題タイプ code/sql の分岐が、スキーマにこう出る。</strong> <code>type TEXT NOT NULL CHECK(type IN ('code','sql'))</code> ——この <strong><code>CHECK</code> 制約</strong>が、Step 1 で強調した「問題タイプ」を<strong>DB レベルで2値に固定</strong>しています。<code>'code'</code> か <code>'sql'</code> 以外は書き込めない。同様に <code>difficulty</code> も <code>CHECK(... IN ('easy','medium','hard'))</code> で3値に縛ります。アプリ側のバリデーションをすり抜けた不正な値が入り込む余地を、テーブル定義そのものが塞いでいます。そして <code>sql_seed</code> と <code>sql_order_matters</code> の2列——これらは <strong><code>type='sql'</code> のときだけ意味を持つ</strong>列です。<code>type='code'</code> の行では <code>sql_seed</code> は既定の空文字列、<code>sql_order_matters</code> は <code>0</code> のまま。<strong>「タイプ依存の列を、使わないタイプでは既定値で寝かせておく」</strong>——これが「1テーブルで2タイプの問題を扱う」割り切りの姿です。タイプごとにテーブルを分ける手もありますが、共通部分（説明・制約・時間）が大半で、差分は2列だけ。単一テーブル＋<code>CHECK</code>＋タイプ専用の既定値列、という最小構成を選んでいます。<code>slug TEXT NOT NULL UNIQUE</code> は「slug は重複しない一意な名札」を DB が保証します。</p>
+    <p><strong>② <code>testcases</code> — 問題に <code>ON DELETE CASCADE</code> でぶら下げる。</strong> <code>problem_id INTEGER NOT NULL REFERENCES problems(id) ON DELETE CASCADE</code>。この<strong>外部キー</strong>が「テストケースは必ずどれかの問題に属す」を保証し、<code>ON DELETE CASCADE</code> が「親の問題が消えたら、そのケースも自動で消える」を保証します（<code>Open</code> で <code>foreign_keys(1)</code> を効かせたのはこのためです）。孤児のテストケースが残らない。<code>input</code> / <code>expected</code> は Step 1 で見た通り、タイプで意味が変わる2列。<code>is_sample INTEGER</code>——SQLite に真偽型は無いので、<strong>bool は <code>INTEGER</code> の 0/1 で表現</strong>します（Go 側の <code>bool</code> と自動で変換されます）。</p>
+    <p><strong>③ <code>submissions</code> — 状態と判定を2列に分ける。</strong> Step 1 で見た「<code>status</code>（処理段階）」と「<code>verdict</code>（判定）」の分離が、そのまま2列になっています。<code>status TEXT NOT NULL DEFAULT 'pending' CHECK(status IN ('pending','running','done'))</code>——既定は <code>pending</code>（作成直後）で、<code>CHECK</code> が3つの段階以外を拒みます。<code>verdict TEXT NOT NULL DEFAULT ''</code>——既定は空（未確定）。採点が <code>done</code> になったとき初めて <code>verdict</code> に <code>AC</code> 等が書かれます。この2列を分けたおかげで「<code>pending</code> なのに <code>verdict</code> が入っている」ような矛盾した状態が実装上生じません——ただしこれはスキーマが制約で禁じているわけではなく、<code>FinishSubmission</code> が <code>status</code> と <code>verdict</code> を<strong>同じ UPDATE で一度に書く</strong>という実装の規律によるものです（Step 6 で見ます）。</p>
+    <p><strong>④ <code>submission_results</code> — ケースごとの結果を、提出にぶら下げる。</strong> <code>submission_id … REFERENCES submissions(id) ON DELETE CASCADE</code> で提出に紐づけ、提出が消えれば結果も消えます。ここで注目すべきは <code>testcase_id INTEGER NOT NULL</code> に<strong>外部キー制約を付けていない</strong>ことです。<code>submission_id</code> は <code>REFERENCES</code> するのに、<code>testcase_id</code> は生の整数。これは意図的で——問題を編集するとテストケースは<strong>全入れ替え</strong>される（Step 5 の <code>UpdateProblem</code> が <code>DELETE</code>→<code>INSERT</code> する）ため、過去の提出結果が参照する古いケース ID は<strong>もう存在しないことがある</strong>。ここに外部キーを張ると、問題を編集した瞬間に過去の結果が消える（CASCADE）か、編集自体が制約違反で弾かれてしまう。履歴を守るため、あえて<strong>緩い参照（ただの ID）</strong>にしています。Step 4 の <code>GetResults</code> が <code>LEFT JOIN</code> を使うのは、この「参照先が消えているかもしれない」を前提にしているからです。</p>
+    <p><strong>末尾の3つの <code>CREATE INDEX</code></strong> は、頻繁に使う検索のための索引です。<code>idx_testcases_problem</code> は「ある問題のケースを <code>ord</code> 順に引く」を速くし、<code>idx_submissions_problem</code> は「ある問題の提出履歴を新しい順に引く」を、<code>idx_results_submission</code> は「ある提出のケース結果を引く」を速くします。いずれも <code>WHERE ... = ? ORDER BY ...</code> という後述のクエリの形に合わせた索引です。</p>
+
+    <div class="box hazard"><div class="box-k">⚠ 落とし穴 — 問題タイプとスキーマの不整合</div>
+      <p>この単一テーブル設計の弱点は、<strong>「型と、その型に依存する列」の整合をアプリが守らねばならない</strong>ことです。<code>CHECK(type IN ('code','sql'))</code> は「<code>type</code> が2値のどれか」までは保証しますが、「<code>type='sql'</code> なら <code>sql_seed</code> が空でないはず」までは保証しません。<code>type='sql'</code> なのに <code>sql_seed</code> が空の問題を登録すると、採点時にテーブルが作られず、提出された <code>query.sql</code> が「そんなテーブルは無い」で失敗して <code>RE</code> になります（ケース入力に追記 SQL があるときは、その追記シードの実行失敗で <code>exit 111</code> → <code>IE</code> に倒れます）——いずれにせよ正しく壊れはしますが、<strong>登録の時点で気づけません</strong>。逆に <code>type='code'</code> なのに <code>sql_seed</code> を埋めても、その列は誰にも読まれず黙って無視されます。<strong>「タイプが決めるべき整合」をスキーマは半分しか守れない</strong>——だからタイプ依存の列を持つ設計では、登録側（Step 5 / Step 8）で「このタイプならこの列が要る/要らない」を意識する必要があります。<code>CHECK</code> で守れる範囲と守れない範囲の線引きを、常に頭に置いてください。</p>
+    </div>
+
+    <h2 class="step" id="step-4"><span class="step-no">Step 4</span>問題を取り出す — GetProblemBySlug と tags の JSON 詰め</h2>
+    <p>テーブルができたので、読み出しから作ります。まず問題一覧 <code>ListProblems</code>——ここで <code>ProblemSummary.Status</code>（solved/attempted/unsolved）を SQL で導きます。</p>
+
+    <div class="file-tag">internal/store/store.go（ListProblems）</div>
+    <pre><code><span class="kw">func</span> (s *<span class="ty">Store</span>) ListProblems() ([]<span class="ty">ProblemSummary</span>, <span class="ty">error</span>) {
+	rows, err := s.db.Query(<span class="st">`
+SELECT p.id, p.slug, p.title, p.type, p.difficulty, p.tags,
+	EXISTS(SELECT 1 FROM submissions x WHERE x.problem_id=p.id AND x.verdict='AC'),
+	EXISTS(SELECT 1 FROM submissions x WHERE x.problem_id=p.id)
+FROM problems p ORDER BY p.id`</span>)
+	<span class="kw">if</span> err != <span class="kw">nil</span> {
+		<span class="kw">return</span> <span class="kw">nil</span>, err
+	}
+	<span class="kw">defer</span> rows.Close()
+	<span class="kw">var</span> out []<span class="ty">ProblemSummary</span>
+	<span class="kw">for</span> rows.Next() {
+		<span class="kw">var</span> p <span class="ty">ProblemSummary</span>
+		<span class="kw">var</span> tags <span class="ty">string</span>
+		<span class="kw">var</span> solved, attempted <span class="ty">bool</span>
+		<span class="kw">if</span> err := rows.Scan(&amp;p.ID, &amp;p.Slug, &amp;p.Title, &amp;p.Type, &amp;p.Difficulty, &amp;tags, &amp;solved, &amp;attempted); err != <span class="kw">nil</span> {
+			<span class="kw">return</span> <span class="kw">nil</span>, err
+		}
+		p.Tags = tagsFromJSON(tags)
+		<span class="kw">switch</span> {
+		<span class="kw">case</span> solved:
+			p.Status = <span class="st">"solved"</span>
+		<span class="kw">case</span> attempted:
+			p.Status = <span class="st">"attempted"</span>
+		<span class="kw">default</span>:
+			p.Status = <span class="st">"unsolved"</span>
+		}
+		out = append(out, p)
+	}
+	<span class="kw">return</span> out, rows.Err()
+}</code></pre>
+    <p>ここが「モデルは DB 列と1対1でない」の実演です。<code>Status</code> という列はどこにもありません。代わりに<strong>2つの <code>EXISTS</code> サブクエリ</strong>で、その場で計算します。1つ目は「この問題に <code>verdict='AC'</code> の提出が<strong>1件でもあるか</strong>」（＝解けたか）、2つ目は「提出が1件でもあるか」（＝挑戦したか）。この2つの真偽を Go 側で受け取り（<code>solved</code> / <code>attempted</code>）、<code>switch</code> で <code>solved</code>→<code>"solved"</code>、<code>attempted</code>→<code>"attempted"</code>、どちらも false→<code>"unsolved"</code> に落とします。<code>EXISTS</code> は「1件でもあれば真」で止まるので、全提出を数えるより速い。<strong>派生値をアプリのループで計算せず、DB に計算させて受け取る</strong>——これが SQL を持つ強みです。</p>
+
+    <p>次に、1問の全情報を引く <code>GetProblemBySlug</code> / <code>GetProblemByID</code>。両者は共通の <code>scanProblem</code> と列リストを使い回します。</p>
+    <div class="file-tag">internal/store/store.go（scanProblem と Get）</div>
+    <pre><code><span class="kw">func</span> (s *<span class="ty">Store</span>) scanProblem(row *sql.<span class="ty">Row</span>) (*<span class="ty">Problem</span>, <span class="ty">error</span>) {
+	<span class="kw">var</span> p <span class="ty">Problem</span>
+	<span class="kw">var</span> tags, created, updated <span class="ty">string</span>
+	err := row.Scan(&amp;p.ID, &amp;p.Slug, &amp;p.Title, &amp;p.Type, &amp;p.Difficulty, &amp;tags,
+		&amp;p.StatementMD, &amp;p.TimeLimitMS, &amp;p.MemoryLimitMB, &amp;p.SQLSeed, &amp;p.SQLOrderMatters, &amp;created, &amp;updated)
+	<span class="kw">if</span> err != <span class="kw">nil</span> {
+		<span class="kw">return</span> <span class="kw">nil</span>, err
+	}
+	p.Tags = tagsFromJSON(tags)
+	p.CreatedAt = parseTime(created)
+	p.UpdatedAt = parseTime(updated)
+	<span class="kw">return</span> &amp;p, <span class="kw">nil</span>
+}
+
+<span class="kw">const</span> problemCols = <span class="st">`id, slug, title, type, difficulty, tags, statement_md, time_limit_ms, memory_limit_mb, sql_seed, sql_order_matters, created_at, updated_at`</span>
+
+<span class="kw">func</span> (s *<span class="ty">Store</span>) GetProblemBySlug(slug <span class="ty">string</span>) (*<span class="ty">Problem</span>, <span class="ty">error</span>) {
+	<span class="kw">return</span> s.scanProblem(s.db.QueryRow(<span class="st">`SELECT `</span>+problemCols+<span class="st">` FROM problems WHERE slug=?`</span>, slug))
+}
+
+<span class="kw">func</span> (s *<span class="ty">Store</span>) GetProblemByID(id <span class="ty">int64</span>) (*<span class="ty">Problem</span>, <span class="ty">error</span>) {
+	<span class="kw">return</span> s.scanProblem(s.db.QueryRow(<span class="st">`SELECT `</span>+problemCols+<span class="st">` FROM problems WHERE id=?`</span>, id))
+}
+
+<span class="kw">var</span> ErrNotFound = sql.<span class="ty">ErrNoRows</span></code></pre>
+    <p>ここに3つの読みどころがあります。第一に、<strong>列リストを <code>problemCols</code> という定数に括り出し</strong>、slug 引きと id 引きで共有しています。<code>SELECT</code> の列順と <code>Scan</code> の引数順は<strong>必ず一致</strong>していなければならず（1つずれると別の列が別のフィールドに入る静かなバグになる）、列リストを一箇所に固定することでこの事故を防ぎます。第二に、<code>WHERE slug=?</code> の <strong><code>?</code> はプレースホルダ</strong>で、値は <code>QueryRow(..., slug)</code> の引数として渡します。文字列連結で SQL を組まないのが<strong>SQL インジェクション対策</strong>の要です。第三に、<code>ErrNotFound = sql.ErrNoRows</code>——「見つからない」を <code>database/sql</code> の <code>ErrNoRows</code> に別名で載せ、呼び出し側（API 層）が <code>store.ErrNotFound</code> で判定できるようにしています。<code>store</code> の外に <code>database/sql</code> の存在を漏らさないための別名——が理想ですが、正直に言えば本書の API 層は <code>errors.Is(err, sql.ErrNoRows)</code> も併読しており（<code>store.ErrNotFound</code> と両にらみ）、抽象化は完全ではありません。</p>
+
+    <p><code>scanProblem</code> の中で2度出てくる <strong><code>tagsFromJSON</code> と、時刻の <code>parseTime</code></strong> が「Go の型と SQLite の型の橋渡し」です。SQLite には配列型も専用の時刻型もありません。だから <code>[]string</code> のタグは JSON 文字列にして <code>TEXT</code> 列に格納し、<code>time.Time</code> は RFC3339 の文字列にして格納します。読むときは逆変換します。</p>
+    <div class="file-tag">internal/store/store.go（変換ヘルパ）</div>
+    <pre><code><span class="kw">func</span> now() <span class="ty">string</span> { <span class="kw">return</span> time.Now().UTC().Format(time.RFC3339) }
+
+<span class="kw">func</span> parseTime(s <span class="ty">string</span>) time.<span class="ty">Time</span> {
+	t, _ := time.Parse(time.RFC3339, s)
+	<span class="kw">return</span> t
+}
+
+<span class="kw">func</span> tagsToJSON(tags []<span class="ty">string</span>) <span class="ty">string</span> {
+	<span class="kw">if</span> tags == <span class="kw">nil</span> {
+		tags = []<span class="ty">string</span>{}
+	}
+	b, _ := json.Marshal(tags)
+	<span class="kw">return</span> string(b)
+}
+
+<span class="kw">func</span> tagsFromJSON(s <span class="ty">string</span>) []<span class="ty">string</span> {
+	<span class="kw">var</span> tags []<span class="ty">string</span>
+	_ = json.Unmarshal([]byte(s), &amp;tags)
+	<span class="kw">if</span> tags == <span class="kw">nil</span> {
+		tags = []<span class="ty">string</span>{}
+	}
+	<span class="kw">return</span> tags
+}</code></pre>
+    <p><code>tagsToJSON</code> は <code>nil</code> を空スライスに正規化してから <code>json.Marshal</code> します（<code>nil</code> だと JSON が <code>null</code> になり、DB 既定の <code>'[]'</code> と食い違うため）。<code>tagsFromJSON</code> も逆に <code>nil</code> を空スライスに揃え、「タグが空の問題」を <code>null</code> ではなく <code>[]</code> として一貫させます。<code>now()</code> が <code>UTC()</code> で揃えているのは、タイムゾーンのズレで時刻比較が壊れないための定石です。</p>
+
+    <p>問題に紐づくケースを引く <code>GetTestcases</code> は、採点ワーカー（第08章）が「この問題のケース一覧」を得るために呼びます。</p>
+    <div class="file-tag">internal/store/store.go（GetTestcases）</div>
+    <pre><code><span class="kw">func</span> (s *<span class="ty">Store</span>) GetTestcases(problemID <span class="ty">int64</span>) ([]<span class="ty">Testcase</span>, <span class="ty">error</span>) {
+	rows, err := s.db.Query(<span class="st">`SELECT id,problem_id,ord,input,expected,is_sample FROM testcases WHERE problem_id=? ORDER BY ord`</span>, problemID)
+	<span class="kw">if</span> err != <span class="kw">nil</span> {
+		<span class="kw">return</span> <span class="kw">nil</span>, err
+	}
+	<span class="kw">defer</span> rows.Close()
+	<span class="kw">var</span> out []<span class="ty">Testcase</span>
+	<span class="kw">for</span> rows.Next() {
+		<span class="kw">var</span> c <span class="ty">Testcase</span>
+		<span class="kw">if</span> err := rows.Scan(&amp;c.ID, &amp;c.ProblemID, &amp;c.Ord, &amp;c.Input, &amp;c.Expected, &amp;c.IsSample); err != <span class="kw">nil</span> {
+			<span class="kw">return</span> <span class="kw">nil</span>, err
+		}
+		out = append(out, c)
+	}
+	<span class="kw">return</span> out, rows.Err()
+}</code></pre>
+    <p><code>ORDER BY ord</code> でケースを<strong>登録順</strong>（<code>insertCases</code> が <code>i+1</code> で振った順）に並べます。この順序は採点順（第00章の <code>JudgeSubmission</code> が回す順）に直結します。「サンプルが先、隠しケースが後」に並ぶのは <code>ord</code> が保証するのではなく、<strong>本書の seed がサンプルを先に登録している</strong>という慣習の結果です。<code>idx_testcases_problem(problem_id, ord)</code> の索引がこのクエリを支えています。</p>
+
+    <div class="gonote"><div class="box-k">GO メモ · Query/QueryRow と Scan、rows.Close と rows.Err、NULL の扱い</div>
+      <p><code>QueryRow</code> は<strong>1行だけ</strong>を期待する読み出しで、<code>Scan</code> で各列を変数のアドレス（<code>&amp;p.ID</code> …）に流し込みます。行が無ければ <code>Scan</code> が <code>sql.ErrNoRows</code> を返す。<code>Query</code> は<strong>複数行</strong>で、<code>for rows.Next() { rows.Scan(...) }</code> で1行ずつ回し、<strong>必ず <code>defer rows.Close()</code></strong>（コネクションを返す）と、ループ後の <code>rows.Err()</code>（途中で壊れていないかの最終確認）を書きます。この2つを忘れるとコネクションリークやエラーの取りこぼしになります。<br>
+      <strong>NULL の扱い</strong>にも触れておきます。SQLite の <code>NULL</code> を Go の <code>string</code> に <code>Scan</code> しようとすると失敗します。本書のスキーマは全列を <code>NOT NULL</code>（一部は <code>DEFAULT</code> 付き）で定義し、<strong>そもそも NULL を発生させない</strong>方針でこれを回避しています（<code>verdict</code> も既定 <code>''</code>、<code>tags</code> も既定 <code>'[]'</code>）。ただし Step 4 の次で見る <code>GetResults</code> は <code>LEFT JOIN</code> で結合先が無いと NULL が出るため、そこだけ <code>COALESCE</code>（NULL を既定値に置換する SQL 関数）で守ります。「NOT NULL で予防し、避けられない JOIN の NULL は COALESCE で吸収する」——この二段構えが NULL 対策の型です。</p>
+    </div>
+
+    <p>最後に、履歴読み出しの主役 <code>GetResults</code>。ここで Step 3 の「<code>testcase_id</code> に外部キーを張らなかった」判断と、Step 1 の「隠しケースは漏らさない」配慮が合流します。</p>
+    <div class="file-tag">internal/store/store.go（GetResults）</div>
+    <pre><code><span class="cm">// GetResults はケース別結果を返す。サンプルケースには入力と期待値も付ける（F-12）。</span>
+<span class="kw">func</span> (s *<span class="ty">Store</span>) GetResults(submissionID <span class="ty">int64</span>) ([]<span class="ty">SubmissionResult</span>, <span class="ty">error</span>) {
+	rows, err := s.db.Query(<span class="st">`
+SELECT r.id, r.submission_id, r.testcase_id, COALESCE(t.ord,0), COALESCE(t.is_sample,0),
+	r.verdict, r.time_ms, r.memory_kb, r.actual_snippet, r.stderr_snippet,
+	COALESCE(t.input,''), COALESCE(t.expected,'')
+FROM submission_results r LEFT JOIN testcases t ON t.id=r.testcase_id
+WHERE r.submission_id=? ORDER BY COALESCE(t.ord, 999999), r.id`</span>, submissionID)
+	<span class="kw">if</span> err != <span class="kw">nil</span> {
+		<span class="kw">return</span> <span class="kw">nil</span>, err
+	}
+	<span class="kw">defer</span> rows.Close()
+	<span class="kw">var</span> out []<span class="ty">SubmissionResult</span>
+	<span class="kw">for</span> rows.Next() {
+		<span class="kw">var</span> r <span class="ty">SubmissionResult</span>
+		<span class="kw">var</span> input, expected <span class="ty">string</span>
+		<span class="kw">if</span> err := rows.Scan(&amp;r.ID, &amp;r.SubmissionID, &amp;r.TestcaseID, &amp;r.Ord, &amp;r.IsSample,
+			&amp;r.Verdict, &amp;r.TimeMS, &amp;r.MemoryKB, &amp;r.ActualSnippet, &amp;r.StderrSnippet, &amp;input, &amp;expected); err != <span class="kw">nil</span> {
+			<span class="kw">return</span> <span class="kw">nil</span>, err
+		}
+		<span class="kw">if</span> r.IsSample {
+			r.Input = input
+			r.Expected = expected
+		} <span class="kw">else</span> {
+			<span class="cm">// 隠しケースの中身は漏らさない（実出力スニペットも消す）</span>
+			r.ActualSnippet = <span class="st">""</span>
+			r.StderrSnippet = truncate(r.StderrSnippet, <span class="st">512</span>)
+		}
+		out = append(out, r)
+	}
+	<span class="kw">return</span> out, rows.Err()
+}
+
+<span class="kw">func</span> truncate(s <span class="ty">string</span>, n <span class="ty">int</span>) <span class="ty">string</span> {
+	<span class="kw">if</span> len(s) &lt;= n {
+		<span class="kw">return</span> s
+	}
+	<span class="kw">return</span> s[:n] + <span class="st">"…"</span>
+}</code></pre>
+    <p><strong><code>LEFT JOIN</code> と <code>COALESCE</code> の組み合わせ</strong>が、Step 3 の伏線を回収します。結果 <code>r</code> はテストケース <code>t</code> と <code>t.id=r.testcase_id</code> で結合しますが、その <code>testcase_id</code> は外部キーで守られていないため、<strong>問題を編集した後だと結合先が消えている</strong>ことがあります。普通の <code>JOIN</code> だと結合先の無い行は結果から落ちてしまい、過去の提出結果が<strong>丸ごと見えなくなる</strong>。それを防ぐのが <code>LEFT JOIN</code>——「左（結果）は必ず残し、右（ケース）が無ければ右の列は NULL」。そして NULL のまま <code>Scan</code> すると壊れるので、<code>COALESCE(t.ord,0)</code> のように<strong>NULL を既定値に置換</strong>します。「消えたケースを参照する古い結果でも、履歴として表示できる」——このためだけに JOIN の種類と NULL 対策を選んでいます。</p>
+    <p>後半の <code>if r.IsSample</code> が Step 1 で予告した<strong>「隠しケースの中身を漏らさない」</strong>実装です。サンプルケースなら入力・期待値を付けて差分表示（F-12）を助けますが、<strong>隠しケースでは <code>ActualSnippet</code> を空にし、<code>StderrSnippet</code> も 512 文字に切り詰めます</strong>。隠しケースの入力・期待出力・提出コードの実出力が漏れると、提出者が答えを逆算できてしまう。この情報統制を、応答を組み立てるこの一箇所で徹底しています。</p>
+
+    <h2 class="step" id="step-5"><span class="step-no">Step 5</span>問題を登録する — トランザクションで問題とケースを束ねる</h2>
+    <p>読み出しの次は書き込みです。ここで初めて<strong>トランザクション</strong>という道具が要ります。なぜ要るのかを、素朴にやってみるところから見ていきます。</p>
+
+    <p>問題を1つ登録するには、<strong>2種類の書き込み</strong>が必要です。<code>problems</code> に1行、そして <code>testcases</code> にケースの数だけ。<strong>もし何も考えずに、上から順に <code>INSERT</code> していったら</strong>どうなるかを先に見ます（これは<strong>作らない反面教師</strong>です。実際の <code>CreateProblem</code> は、この問題を最初から回避した形になっています）。</p>
+    <div class="ascii">❌ 素朴案: 上から順に INSERT していく（これは作らない）
+
+  ① INSERT INTO problems …        → 成功（id=7 が振られた）
+  ② INSERT INTO testcases (7,…)   → 成功
+  ③ INSERT INTO testcases (7,…)   → ★ここで失敗したら？
+  ④ INSERT INTO testcases (7,…)   → 実行されない
+
+  結果、DB に残るもの:
+    problems  … id=7 の問題が居る
+    testcases … その問題のケースが 2件だけ ある
+
+  → 「テストケースが途中までしか無い問題」が出来上がる</div>
+    <p><strong>もしこうなってしまったら</strong>、何が最悪かというと、<strong>壊れているのに動いてしまう</strong>ことです。この問題を開いた人は普通に提出でき、採点も走り、<strong>2件だけ通れば <code>AC</code> が出ます</strong>。本当は5件のケースで検査するはずだった問題が、静かに「甘い問題」に化ける。しかもエラーは出ないので、誰も気づきません。</p>
+    <p>ではどうするか。<strong>「全部成功する」か「1つも書かれていない」か、そのどちらかにしかならない</strong>ようにできれば解決します。途中の状態を外から見えないようにする——これを保証する仕組みが<strong>トランザクション</strong>です。</p>
+    <div class="ascii">トランザクション: 途中で失敗したら、全部なかったことにする
+
+  Begin  ──┬─ ① INSERT problems
+           ├─ ② INSERT testcases
+           ├─ ③ INSERT testcases  → 失敗！
+           └─ Rollback ← ①②も含めて全部取り消す（DB は元のまま）
+
+  Begin  ──┬─ ①②③④ 全部成功
+           └─ Commit  ← ここで初めて、まとめて確定する</div>
+    <p>使う言葉は3つだけです。<strong><code>Begin</code></strong>（ここから束ねる）、<strong><code>Commit</code></strong>（全部確定する）、<strong><code>Rollback</code></strong>（全部なかったことにする）。「全部か、無か」というこの性質を<strong>原子性</strong>（atomicity）と呼びます——それ以上分割できない1つの操作として扱う、という意味です。</p>
+    <p>それでは、<code>CreateProblem</code> が<strong>問題1行とテストケース複数行を、まとめて（原子的に）</strong>書き込む実物を読みます。</p>
+
+    <div class="file-tag">internal/store/store.go（CreateProblem）</div>
+    <pre><code><span class="cm">// CreateProblem は問題とテストケースをまとめて登録する。</span>
+<span class="kw">func</span> (s *<span class="ty">Store</span>) CreateProblem(p *<span class="ty">Problem</span>, cases []<span class="ty">Testcase</span>) (<span class="ty">int64</span>, <span class="ty">error</span>) {
+	tx, err := s.db.Begin()
+	<span class="kw">if</span> err != <span class="kw">nil</span> {
+		<span class="kw">return</span> <span class="st">0</span>, err
+	}
+	<span class="kw">defer</span> tx.Rollback()
+	res, err := tx.Exec(<span class="st">`INSERT INTO problems (slug,title,type,difficulty,tags,statement_md,time_limit_ms,memory_limit_mb,sql_seed,sql_order_matters,created_at,updated_at)
+VALUES (?,?,?,?,?,?,?,?,?,?,?,?)`</span>,
+		p.Slug, p.Title, p.Type, p.Difficulty, tagsToJSON(p.Tags), p.StatementMD,
+		p.TimeLimitMS, p.MemoryLimitMB, p.SQLSeed, p.SQLOrderMatters, now(), now())
+	<span class="kw">if</span> err != <span class="kw">nil</span> {
+		<span class="kw">return</span> <span class="st">0</span>, err
+	}
+	id, _ := res.LastInsertId()
+	<span class="kw">if</span> err := insertCases(tx, id, cases); err != <span class="kw">nil</span> {
+		<span class="kw">return</span> <span class="st">0</span>, err
+	}
+	<span class="kw">return</span> id, tx.Commit()
+}</code></pre>
+    <p>この関数の骨は<strong>「<code>Begin</code> → <code>defer Rollback</code> → 複数の <code>Exec</code> → 最後に <code>Commit</code>」</strong>という Go のトランザクションの定石です。順に効く点を見ます。<code>tx, _ := s.db.Begin()</code> でトランザクションを開始。次の <code>defer tx.Rollback()</code> が<strong>安全網</strong>で、この関数がどこで <code>return</code> しても、まず <code>Rollback</code> が走ります。ところが最後まで到達して <code>Commit</code> が成功していれば、その後の <code>Rollback</code> は「もう終わったトランザクション」への操作なので<strong>無視される</strong>（何も起きない）。逆に途中でエラー <code>return</code> すれば <code>Commit</code> されないまま <code>Rollback</code> が効いて、<strong>問題行の INSERT ごと巻き戻る</strong>。つまり「問題は入ったがケースが入らなかった」という<strong>中途半端な状態が絶対に残らない</strong>。これが原子性です。<code>res.LastInsertId()</code> で採番された問題 ID を取り、それを <code>insertCases</code> に渡してケースを親問題に紐づけます。</p>
+    <p><code>insertCases</code> は、渡されたケースを順に INSERT し、<strong><code>ord</code> を <code>i+1</code> で自動採番</strong>します。呼び出し側は <code>ord</code> を気にせず、スライスの並び順がそのまま採点順になります。</p>
+    <div class="file-tag">internal/store/store.go（insertCases）</div>
+    <pre><code><span class="kw">func</span> insertCases(tx *sql.<span class="ty">Tx</span>, problemID <span class="ty">int64</span>, cases []<span class="ty">Testcase</span>) <span class="ty">error</span> {
+	<span class="kw">for</span> i, c := <span class="kw">range</span> cases {
+		<span class="kw">if</span> _, err := tx.Exec(<span class="st">`INSERT INTO testcases (problem_id,ord,input,expected,is_sample) VALUES (?,?,?,?,?)`</span>,
+			problemID, i+<span class="st">1</span>, c.Input, c.Expected, c.IsSample); err != <span class="kw">nil</span> {
+			<span class="kw">return</span> err
+		}
+	}
+	<span class="kw">return</span> <span class="kw">nil</span>
+}</code></pre>
+    <p><code>insertCases</code> が受け取るのが <code>*sql.DB</code> ではなく <strong><code>*sql.Tx</code></strong> であることに注目してください。これにより、ケースの INSERT は<strong>呼び出し元と同じトランザクションの中で</strong>実行されます。だから <code>CreateProblem</code> でも、次の <code>UpdateProblem</code> でも、この1つのヘルパを使い回せます。</p>
+
+    <p>更新 <code>UpdateProblem</code> は「問題を更新し、テストケースを<strong>全入れ替え</strong>する」。ここが Step 3・Step 4 で繰り返した「<code>testcase_id</code> が消えることがある」の<strong>震源地</strong>です。</p>
+    <div class="file-tag">internal/store/store.go（UpdateProblem）</div>
+    <pre><code><span class="cm">// UpdateProblem は問題を更新し、テストケースを全入れ替えする。</span>
+<span class="kw">func</span> (s *<span class="ty">Store</span>) UpdateProblem(p *<span class="ty">Problem</span>, cases []<span class="ty">Testcase</span>) <span class="ty">error</span> {
+	tx, err := s.db.Begin()
+	<span class="kw">if</span> err != <span class="kw">nil</span> {
+		<span class="kw">return</span> err
+	}
+	<span class="kw">defer</span> tx.Rollback()
+	res, err := tx.Exec(<span class="st">`UPDATE problems SET slug=?,title=?,type=?,difficulty=?,tags=?,statement_md=?,time_limit_ms=?,memory_limit_mb=?,sql_seed=?,sql_order_matters=?,updated_at=? WHERE id=?`</span>,
+		p.Slug, p.Title, p.Type, p.Difficulty, tagsToJSON(p.Tags), p.StatementMD,
+		p.TimeLimitMS, p.MemoryLimitMB, p.SQLSeed, p.SQLOrderMatters, now(), p.ID)
+	<span class="kw">if</span> err != <span class="kw">nil</span> {
+		<span class="kw">return</span> err
+	}
+	<span class="kw">if</span> n, _ := res.RowsAffected(); n == <span class="st">0</span> {
+		<span class="kw">return</span> ErrNotFound
+	}
+	<span class="kw">if</span> _, err := tx.Exec(<span class="st">`DELETE FROM testcases WHERE problem_id=?`</span>, p.ID); err != <span class="kw">nil</span> {
+		<span class="kw">return</span> err
+	}
+	<span class="kw">if</span> err := insertCases(tx, p.ID, cases); err != <span class="kw">nil</span> {
+		<span class="kw">return</span> err
+	}
+	<span class="kw">return</span> tx.Commit()
+}</code></pre>
+    <p><code>DELETE FROM testcases</code> のあと <code>insertCases</code> で入れ直す——この「消して入れ直す」がケースの<strong>全入れ替え</strong>です。差分更新より単純で、ケース数が数個〜十数個の本書では十分。<strong>入れ直したケースには新しい ID が振られる</strong>ので、以前の提出結果（<code>submission_results.testcase_id</code>）が指していた古い ID は行方不明になります。だから Step 3 で <code>testcase_id</code> に外部キーを張らず、Step 4 の <code>GetResults</code> で <code>LEFT JOIN</code>+<code>COALESCE</code> を使った——設計判断の連鎖がここで閉じます。<code>RowsAffected()==0</code> で「更新対象が存在しない」を <code>ErrNotFound</code> に落とすのも、この <code>UPDATE</code> の作法です。もちろん DELETE と INSERT は同じトランザクション内なので、途中で失敗すれば<strong>削除ごと巻き戻り</strong>、「古いケースは消えたが新しいケースが入っていない」空白は生じません。</p>
+
+    <div class="gonote"><div class="box-k">GO メモ · トランザクションの defer Rollback + Commit イディオム</div>
+      <p><code>tx, _ := db.Begin()</code> の直後に <code>defer tx.Rollback()</code> を置き、正常系の最後で <code>return tx.Commit()</code> する——これは Go で<strong>最も安全なトランザクションの書き方</strong>です。要点は「<strong><code>Commit</code> 後の <code>Rollback</code> は無害</strong>」という <code>database/sql</code> の仕様。<code>Commit</code> が成功していれば <code>defer</code> の <code>Rollback</code> は <code>sql.ErrTxDone</code> を返すだけで DB には何もしません。だから「エラーで途中 return したら巻き戻し、最後まで行けたら Commit（そのあとの Rollback は空振り）」が、<code>if err != nil</code> のたびに <code>Rollback</code> を明示的に呼ばなくても成立します。この型を覚えておけば、複数の書き込みを「全部成功か、全部無かったことに」まとめるのが定型で書けます。<code>insertCases</code> を <code>*sql.Tx</code> 引数にして <code>Create</code>/<code>Update</code> 両方から使い回せるのも、この型の恩恵です。</p>
+    </div>
+
+    <h2 class="step" id="step-6"><span class="step-no">Step 6</span>提出を作り、状態を進める — CreateSubmission から FinishSubmission へ</h2>
+    <p>採点対象（問題・ケース）の CRUD ができました。次は採点結果側——<strong>提出のライフサイクル</strong>を DB でどう進めるか。Step 1 で見た <code>status</code>（pending→running→done）の遷移を、そのまま3つのメソッドが担います。まず流れを絵にします。</p>
+
+    <div class="ascii">1提出の状態遷移と、それを進めるメソッド
+
+  API ハンドラ                 ジャッジワーカー（第08章）
+  ┌──────────────┐            ┌────────────────────────────┐
+  │ 提出を受け付け │            │ 採点開始                     │
+  │ CreateSubmission          │ SetSubmissionRunning         │
+  │  → status: pending ─────▶ │  → status: running           │
+  └──────────────┘            │                              │
+                              │ 各ケースを採点しながら…       │
+                              │  AddResult ×N（Step 7）      │
+                              │                              │
+                              │ 採点完了                     │
+                              │ FinishSubmission             │
+                              │  → status: done, verdict 確定 │
+                              └────────────────────────────┘</div>
+
+    <p>提出の入口 <code>CreateSubmission</code>。API ハンドラが受け取った「問題 ID・言語・コード」を <code>pending</code> で書き込み、採番された提出 ID を返します。</p>
+    <div class="file-tag">internal/store/store.go（CreateSubmission）</div>
+    <pre><code><span class="kw">func</span> (s *<span class="ty">Store</span>) CreateSubmission(problemID <span class="ty">int64</span>, language, code <span class="ty">string</span>) (<span class="ty">int64</span>, <span class="ty">error</span>) {
+	res, err := s.db.Exec(<span class="st">`INSERT INTO submissions (problem_id,language,code,status,created_at) VALUES (?,?,?,'pending',?)`</span>,
+		problemID, language, code, now())
+	<span class="kw">if</span> err != <span class="kw">nil</span> {
+		<span class="kw">return</span> <span class="st">0</span>, err
+	}
+	<span class="kw">return</span> res.LastInsertId()
+}</code></pre>
+    <p><code>status</code> を明示的に <code>'pending'</code> で挿入し（既定値と同じですが意図を明示）、<code>verdict</code> は指定しないので既定の <code>''</code>（未確定）。この時点では採点はまだ1ミリも進んでいません。返した ID を API 層がジョブキューに積み（第08章）、ワーカーが拾って採点を始めます。<strong>「受け付け（この関数）」と「採点（ワーカー）」を分ける</strong>——これが非同期処理（第08章）の土台で、<code>pending</code> という状態はその分離の証です。</p>
+
+    <p>提出を読む <code>GetSubmission</code> と <code>ListSubmissions</code> は、問題テーブルと結合して <code>ProblemSlug</code>/<code>ProblemTitle</code> を埋めます。<code>GetSubmission</code> はコードも含む1件、<code>ListSubmissions</code> はコードを省いた履歴一覧です。</p>
+    <div class="file-tag">internal/store/store.go（GetSubmission / ListSubmissions）</div>
+    <pre><code><span class="kw">func</span> (s *<span class="ty">Store</span>) GetSubmission(id <span class="ty">int64</span>) (*<span class="ty">Submission</span>, <span class="ty">error</span>) {
+	<span class="kw">var</span> sub <span class="ty">Submission</span>
+	<span class="kw">var</span> created <span class="ty">string</span>
+	err := s.db.QueryRow(<span class="st">`
+SELECT s.id, s.problem_id, p.slug, p.title, s.language, s.code, s.status, s.verdict, s.compile_output, s.time_ms, s.memory_kb, s.created_at
+FROM submissions s JOIN problems p ON p.id=s.problem_id WHERE s.id=?`</span>, id).
+		Scan(&amp;sub.ID, &amp;sub.ProblemID, &amp;sub.ProblemSlug, &amp;sub.ProblemTitle, &amp;sub.Language, &amp;sub.Code,
+			&amp;sub.Status, &amp;sub.Verdict, &amp;sub.CompileOutput, &amp;sub.TimeMS, &amp;sub.MemoryKB, &amp;created)
+	<span class="kw">if</span> err != <span class="kw">nil</span> {
+		<span class="kw">return</span> <span class="kw">nil</span>, err
+	}
+	sub.CreatedAt = parseTime(created)
+	<span class="kw">return</span> &amp;sub, <span class="kw">nil</span>
+}
+
+<span class="kw">func</span> (s *<span class="ty">Store</span>) ListSubmissions(problemID <span class="ty">int64</span>, limit <span class="ty">int</span>) ([]<span class="ty">Submission</span>, <span class="ty">error</span>) {
+	q := <span class="st">`
+SELECT s.id, s.problem_id, p.slug, p.title, s.language, s.status, s.verdict, s.time_ms, s.memory_kb, s.created_at
+FROM submissions s JOIN problems p ON p.id=s.problem_id`</span>
+	<span class="kw">var</span> args []<span class="kw">any</span>
+	<span class="kw">if</span> problemID &gt; <span class="st">0</span> {
+		q += <span class="st">` WHERE s.problem_id=?`</span>
+		args = append(args, problemID)
+	}
+	q += <span class="st">` ORDER BY s.id DESC LIMIT ?`</span>
+	args = append(args, limit)
+	rows, err := s.db.Query(q, args...)
+	<span class="kw">if</span> err != <span class="kw">nil</span> {
+		<span class="kw">return</span> <span class="kw">nil</span>, err
+	}
+	<span class="kw">defer</span> rows.Close()
+	<span class="kw">var</span> out []<span class="ty">Submission</span>
+	<span class="kw">for</span> rows.Next() {
+		<span class="kw">var</span> sub <span class="ty">Submission</span>
+		<span class="kw">var</span> created <span class="ty">string</span>
+		<span class="kw">if</span> err := rows.Scan(&amp;sub.ID, &amp;sub.ProblemID, &amp;sub.ProblemSlug, &amp;sub.ProblemTitle, &amp;sub.Language,
+			&amp;sub.Status, &amp;sub.Verdict, &amp;sub.TimeMS, &amp;sub.MemoryKB, &amp;created); err != <span class="kw">nil</span> {
+			<span class="kw">return</span> <span class="kw">nil</span>, err
+		}
+		sub.CreatedAt = parseTime(created)
+		out = append(out, sub)
+	}
+	<span class="kw">return</span> out, rows.Err()
+}</code></pre>
+    <p><code>ListSubmissions</code> の<strong>クエリの組み立て方</strong>が読みどころです。<code>problemID &gt; 0</code> のときだけ <code>WHERE s.problem_id=?</code> を足し、引数スライス <code>args</code> にも値を追加する。「問題を指定すればその問題の履歴、0 なら全提出履歴」を1つの関数で扱うために、SQL 文字列と引数を<strong>並行して</strong>組み立てています。ここでも値は必ずプレースホルダ <code>?</code> 経由で、<code>args...</code> として渡す（インジェクション対策）。<code>ORDER BY s.id DESC</code> で新しい順、<code>LIMIT ?</code> で件数を絞る。一覧の <code>SELECT</code> にコード（<code>s.code</code>）が無いのは、履歴一覧に提出コード全文は要らないからで、必要なとき <code>GetSubmission</code> で1件だけ取ります。</p>
+
+    <p>そして状態を進める2つ。<code>SetSubmissionRunning</code> と <code>FinishSubmission</code>。</p>
+    <div class="file-tag">internal/store/store.go（状態遷移）</div>
+    <pre><code><span class="kw">func</span> (s *<span class="ty">Store</span>) SetSubmissionRunning(id <span class="ty">int64</span>) <span class="ty">error</span> {
+	_, err := s.db.Exec(<span class="st">`UPDATE submissions SET status='running' WHERE id=?`</span>, id)
+	<span class="kw">return</span> err
+}
+
+<span class="kw">func</span> (s *<span class="ty">Store</span>) FinishSubmission(id <span class="ty">int64</span>, verdict, compileOutput <span class="ty">string</span>, timeMS, memoryKB <span class="ty">int</span>) <span class="ty">error</span> {
+	_, err := s.db.Exec(<span class="st">`UPDATE submissions SET status='done', verdict=?, compile_output=?, time_ms=?, memory_kb=? WHERE id=?`</span>,
+		verdict, compileOutput, timeMS, memoryKB, id)
+	<span class="kw">return</span> err
+}</code></pre>
+    <p><code>SetSubmissionRunning</code> は採点開始時に <code>running</code> へ、<code>FinishSubmission</code> は採点完了時に<strong>一度に</strong> <code>done</code>＋確定した <code>verdict</code>＋コンパイル出力＋最大時間・最大メモリを書き込みます。この2つがワーカー（第08章の <code>worker.go</code>）から呼ばれることで、Step 6 冒頭の絵の状態遷移が実際に進みます。<code>FinishSubmission</code> が「status と verdict を同じ UPDATE で」書くのが要点で、<strong>「done なのに verdict が空」という一瞬の矛盾すら作らない</strong>ためです。</p>
+    <p>もう1つ、サーバ再起動時の後始末 <code>ResetInterrupted</code> にも触れておきます。採点中（<code>running</code>）のままサーバが落ちると、その提出は永遠に <code>running</code> で残ってしまう。</p>
+    <div class="file-tag">internal/store/store.go（ResetInterrupted）</div>
+    <pre><code><span class="cm">// ResetInterrupted はサーバ再起動時の後始末。running のまま残った提出を IE で確定し、</span>
+<span class="cm">// pending の ID 一覧を返す（呼び出し側で再エンキューする）。</span>
+<span class="kw">func</span> (s *<span class="ty">Store</span>) ResetInterrupted() ([]<span class="ty">int64</span>, <span class="ty">error</span>) {
+	<span class="kw">if</span> _, err := s.db.Exec(<span class="st">`UPDATE submissions SET status='done', verdict='IE', compile_output='judge interrupted by server restart' WHERE status='running'`</span>); err != <span class="kw">nil</span> {
+		<span class="kw">return</span> <span class="kw">nil</span>, err
+	}
+	rows, err := s.db.Query(<span class="st">`SELECT id FROM submissions WHERE status='pending' ORDER BY id`</span>)
+	<span class="kw">if</span> err != <span class="kw">nil</span> {
+		<span class="kw">return</span> <span class="kw">nil</span>, err
+	}
+	<span class="kw">defer</span> rows.Close()
+	<span class="kw">var</span> ids []<span class="ty">int64</span>
+	<span class="kw">for</span> rows.Next() {
+		<span class="kw">var</span> id <span class="ty">int64</span>
+		<span class="kw">if</span> err := rows.Scan(&amp;id); err != <span class="kw">nil</span> {
+			<span class="kw">return</span> <span class="kw">nil</span>, err
+		}
+		ids = append(ids, id)
+	}
+	<span class="kw">return</span> ids, rows.Err()
+}</code></pre>
+    <p>再起動時に「<code>running</code> のまま取り残された提出」を <strong><code>IE</code> で確定</strong>させ（第00章で立てた「ジャッジ側の非は IE」の思想そのもの——サーバが落ちたのは提出者のせいではない）、まだ採点前の <code>pending</code> は ID を集めて呼び出し側に返し、再エンキューさせます。<strong>状態列を持つと「異常終了からの復旧」まで設計に入ってくる</strong>——これが「提出の状態を DB で持つ」ことの重みです。</p>
+
+    <h2 class="step" id="step-7"><span class="step-no">Step 7</span>ケース結果を逐次保存する — AddResult と OnCaseResult の接続</h2>
+    <p>この章のクライマックスです。第00章で <code>JudgeSubmission</code> の骨格を読んだとき、判定ループの中に <code>onCase(tc, v, …)</code> という<strong>コールバック</strong>がありました。「ケース1件ごとに結果を外へ通知する仕掛け」と説明したあれです。<strong>その通知先が、いまから繋ぐ <code>AddResult</code></strong> です。まず保存メソッドから。</p>
+    <div class="file-tag">internal/store/store.go（AddResult）</div>
+    <pre><code><span class="kw">func</span> (s *<span class="ty">Store</span>) AddResult(r *<span class="ty">SubmissionResult</span>) <span class="ty">error</span> {
+	_, err := s.db.Exec(<span class="st">`INSERT INTO submission_results (submission_id,testcase_id,verdict,time_ms,memory_kb,actual_snippet,stderr_snippet)
+VALUES (?,?,?,?,?,?,?)`</span>, r.SubmissionID, r.TestcaseID, r.Verdict, r.TimeMS, r.MemoryKB, r.ActualSnippet, r.StderrSnippet)
+	<span class="kw">return</span> err
+}</code></pre>
+    <p><code>AddResult</code> は「ケース1件の結果を1行 INSERT する」だけの素朴な関数です。肝は<strong>これが採点ループの中で、ケースを1件採点するたびに呼ばれる</strong>こと。10ケースを採点すれば、最大10回 <code>AddResult</code> が走り、<code>submission_results</code> に行が<strong>1件ずつ</strong>積まれていきます。全ケースぶんを1回の <code>INSERT</code> でまとめて書くのではなく、<strong>1件確定するたびに即保存</strong>する——この形が、画面に途中経過（「3件目まで通過、採点中…」）を出すための<strong>受け口</strong>になります。ポーリング中のフロントが <code>GetResults</code> を叩けば、その時点までに保存された分だけが返る仕組みです。</p>
+
+    <div class="box hazard"><div class="box-k">⚠ 落とし穴 — 「1件ずつ保存」は、まだ「1件ずつ<strong>見える</strong>」ではない</div>
+      <p>ここで先に断っておきます。<code>AddResult</code> が1件ずつ走るのは事実ですが、<strong>現状それをポーリングで捉えることはほぼできません</strong>。この関数が呼ばれるのは、<strong>コンテナが終了して出力が全部出揃ったあと</strong>だからです。10件ぶんの <code>AddResult</code> は<strong>数ミリ秒のうちに一気に並び</strong>、その直後に <code>FinishSubmission</code>（<code>done</code> 確定）が来ます。1秒間隔のポーリングがその隙間に入り込む余地は、まずありません。</p>
+      <p>詰まっている場所は、この章の <code>store</code> ではありません。<strong>ホスト側がコンテナの出力を最後まで溜め込んでから一括で解釈している</strong>ためで、詳しくは<strong>第08章 Step 6</strong> で「どちら側が詰まっているのか」として扱います。</p>
+      <p>ではなぜ、いま <code>AddResult</code> を1件ずつ呼ぶ形にしておくのか。<strong>コンテナ出力の受け取り方を改めれば、この先（DB → API → 画面）を一切変えずに本物の途中経過が流れ出すから</strong>です。この章で作っているのは<strong>その配管</strong>だと捉えてください。</p>
+      <p>なお<strong>テーブルの形（<code>submission_results</code>）は、どちらの作りでも同じ</strong>です——1ケース1行を <code>INSERT</code> するのは変わりません。効いているのは<strong>「1件確定するたびに呼ばれる」という <code>AddResult</code> の<em>呼ばれ方</em></strong>のほうで、それを可能にしているのが次に見る <code>OnCaseResult</code> です。</p>
+    </div>
+    <p>では、第00章の <code>onCase</code> コールバックと、この <code>AddResult</code> が<strong>どこで繋がる</strong>のか。それが第08章のワーカー <code>worker.go</code> です。この章の締めとして、その接続部だけを先取りして見ます（ワーカー全体は第08章）。</p>
+    <div class="file-tag">internal/judge/worker.go（OnCaseResult コールバックの中身・抜粋）</div>
+    <pre><code>out := w.judger.JudgeSubmission(ctx, <span class="ty">Job</span>{
+	SubmissionID: id,
+	Language:     sub.Language,
+	Code:         sub.Code,
+	Problem:      problem,
+	Cases:        cases,
+}, <span class="kw">func</span>(tc store.<span class="ty">Testcase</span>, v <span class="ty">Verdict</span>, timeMS, memKB <span class="ty">int</span>, actual, stderr <span class="ty">string</span>) {
+	<span class="cm">// ケースごとに逐次保存 → ポーリング中のフロントに進行状況が見える</span>
+	<span class="kw">if</span> err := w.store.AddResult(&amp;store.<span class="ty">SubmissionResult</span>{
+		SubmissionID:  id,
+		TestcaseID:    tc.ID,
+		Verdict:       string(v),
+		TimeMS:        timeMS,
+		MemoryKB:      memKB,
+		ActualSnippet: actual,
+		StderrSnippet: stderr,
+	}); err != <span class="kw">nil</span> {
+		log.Printf(<span class="st">"submission %d: save case result: %v"</span>, id, err)
+	}
+})</code></pre>
+    <p>ここで<strong>2つのパッケージが握手</strong>します。第08章のワーカーは、<code>judge.JudgeSubmission</code> を呼ぶとき、最後の引数に<strong>その場で書いた無名関数</strong>を渡しています。この関数は第00章で定義した <code>OnCaseResult</code> 型——</p>
+    <div class="file-tag">internal/judge/judge.go（OnCaseResult 型の定義・再掲）</div>
+    <pre><code><span class="cm">// OnCaseResult はケース1件の結果確定ごとに呼ばれる（進行状況の逐次保存用）。</span>
+<span class="kw">type</span> <span class="ty">OnCaseResult</span> <span class="kw">func</span>(tc store.<span class="ty">Testcase</span>, verdict <span class="ty">Verdict</span>, timeMS, memKB <span class="ty">int</span>, actual, stderr <span class="ty">string</span>)</code></pre>
+    <p>——にぴたりと一致する形をしています。<code>JudgeSubmission</code> は採点の内側で、ケースを1件判定するたびにこの関数を <code>onCase(tc, v, …)</code> と呼びます（第00章で見た判定ループの中）。すると<strong>採点機構（judge）が、自分は DB を一切知らないまま、保管庫（store）へのデータ受け渡しだけを外から注入された関数に委ねる</strong>。渡された無名関数の中身は「受け取った1件を <code>store.SubmissionResult</code> に詰めて <code>AddResult</code> で保存する」だけ。<strong>judge は「保存しろ」とすら言わず、ただ「1件終わった」と通知するだけ</strong>で、その通知をどう扱うか（＝ DB に逐次保存する）はワーカーが決めています。</p>
+    <p>この設計の美しさを味わってください。第00章で「採点と実行を分ける」規律を立て、この章で「採点と永続化を分ける」規律を守った。<code>judge</code> パッケージは <code>store</code> の型（<code>Testcase</code>）を<strong>読む</strong>ことはあっても、<code>store</code> に<strong>書く</strong>ことはしません。書き込みは全部、コールバックという1本の管を通してワーカーが行う。だから採点ロジックのテスト（第00章の <code>TestCompareOutput</code>）は DB 抜きで通り、DB の CRUD はこの章で独立に検証でき、両者を繋ぐのは第08章のワーカーだけ——<strong>3つの関心が、依存の向きまで含めてきれいに分かれている</strong>。<code>OnCaseResult</code> という小さな関数型が、その分離を成立させる蝶番です。</p>
+
+    <div class="box hazard"><div class="box-k">⚠ 落とし穴 — ケース結果の保存漏れ</div>
+      <p><code>AddResult</code> は<strong>コールバックの中で呼ばれる</strong>ため、その失敗の扱いに癖があります。ワーカーのコールバックは、<code>AddResult</code> がエラーを返しても <code>log.Printf</code> するだけで<strong>採点自体は止めません</strong>。これは意図的です——1件の結果保存に失敗したくらいで提出全体の採点を落とすと、最終 verdict（<code>FinishSubmission</code> で書く方）まで巻き添えになる。ケース単位の保存はあくまで「途中経過を見せるための贅沢」で、<strong>正</strong>は最後の <code>FinishSubmission</code> が握る全体 verdict だ、という割り切りです。<br>
+      ただしこの割り切りには裏の危険があります。<strong>途中のケース結果が抜けても気づきにくい</strong>。<code>GetResults</code> が返す行数が実際の採点ケース数より少なくても、UI は「まだ採点中」と区別がつかないことがある。だから逐次保存は「あれば嬉しい進行表示」と位置づけ、<strong>最終的な正しさは全体 verdict に一本化</strong>しておくのが安全です。もう一つ、第00章の <code>break</code>（最初の非 AC で打ち切り）を思い出してください。10ケース中3件目で WA なら、<code>AddResult</code> は<strong>3回しか呼ばれません</strong>。「結果が3件しかない」のは保存漏れではなく打ち切りの正常動作——この2つ（打ち切りと保存漏れ）を混同しないことも大切です。</p>
+    </div>
+
+    <div class="box do"><div class="box-k">▸ 動かして確認</div>
+      <p><code>store</code> パッケージには専用のユニットテストはありませんが、<strong>ビルドが通ること</strong>と、<strong>全体テストが緑</strong>であること、そして<strong>seed が実際に投入されること</strong>で健全性を確認できます。まず store 単体がコンパイルできることを確かめます（Docker 不要）。</p>
+      <pre class="term"><code><span class="ps">$</span> cd backend
+<span class="ps">$</span> go build ./internal/store/
+<span class="out">（何も出なければ成功）</span></code></pre>
+      <p>続いて、リポジトリ全体のテストを回します（採点ロジックのテストは Docker 不要で通ります）。</p>
+      <pre class="term"><code><span class="ps">$</span> go test ./... -count=1
+<span class="out">?       judge/cmd/server        [no test files]
+?       judge/internal/api      [no test files]
+ok      judge/internal/judge    0.412s
+?       judge/internal/store    [no test files]</span></code></pre>
+      <p><code>store</code> パッケージにテストファイルが無い場合は <code>[no test files]</code> と表示されますが、ビルドが通っていれば型と SQL の対応は健全です。次の Step 8 で見る <code>SeedIfEmpty</code> の実地確認は、そのステップの末尾で行います。</p>
+    </div>
+
+    <h2 class="step" id="step-8"><span class="step-no">Step 8</span>初期問題を投入する — SeedIfEmpty</h2>
+    <p>スキーマと CRUD が揃いました。しかし DB は最初は空。<strong>初回起動時に問題が1件も無いなら、動作確認用の初期問題を投入</strong>しておくと、立ち上げてすぐ採点を試せます。それが <code>internal/store/seed.go</code> の <code>SeedIfEmpty</code> です。</p>
+    <div class="file-tag">internal/store/seed.go（SeedIfEmpty）</div>
+    <pre><code><span class="cm">// SeedIfEmpty は問題が1件もないときだけ初期問題を投入する（受け入れ基準の検証用を兼ねる）。</span>
+<span class="kw">func</span> (s *<span class="ty">Store</span>) SeedIfEmpty() <span class="ty">error</span> {
+	n, err := s.CountProblems()
+	<span class="kw">if</span> err != <span class="kw">nil</span> || n &gt; <span class="st">0</span> {
+		<span class="kw">return</span> err
+	}
+	<span class="kw">for</span> _, seed := <span class="kw">range</span> seedProblems() {
+		<span class="kw">if</span> _, err := s.CreateProblem(seed.p, seed.cases); err != <span class="kw">nil</span> {
+			<span class="kw">return</span> fmt.Errorf(<span class="st">"seed %s: %w"</span>, seed.p.Slug, err)
+		}
+	}
+	<span class="kw">return</span> <span class="kw">nil</span>
+}</code></pre>
+    <p><strong>冪等性</strong>（何度呼んでも安全）が要点です。冒頭で <code>CountProblems()</code> を見て、<strong>すでに問題があれば（<code>n &gt; 0</code>）何もせず返る</strong>。だから起動のたびに <code>SeedIfEmpty</code> を呼んでも、初回だけ投入され、2回目以降は空振り。既存データを二重投入したり上書きしたりしません。投入は Step 5 で作った <code>CreateProblem</code> をそのまま使うので、<strong>問題1件＋そのケース群</strong>が各々トランザクションで原子的に入ります。<code>fmt.Errorf("seed %s: %w", …, err)</code> の <code>%w</code> は、どの問題の投入で失敗したかを元エラーに包んで返す書き方です。</p>
+    <p>投入されるデータの中身 <code>seedProblems()</code> は、この章の設計が実データでどう埋まるかの<strong>見本市</strong>です。掲載は要点だけに絞ります。<code>code</code> 問題（標準入出力採点）の代表と、<code>sql</code> 問題（結果セット採点）の代表を1つずつ。</p>
+    <div class="file-tag">internal/store/seed.go（code 問題の例・抜粋）</div>
+    <pre><code>{
+	p: &amp;<span class="ty">Problem</span>{
+		Slug: <span class="st">"sum-two-numbers"</span>, Title: <span class="st">"2数の和"</span>, Type: <span class="st">"code"</span>, Difficulty: <span class="st">"easy"</span>,
+		Tags: []<span class="ty">string</span>{<span class="st">"math"</span>, <span class="st">"starter"</span>}, TimeLimitMS: <span class="st">2000</span>, MemoryLimitMB: <span class="st">256</span>,
+		StatementMD: <span class="st">`2つの整数 A, B が与えられる。A + B を出力せよ。 … `</span>,
+	},
+	cases: []<span class="ty">Testcase</span>{
+		{Input: <span class="st">"3 5\n"</span>, Expected: <span class="st">"8\n"</span>, IsSample: <span class="kw">true</span>},
+		{Input: <span class="st">"-2 7\n"</span>, Expected: <span class="st">"5\n"</span>, IsSample: <span class="kw">true</span>},
+		{Input: <span class="st">"0 0\n"</span>, Expected: <span class="st">"0\n"</span>},
+		{Input: <span class="st">"1000000000000000 1000000000000000\n"</span>, Expected: <span class="st">"2000000000000000\n"</span>},
+		<span class="cm">// …（境界値のケースが続く）</span>
+	},
+},</code></pre>
+    <p>この <code>code</code> 問題では、Step 1 で見た通り <code>Input</code> が<strong>標準入力</strong>（<code>"3 5\n"</code>）、<code>Expected</code> が<strong>期待標準出力</strong>（<code>"8\n"</code>）です。<code>SQLSeed</code> は指定していないので既定の空——<code>type='code'</code> では SQL 専用列は寝たまま、というスキーマの姿がデータにも表れています。最初の2件が <code>IsSample: true</code>（提出者に見せるサンプル）、残りが隠しケース。<code>Expected: "8\n"</code> は、まさに第00章の <code>normalizeOutput</code> のテストが守っていた「末尾改行付きの期待値」で、この章と第00章が同じデータで繋がっているのが分かります。次に <code>sql</code> 問題。</p>
+    <div class="file-tag">internal/store/seed.go（sql 問題の例・抜粋）</div>
+    <pre><code>{
+	p: &amp;<span class="ty">Problem</span>{
+		Slug: <span class="st">"sql-expensive-products"</span>, Title: <span class="st">"SQL: 高価格帯の商品"</span>, Type: <span class="st">"sql"</span>, Difficulty: <span class="st">"easy"</span>,
+		Tags: []<span class="ty">string</span>{<span class="st">"sql"</span>, <span class="st">"select"</span>}, TimeLimitMS: <span class="st">3000</span>, MemoryLimitMB: <span class="st">256</span>,
+		SQLOrderMatters: <span class="kw">false</span>,
+		SQLSeed: <span class="st">`CREATE TABLE products (id INTEGER PRIMARY KEY, name TEXT NOT NULL, price INTEGER NOT NULL);
+INSERT INTO products (id, name, price) VALUES
+ (1, 'apple', 120), (2, 'banana', 80), (3, 'cherry', 300), … ;`</span>,
+		StatementMD: <span class="st">`テーブル `</span> + <span class="st">"`products(id, name, price)`"</span> + <span class="st">` から、**price が 100 を超える**商品の `</span> + <span class="st">"`name`"</span> + <span class="st">` を取得せよ。 … `</span>,
+	},
+	cases: []<span class="ty">Testcase</span>{
+		{
+			Input:    <span class="st">""</span>,
+			Expected: <span class="st">`[{"name":"apple"},{"name":"cherry"},{"name":"elderberry"}]`</span>,
+			IsSample: <span class="kw">true</span>,
+		},
+		{
+			Input:    <span class="st">`INSERT INTO products (id, name, price) VALUES (6, 'fig', 101), (7, 'grape', 99);`</span>,
+			Expected: <span class="st">`[{"name":"apple"},{"name":"cherry"},{"name":"elderberry"},{"name":"fig"}]`</span>,
+		},
+	},
+},</code></pre>
+    <p><code>sql</code> 問題では、Step 1・Step 3 で強調した<strong>タイプ依存の列が全部埋まります</strong>。<code>Type: "sql"</code>、そして <code>SQLSeed</code> に「採点前に走らせてテーブルを用意する初期化 SQL」（<code>CREATE TABLE</code> ＋ 基礎データの <code>INSERT</code>）、<code>SQLOrderMatters: false</code> に「行順は問わない」。テストケースの意味も <code>code</code> と違います——<code>Input</code> は<strong>シードに追記する SQL</strong>（1件目は空、2件目は「商品を追加してから採点」）、<code>Expected</code> は<strong>期待する結果セットの JSON 行配列</strong>。この <code>Expected</code> が第06章の <code>CompareResultSet</code> に食わされて採点されます。<strong>同じ <code>Testcase</code> 構造体・同じ <code>problems</code> テーブルが、<code>Type</code> ひとつで <code>code</code> にも <code>sql</code> にも姿を変える</strong>——Step 3 で設計した「単一テーブル＋タイプ専用列」が、この2つの seed データで具体化しています。</p>
+
+    <div class="box do"><div class="box-k">▸ 動かして確認 — seed が投入されるか</div>
+      <p>バックエンドを起動すると、初回は <code>SeedIfEmpty</code> が走って初期問題が入ります。問題一覧 API を叩いて、seed（sum-two-numbers / reverse-string / fizzbuzz / sql-… の各問題）が入っているか確認します。</p>
+      <pre class="term"><code><span class="ps">$</span> cd backend
+<span class="ps">$</span> go run ./cmd/server
+<span class="out">listening on http://127.0.0.1:8080</span>
+
+<span class="cm"># 別ターミナルで問題一覧を取得（seed された問題が並ぶ）</span>
+<span class="ps">$</span> curl -s http://localhost:8080/api/problems
+<span class="out">{"problems":[{"id":1,"slug":"sum-two-numbers","title":"2数の和","type":"code",
+  "difficulty":"easy","tags":["math","starter"],"status":"unsolved"}, …]}</span></code></pre>
+      <p><code>type</code> が <code>"code"</code> の問題と <code>"sql"</code> の問題が混在し、<code>status</code> がまだ <code>"unsolved"</code>（提出前）で返れば、<code>SeedIfEmpty</code>・<code>ListProblems</code>・<code>Status</code> の派生計算がすべて機能しています。もう一度 <code>go run</code> し直しても問題が二重に増えないこと（<code>SeedIfEmpty</code> の冪等性）も確かめてください。</p>
+    </div>
+
+    <h2>つまずき FAQ</h2>
+    <details class="qa"><summary>なぜ PostgreSQL ではなく SQLite なの? 後で困らない?</summary>
+      <div class="qa-body"><p>このジャッジの要件が<strong>単一ユーザー・セルフホスト・ローカル単一ホスト</strong>だからです。別プロセスの DB サーバを立てて接続を管理する重さは、この規模には過剰です。SQLite なら DB は1ファイルで、Go プロセスが直接読み書きし、<code>modernc.org/sqlite</code> なら cgo 不要で単一バイナリに固められます（バックアップも「ファイルをコピー」で済む）。弱点は同時書き込みですが、本書はワーカー並列度1・<code>SetMaxOpenConns(1)</code>・WAL＋<code>busy_timeout</code> で書き込み手をほぼ1本に絞っているので、その弱点はほとんど露出しません。将来もし多人数同時利用が必要になったら、そのときこそ PostgreSQL への移行を考える——「要件が育ってから道具を替える」で十分間に合います。</p></div>
+    </details>
+    <details class="qa"><summary>問題タイプ code/sql は、なぜテーブルを分けず1つの <code>problems</code> にまとめたの?</summary>
+      <div class="qa-body"><p>共通部分が大半で、差分が小さいからです。説明・制約・制限時間・タグ・難易度は <code>code</code> でも <code>sql</code> でも同じ形。違うのは <code>sql_seed</code> と <code>sql_order_matters</code> の2列と、テストケースの <code>input/expected</code> の<strong>意味</strong>だけ。テーブルを2つに割ると、一覧・提出・履歴のクエリを2系統書く羽目になり割に合いません。だから単一テーブルにし、<code>type</code> を <code>CHECK(type IN ('code','sql'))</code> で2値に固定し、<strong>タイプ専用列は使わないタイプでは既定値で寝かせる</strong>。この割り切りの代償は「タイプと列の整合をアプリが守る必要がある」（<code>type='sql'</code> なら <code>sql_seed</code> が要る、を <code>CHECK</code> は保証しない）ことで、そこは登録側（<code>CreateProblem</code> / seed）で気をつけます。</p></div>
+    </details>
+    <details class="qa"><summary><code>submission_results.testcase_id</code> はなぜ外部キーにしなかったの? 不整合が怖くない?</summary>
+      <div class="qa-body"><p><strong>履歴を守るため</strong>です。<code>UpdateProblem</code> はテストケースを <code>DELETE</code>→<code>INSERT</code> で<strong>全入れ替え</strong>するので、入れ直したケースには新しい ID が振られ、過去の提出結果が指す古い ID は消えます。もし <code>testcase_id</code> に外部キー＋CASCADE を張ると、問題を編集した瞬間に過去の結果が<strong>丸ごと消える</strong>か、編集が制約違反で弾かれてしまう。それを避けるため、あえて「ただの整数（緩い参照）」にしています。代わりに読み出し <code>GetResults</code> で <code>LEFT JOIN</code>＋<code>COALESCE</code> を使い、「結合先のケースがもう無くても、結果行は残して既定値で埋める」ことで、消えたケースを参照する古い履歴も表示できるようにしています。「制約で守る」と「履歴を残す」がぶつかったとき、後者を選んだ判断です。</p></div>
+    </details>
+
+    <h2>理解度チェック</h2>
+    <p>次の問いに<strong>自分の言葉で</strong>答えられたら、この章は卒業です。</p>
+    <details class="qa"><summary>1. 4つのモデル（Problem / Testcase / Submission / SubmissionResult）は、何を覚え、どう繋がるか。「採点対象」と「採点結果」の2群で説明せよ。</summary>
+      <div class="qa-body"><p><strong>採点対象</strong>は事前に登録する2つ。<code>Problem</code>（問題の説明・制約・制限時間・タイプ）に、<code>Testcase</code>（入力と期待出力の組）が <code>problem_id</code> で1対多にぶら下がる。<strong>採点結果</strong>は提出のたびに増える2つ。<code>Submission</code>（1提出＝言語・コード・状態・全体 verdict）に、<code>SubmissionResult</code>（ケースごとの合否・時間・メモリ）が <code>submission_id</code> で1対多にぶら下がる。両群は <code>Submission.problem_id</code> で問題を参照して繋がる。採点機構（judge）はこれらを受け取るだけで、DB を触るのは store と、両者を繋ぐワーカー（第08章）である。</p></div>
+    </details>
+    <details class="qa"><summary>2. なぜ SQLite（modernc.org/sqlite）を選んだか。問題タイプ code/sql の分岐は、スキーマのどこに表れているか。</summary>
+      <div class="qa-body"><p>SQLite を選んだのは要件が<strong>単一ホスト・セルフホスト</strong>で、サーバレスの1ファイル DB が最適だから。特に <code>modernc.org/sqlite</code> は<strong>純 Go 実装で cgo 不要</strong>のため、C コンパイラなしで単一バイナリに固められる（技術スタックの「Go 単一バイナリ」に合致）。code/sql の分岐は、<code>problems</code> テーブルの <code>type TEXT CHECK(type IN ('code','sql'))</code> でタイプを2値に固定し、<code>sql</code> 専用の <code>sql_seed</code> / <code>sql_order_matters</code> 列を持たせる形で表れる。<code>code</code> の行ではこれらは既定値で寝ており、<code>sql</code> の行でだけ埋まる。テストケースの <code>input/expected</code> も、型は同じでも <code>type</code> によって「stdin/stdout」か「追加SQL/結果セットJSON」かに意味が変わる。</p></div>
+    </details>
+    <details class="qa"><summary>3. ケース結果が「逐次」保存されるのはなぜ重要か。<code>OnCaseResult</code> コールバックは、どの2つのパッケージをどう繋いでいるか。</summary>
+      <div class="qa-body"><p>ケース1件終わるたびに <code>AddResult</code> で INSERT する形にしておくと、<strong>採点の途中経過を保存できる受け口</strong>になる。テーブルの形自体はどちらの方式でも同じ（1ケース1行）で、効いているのは<strong>「1件確定するたびに呼ばれる」という呼ばれ方</strong>のほう。<strong>ただし現状この受け口は活きていない</strong>——ホスト側がコンテナ出力を最後まで溜めてから一括で解釈するため、<code>AddResult</code> は数ミリ秒で全件並ぶ（第08章 Step 6）。<strong>コンテナ出力の受け取り方を改めれば、DB から画面までは無変更で本物の途中経過が流れる</strong>——そのための配管が、この形。<code>OnCaseResult</code> は <code>judge</code> パッケージ（採点機構）と <code>store</code> パッケージ（保管庫）を繋ぐ<strong>蝶番</strong>。<code>judge.JudgeSubmission</code> はケースを判定するたびにこのコールバックを呼ぶだけで DB を一切知らず、ワーカー（第08章）が渡す無名関数の中で「受け取った1件を <code>store.SubmissionResult</code> に詰めて <code>AddResult</code> する」。これにより採点ロジックは DB 非依存を保ち、書き込みはコールバック1本を通してワーカーだけが行う——採点・永続化・接続の3つの関心が分離される。</p></div>
+    </details>
+
+    <h2>まとめ — 次の層へ</h2>
+    <p>この章で、オンラインジャッジの<strong>記憶</strong>ができました。採点対象（<code>Problem</code> / <code>Testcase</code>）と採点結果（<code>Submission</code> / <code>SubmissionResult</code>）の4モデルを定め、単一ホスト・cgo 不要という要件に照らして SQLite を選び、問題タイプ code/sql の分岐を <code>CHECK</code> 制約とタイプ専用列でスキーマに刻みました。問題とケースをトランザクションで原子的に登録し、提出を <code>pending → running → done</code> と進め、ケース結果を <code>AddResult</code> で<strong>1件ずつ</strong>保存する。そしてその逐次保存が、第00章の <code>OnCaseResult</code> コールバックを通じて採点機構と握手することを見ました。採点する「機構」と、採点を覚える「保管庫」——2つが揃いました。</p>
+    <p>しかし、まだ大事な繋ぎが残っています。ユーザーが提出したとき、それを<strong>いつ、誰が</strong>採点するのか。採点には数秒かかるので、画面の前で待たせるわけにはいきません。この章で作った <code>CreateSubmission</code> が返す <code>pending</code> の提出を、<strong>いったん受け付けて即座に「採点中」を返し、裏で1件ずつ捌く</strong>——序章で予告した goroutine とキューの出番です。次の第08章では、この <code>store</code> と <code>judge</code> を繋ぐ<strong>非同期ワーカー</strong>を作り、提出を「あとで」捌く仕組みを組み上げます。</p>
+
+    <div class="chap-foot">
+      <a class="pager" href="06-lang.html"><span class="dir">← 前へ</span>第06章 · いろんな言語で</a>
+      <a class="pager next" href="08-queue.html"><span class="dir">次へ →</span>第08章 · 提出を「あとで」捌く</a>
+    </div>
+  </main>
+</div>
+</body>
+</html>

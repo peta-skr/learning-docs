@@ -1,0 +1,1120 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>第06章 壊れない仕組み — ディスクからつくるデータベース</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500;600&family=Source+Serif+4:opsz,wght@8..60,400;8..60,600;8..60,700&family=Noto+Serif+JP:wght@400;600;700&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<div class="shell">
+
+  <aside class="spine">
+    <a class="wordmark" href="index.html">MINIDB · from scratch</a>
+    <div class="book-title">ディスクから<br>つくるデータベース</div>
+    <div class="book-sub">Go で B+Tree から SQL まで</div>
+
+    <div class="legend"><span>読む <b>↓</b></span><span>組む <b>↑</b></span></div>
+
+    <nav aria-label="目次">
+      <ul class="toc">
+        <li><a class="nav-item" href="index.html"><span class="nav-num">序</span><span class="nav-label">はじめに・準備<span class="nav-tag">Setup</span></span></a></li>
+        <li><a class="nav-item" href="00-disk.html"><span class="nav-num">00</span><span class="nav-label">ディスクとページ<span class="nav-tag">Disk</span></span></a></li>
+        <li><a class="nav-item" href="01-page.html"><span class="nav-num">01</span><span class="nav-label">ページの中身<span class="nav-tag">Page</span></span></a></li>
+        <li><a class="nav-item" href="02-buffer.html"><span class="nav-num">02</span><span class="nav-label">バッファプール<span class="nav-tag">Buffer</span></span></a></li>
+        <li><a class="nav-item" href="03-btree.html"><span class="nav-num">03</span><span class="nav-label">B+Tree 索引<span class="nav-tag">Index</span></span></a></li>
+        <li><a class="nav-item" href="04-catalog.html"><span class="nav-num">04</span><span class="nav-label">表とカタログ<span class="nav-tag">Catalog</span></span></a></li>
+        <li><a class="nav-item" href="05-sql.html"><span class="nav-num">05</span><span class="nav-label">SQL を実行する<span class="nav-tag">Query</span></span></a></li>
+        <li><a class="nav-item current" aria-current="page" href="06-wal.html"><span class="nav-num">06</span><span class="nav-label">壊れない仕組み<span class="nav-tag">WAL</span></span></a></li>
+        <li><a class="nav-item" href="07-txn.html"><span class="nav-num">07</span><span class="nav-label">索引とトランザクション<span class="nav-tag">Txn</span></span></a></li>
+      </ul>
+    </nav>
+
+    <div class="spine-foot">
+      各章は一つの層。<br>下（ディスク）から上（SQL）へ<br>積み上げて動かしていく。
+    </div>
+  </aside>
+
+  <main class="reading">
+    <div class="progress-tag">第06章 / 全8章 · 層: WAL · 読了目安 4〜5時間</div>
+    <div class="eyebrow"><span>WAL</span><span class="depth">— 落ちても壊れない</span></div>
+    <h1>壊れない仕組み</h1>
+    <p class="lede">データベースが「ただのファイル」と決定的に違うのは、ここです。書き込みの真っ最中に電源が落ちても、データが半分だけ壊れたりしない。その約束を、<strong>先に書くログ（Write-Ahead Log）</strong>で果たします。この章では、たった 166 行の <code>wal.go</code> でクラッシュ耐性を作り、テストで本当にクラッシュさせて、回復する瞬間を自分の目で見ます。</p>
+
+    <div class="box goal"><div class="box-k">◈ この章のゴール</div>
+      <p>コミットの直後にプロセスを強制終了しても、再起動すればコミット済みの行が戻ってくる — そして未コミットの変更はきれいに消えている。<code>go test ./internal/wal -v</code> と <code>go test . -run TestM6 -v</code> が PASS し、章末の演習で <code>.wal</code> ファイルの中身を 16 進ダンプで読み解けたら合格です。</p>
+    </div>
+
+    <div class="box map"><div class="box-k">☰ この章のステップ</div>
+      <ol>
+        <li><a href="#step-1">レコード形式を決めて、ログを開く</a></li>
+        <li><a href="#step-2">AppendCommit — fsync がコミットを成立させる</a></li>
+        <li><a href="#step-3">Recover — redo 再生と、チェックポイント</a></li>
+        <li><a href="#step-4">クラッシュをテストで再現する</a></li>
+        <li><a href="#step-5">データファイルの torn write を修復する</a></li>
+        <li><a href="#step-6">db.go へ組み込む — 起動時回復と E2E</a></li>
+        <li><a href="#step-7">演習 — 本当にクラッシュさせて、中を覗く</a></li>
+      </ol>
+    </div>
+
+    <h2>三つの事故 — 「ただのファイル」はこう壊れる</h2>
+    <p>第05章までの minidb は、正常に <code>Close()</code> すれば完璧に動きます。でも現実のプログラムは、いつも行儀よく終了できるとは限りません。停電、OS のクラッシュ、<code>kill -9</code>、Go のパニック。<strong>書き込みの途中で突然止まったら</strong>、ファイルには何が残るのでしょうか。起こりうる事故は3種類あります。</p>
+
+    <p><strong>事故① 書いたはずのものが消える。</strong>これは第00章で見たとおりです。<code>f.Write()</code> が成功しても、データはまだ OS のページキャッシュ（メモリ）にいるだけで、物理ディスクには届いていません。<code>fsync</code>（Go では <code>f.Sync()</code>）を呼ぶ前に電源が落ちれば、その書き込みは<strong>なかったこと</strong>になります。</p>
+
+    <p><strong>事故② 複数ページの片方だけが書ける。</strong>こちらが本章の主役です。SQL では <code>INSERT</code> 1文でも、内部では複数のページを書き換えることがあります。行を入れるヒープページ、行数や空き状況が変わるカタログページ、第07章で作る索引ページ。この「一式」の途中でクラッシュすると —</p>
+
+    <div class="ascii">INSERT INTO logs VALUES (2, 'world') — 内部では 2 ページの書き換えだとする
+
+時刻 ─────────────────────────────────────────────────▶
+
+     ヒープページ 3 を書く         カタログページ 1 を書く
+           │                           │
+  ─────────●─────────────✕─────────────○─────────────
+                         ↑
+                    ここで電源断
+
+ディスクに残った状態:  ページ 3 = 新しい姿  /  ページ 1 = 古い姿
+
+→「変更前」でも「変更後」でもない、半分だけ新しい状態。
+  行は入っているのに行数が合わない、索引にだけ行がない…。
+  しかも、どこが半端なのかを示す情報はファイルのどこにもない。</div>
+
+    <p>事故①は「変更が丸ごと消える」だけなので、まだ我慢できます（アプリはやり直せばいい）。事故②は質が違います。<strong>どの時点の姿でもない中間状態</strong>がディスクに固定され、それを検出する手がかりも、修復する材料も残っていない。データベースにとって最悪の壊れ方です。</p>
+
+    <p><strong>事故③ 1ページの書き込み自体が途中で切れる。</strong>4096 バイトの <code>WriteAt</code> がアトミック（不可分）である保証はありません。電源断のタイミングによっては、ページの前半だけが新しく、後半は古いまま — あるいはファイル末尾が 4096 バイトの倍数ですらない半端な長さで切れることがあります。これを <strong>torn write（途中で破れた書き込み）</strong>と呼びます。事故②の1ページ版と考えてください。</p>
+
+    <h2>ログが先、データが後 — Write-Ahead Log の原理</h2>
+    <p>この問題への答えが <strong>WAL（Write-Ahead Log = 先行書き込みログ）</strong>です。原理はひと言で言えます。<strong>データファイルを書き換える前に、これから行う変更の内容を、別のログファイルへ追記して fsync する。</strong>それだけです。</p>
+
+    <div class="ascii">2 ファイル体制と、書き込みの順序
+
+              ① 変更内容を追記      ② fsync ◀━━ この瞬間がコミット成立
+  コミット ──▶ mydata.db.wal ─────────────▶ 物理ディスクに固定
+                    │
+                    │ ③ データ本体への反映は「その後いつでも」よい
+                    ▼
+               mydata.db（ページの並び = 第00〜05章で作った世界）
+
+  再起動時: ログを先頭から再生（redo）すれば、
+            コミット済みの変更をデータ本体へ「反映し直せる」</div>
+
+    <p>なぜこの順序で救われるのか。ポイントは<strong>復元可能性の非対称性</strong>です。ログが完全なら、データファイルがどれだけ中途半端でも、ログを再生してコミット済みの状態を作り直せます。逆に、ログがないままデータファイルが半端になったら、何をどう直せばいいのか知る方法がありません。つまり「ログが先」は行儀の問題ではなく、<strong>壊れたときに情報が残っている側を先に確定させる</strong>、という生存戦略です。</p>
+
+    <p>もうひとつ大事なのは、ログが<strong>追記専用</strong>であることです。ログへの書き込みは常にファイル末尾への連続書き込みなので、あちこちのページを書き換えるより速く、そして「途中で切れたら末尾が壊れるだけ」という単純な壊れ方しかしません。壊れ方を末尾に限定できる — これが後で効いてきます。</p>
+
+    <h2>物理ログという割り切りと、冪等性</h2>
+    <p>ログに何を記録するかには流儀があります。「ページ 3 のスロット 2 に行 (2, 'world') を挿入した」のように操作を記録するのが<strong>論理ログ</strong>、「ページ 3 の変更後の中身はこの 4096 バイトです」と結果を丸ごと記録するのが<strong>物理ログ</strong>です。minidb は物理ログ、それも<strong>変更ページの完全イメージ</strong>を記録する方式を選びます。</p>
+    <p>容量は食います（1ページ触るたびに 4096 バイト強）。その代わり、再生が「ページをその位置に置くだけ」になり、<strong>何度再生しても同じ結果</strong>になります。この性質を<strong>冪等（べきとう）</strong>と言います。回復の途中でまたクラッシュしても、次の起動でもう一度最初から再生すればいいだけ。「どこまで再生したか」を管理する必要が消えるのです。学習実装にとって、これ以上ない割り切りです。</p>
+    <p>さらにこの実装は <strong>redo（やり直し）専用</strong>で、undo（取り消し）ログを持ちません。未コミットの変更をそもそもディスクにもバッファプールにも書かない設計（第07章で見るトランザクションの「私有変更集合」）なので、取り消すべきものがディスク上に存在しないからです。本物の DB（ARIES 方式など）は性能のために未コミットの書き出しを許し、その代償として undo も持ちます — 方式の分岐点として頭の隅に置いておいてください。</p>
+
+    <h2 class="step" id="step-1"><span class="step-no">Step 1</span>レコード形式を決めて、ログを開く</h2>
+    <p>ここから <code>internal/wal/wal.go</code> を頭から読んでいきます。この章で <code>wal.go</code> は全行を掲載します。まずはパッケージコメント、レコード形式の定義、そしてログファイルを開く <code>Open</code> まで。</p>
+    <p>ログに入れるレコードは、たった2種類です。<strong>ページイメージレコード</strong>（このページの新しい中身はこれ）と<strong>コミットレコード</strong>（ここまでのページ一式で1コミット成立）。各レコードの末尾には <strong>CRC32</strong> というチェックサム（内容から計算した 4 バイトの検査値）を付けます。書き込み途中で切れたレコードは内容と CRC が一致しなくなるので、「このレコードは最後まで書き終わっていたか？」を後から判定できます。</p>
+
+    <div class="ascii">WAL ファイル = レコードを詰めて並べただけのバイト列
+（数値は章末の演習で実際にダンプした値。数値はすべてリトルエンディアン）
+
+ページイメージレコード（1 + 4 + 4096 + 4 = 4105 バイト）
+┌──────┬──────────────┬───────────────────┬──────────────┐
+│  01  │ 02 00 00 00  │ …… 4096 バイト …… │ 58 27 21 e9  │
+│ 種別 │ PageID = 2   │ ページの完全イメージ │ CRC32        │
+└──────┴──────────────┴───────────────────┴──────────────┘
+
+コミットレコード（1 + 4 = 5 バイト）
+┌──────┬──────────────┐
+│  02  │ a1 8e 0c 3c  │
+│ 種別 │ CRC32        │
+└──────┴──────────────┘
+
+1 コミット = [img]…[img][commit] のひとかたまり
+ファイル   = そのかたまりが時系列に並んだもの</div>
+
+    <div class="file-tag">internal/wal/wal.go</div>
+    <pre><code><span class="cm">// Package wal は Write-Ahead Log（M6）。方式は redo のみ（設計判断 A-1）。</span>
+<span class="cm">//</span>
+<span class="cm">// 原則はひとつ: 「データファイルに書く前に、ログに書いて fsync する」。</span>
+<span class="cm">// コミット = 変更ページの完全イメージ + コミットレコードがログ上で耐久化された瞬間。</span>
+<span class="cm">// クラッシュ後はログを前から再生（redo）すれば、コミット済みの状態に必ず戻れる。</span>
+<span class="cm">//</span>
+<span class="cm">// レコード形式（リトルエンディアン、各レコード末尾に CRC32）:</span>
+<span class="cm">//</span>
+<span class="cm">//	ページイメージ: [1][PageID u32][ページ本体 4096B][CRC u32]</span>
+<span class="cm">//	コミット:       [2][CRC u32]</span>
+<span class="cm">//</span>
+<span class="cm">// CRC は「書いている途中で電源が落ちた（torn write）」レコードを見分けるため。</span>
+<span class="cm">// 再生は壊れたレコードを見つけた時点で打ち切る — そこから先はコミットが</span>
+<span class="cm">// 成立していないので捨ててよい。</span>
+<span class="kw">package</span> wal
+
+<span class="kw">import</span> (
+	<span class="st">"encoding/binary"</span>
+	<span class="st">"fmt"</span>
+	<span class="st">"hash/crc32"</span>
+	<span class="st">"io"</span>
+	<span class="st">"os"</span>
+
+	<span class="st">"minidb/internal/storage"</span>
+)
+
+<span class="kw">const</span> (
+	recPageImage = <span class="st">1</span>
+	recCommit    = <span class="st">2</span>
+)
+
+<span class="cm">// WAL はログファイルへの追記と再生を担う。</span>
+<span class="kw">type</span> <span class="ty">WAL</span> <span class="kw">struct</span> {
+	f *os.<span class="ty">File</span>
+}
+
+<span class="cm">// Open はログファイルを開く（なければ作る）。追記は常に末尾へ。</span>
+<span class="kw">func</span> Open(path <span class="kw">string</span>) (*<span class="ty">WAL</span>, <span class="ty">error</span>) {
+	f, err := os.OpenFile(path, os.O_RDWR|os.O_CREATE, <span class="st">0o644</span>)
+	<span class="kw">if</span> err != <span class="kw">nil</span> {
+		<span class="kw">return</span> <span class="kw">nil</span>, fmt.Errorf(<span class="st">"wal: open: %w"</span>, err)
+	}
+	<span class="kw">if</span> _, err := f.Seek(<span class="st">0</span>, io.SeekEnd); err != <span class="kw">nil</span> {
+		f.Close()
+		<span class="kw">return</span> <span class="kw">nil</span>, err
+	}
+	<span class="kw">return</span> &amp;<span class="ty">WAL</span>{f: f}, <span class="kw">nil</span>
+}</code></pre>
+
+    <p>構造体は <code>os.File</code> を1個持つだけ。第00章の <code>DiskManager</code> が <code>ReadAt</code> / <code>WriteAt</code> で「位置を狙い撃ち」していたのに対し、WAL は<strong>現在位置から順に</strong>読み書きするファイルの使い方をします。だから <code>Open</code> の仕事は「開いて、現在位置を末尾に合わせる」こと。前回のログが残っていれば、その続きに追記される体勢になります。</p>
+    <p>もうひとつ注目してほしいのは、<code>recPageImage = 1</code> / <code>recCommit = 2</code> という種別番号に <code>0</code> を使っていないことです。0 埋めされた領域（後で出てきます）を誤ってレコードと解釈しないための、地味だけれど大事な選択です。</p>
+
+    <div class="gonote"><div class="box-k">GO メモ · hash/crc32 — チェックサム</div>
+      <p><code>crc32.ChecksumIEEE(data)</code> は、バイト列 <code>data</code> から <code>uint32</code>（4 バイト）の検査値を計算します。CRC は「データが1ビットでも変わればほぼ確実に値が変わる」性質を持つので、<strong>書き込みが途中で切れた・化けた</strong>ことの検出に使えます。暗号学的な改ざん耐性はありませんが（誰かが CRC ごと偽造できる）、相手が「事故」なら十分。DB のページやログレコードの検査値として定番の道具です。</p>
+    </div>
+
+    <div class="gonote"><div class="box-k">GO メモ · f.Seek と io.SeekStart / SeekCurrent / SeekEnd</div>
+      <p><code>f.Seek(offset, whence)</code> はファイルの「現在位置」を動かし、移動後の位置（先頭からのバイト数）を返します。基準 <code>whence</code> は3種類: <code>io.SeekStart</code>（先頭から）、<code>io.SeekCurrent</code>（今の位置から）、<code>io.SeekEnd</code>（末尾から）。<code>f.Seek(0, io.SeekEnd)</code> は「末尾へ移動」、<code>f.Seek(0, io.SeekCurrent)</code> は「動かず、今の位置を教えて」というイディオムです。両方この章で使います。</p>
+    </div>
+
+    <div class="box do"><div class="box-k">▸ 動かして確認</div>
+      <p>まだテストは書いていないので、コンパイルが通ることだけ確かめます。成功すると何も表示されません（Unix 流の「便りがないのは良い便り」です）。</p>
+      <pre class="term"><code><span class="ps">$</span> go build ./internal/wal
+<span class="out">（出力なし = 成功）</span></code></pre>
+    </div>
+
+    <h2 class="step" id="step-2"><span class="step-no">Step 2</span>AppendCommit — fsync がコミットを成立させる</h2>
+    <p>次は本章の心臓部、コミットの書き込みです。作るのは「変更ページ一式を受け取り、ページイメージレコードの列＋コミットレコードをログ末尾に追記し、fsync してから返る」関数。<strong>この関数が返ってきた瞬間 = コミット成立の瞬間</strong>という契約にします。</p>
+
+    <div class="file-tag">internal/wal/wal.go（つづき）</div>
+    <pre><code><span class="cm">// AppendCommit はトランザクションの変更ページ一式とコミットレコードを追記し、</span>
+<span class="cm">// fsync してから返る。この呼び出しが返った瞬間が「コミット成立」。</span>
+<span class="kw">func</span> (w *<span class="ty">WAL</span>) AppendCommit(pages <span class="kw">map</span>[storage.<span class="ty">PageID</span>]*storage.<span class="ty">Page</span>) <span class="ty">error</span> {
+	buf := <span class="kw">make</span>([]<span class="kw">byte</span>, <span class="st">0</span>, <span class="kw">len</span>(pages)*(<span class="st">1</span>+<span class="st">4</span>+storage.PageSize+<span class="st">4</span>)+<span class="st">5</span>)
+	<span class="kw">for</span> id, p := <span class="kw">range</span> pages {
+		rec := <span class="kw">make</span>([]<span class="kw">byte</span>, <span class="st">1</span>+<span class="st">4</span>+storage.PageSize)
+		rec[<span class="st">0</span>] = recPageImage
+		binary.LittleEndian.PutUint32(rec[<span class="st">1</span>:<span class="st">5</span>], <span class="kw">uint32</span>(id))
+		<span class="kw">copy</span>(rec[<span class="st">5</span>:], p[:])
+		buf = <span class="kw">append</span>(buf, rec...)
+		buf = binary.LittleEndian.AppendUint32(buf, crc32.ChecksumIEEE(rec))
+	}
+	commit := []<span class="kw">byte</span>{recCommit}
+	buf = <span class="kw">append</span>(buf, commit...)
+	buf = binary.LittleEndian.AppendUint32(buf, crc32.ChecksumIEEE(commit))
+
+	<span class="cm">// 書き込み前の末尾位置を控えておく。途中失敗したら書きかけを切り戻す —</span>
+	<span class="cm">// 壊れたレコードを残すと、その後ろに追記される正常なコミットまで</span>
+	<span class="cm">// 回復時に読めなくなる（再生は壊れたレコードで打ち切るため）。</span>
+	tail, err := w.f.Seek(<span class="st">0</span>, io.SeekCurrent)
+	<span class="kw">if</span> err != <span class="kw">nil</span> {
+		<span class="kw">return</span> fmt.Errorf(<span class="st">"wal: seek: %w"</span>, err)
+	}
+	<span class="kw">if</span> _, err := w.f.Write(buf); err != <span class="kw">nil</span> {
+		w.rewindTo(tail)
+		<span class="kw">return</span> fmt.Errorf(<span class="st">"wal: append: %w"</span>, err)
+	}
+	<span class="cm">// ログが先、データが後。この Sync の後でなければページをデータファイルに書いてはいけない。</span>
+	<span class="kw">if</span> err := w.f.Sync(); err != <span class="kw">nil</span> {
+		<span class="cm">// Sync 失敗 = コミット不成立。レコードが OS バッファ経由で後から</span>
+		<span class="cm">// 永続化されると「失敗したはずのコミット」が再生されてしまうので切り戻す</span>
+		w.rewindTo(tail)
+		<span class="kw">return</span> fmt.Errorf(<span class="st">"wal: sync: %w"</span>, err)
+	}
+	<span class="kw">return</span> <span class="kw">nil</span>
+}
+
+<span class="cm">// rewindTo は書きかけのレコードをベストエフォートで切り捨てる。</span>
+<span class="kw">func</span> (w *<span class="ty">WAL</span>) rewindTo(off <span class="kw">int64</span>) {
+	_ = w.f.Truncate(off)
+	_, _ = w.f.Seek(<span class="st">0</span>, io.SeekEnd)
+}</code></pre>
+
+    <p>前半はただの組み立てです。ページごとに <code>[種別 1][PageID 4][本体 4096]</code> を作って CRC を後置し、最後にコミットレコードを足す。全部を1個の <code>buf</code> にまとめてから<strong>1回の <code>Write</code></strong> で書いているのは、書き込み回数を減らすためと、失敗時の後始末を1箇所にまとめるためです。</p>
+    <p>コミットが成立するまでの手順を、時系列で描くとこうなります。呼び出し側（第07章のトランザクション）まで含めた全体の流れです。</p>
+
+    <div class="ascii">コミットの手順 — 順序がすべて
+
+tx.Commit(wal)
+  │
+  ├─ 1. WAL へ追記     [img][img]…[commit] を 1 回の Write で
+  │                     （まだ OS のキャッシュの中。消えるかもしれない）
+  ├─ 2. wal の fsync   ◀━━━ ここがコミット成立の瞬間
+  │                     成功 → 以後どんなクラッシュでも redo で復元できる
+  │                     失敗 → rewindTo で書きかけを切り捨てて、中止
+  ├─ 3. 変更ページをバッファプールへ反映（メモリ上の正本を更新）
+  └─ 4. データファイルへは「いつか」届けばよい
+        （ページ追い出し / Close 時の FlushAll / クラッシュ時は redo）</div>
+
+    <p>手順 2 と 4 の間の非対称に注目してください。ログの fsync は<strong>コミットのたびに必ず</strong>やる。データファイルへの反映は<strong>いつでもいい</strong>。事故が起きても、ログさえ確定していればデータ側は再構成できるからです。逆にこの順序を破って「データを先に書き、ログは後で」とすると、データだけ書けた時点のクラッシュで<strong>由来不明の中間状態</strong>（事故②そのもの）が生まれます。</p>
+    <p>次に、失敗経路。<code>Write</code> や <code>Sync</code> が失敗したとき、ただエラーを返すだけでは足りません。書きかけのバイト列がログ末尾に残るかもしれないからです。後で見るとおり、回復処理は壊れたレコードに出会うと<strong>そこで読むのをやめる</strong>ので、ゴミの後ろに正常なコミットが追記されると、そのコミットは二度と再生されなくなります。だから失敗したら <code>rewindTo</code> で書き込み前の長さまで <code>Truncate</code>（切り詰め）して、なかったことにする。<code>Sync</code> 失敗時の切り戻しはさらに一段深い理由があります — 失敗を返したのに、書いたバイトが OS のキャッシュから<strong>後からこっそり永続化されてしまう</strong>と、「失敗したはずのコミット」が次回起動時に再生されてしまう。アプリには失敗と伝えたのに DB には反映される、という食い違いを防ぐための切り戻しです。</p>
+
+    <div class="box hazard"><div class="box-k">⚠ 落とし穴</div>
+      <p><code>fsync</code> を呼ぶまで、書いたデータがディスクに届いた保証はありません。そして「変更済みのページをデータファイルへ書く前に、対応するログが fsync 済みであること」— この順序を一箇所でも破ると、クラッシュ時に回復できない穴が空きます。テストを通すためだけに <code>Sync()</code> を足したり消したりする対症療法は厳禁です（このプロジェクトの CLAUDE.md にもそう書いてあります）。</p>
+    </div>
+
+    <div class="gonote"><div class="box-k">GO メモ · binary.LittleEndian.AppendUint32</div>
+      <p><code>PutUint32(buf, v)</code> が「用意済みの 4 バイトに書き込む」のに対し、<code>AppendUint32(buf, v)</code> は「スライスの末尾に 4 バイトを足して返す」関数です（Go 1.19 から）。<code>buf = append(buf, ...)</code> と同じ感覚で数値を追記できるので、可変長のレコードを組み立てるときに便利です。ちなみに本書のページ内部（第01章）もこの WAL もリトルエンディアンで統一しています — 自分で書いて自分で読む閉じた形式なので、どちらの向きでも構いません。大事なのは書く側と読む側が一致していることだけです。</p>
+    </div>
+
+    <div class="box do"><div class="box-k">▸ 動かして確認</div>
+      <p>コミット書き込みの経路は、次のステップで作る <code>Recover</code> とセットのテスト <code>TestRecoverCommitted</code> で踏めます。読む派のあなたの手元には完成版があるので、先回りして PASS することだけ確認しておきましょう（テストの中身は Step 4 で読み解きます）。</p>
+      <pre class="term"><code><span class="ps">$</span> go test ./internal/wal -run TestRecoverCommitted -v
+<span class="out">=== RUN   TestRecoverCommitted
+--- PASS: TestRecoverCommitted (0.03s)
+PASS
+ok  	minidb/internal/wal	0.872s</span></code></pre>
+    </div>
+
+    <h2 class="step" id="step-3"><span class="step-no">Step 3</span>Recover — redo 再生と、チェックポイント</h2>
+    <p>書けたら、次は読む側。再起動時にログを先頭から読み、<strong>コミットが成立しているかたまりだけ</strong>をデータファイルへ書き戻す回復処理です。あわせて、回復が済んだログを空にする <code>Truncate</code>（チェックポイント）と <code>Close</code> も載せて、<code>wal.go</code> はこれで全行になります。</p>
+
+    <div class="file-tag">internal/wal/wal.go（つづき・これで全文）</div>
+    <pre><code><span class="cm">// Recover はログを先頭から再生し、コミット済みバッチだけをディスクへ適用する。</span>
+<span class="cm">// 適用したコミット数を返す。壊れたレコード（torn write）以降は捨てる。</span>
+<span class="kw">func</span> (w *<span class="ty">WAL</span>) Recover(disk *storage.<span class="ty">DiskManager</span>) (<span class="kw">int</span>, <span class="ty">error</span>) {
+	<span class="kw">if</span> _, err := w.f.Seek(<span class="st">0</span>, io.SeekStart); err != <span class="kw">nil</span> {
+		<span class="kw">return</span> <span class="st">0</span>, err
+	}
+	commits := <span class="st">0</span>
+	pending := <span class="kw">map</span>[storage.<span class="ty">PageID</span>]*storage.<span class="ty">Page</span>{} <span class="cm">// まだコミットレコードを見ていないページ</span>
+	<span class="kw">for</span> {
+		<span class="kw">var</span> typ [<span class="st">1</span>]<span class="kw">byte</span>
+		<span class="kw">if</span> _, err := io.ReadFull(w.f, typ[:]); err != <span class="kw">nil</span> {
+			<span class="kw">break</span> <span class="cm">// 末尾（または途中欠け）</span>
+		}
+		<span class="kw">switch</span> typ[<span class="st">0</span>] {
+		<span class="kw">case</span> recPageImage:
+			body := <span class="kw">make</span>([]<span class="kw">byte</span>, <span class="st">4</span>+storage.PageSize+<span class="st">4</span>)
+			<span class="kw">if</span> _, err := io.ReadFull(w.f, body); err != <span class="kw">nil</span> {
+				<span class="kw">goto</span> done <span class="cm">// 途中で切れている → 未コミット。捨てる</span>
+			}
+			rec := <span class="kw">append</span>(typ[:], body[:<span class="st">4</span>+storage.PageSize]...)
+			<span class="kw">if</span> crc32.ChecksumIEEE(rec) != binary.LittleEndian.Uint32(body[<span class="st">4</span>+storage.PageSize:]) {
+				<span class="kw">goto</span> done <span class="cm">// torn write</span>
+			}
+			id := storage.<span class="ty">PageID</span>(binary.LittleEndian.Uint32(body[<span class="st">0</span>:<span class="st">4</span>]))
+			<span class="kw">var</span> p storage.<span class="ty">Page</span>
+			<span class="kw">copy</span>(p[:], body[<span class="st">4</span>:<span class="st">4</span>+storage.PageSize])
+			pending[id] = &amp;p
+		<span class="kw">case</span> recCommit:
+			<span class="kw">var</span> crc [<span class="st">4</span>]<span class="kw">byte</span>
+			<span class="kw">if</span> _, err := io.ReadFull(w.f, crc[:]); err != <span class="kw">nil</span> {
+				<span class="kw">goto</span> done
+			}
+			<span class="kw">if</span> crc32.ChecksumIEEE(typ[:]) != binary.LittleEndian.Uint32(crc[:]) {
+				<span class="kw">goto</span> done
+			}
+			<span class="cm">// コミット成立バッチをディスクへ適用</span>
+			<span class="kw">for</span> id, p := <span class="kw">range</span> pending {
+				disk.EnsurePages(id + <span class="st">1</span>)
+				<span class="kw">if</span> err := disk.WritePage(id, p); err != <span class="kw">nil</span> {
+					<span class="kw">return</span> commits, fmt.Errorf(<span class="st">"wal: redo write page %d: %w"</span>, id, err)
+				}
+			}
+			pending = <span class="kw">map</span>[storage.<span class="ty">PageID</span>]*storage.<span class="ty">Page</span>{}
+			commits++
+		<span class="kw">default</span>:
+			<span class="kw">goto</span> done <span class="cm">// 未知レコード = 壊れている</span>
+		}
+	}
+done:
+	<span class="kw">if</span> commits &gt; <span class="st">0</span> {
+		<span class="kw">if</span> err := disk.Sync(); err != <span class="kw">nil</span> {
+			<span class="kw">return</span> commits, err
+		}
+	}
+	<span class="kw">if</span> _, err := w.f.Seek(<span class="st">0</span>, io.SeekEnd); err != <span class="kw">nil</span> {
+		<span class="kw">return</span> commits, err
+	}
+	<span class="kw">return</span> commits, <span class="kw">nil</span>
+}
+
+<span class="cm">// Truncate はログを空にする（チェックポイント後に呼ぶ）。</span>
+<span class="cm">// 呼んでよいのは「データファイルが fsync 済みで、ログが不要になった」ときだけ。</span>
+<span class="kw">func</span> (w *<span class="ty">WAL</span>) Truncate() <span class="ty">error</span> {
+	<span class="kw">if</span> err := w.f.Truncate(<span class="st">0</span>); err != <span class="kw">nil</span> {
+		<span class="kw">return</span> err
+	}
+	<span class="kw">if</span> _, err := w.f.Seek(<span class="st">0</span>, io.SeekStart); err != <span class="kw">nil</span> {
+		<span class="kw">return</span> err
+	}
+	<span class="kw">return</span> w.f.Sync()
+}
+
+<span class="cm">// Close はログファイルを閉じる（Truncate はしない — クラッシュ時再生のため残す）。</span>
+<span class="kw">func</span> (w *<span class="ty">WAL</span>) Close() <span class="ty">error</span> { <span class="kw">return</span> w.f.Close() }</code></pre>
+
+    <p>構造は素直な読み取りループです。レコード種別を1バイト読み、種別ごとに残りを読んで検査する。鍵になるのは <code>pending</code> という一時置き場です。ページイメージはすぐにはディスクへ書かず、<code>pending</code> に溜める。<strong>コミットレコードを見た瞬間にはじめて</strong>、溜めた一式をまとめてデータファイルへ書き戻す。こうすることで「ページイメージはあるがコミットがない」かたまり — つまりコミット直前にクラッシュしたトランザクション — は、ループを抜けたとき <code>pending</code> に残ったまま捨てられます。原子性（全部か、無しか）が、この2行の構造だけで実現されているわけです。</p>
+    <p>そして本章でいちばん大事な考え方がこれです。<strong>壊れたレコードに出会ったら、エラーではなく「正常終了」として打ち切る。</strong>途中欠け（<code>io.ReadFull</code> が失敗）、CRC 不一致、未知の種別 — すべて <code>goto done</code> で読み取り終了に向かい、エラーは返しません。奇妙に感じるかもしれませんが、こう考えてください。ログ末尾が壊れる原因は「AppendCommit の途中でクラッシュした」以外にありません（正常時は必ず完全なかたまりが書かれ、失敗時は rewindTo が切り戻すから）。つまり<strong>壊れた末尾 = 成立しなかったコミットの残骸</strong>であり、それを捨てるのは回復の失敗ではなく、回復の正しい結論なのです。ここでエラーにしてしまうと、ふつうにクラッシュしただけの DB が二度と開けなくなります。</p>
+    <p>3つのクラッシュシナリオで、この再生ロジックがどう振る舞うかを確かめておきましょう。</p>
+
+    <div class="ascii">クラッシュ地点ごとの、再生の振る舞い
+
+シナリオ A: コミットレコードの fsync 前にクラッシュ
+  WAL:  [img 1][img 2]▓▓▓        ← commit まで書き切れていない
+  再生:  pending に溜める → commit に出会わないままループ終了 → 捨てる
+  結果:  変更は「無かったこと」に。
+         アプリはまだコミット成功を受け取っていないので、これが正解 ✓
+
+シナリオ B: fsync 完了後、データファイル反映前にクラッシュ
+  WAL:  [img 1][img 2][commit]   ← 完全なかたまりが耐久化済み
+  再生:  commit を見た瞬間、pending の 2 ページを WritePage で書き戻す
+  結果:  コミット済みの変更が復元される ✓
+
+シナリオ C: 正常なコミットの後ろに torn write
+  WAL:  [img][commit][img▓▓      ← 末尾レコードだけ CRC 不一致
+  再生:  手前の commit までは適用。壊れたレコードで打ち切り
+  結果:  コミット済みは生き、書きかけだけが消える ✓（エラーにはしない）</div>
+
+    <p>細部も2つ拾っておきます。<code>disk.EnsurePages(id + 1)</code> は、「クラッシュ前に割り当てたが、データファイルにはまだ1度も書かれていないページ」への備えです。データファイルが短いままだと <code>WritePage</code> の範囲検査（第00章）に弾かれるので、ページ総数の管理情報を先に広げておきます。もうひとつ、ループを抜けた後の <code>disk.Sync()</code>。せっかく redo した内容が OS のキャッシュ止まりでは、直後の再クラッシュでまた消えてしまう — 回復もまた「書いたら fsync」の例外ではありません（もっとも、redo は冪等なので、仮にここで落ちても次回もう一度再生し直すだけです）。</p>
+    <p>最後の <code>Truncate</code> がいわゆる<strong>チェックポイント</strong>です。ログは追記専用なので、放っておくと無限に育ちます。しかし「ログが必要なのは、データファイルにまだ反映されていないコミットがある間」だけ。データファイルが fsync まで済んだ瞬間、ログの中身は全部用済みになるので、長さ 0 に切り詰めて仕切り直せます。minidb では回復直後と <code>Close()</code> 時に呼びます（Step 6）。</p>
+
+    <div class="gonote"><div class="box-k">GO メモ · io.ReadFull — 「ちょうど n バイト」を保証する読み取り</div>
+      <p><code>f.Read(buf)</code> は <code>len(buf)</code> より<strong>少なく</strong>読んで返ることが仕様上あり得ます。<code>io.ReadFull(f, buf)</code> はぴったり <code>len(buf)</code> 読めるまで繰り返し、足りずに終端へ達したらエラー（<code>io.ErrUnexpectedEOF</code> など）を返します。「4105 バイトのレコードを丸ごと読む。読めなければ途中欠け」という本章の判定には、この関数が正確に合います。</p>
+    </div>
+
+    <div class="gonote"><div class="box-k">GO メモ · goto — Go にもある、そして稀に正しい</div>
+      <p>Go には <code>goto</code> 文とラベル（<code>done:</code>）があります。ふだん使うことはまずありませんが、<code>Recover</code> のように「二重ループや <code>switch</code> の内側から、後始末のコードへ一気に抜けたい」場面では、フラグ変数を増やすより読みやすくなることがあります。<code>break</code> が <code>switch</code> を抜けるだけで <code>for</code> を抜けられない、という Go の仕様も、ここで <code>goto</code> が選ばれた理由です。</p>
+    </div>
+
+    <div class="box do"><div class="box-k">▸ 動かして確認</div>
+      <p><code>wal.go</code> が全部そろったので、パッケージのテストを一式流します。3本の意味は次のステップで読み解きます。</p>
+      <pre class="term"><code><span class="ps">$</span> go test ./internal/wal -v
+<span class="out">=== RUN   TestRecoverCommitted
+--- PASS: TestRecoverCommitted (0.02s)
+=== RUN   TestRecoverDiscardsUncommitted
+--- PASS: TestRecoverDiscardsUncommitted (0.02s)
+=== RUN   TestRecoverToleratesTornTail
+--- PASS: TestRecoverToleratesTornTail (0.02s)
+PASS
+ok  	minidb/internal/wal	0.836s</span></code></pre>
+    </div>
+
+    <h2 class="step" id="step-4"><span class="step-no">Step 4</span>クラッシュをテストで再現する</h2>
+    <p>ここで手を止めて、考えてみてください。<strong>「電源断に耐える」ことを、どうやって自動テストにするのか？</strong>テストのたびに本当に電源を引き抜くわけにはいきません。</p>
+    <p>答えはこうです。クラッシュとは、突き詰めれば<strong>「ファイルが中途半端な状態のまま、プロセスの記憶が全部消えること」</strong>です。であれば、(1) 中途半端な状態のファイルを意図的に作り、(2) 何も覚えていない新しいオブジェクトでそのファイルを開き直せば、クラッシュ直後の再起動と区別がつきません。この「途中状態のファイルを作って再オープンする」技法が、この章のテスト全部の骨格です。<code>wal_test.go</code> を全文読みます。</p>
+
+    <div class="file-tag">internal/wal/wal_test.go</div>
+    <pre><code><span class="kw">package</span> wal
+
+<span class="kw">import</span> (
+	<span class="st">"encoding/binary"</span>
+	<span class="st">"hash/crc32"</span>
+	<span class="st">"path/filepath"</span>
+	<span class="st">"testing"</span>
+
+	<span class="st">"minidb/internal/storage"</span>
+)
+
+<span class="kw">func</span> setup(t *testing.<span class="ty">T</span>) (<span class="kw">string</span>, <span class="kw">string</span>) {
+	t.Helper()
+	dir := t.TempDir()
+	<span class="kw">return</span> filepath.Join(dir, <span class="st">"test.db"</span>), filepath.Join(dir, <span class="st">"test.db.wal"</span>)
+}
+
+<span class="cm">// M6 受け入れ基準の核: コミット済み変更は、データファイルに未反映のまま</span>
+<span class="cm">// クラッシュしても、WAL 再生で復元される。</span>
+<span class="kw">func</span> TestRecoverCommitted(t *testing.<span class="ty">T</span>) {
+	dbPath, walPath := setup(t)
+
+	<span class="cm">// 1 ページ確保だけデータファイルに済ませておく（実体は空ページ）</span>
+	d, err := storage.OpenDiskManager(dbPath)
+	<span class="kw">if</span> err != <span class="kw">nil</span> {
+		t.Fatal(err)
+	}
+	id := d.AllocatePage()
+	<span class="kw">var</span> empty storage.<span class="ty">Page</span>
+	<span class="kw">if</span> err := d.WritePage(id, &amp;empty); err != <span class="kw">nil</span> {
+		t.Fatal(err)
+	}
+	<span class="kw">if</span> err := d.Close(); err != <span class="kw">nil</span> {
+		t.Fatal(err)
+	}
+
+	<span class="cm">// コミット: WAL には書くが、データファイルには一切書かない（= クラッシュ前の状態）</span>
+	w, err := Open(walPath)
+	<span class="kw">if</span> err != <span class="kw">nil</span> {
+		t.Fatal(err)
+	}
+	<span class="kw">var</span> p storage.<span class="ty">Page</span>
+	<span class="kw">copy</span>(p[:], []<span class="kw">byte</span>(<span class="st">"committed-but-not-in-datafile"</span>))
+	<span class="kw">if</span> err := w.AppendCommit(<span class="kw">map</span>[storage.<span class="ty">PageID</span>]*storage.<span class="ty">Page</span>{id: &amp;p}); err != <span class="kw">nil</span> {
+		t.Fatal(err)
+	}
+	w.Close() <span class="cm">// クラッシュの代役: データ反映せずに終了</span>
+
+	<span class="cm">// ---- 再起動 + 回復 ----</span>
+	d2, err := storage.OpenDiskManager(dbPath)
+	<span class="kw">if</span> err != <span class="kw">nil</span> {
+		t.Fatal(err)
+	}
+	<span class="kw">defer</span> d2.Close()
+	w2, err := Open(walPath)
+	<span class="kw">if</span> err != <span class="kw">nil</span> {
+		t.Fatal(err)
+	}
+	<span class="kw">defer</span> w2.Close()
+	n, err := w2.Recover(d2)
+	<span class="kw">if</span> err != <span class="kw">nil</span> {
+		t.Fatal(err)
+	}
+	<span class="kw">if</span> n != <span class="st">1</span> {
+		t.Fatalf(<span class="st">"再生されたコミット数 = %d, want 1"</span>, n)
+	}
+	<span class="kw">var</span> got storage.<span class="ty">Page</span>
+	<span class="kw">if</span> err := d2.ReadPage(id, &amp;got); err != <span class="kw">nil</span> {
+		t.Fatal(err)
+	}
+	<span class="kw">if</span> <span class="kw">string</span>(got[:<span class="st">29</span>]) != <span class="st">"committed-but-not-in-datafile"</span> {
+		t.Fatal(<span class="st">"コミット済みの変更が回復されていない"</span>)
+	}
+}</code></pre>
+
+    <p>1本目、<strong>コミット直後のクラッシュ</strong>。テストデータの文字列が <code>"committed-but-not-in-datafile"</code>（コミット済み・ただしデータファイルには無い）と、状況をそのまま名乗っています。<code>AppendCommit</code> は呼ぶが、<code>DiskManager</code> へのページ書き込みは<strong>意図的にしない</strong> — これが「WAL の fsync までは済んだが、データ反映前に落ちた」シナリオ B の作り方です。そして <code>w.Close()</code> のコメントに注目。<strong>クラッシュの代役はただの Close</strong> です。ファイルを閉じても中身は勝手に進まないので、「中途半端なまま記憶が消えた」状況としては本物のクラッシュと等価になります。再オープン後は <code>Recover</code> が 1 コミットを再生し、ページに文字列が現れることを検査します。</p>
+
+    <div class="gonote"><div class="box-k">GO メモ · t.TempDir と t.Helper</div>
+      <p><code>t.TempDir()</code> は、そのテスト専用の一時ディレクトリを作り、<strong>テスト終了時に自動で削除</strong>してくれます。後片付けのコードが要らないので、ファイルを扱うテストの定番です。<code>t.Helper()</code> は「この関数はテスト補助です」という宣言で、失敗時の行番号報告が呼び出し元の行になります。</p>
+    </div>
+
+    <div class="file-tag">internal/wal/wal_test.go（つづき）</div>
+    <pre><code><span class="cm">// コミットレコードのないページイメージ（未コミット）は再生されない。</span>
+<span class="kw">func</span> TestRecoverDiscardsUncommitted(t *testing.<span class="ty">T</span>) {
+	dbPath, walPath := setup(t)
+	d, err := storage.OpenDiskManager(dbPath)
+	<span class="kw">if</span> err != <span class="kw">nil</span> {
+		t.Fatal(err)
+	}
+	<span class="kw">defer</span> d.Close()
+	id := d.AllocatePage()
+	<span class="kw">var</span> empty storage.<span class="ty">Page</span>
+	<span class="kw">if</span> err := d.WritePage(id, &amp;empty); err != <span class="kw">nil</span> {
+		t.Fatal(err)
+	}
+
+	<span class="cm">// ページイメージだけ書いてコミットレコードなしで終わる（コミット直前のクラッシュ）</span>
+	w, err := Open(walPath)
+	<span class="kw">if</span> err != <span class="kw">nil</span> {
+		t.Fatal(err)
+	}
+	<span class="kw">var</span> p storage.<span class="ty">Page</span>
+	<span class="kw">copy</span>(p[:], []<span class="kw">byte</span>(<span class="st">"uncommitted"</span>))
+	<span class="cm">// AppendCommit を使わず生のページレコードだけ書く</span>
+	rec := <span class="kw">make</span>([]<span class="kw">byte</span>, <span class="st">1</span>+<span class="st">4</span>+storage.PageSize)
+	rec[<span class="st">0</span>] = <span class="st">1</span>
+	<span class="kw">copy</span>(rec[<span class="st">5</span>:], p[:])
+	<span class="cm">// CRC は正しく付ける（レコード自体は完全、ただしコミットがない）</span>
+	crc := crc32ChecksumForTest(rec)
+	w.f.Write(rec)
+	w.f.Write(crc)
+	w.f.Sync()
+	w.Close()
+
+	w2, err := Open(walPath)
+	<span class="kw">if</span> err != <span class="kw">nil</span> {
+		t.Fatal(err)
+	}
+	<span class="kw">defer</span> w2.Close()
+	n, err := w2.Recover(d)
+	<span class="kw">if</span> err != <span class="kw">nil</span> {
+		t.Fatal(err)
+	}
+	<span class="kw">if</span> n != <span class="st">0</span> {
+		t.Fatalf(<span class="st">"未コミットなのに %d 件再生された"</span>, n)
+	}
+	<span class="kw">var</span> got storage.<span class="ty">Page</span>
+	<span class="kw">if</span> err := d.ReadPage(id, &amp;got); err != <span class="kw">nil</span> {
+		t.Fatal(err)
+	}
+	<span class="kw">if</span> <span class="kw">string</span>(got[:<span class="st">11</span>]) == <span class="st">"uncommitted"</span> {
+		t.Fatal(<span class="st">"未コミットの変更がデータファイルに反映されてしまった"</span>)
+	}
+}
+
+<span class="cm">// 書き込み途中で切れたレコード（torn write）があっても、そこまでの</span>
+<span class="cm">// コミット済み分は再生され、エラーにもならない。</span>
+<span class="kw">func</span> TestRecoverToleratesTornTail(t *testing.<span class="ty">T</span>) {
+	dbPath, walPath := setup(t)
+	d, err := storage.OpenDiskManager(dbPath)
+	<span class="kw">if</span> err != <span class="kw">nil</span> {
+		t.Fatal(err)
+	}
+	<span class="kw">defer</span> d.Close()
+	id := d.AllocatePage()
+	<span class="kw">var</span> empty storage.<span class="ty">Page</span>
+	<span class="kw">if</span> err := d.WritePage(id, &amp;empty); err != <span class="kw">nil</span> {
+		t.Fatal(err)
+	}
+
+	w, err := Open(walPath)
+	<span class="kw">if</span> err != <span class="kw">nil</span> {
+		t.Fatal(err)
+	}
+	<span class="kw">var</span> p storage.<span class="ty">Page</span>
+	p[<span class="st">0</span>] = <span class="st">0x5A</span>
+	<span class="kw">if</span> err := w.AppendCommit(<span class="kw">map</span>[storage.<span class="ty">PageID</span>]*storage.<span class="ty">Page</span>{id: &amp;p}); err != <span class="kw">nil</span> {
+		t.Fatal(err)
+	}
+	<span class="cm">// 末尾に中途半端なゴミ（レコード先頭バイトだけ）を足す = torn write</span>
+	w.f.Write([]<span class="kw">byte</span>{<span class="st">1</span>, <span class="st">0xDE</span>, <span class="st">0xAD</span>})
+	w.f.Sync()
+	w.Close()
+
+	w2, err := Open(walPath)
+	<span class="kw">if</span> err != <span class="kw">nil</span> {
+		t.Fatal(err)
+	}
+	<span class="kw">defer</span> w2.Close()
+	n, err := w2.Recover(d)
+	<span class="kw">if</span> err != <span class="kw">nil</span> {
+		t.Fatal(err)
+	}
+	<span class="kw">if</span> n != <span class="st">1</span> {
+		t.Fatalf(<span class="st">"torn tail の手前のコミットが再生されない: n=%d"</span>, n)
+	}
+}
+
+<span class="cm">// テスト用に本体と同じ CRC を計算する。</span>
+<span class="kw">func</span> crc32ChecksumForTest(rec []<span class="kw">byte</span>) []<span class="kw">byte</span> {
+	<span class="kw">var</span> b [<span class="st">4</span>]<span class="kw">byte</span>
+	binary.LittleEndian.PutUint32(b[:], crc32.ChecksumIEEE(rec))
+	<span class="kw">return</span> b[:]
+}</code></pre>
+
+    <p>2本目、<strong>未コミットは消える</strong>。面白いのは作り方です。<code>AppendCommit</code> を経由すると必ずコミットレコードまで書かれてしまうので、テストは <code>w.f.Write(rec)</code> と<strong>内部のファイルを直接触って</strong>、「CRC は正しいがコミットレコードがないページイメージ」を偽造します。同じパッケージ内のテスト（<code>package wal</code>）だから非公開フィールド <code>w.f</code> に触れる — 内部状態を偽造するテストをパッケージ内テストで書く、という使い分けの好例です。期待値は「再生 0 件」かつ「ページに <code>"uncommitted"</code> が<strong>現れていない</strong>こと」。シナリオ A の検証です。</p>
+    <p>3本目、<strong>torn write 耐性</strong>。正常なコミットを1個書いた後、末尾に <code>{1, 0xDE, 0xAD}</code> という3バイトのゴミを直接足します。先頭バイトが <code>1</code> なので、回復処理はこれをページイメージレコードだと思って残り 4104 バイトを読もうとし、途中欠けで <code>goto done</code> に落ちる — シナリオ C の再現です。検査しているのは2点。<strong>手前のコミットはちゃんと再生される</strong>こと（<code>n == 1</code>）、そして <code>Recover</code> が<strong>エラーを返さない</strong>こと。「壊れた末尾は異常ではなく、成立しなかったコミットの残骸」という Step 3 の設計判断が、そのままテストの期待値になっています。</p>
+
+    <div class="box do"><div class="box-k">▸ 動かして確認</div>
+      <p>2本目と3本目を名前指定で流してみましょう。<code>-run</code> には正規表現が書けます。</p>
+      <pre class="term"><code><span class="ps">$</span> go test ./internal/wal -run 'TestRecoverDiscardsUncommitted|TestRecoverToleratesTornTail' -v
+<span class="out">=== RUN   TestRecoverDiscardsUncommitted
+--- PASS: TestRecoverDiscardsUncommitted (0.01s)
+=== RUN   TestRecoverToleratesTornTail
+--- PASS: TestRecoverToleratesTornTail (0.01s)
+PASS
+ok  	minidb/internal/wal	0.760s</span></code></pre>
+      <p>余裕があれば、写経派向けの実験を。<code>Recover</code> の <code>goto done</code> をどれか <code>return commits, err</code> に変えると、3本目が「エラーを返した」で FAIL するはずです。テストが設計判断を守っている、という感覚がつかめます（試したら元に戻すのを忘れずに）。</p>
+    </div>
+
+    <h2 class="step" id="step-5"><span class="step-no">Step 5</span>データファイルの torn write を修復する</h2>
+    <p>WAL 側の耐性はできました。しかし事故③には続きがあります。<strong>データファイル自体</strong>がページ書き込みの途中で切れていたら？ 例えば新しいページをファイル末尾に書いている最中の電源断で、ファイルサイズが 4096 の倍数ではない半端な長さになっているかもしれません。</p>
+    <p>第00章で作った <code>OpenDiskManager</code> は「ファイルサイズ ÷ ページサイズ」でページ総数を復元していました。半端なサイズは想定外です。素朴に考えると「サイズが境界に揃っていない = 破損ファイル」としてオープンを<strong>拒否</strong>したくなります。実はこの実装も最初はそうなっていて、AI クロスレビューで指摘されて直した箇所です。何がまずいか、分かるでしょうか。</p>
+    <p>拒否すると、<strong>WAL の回復処理に到達する前に門前払い</strong>してしまうのです。Step 6 で見るとおり、起動時の手順は「①データファイルを開く → ② WAL を再生」。①で死ぬと、せっかくログに完全な姿が残っているのに、それを適用する機会が永遠に来ません。クラッシュに耐えるためのシステムが、クラッシュの痕跡を見て起動を拒む — 本末転倒です。正解は<strong>拒否ではなく修復</strong>。ページ境界まで 0 埋めして開いてしまい、中身の正しさは redo に任せます。</p>
+
+    <div class="ascii">torn write されたデータファイルの修復（Truncate による 0 埋め）
+
+  mydata.db（12,388 バイト = 3 ページ + 100 バイト）
+  ┌────────┬────────┬────────┬──┐
+  │ page 0 │ page 1 │ page 2 │▓▓│ ← 書き込み途中で切れた尻尾
+  └────────┴────────┴────────┴──┘
+          f.Truncate(16384) — 境界まで伸ばす（伸びた分は 0）
+  ┌────────┬────────┬────────┬────────────┐
+  │ page 0 │ page 1 │ page 2 │ 000…000    │ ← page 3 として数える
+  └────────┴────────┴────────┴────────────┘
+  中身が正しいかはこの層では気にしない:
+  ・コミット済みの内容なら → WAL に完全イメージがあり、redo が上書きする
+  ・未コミットの内容なら   → そもそも存在してはいけないデータ。0 のままで正しい</div>
+
+    <div class="file-tag">internal/storage/disk.go（第00章のコードに、torn write 修復を追加）</div>
+    <pre><code><span class="cm">// OpenDiskManager はデータベースファイルを開く。存在しなければ作成する。</span>
+<span class="cm">// 既存ファイルの場合、サイズからページ総数を復元する（これが M0 の「再起動後も読める」の要）。</span>
+<span class="kw">func</span> OpenDiskManager(path <span class="kw">string</span>) (*<span class="ty">DiskManager</span>, <span class="ty">error</span>) {
+	f, err := os.OpenFile(path, os.O_RDWR|os.O_CREATE, <span class="st">0o644</span>)
+	<span class="kw">if</span> err != <span class="kw">nil</span> {
+		<span class="kw">return</span> <span class="kw">nil</span>, fmt.Errorf(<span class="st">"storage: open %s: %w"</span>, path, err)
+	}
+	info, err := f.Stat()
+	<span class="kw">if</span> err != <span class="kw">nil</span> {
+		f.Close()
+		<span class="kw">return</span> <span class="kw">nil</span>, fmt.Errorf(<span class="st">"storage: stat %s: %w"</span>, path, err)
+	}
+	size := info.Size()
+	<span class="kw">if</span> size%PageSize != <span class="st">0</span> {
+		<span class="cm">// ページ書き込みの途中でクラッシュした疑い（torn write）。</span>
+		<span class="cm">// ここで拒否すると WAL 回復に到達できなくなるので、ページ境界まで</span>
+		<span class="cm">// 0 埋めして開く。中身の正しさはコミット済みなら WAL の redo が復元し、</span>
+		<span class="cm">// 未コミットなら元々存在しないはずのデータなので捨ててよい。</span>
+		size = (size/PageSize + <span class="st">1</span>) * PageSize
+		<span class="kw">if</span> err := f.Truncate(size); err != <span class="kw">nil</span> {
+			f.Close()
+			<span class="kw">return</span> <span class="kw">nil</span>, fmt.Errorf(<span class="st">"storage: %s の torn write 修復に失敗: %w"</span>, path, err)
+		}
+	}
+	<span class="kw">return</span> &amp;<span class="ty">DiskManager</span>{
+		file:     f,
+		numPages: <span class="ty">PageID</span>(size / PageSize),
+	}, <span class="kw">nil</span>
+}
+
+<span class="cm">// …（AllocatePage / NumPages は第00章のまま変更なし）</span>
+
+<span class="cm">// EnsurePages はページ総数が n 以上になるよう管理情報を広げる。</span>
+<span class="cm">// WAL 回復（M6）で「クラッシュ前に割り当て済みだったがデータファイルには</span>
+<span class="cm">// まだ書かれていない」ページを書き戻すために使う。</span>
+<span class="kw">func</span> (d *<span class="ty">DiskManager</span>) EnsurePages(n <span class="ty">PageID</span>) {
+	<span class="kw">if</span> n &gt; d.numPages {
+		d.numPages = n
+	}
+}
+
+<span class="cm">// …（ReadPage / WritePage / Sync / Close は第00章のまま変更なし）</span></code></pre>
+
+    <p><code>(size/PageSize + 1) * PageSize</code> は「切り上げて次のページ境界へ」という整数演算の定型です。12,388 バイトなら 12388/4096 = 3（整数除算）、+1 して ×4096 = 16,384。<code>EnsurePages</code> は Step 3 の <code>Recover</code> から呼ばれていた相方で、こちらはファイルではなく<strong>メモリ上のページ総数カウンタ</strong>を広げるだけです。実体は redo の <code>WritePage</code> が書き込みます。</p>
+    <p>この修復にもテストがあります。技法は Step 4 と同じ — <code>os.WriteFile</code> で「1ページ+100バイト」という半端なファイルを<strong>最初から作ってしまい</strong>、開き直すだけです。</p>
+
+    <div class="file-tag">internal/storage/disk_test.go（抜粋）</div>
+    <pre><code><span class="cm">// ページ境界に揃っていないファイル（torn write）は 0 埋めで修復して開く。</span>
+<span class="cm">// ここで拒否すると WAL 回復に到達できず、クラッシュ耐性（M6）が壊れるため。</span>
+<span class="kw">func</span> TestOpenRepairsTornFile(t *testing.<span class="ty">T</span>) {
+	path := filepath.Join(t.TempDir(), <span class="st">"torn.db"</span>)
+	<span class="kw">if</span> err := os.WriteFile(path, <span class="kw">make</span>([]<span class="kw">byte</span>, PageSize+<span class="st">100</span>), <span class="st">0o644</span>); err != <span class="kw">nil</span> {
+		t.Fatal(err)
+	}
+	d, err := OpenDiskManager(path)
+	<span class="kw">if</span> err != <span class="kw">nil</span> {
+		t.Fatalf(<span class="st">"torn write のファイルが修復されず開けない: %v"</span>, err)
+	}
+	<span class="kw">defer</span> d.Close()
+	<span class="kw">if</span> got := d.NumPages(); got != <span class="st">2</span> {
+		t.Fatalf(<span class="st">"修復後のページ総数 = %d, want 2"</span>, got)
+	}
+	<span class="kw">var</span> p <span class="ty">Page</span>
+	<span class="kw">if</span> err := d.ReadPage(<span class="st">1</span>, &amp;p); err != <span class="kw">nil</span> {
+		t.Fatalf(<span class="st">"修復されたページが読めない: %v"</span>, err)
+	}
+}</code></pre>
+
+    <div class="gonote"><div class="box-k">GO メモ · f.Truncate — 切り詰めるだけでなく、伸ばせる</div>
+      <p><code>f.Truncate(n)</code> はファイルの長さを <code>n</code> バイトに変更します。名前のとおり短くする（切り詰める）ほか、<strong>今より大きい <code>n</code> を渡すと伸ばす</strong>こともでき、伸びた領域は 0 で埋まったように見えます。この章では両方向を使いました — <code>rewindTo</code> と WAL の <code>Truncate()</code> は切り詰め、torn write 修復は 0 埋め拡張です。</p>
+    </div>
+
+    <div class="box do"><div class="box-k">▸ 動かして確認</div>
+      <pre class="term"><code><span class="ps">$</span> go test ./internal/storage -run TestOpenRepairsTornFile -v
+<span class="out">=== RUN   TestOpenRepairsTornFile
+--- PASS: TestOpenRepairsTornFile (0.01s)
+PASS
+ok  	minidb/internal/storage	0.815s</span></code></pre>
+    </div>
+
+    <div class="box hazard"><div class="box-k">⚠ 落とし穴</div>
+      <p>クラッシュ耐性は fsync の順序<strong>だけ</strong>では完成しません。この章で塞いだ穴を並べてみると — 書きかけ WAL レコードの切り戻し（<code>rewindTo</code>）、Sync 失敗後の切り戻し、途中で切れたデータファイルの 0 埋め修復。どれも「正常系は正しいのに、<strong>失敗の後始末</strong>が甘い」という同じ型の穴です。実際この3つは、テストが全部緑になった後の AI クロスレビューで見つかりました。正常系のテストが通ることと、異常系が正しいことは、別の話なのです。</p>
+    </div>
+
+    <h2 class="step" id="step-6"><span class="step-no">Step 6</span>db.go へ組み込む — 起動時回復と E2E</h2>
+    <p>部品はそろいました。最後に、全層を束ねる <code>db.go</code> に WAL を配線します。押さえるべき場所は3つ — <strong>開くとき</strong>（回復）、<strong>コミットするとき</strong>（ログが先）、<strong>閉じるとき</strong>（チェックポイント）です。まず <code>Open</code> から。</p>
+
+    <div class="file-tag">db.go（Open — 起動のたびに、まず回復）</div>
+    <pre><code><span class="cm">// Open は DB ファイルを開く。手順は常に:</span>
+<span class="cm">// ① WAL を再生してコミット済み状態へ回復（M6）→ ② 空ならブートストラップ → ③ カタログ読込。</span>
+<span class="kw">func</span> Open(path <span class="kw">string</span>) (*<span class="ty">DB</span>, <span class="ty">error</span>) {
+	disk, err := storage.OpenDiskManager(path)
+	<span class="kw">if</span> err != <span class="kw">nil</span> {
+		<span class="kw">return</span> <span class="kw">nil</span>, err
+	}
+	w, err := wal.Open(path + <span class="st">".wal"</span>)
+	<span class="kw">if</span> err != <span class="kw">nil</span> {
+		disk.Close()
+		<span class="kw">return</span> <span class="kw">nil</span>, err
+	}
+	<span class="cm">// クラッシュ回復: コミット済みの変更をデータファイルへ適用し、ログを空にする</span>
+	<span class="kw">if</span> _, err := w.Recover(disk); err != <span class="kw">nil</span> {
+		w.Close()
+		disk.Close()
+		<span class="kw">return</span> <span class="kw">nil</span>, fmt.Errorf(<span class="st">"minidb: WAL 回復に失敗: %w"</span>, err)
+	}
+	<span class="kw">if</span> err := w.Truncate(); err != <span class="kw">nil</span> {
+		w.Close()
+		disk.Close()
+		<span class="kw">return</span> <span class="kw">nil</span>, err
+	}
+
+	pool := buffer.New(disk, <span class="st">128</span>)
+	<span class="kw">if</span> disk.NumPages() == <span class="st">0</span> {
+		<span class="cm">// 新規 DB: メタページとカタログを作って土台を固める</span>
+		<span class="kw">if</span> err := catalog.Bootstrap(pool); err != <span class="kw">nil</span> {
+			w.Close()
+			disk.Close()
+			<span class="kw">return</span> <span class="kw">nil</span>, err
+		}
+		<span class="kw">if</span> err := pool.FlushAll(); err != <span class="kw">nil</span> {
+			w.Close()
+			disk.Close()
+			<span class="kw">return</span> <span class="kw">nil</span>, err
+		}
+	}
+	cat, err := catalog.Load(pool)
+	<span class="kw">if</span> err != <span class="kw">nil</span> {
+		w.Close()
+		disk.Close()
+		<span class="kw">return</span> <span class="kw">nil</span>, err
+	}
+	<span class="kw">return</span> &amp;<span class="ty">DB</span>{disk: disk, wal: w, pool: pool, cat: cat}, <span class="kw">nil</span>
+}</code></pre>
+
+    <p>順序が物語のすべてです。①データファイルを開く（このとき Step 5 の torn write 修復が効く）→ ② WAL を再生してコミット済み状態へ戻す → ③ 回復済みなのでログを空にする（チェックポイント）→ ④ そのきれいな状態の上で、バッファプールを作りカタログを読む。前回が正常終了なら WAL は空で、<code>Recover</code> は 0 件を再生して即座に返ります。つまり<strong>回復処理は特別な起動モードではなく、毎回必ず通る道</strong>。クラッシュしたかどうかを判定するコードはどこにもありません — 判定しなくても正しく動くように作ってあるからです。</p>
+    <p>コミット側の配線は <code>Exec</code> の末尾にあります。トランザクション本体（<code>txn.Tx</code>）は第07章の主役なので、ここでは WAL に関わる筋だけ追ってください。</p>
+
+    <div class="file-tag">db.go（Exec — 自動コミットの経路のみ。省略部は第07章で）</div>
+    <pre><code><span class="cm">// Exec は SQL 1 文を実行する。</span>
+<span class="cm">// BEGIN〜COMMIT の外では文ごとの自動コミット（1 文 = 1 トランザクション）。</span>
+<span class="kw">func</span> (db *<span class="ty">DB</span>) Exec(sqlStr <span class="kw">string</span>) (*<span class="ty">Result</span>, <span class="ty">error</span>) {
+	stmt, err := sql.Parse(sqlStr)
+	<span class="kw">if</span> err != <span class="kw">nil</span> {
+		<span class="kw">return</span> <span class="kw">nil</span>, err
+	}
+
+	<span class="cm">// …（BEGIN / COMMIT / ROLLBACK と明示トランザクション中の分岐 — 第07章で）</span>
+
+	<span class="cm">// 自動コミット: 文ごとに Tx を作り、成功したらコミット</span>
+	tx := txn.Begin(db.pool)
+	res, err := sql.Execute(tx, db.cat, stmt)
+	<span class="kw">if</span> err != <span class="kw">nil</span> {
+		tx.Rollback()
+		<span class="cm">// …（DDL 失敗時のカタログ再読込 — 第07章で）</span>
+		<span class="kw">return</span> <span class="kw">nil</span>, err
+	}
+	<span class="kw">if</span> err := tx.Commit(db.wal); err != <span class="kw">nil</span> {
+		<span class="kw">return</span> <span class="kw">nil</span>, err
+	}
+	db.lastPlan = res.Plan
+	<span class="kw">return</span> res, <span class="kw">nil</span>
+}</code></pre>
+
+    <p>そして <code>tx.Commit(db.wal)</code> の中身が、Step 2 の順序図をそのままコードにしたものです。第07章で全文を扱いますが、WAL との接点だけ先に見ておきます。</p>
+
+    <div class="file-tag">internal/txn/txn.go（Commit のみ先出し — 全体は第07章で）</div>
+    <pre><code><span class="cm">// Commit は変更を WAL へ耐久化し（ログが先）、その後 base へ反映する（データが後）。</span>
+<span class="kw">func</span> (t *<span class="ty">Tx</span>) Commit(w *wal.<span class="ty">WAL</span>) <span class="ty">error</span> {
+	<span class="kw">if</span> t.done || <span class="kw">len</span>(t.pages) == <span class="st">0</span> {
+		t.done = <span class="kw">true</span>
+		<span class="kw">return</span> <span class="kw">nil</span>
+	}
+	<span class="cm">// 1. ログが先: ここで fsync まで済む。返った瞬間にコミット成立</span>
+	<span class="kw">if</span> err := w.AppendCommit(t.pages); err != <span class="kw">nil</span> {
+		<span class="kw">return</span> err
+	}
+	<span class="cm">// 2. データが後: バッファプールへ反映（ディスクへは追い出し or FlushAll で届く）</span>
+	<span class="kw">for</span> id, p := <span class="kw">range</span> t.pages {
+		src := p
+		<span class="kw">if</span> err := t.base.Write(id, <span class="kw">func</span>(dst *storage.<span class="ty">Page</span>) <span class="ty">error</span> {
+			*dst = *src
+			<span class="kw">return</span> <span class="kw">nil</span>
+		}); err != <span class="kw">nil</span> {
+			<span class="kw">return</span> err
+		}
+	}
+	t.pages = <span class="kw">nil</span>
+	t.done = <span class="kw">true</span>
+	<span class="kw">return</span> <span class="kw">nil</span>
+}</code></pre>
+
+    <p>最後に、閉じるときとテスト用の「クラッシュ装置」。</p>
+
+    <div class="file-tag">db.go（Close と CrashForTest）</div>
+    <pre><code><span class="cm">// Close は開いているトランザクションをロールバックし、</span>
+<span class="cm">// ダーティページを書き戻してからチェックポイント（WAL 空化）する。</span>
+<span class="kw">func</span> (db *<span class="ty">DB</span>) Close() <span class="ty">error</span> {
+	<span class="kw">if</span> db.active != <span class="kw">nil</span> {
+		db.active.Rollback()
+		db.active = <span class="kw">nil</span>
+	}
+	<span class="kw">if</span> err := db.pool.FlushAll(); err != <span class="kw">nil</span> {
+		db.wal.Close()
+		db.disk.Close()
+		<span class="kw">return</span> err
+	}
+	<span class="cm">// データファイルが fsync 済みになったので、ログは空にしてよい（チェックポイント）</span>
+	<span class="kw">if</span> err := db.wal.Truncate(); err != <span class="kw">nil</span> {
+		db.wal.Close()
+		db.disk.Close()
+		<span class="kw">return</span> err
+	}
+	<span class="kw">if</span> err := db.wal.Close(); err != <span class="kw">nil</span> {
+		db.disk.Close()
+		<span class="kw">return</span> err
+	}
+	<span class="kw">return</span> db.disk.Close()
+}
+
+<span class="cm">// CrashForTest はクラッシュを装って閉じる: バッファもログも一切後始末しない。</span>
+<span class="cm">// M6 のクラッシュ回復テスト専用。</span>
+<span class="kw">func</span> (db *<span class="ty">DB</span>) CrashForTest() {
+	db.wal.Close()
+	db.disk.Close()
+}</code></pre>
+
+    <p><code>Close</code> の順序は厳密です。<strong>FlushAll が先、Truncate が後</strong>。ダーティページ（メモリ上でだけ更新されたページ — 第02章）をディスクへ書き切り、fsync が済んだ後でなければ、ログは消せません。逆にすると、「ログは消えたがデータは未反映」という一瞬が生まれ、そこでクラッシュしたらコミット済みデータが失われます。<code>CrashForTest</code> は Step 4 の技法の DB 版で、FlushAll も Truncate もせず、ただファイルを閉じる — つまり「バッファの中身は消え、WAL とデータファイルは中途半端なまま」というクラッシュ直後の状況を作ります。これを使う E2E テストが、M6 の受け入れ基準そのものです。</p>
+
+    <div class="file-tag">e2e_test.go（M6 のクラッシュ回復テスト）</div>
+    <pre><code><span class="cm">// M6 受け入れ基準: コミット直後の強制終了でもデータが失われず、</span>
+<span class="cm">// 再起動時に一貫した状態へ回復する。</span>
+<span class="kw">func</span> TestM6CrashRecovery(t *testing.<span class="ty">T</span>) {
+	path := filepath.Join(t.TempDir(), <span class="st">"m6.db"</span>)
+
+	<span class="cm">// 土台を作って正常に閉じる</span>
+	db := open(t, path)
+	mustExec(t, db, <span class="st">"CREATE TABLE logs (id INT, msg TEXT)"</span>)
+	mustExec(t, db, <span class="st">"INSERT INTO logs VALUES (1, 'before-crash')"</span>)
+	<span class="kw">if</span> err := db.Close(); err != <span class="kw">nil</span> {
+		t.Fatal(err)
+	}
+
+	<span class="cm">// コミット直後にクラッシュ（バッファ未フラッシュ・WAL のみ耐久化済み）</span>
+	db = open(t, path)
+	mustExec(t, db, <span class="st">"INSERT INTO logs VALUES (2, 'committed-then-crash')"</span>)
+	db.CrashForTest()
+
+	<span class="cm">// 再起動 → WAL 再生でコミット済みの行が戻る</span>
+	db2 := open(t, path)
+	res := mustExec(t, db2, <span class="st">"SELECT COUNT(*) FROM logs"</span>)
+	<span class="kw">if</span> res.Rows[<span class="st">0</span>][<span class="st">0</span>].Int != <span class="st">2</span> {
+		t.Fatalf(<span class="st">"クラッシュ回復後の行数 = %d, want 2（コミット済みが失われた）"</span>, res.Rows[<span class="st">0</span>][<span class="st">0</span>].Int)
+	}
+	res = mustExec(t, db2, <span class="st">"SELECT msg FROM logs WHERE id = 2"</span>)
+	<span class="kw">if</span> <span class="kw">len</span>(res.Rows) != <span class="st">1</span> || res.Rows[<span class="st">0</span>][<span class="st">0</span>].Str != <span class="st">"committed-then-crash"</span> {
+		t.Fatal(<span class="st">"回復した行の内容が不正"</span>)
+	}
+	db2.Close()
+}
+
+<span class="cm">// M6 の裏面: 未コミットの変更はクラッシュで消える（原子性）。</span>
+<span class="kw">func</span> TestM6UncommittedLostOnCrash(t *testing.<span class="ty">T</span>) {
+	path := filepath.Join(t.TempDir(), <span class="st">"m6b.db"</span>)
+	db := open(t, path)
+	mustExec(t, db, <span class="st">"CREATE TABLE t (id INT)"</span>)
+	<span class="kw">if</span> err := db.Close(); err != <span class="kw">nil</span> {
+		t.Fatal(err)
+	}
+
+	db = open(t, path)
+	mustExec(t, db, <span class="st">"BEGIN"</span>)
+	mustExec(t, db, <span class="st">"INSERT INTO t VALUES (1)"</span>)
+	<span class="cm">// COMMIT せずにクラッシュ</span>
+	db.CrashForTest()
+
+	db2 := open(t, path)
+	<span class="kw">defer</span> db2.Close()
+	res := mustExec(t, db2, <span class="st">"SELECT COUNT(*) FROM t"</span>)
+	<span class="kw">if</span> res.Rows[<span class="st">0</span>][<span class="st">0</span>].Int != <span class="st">0</span> {
+		t.Fatalf(<span class="st">"未コミットの変更が残っている: %d 行"</span>, res.Rows[<span class="st">0</span>][<span class="st">0</span>].Int)
+	}
+}</code></pre>
+
+    <p>1本目は SQL のレベルで再現した「コミット直後クラッシュ」です。<code>INSERT</code> は自動コミットなので、<code>mustExec</code> が返った時点で WAL の fsync は済んでいます。しかしバッファプールはフラッシュしていないので、行 2 は<strong>データファイルにはまだ無い</strong>。そこで <code>CrashForTest()</code>。再起動後の <code>SELECT COUNT(*)</code> が 2 を返せば、WAL 再生が働いた証拠です。2本目はその裏面 — <code>BEGIN</code> だけして <code>COMMIT</code> しなかった行は、再起動後には存在しないこと。表と裏の両方が揃ってはじめて、「全部か、無しか」と言えます。</p>
+
+    <div class="box do"><div class="box-k">▸ 動かして確認</div>
+      <pre class="term"><code><span class="ps">$</span> go test . -run TestM6 -v
+<span class="out">=== RUN   TestM6CrashRecovery
+--- PASS: TestM6CrashRecovery (0.05s)
+=== RUN   TestM6UncommittedLostOnCrash
+--- PASS: TestM6UncommittedLostOnCrash (0.03s)
+PASS
+ok  	minidb	0.851s</span></code></pre>
+    </div>
+
+    <h2 class="step" id="step-7"><span class="step-no">Step 7</span>演習 — 本当にクラッシュさせて、中を覗く</h2>
+    <p>仕上げに、テストの外で「本物の」クラッシュと回復を起こし、WAL ファイルの中身を 16 進で読んでみます。理屈で追ってきたバイト列が実物のファイルに見えたとき、この章は本当に自分のものになります。以下のコマンドは Git Bash / WSL / macOS のシェルを想定しています（<code>xxd</code> が無い環境では PowerShell の <code>Format-Hex</code> でも代用できます）。</p>
+
+    <h3>7-1. 正常終了のとき、WAL はどうなっているか</h3>
+    <p>まず演習用のディレクトリ <code>waldemo/</code> を <code>src/</code> の隣に作り、<code>src/</code> から REPL でデータベースを1個作って、行を入れて、行儀よく終了します。</p>
+    <pre class="term"><code><span class="ps">$</span> mkdir ../waldemo
+<span class="ps">$</span> go run ./cmd/minidb-repl ../waldemo/demo.db
+<span class="out">minidb — 単一ファイル組み込み RDBMS（.exit で終了 / .stats で統計）</span>
+<span class="ps">minidb&gt;</span> CREATE TABLE logs (id INT, msg TEXT)
+<span class="out">OK（0 行）</span>
+<span class="ps">minidb&gt;</span> INSERT INTO logs VALUES (1, 'hello')
+<span class="out">OK（1 行）</span>
+<span class="ps">minidb&gt;</span> INSERT INTO logs VALUES (2, 'world')
+<span class="out">OK（1 行）</span>
+<span class="ps">minidb&gt;</span> .exit
+<span class="ps">$</span> ls -l ../waldemo/
+<span class="out">total 12
+-rw-r--r-- 1 atuch 197609 12288 Jul 10 07:52 demo.db
+-rw-r--r-- 1 atuch 197609     0 Jul 10 07:52 demo.db.wal</span></code></pre>
+    <p><code>demo.db</code> は 12,288 バイト = ちょうど 3 ページ（メタページ、カタログページ、logs のヒープページ）。そして <code>demo.db.wal</code> は <strong>0 バイト</strong>です。コミットのたびにログは書かれていたのに、<code>.exit</code> の <code>Close()</code> が FlushAll → チェックポイントを済ませたので、空に戻っている。<strong>正常に暮らしている限り、WAL は「書かれては消される」を繰り返す働き者</strong>で、中身が残るのはクラッシュしたときだけなのです。</p>
+
+    <h3>7-2. コミット直後にクラッシュさせる</h3>
+    <p><code>CrashForTest</code> を呼ぶ小さなプログラムを書きます。<code>waldemo/</code> に次の2ファイルを置いてください（<code>replace</code> ディレクティブで隣の <code>src/</code> を参照します）。</p>
+    <div class="file-tag">waldemo/go.mod</div>
+    <pre><code><span class="kw">module</span> waldemo
+
+<span class="kw">go</span> <span class="st">1.21</span>
+
+<span class="kw">require</span> minidb <span class="st">v0.0.0</span>
+
+<span class="kw">replace</span> minidb =&gt; ../src</code></pre>
+    <div class="file-tag">waldemo/crash.go</div>
+    <pre><code><span class="kw">package</span> main
+
+<span class="kw">import</span> (
+	<span class="st">"fmt"</span>
+	<span class="st">"os"</span>
+
+	minidb <span class="st">"minidb"</span>
+)
+
+<span class="kw">func</span> main() {
+	db, err := minidb.Open(os.Args[<span class="st">1</span>])
+	<span class="kw">if</span> err != <span class="kw">nil</span> {
+		<span class="kw">panic</span>(err)
+	}
+	must(db, <span class="st">"CREATE TABLE logs (id INT, msg TEXT)"</span>)
+	must(db, <span class="st">"INSERT INTO logs VALUES (1, 'survive-me')"</span>)
+	db.CrashForTest() <span class="cm">// バッファもログも後始末せずに終了 = クラッシュ</span>
+	fmt.Println(<span class="st">"committed &amp; crashed"</span>)
+}
+
+<span class="kw">func</span> must(db *minidb.<span class="ty">DB</span>, q <span class="kw">string</span>) {
+	<span class="kw">if</span> _, err := db.Exec(q); err != <span class="kw">nil</span> {
+		<span class="kw">panic</span>(err)
+	}
+}</code></pre>
+    <p><code>waldemo/</code> の中で実行します（初回は <code>go mod tidy</code> で go.mod を整えます）。</p>
+    <pre class="term"><code><span class="ps">$</span> cd ../waldemo
+<span class="ps">$</span> go mod tidy
+<span class="ps">$</span> go run crash.go crash.db
+<span class="out">committed &amp; crashed</span>
+<span class="ps">$</span> ls -l crash.db crash.db.wal
+<span class="out">-rw-r--r-- 1 atuch 197609  8192 Jul 10 07:53 crash.db
+-rw-r--r-- 1 atuch 197609 12325 Jul 10 07:53 crash.db.wal</span></code></pre>
+    <p>今度は WAL に中身が残っています。<strong>12,325 バイト</strong> — 内訳を計算してみましょう。ページイメージレコードは 4,105 バイト（1+4+4096+4）、コミットレコードは 5 バイト。この実行では2つのトランザクションが走りました。<code>CREATE TABLE</code>（カタログページ 1 と新しいヒープページ 2 の 2 枚を変更）と <code>INSERT</code>（ヒープページ 2 の 1 枚）。つまり 4105×3 + 5×2 = <strong>12,325</strong>。ぴったりです。一方 <code>crash.db</code> は 8,192 バイト = 2 ページのまま。ページ 2 は割り当てられただけで、データファイルには一度も書かれていません。行 <code>'survive-me'</code> は今、<strong>WAL の中にしか存在しない</strong>のです。確かめられます。</p>
+    <pre class="term"><code><span class="ps">$</span> grep -c "survive-me" crash.db
+<span class="out">0</span>
+<span class="ps">$</span> grep -c "survive-me" crash.db.wal
+<span class="out">1</span></code></pre>
+
+    <h3>7-3. WAL を 16 進で読む</h3>
+    <p>ファイルの先頭 16 バイトをダンプします。</p>
+    <pre class="term"><code><span class="ps">$</span> xxd -l 16 crash.db.wal
+<span class="out">00000000: 0102 0000 0000 0000 10ff ffff ff00 0000  ................</span></code></pre>
+    <p>Step 1 のレコード形式で読んでみてください。<code>01</code> = ページイメージレコード。続く <code>02 00 00 00</code> はリトルエンディアンの PageID = <strong>2</strong>。その先はページ本体の 4096 バイトで、先頭は第01章で作ったスロット化ページのヘッダです — <code>00 00</code>（スロット数 0）、<code>00 10</code>（freeEnd = 0x1000 = 4096）、<code>ff ff ff ff</code>（次ページなし = InvalidPageID）。つまりこれは <code>CREATE TABLE</code> が作った直後の、<strong>空っぽのヒープページ 2</strong> の完全イメージです（同一コミット内のレコード順は Go の map の列挙順なので、実行のたびに変わることがあります）。末尾も見てみましょう。</p>
+    <pre class="term"><code><span class="ps">$</span> xxd -s 12310 crash.db.wal
+<span class="out">00003016: 6976 652d 6d65 5827 21e9 02a1 8e0c 3c    ive-meX'!.....&lt;</span></code></pre>
+    <p>右の ASCII 欄に <code>ive-me</code> — 行データ <code>'survive-me'</code> の尻尾が見えます（スロット化ページは実体を末尾から詰めるので、ページイメージの最後にレコード実体が来る）。その直後の <code>58 27 21 e9</code> がこのページイメージの CRC32。次の <code>02</code> が<strong>コミットレコード</strong>で、<code>a1 8e 0c 3c</code> がその CRC。<code>fsync</code> まで済んだこの 5 バイトが、「INSERT は成立した」という耐久化された証文です。</p>
+
+    <h3>7-4. 再起動して、回復の瞬間を見る</h3>
+    <p>REPL で開き直すだけです。<code>Open</code> の中で <code>Recover</code> が黙って仕事をします。</p>
+    <pre class="term"><code><span class="ps">$</span> cd ../src
+<span class="ps">$</span> go run ./cmd/minidb-repl ../waldemo/crash.db
+<span class="out">minidb — 単一ファイル組み込み RDBMS（.exit で終了 / .stats で統計）</span>
+<span class="ps">minidb&gt;</span> SELECT * FROM logs
+<span class="out">| id | msg        |
+| -- | ---------- |
+| 1  | survive-me |
+（1 行 / plan: seqscan(logs)）</span>
+<span class="ps">minidb&gt;</span> .exit
+<span class="ps">$</span> ls -l ../waldemo/crash.db ../waldemo/crash.db.wal
+<span class="out">-rw-r--r-- 1 atuch 197609 12288 Jul 10 07:53 crash.db
+-rw-r--r-- 1 atuch 197609     0 Jul 10 07:53 crash.db.wal</span></code></pre>
+    <p>行は生きています。そして <code>crash.db</code> は 12,288 バイト（3 ページ）に伸び、WAL は 0 バイトに戻りました。redo がページ 1 と 2 を書き戻し、チェックポイントがログを空にした — この2つのファイルサイズの変化が、回復処理の足跡そのものです。</p>
+
+    <h3>7-5. おまけ: データファイルを破って、修復を見る</h3>
+    <p>最後に Step 5 の torn write 修復も実物で。7-1 で作った <code>demo.db</code> のコピーの末尾に、半端な 100 バイトのゴミを付け足してから開きます。</p>
+    <pre class="term"><code><span class="ps">$</span> cd ../waldemo
+<span class="ps">$</span> cp demo.db torn.db
+<span class="ps">$</span> head -c 100 /dev/urandom &gt;&gt; torn.db
+<span class="ps">$</span> ls -l torn.db
+<span class="out">-rw-r--r-- 1 atuch 197609 12388 Jul 10 07:54 torn.db</span>
+<span class="ps">$</span> cd ../src
+<span class="ps">$</span> go run ./cmd/minidb-repl ../waldemo/torn.db
+<span class="out">minidb — 単一ファイル組み込み RDBMS（.exit で終了 / .stats で統計）</span>
+<span class="ps">minidb&gt;</span> SELECT * FROM logs
+<span class="out">| id | msg   |
+| -- | ----- |
+| 1  | hello |
+| 2  | world |
+（2 行 / plan: seqscan(logs)）</span>
+<span class="ps">minidb&gt;</span> .exit
+<span class="ps">$</span> ls -l ../waldemo/torn.db
+<span class="out">-rw-r--r-- 1 atuch 197609 16384 Jul 10 07:54 torn.db</span></code></pre>
+    <p>12,388 バイトの破れたファイルが、文句も言わずに開き、既存の 2 行は無事で、サイズは 16,384（4 ページ境界）に修復されています。拒否ではなく修復 — 遊び終わったら <code>waldemo/</code> ディレクトリごと削除して構いません。</p>
+
+    <h2>つまずき FAQ</h2>
+
+    <details class="qa"><summary>fsync すれば本当に「絶対」消えないのですか？</summary>
+      <div class="qa-body"><p>厳密には、<code>fsync</code> は「OS のキャッシュからストレージデバイスへ書き出せ」という指示であり、その先にはデバイス内部の書き込みキャッシュという領域がまだあります。行儀のよいドライブは fsync で不揮発領域まで書き切りますが、世の中には「書いた」と嘘をつく安物ドライブも実在し、本物の DBMS の開発者はそういう相手とも戦っています。本書の立場は「OS とドライブが仕様どおりに振る舞う前提で、ソフトウェア側の責務（順序と後始末）を完全に果たす」です。ソフトの穴とハードの嘘は、まず前者を塞がないと議論になりません。</p></div>
+    </details>
+
+    <details class="qa"><summary>1 ページ触るたびに 4096 バイトもログに書くのは無駄では？</summary>
+      <div class="qa-body"><p>そのとおり、物理完全イメージは容量面では贅沢な方式です。1 バイトの更新でも 4 KiB 強がログに乗ります。本物の DB は、変更箇所だけの物理差分ログや論理ログ、複数トランザクションの fsync をまとめるグループコミットなどで書き込み量を圧縮しています。それでも本書がこの方式を選んだのは、再生が「置くだけ」で冪等になり、undo も LSN（ログ順序番号）も要らなくなるからです。正しさの構造を最小の部品数で見せる、という学習実装の割り切りです。</p></div>
+    </details>
+
+    <details class="qa"><summary>WAL ファイルはどこまでも大きくなりませんか？</summary>
+      <div class="qa-body"><p>チェックポイント（<code>wal.Truncate()</code>）がそれを防ぎます。minidb がログを空にするのは「起動時の回復直後」と「Close 時」の2箇所だけなので、開きっぱなしで書き続ければ WAL はセッション中は育ち続けます。本物の DB は稼働中にも定期的にチェックポイントを実行し（ダーティページを書き出してからログの先頭を前進させる）、ログサイズを一定範囲に保ちます。「いつ Truncate してよいか」の条件 — 対応するデータがデータファイル上で fsync 済みであること — は minidb も本物も同じです。</p></div>
+    </details>
+
+    <details class="qa"><summary>undo ログが無いのに、なぜ ROLLBACK できるのですか？</summary>
+      <div class="qa-body"><p>未コミットの変更が、そもそもディスクにもバッファプールにも書かれないからです。第07章で見るとおり、トランザクションの変更はコミットまで <code>Tx</code> の私有ページコピーに閉じ込められます。ROLLBACK はそのコピーを捨てるだけ。ディスク上に「取り消すべきもの」が存在しないので、undo が要りません。逆に言うと、性能のために未コミットページのディスク書き出しを許す設計（steal 方式）を選んだ瞬間、undo ログが必須になります。ARIES などの本格的な回復アルゴリズムが redo と undo の両方を持つのはそのためです。</p></div>
+    </details>
+
+    <details class="qa"><summary>AppendCommit は map をループしていますが、Go の map は順序不定ですよね。ログの中身が実行ごとに変わって大丈夫？</summary>
+      <div class="qa-body"><p>大丈夫です。順序が意味を持つのは<strong>コミットのかたまり同士</strong>（時系列）だけで、同じコミットの中のページイメージ同士は、どの順で書かれても・どの順で再生されても結果が変わりません。各レコードは「ページ ID とその完全な中身」で自己完結しており、同一コミット内に同じページが2回現れることもない（<code>map</code> のキーだから）ためです。実際、Step 7 の 16 進ダンプで先頭に来るページも実行のたびに変わります。</p></div>
+    </details>
+
+    <h2>理解度チェック</h2>
+    <p>次の問いに自分の言葉で答えてから、答えを開いてください。Q1〜Q3 はこの章の核心のシナリオ問題です。</p>
+
+    <details class="qa"><summary>Q1. コミットレコードを書いて fsync する「直前」にクラッシュした。再起動後、この変更はどうなる？ それはアプリケーションから見て正しい結果か？</summary>
+      <div class="qa-body"><p>消えます。ログにはページイメージ（と、もしかするとコミットレコードの断片）までしか残っておらず、<code>Recover</code> は完全なコミットレコードに出会わないので <code>pending</code> を捨てます。そしてこれは正しい結果です — <code>AppendCommit</code> はまだ返っていないので、アプリは「コミット成功」の報告を受け取っていません。成功と言われていないものが消えるのは、耐久性の約束（成功と報告したものは消えない）に違反しません。</p></div>
+    </details>
+
+    <details class="qa"><summary>Q2. では fsync が完了した「直後」（AppendCommit が return する前、バッファプール反映もまだ）にクラッシュしたら？ アプリは成功報告を受け取っていないのに変更が復活するとしたら、それは矛盾ではない？</summary>
+      <div class="qa-body"><p>復活します。ログ上にはページイメージ＋コミットレコードの完全なかたまりが耐久化済みなので、再起動時の redo がデータファイルへ適用します。そして矛盾ではありません。禁止されているのは「成功と報告したのに消える」ことであって、「成功と報告する前だったが残る」ことではないからです。呼び出し側から見れば結果不明のまま切断されたのと同じで、再起動後に確認すれば入っている — 現実の DB でもコミット応答の直前に接続が切れれば同じことが起きます。</p></div>
+    </details>
+
+    <details class="qa"><summary>Q3. Close() の中で、FlushAll と wal.Truncate の順序を逆にしたらどうなる？</summary>
+      <div class="qa-body"><p>「ログは空、ダーティページは未反映」という時間帯が生まれます。その間にクラッシュすると、コミット済みの変更（バッファ上にしかないページ）を復元する材料がもうどこにもなく、耐久性が破れます。ログを消してよいのは、対応するデータがデータファイル上で fsync 済みになった後 — チェックポイントの順序は片方向にしか回せません。</p></div>
+    </details>
+
+    <details class="qa"><summary>Q4. Recover を「CRC 不一致ならエラーを返す」実装に変えたら、何がまずい？</summary>
+      <div class="qa-body"><p>ふつうにクラッシュしただけのデータベースが、二度と開けなくなります。<code>AppendCommit</code> の途中でクラッシュすれば末尾に不完全なレコードが残るのは<strong>正常な出来事</strong>であり、それは「成立しなかったコミットの残骸」なので捨てるのが正しい回復です。エラーにすべきなのは、再生した内容をディスクへ書き戻す段階の失敗（<code>WritePage</code> のエラーなど）だけ。<code>TestRecoverToleratesTornTail</code> が「エラーを返さないこと」まで検査しているのは、この設計判断を守るためです。</p></div>
+    </details>
+
+    <details class="qa"><summary>Q5. AppendCommit から rewindTo（失敗時の切り戻し）を削除したら、どんなシナリオで壊れる？</summary>
+      <div class="qa-body"><p>例えばディスク満杯で <code>Write</code> が途中まで書いて失敗したとします。アプリはエラーを受け取り、容量を空けて次のコミットを実行、それは成功した — ところがログ上では [壊れた断片][正常なコミット] の並びになっています。再起動時の <code>Recover</code> は壊れた断片で打ち切るので、その<strong>後ろにある成功したはずのコミットが再生されません</strong>。「成功と報告したものが消える」最悪の違反です。壊れ方を末尾に限定するには、失敗のたびに末尾を切り戻して整えておく必要があります。</p></div>
+    </details>
+
+    <details class="qa"><summary>Q6. disk.go の 0 埋め修復で、半端だった部分に大事なデータが入っていたら消えてしまわない？</summary>
+      <div class="qa-body"><p>消えません — 正確には、「消えて困るものは、そこには存在し得ない」が答えです。その半端な尻尾がコミット済みの変更の一部なら、WAL に完全なページイメージが耐久化されており、直後の redo が正しい中身で上書きします。未コミットの変更なら、そもそもディスクに存在してはいけなかったデータなので、0 で消えるのが正しい。どちらに転んでも安全なように「ログが先」の順序が設計されている、という全体構造の帰結です。</p></div>
+    </details>
+
+    <div class="box done"><div class="box-k">✓ 完了の合図</div>
+      <p>WAL パッケージのテスト3本と、M6 の E2E テスト2本がすべて PASS すること。加えて Step 7 の演習で、クラッシュ後の <code>.wal</code> に行データが残り、再起動で行が復活し、WAL が 0 バイトに戻る一部始終を自分の目で確認できていれば、この章は完了です。</p>
+      <pre class="term"><code><span class="ps">$</span> go test ./internal/wal -v
+<span class="out">--- PASS: TestRecoverCommitted (0.02s)
+--- PASS: TestRecoverDiscardsUncommitted (0.02s)
+--- PASS: TestRecoverToleratesTornTail (0.02s)</span>
+<span class="ps">$</span> go test . -run TestM6 -v
+<span class="out">--- PASS: TestM6CrashRecovery (0.05s)
+--- PASS: TestM6UncommittedLostOnCrash (0.03s)</span></code></pre>
+    </div>
+
+    <h2>まとめ — 次の層へ</h2>
+    <p>この章で minidb は、「ただのファイル」から一線を越えました。コミットとは fsync が返る瞬間の名前であること。回復とは、毎起動時に必ず通る、ログの冪等な再生であること。壊れた末尾はエラーではなく「成立しなかったコミット」という正しい答えであること。そしてクラッシュ耐性の半分は、rewind や 0 埋め修復といった<strong>失敗経路の後始末</strong>でできていること。電源を引き抜かなくても、「途中状態のファイルを作って開き直す」テストでそのすべてを検証できることも学びました。</p>
+    <p>ただし、いまの原子性は <strong>1 文ぶん</strong>です。<code>INSERT</code> 1回は「全部か、無しか」になりましたが、「口座 A から 1 万円引き、口座 B に 1 万円足す」— この<strong>2つの文をまとめて</strong>全部か無しかにする手段がまだありません。E2E テストにこっそり登場した <code>BEGIN</code> と <code>COMMIT</code>、その正体である <code>txn.Tx</code>（コミット済みしか下へ流さない私有変更集合）を、次章で組み上げます。あわせて、検索を主キー以外でも速くするセカンダリ索引を張って、この小さなデータベースを完成させましょう。</p>
+
+    <div class="chap-foot">
+      <a class="pager" href="05-sql.html"><span class="dir">← 前へ</span>第05章 · SQL を実行する</a>
+      <a class="pager next" href="07-txn.html"><span class="dir">次へ →</span>第07章 · 索引とトランザクション</a>
+    </div>
+  </main>
+</div>
+</body>
+</html>

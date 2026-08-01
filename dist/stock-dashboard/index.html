@@ -1,0 +1,132 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>指数ダッシュボードを作る — はじめに</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@400;500;600;700&family=Source+Serif+4:opsz,wght@8..60,400;8..60,500;8..60,600&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<div class="shell">
+
+  <aside class="spine">
+    <a class="wordmark" href="index.html">STOCK · from scratch<span class="tick"> ↗</span></a>
+    <div class="book-title">指数ダッシュボードを<br>つくる</div>
+    <div class="book-sub">好きな指数を、好きな期間で</div>
+
+    <div class="legend-rail"><span>読む <b>↓</b></span><span>組む <b>↑</b></span></div>
+
+    <nav aria-label="目次">
+      <ul class="toc">
+        <li><a class="nav-item current" aria-current="page" href="index.html"><span class="nav-num">序</span><span class="nav-label">はじめに<span class="nav-tag">Intro</span></span></a></li>
+        <li><a class="nav-item" href="00-line.html"><span class="nav-num">00</span><span class="nav-label">一本の線を引く<span class="nav-tag">Line</span></span></a></li>
+        <li><a class="nav-item" href="01-fetch.html"><span class="nav-num">01</span><span class="nav-label">データを取ってくる<span class="nav-tag">Fetch</span></span></a></li>
+        <li><a class="nav-item" href="02-store.html"><span class="nav-num">02</span><span class="nav-label">貯めて、切り出す<span class="nav-tag">Store</span></span></a></li>
+        <li><a class="nav-item" href="03-range.html"><span class="nav-num">03</span><span class="nav-label">期間を自由にする<span class="nav-tag">Range</span></span></a></li>
+        <li><a class="nav-item" href="04-overlay.html"><span class="nav-num">04</span><span class="nav-label">二本目を重ねる<span class="nav-tag">Overlay</span></span></a></li>
+        <li><a class="nav-item" href="05-rebase.html"><span class="nav-num">05</span><span class="nav-label">100にそろえる<span class="nav-tag">Rebase</span></span></a></li>
+        <li><a class="nav-item" href="06-downsample.html"><span class="nav-num">06</span><span class="nav-label">長い期間を軽くする<span class="nav-tag">Sample</span></span></a></li>
+        <li><a class="nav-item" href="07-url.html"><span class="nav-num">07</span><span class="nav-label">URLに状態を持たせる<span class="nav-tag">URL</span></span></a></li>
+        <li><a class="nav-item" href="08-finish.html"><span class="nav-num">08</span><span class="nav-label">仕上げと、次の一歩<span class="nav-tag">Finish</span></span></a></li>
+      </ul>
+    </nav>
+
+    <div class="spine-foot">
+      各章は一段の階段。<br>前の章の「できたこと」が<br>次の章の「困りごと」を呼ぶ。
+    </div>
+  </aside>
+
+  <main class="reading">
+    <div class="eyebrow"><span>序章</span><span class="depth">— はじめに</span></div>
+    <h1>好きな指数を、好きな期間で。<br>一段ずつ作る。</h1>
+    <p class="lede">主要な株価指数を、自分で決めた任意の期間で重ねて比べられる——そんなダッシュボードを、一段ずつ組み上げていく教材です。各章で「動くもの」が一つずつ増えていきます。</p>
+
+    <div class="hero" aria-label="完成イメージ：開始時点を100にそろえた指数比較のイメージ図">
+      <svg viewBox="0 0 640 240" role="img">
+        <line x1="40" y1="150" x2="620" y2="150" stroke="#C24A24" stroke-width="1.2" stroke-dasharray="4 4" opacity="0.7"/>
+        <text x="44" y="144" class="baseline-lab">100（開始日）</text>
+        <polyline class="draw" points="40,150 120,120 200,132 280,86 360,104 440,58 520,74 620,36" fill="none" stroke="#1E6E68" stroke-width="2.6" stroke-linejoin="round" stroke-linecap="round"/>
+        <polyline class="draw d2" points="40,150 120,140 200,150 280,128 360,146 440,120 520,132 620,108" fill="none" stroke="#7A8890" stroke-width="2.2" stroke-linejoin="round" stroke-linecap="round"/>
+      </svg>
+      <div class="legend">
+        <span><i style="background:#1E6E68"></i>S&amp;P500</span>
+        <span><i style="background:#7A8890"></i>日経平均</span>
+        <span><i style="background:#C24A24;height:0;border-top:2px dashed #C24A24"></i>基準 100</span>
+      </div>
+    </div>
+
+    <blockquote>
+      作れないものは、理解できない。
+      <cite>この教材の底に流れる考え</cite>
+    </blockquote>
+
+    <h2>この教材の約束</h2>
+    <p>ここでは、設計やコードの細部を全部決めきることはしません。それは <strong>Claude Code と一緒に</strong> あなたが手を動かす部分です。この教材が受け持つのは、<strong>「なぜ次にそれを作るのか」「一段上がると何ができるようになるのか」</strong>を、つまずきごと味わいながら掴むこと。</p>
+    <p>だから各章は短く、順番に意味があります。前の章の「できたこと」が、次の章の「困りごと」を呼び、それを解いてまた一段上がる。その連なりが、完成形まで続きます。</p>
+
+    <div class="insight"><div class="box-k">◈ この教材の底に流れる考え</div>
+      <p>作れないものは、理解できない。既存サイトを使うだけでは見えない仕組みが、自分で一本の線を引いた瞬間から見えはじめます。</p>
+    </div>
+
+    <h2>完成したら、できること</h2>
+    <ul class="plain">
+      <li>見たい指数（S&amp;P500・NASDAQ・半導体指数・日経平均…）を選んで重ねる</li>
+      <li>開始日と終了日を <em>自由に</em> 指定する（固定プリセットに縛られない）</li>
+      <li>開始時点を100にそろえて、スケールの違う指数を同じ土俵で比べる</li>
+      <li>見ている状態をURLで共有し、後から同じ画面を再現する</li>
+    </ul>
+
+    <h2>この本の読み方</h2>
+    <p>左（スマホでは上）の目次に沿って、上から順に進んでください。章はそのまま「一段の階段」で、飛ばすと次章の「困りごと」が唐突に見えます。各章は次の形でできています。</p>
+    <ul>
+      <li><strong>この章のゴール</strong> — 何が「動く」ようになれば卒業か。観測できる形で書いてあります。</li>
+      <li><strong>なぜ次にこれを作るのか</strong> — 前章の到達点から、この章の困りごとがどう生まれるか。</li>
+      <li><strong>手を動かす</strong> — 章の終わりで一度立ち止まり、自分の実装に反映する関所です。</li>
+    </ul>
+    <p>章末の「手を動かす」を飛ばして読み進めることもできますが、<strong>一度立ち止まって手を動かすのが一番の近道</strong>です。読むだけで進むと、次章の壁が急に高く感じます。</p>
+
+    <h2>前提と、かかる時間</h2>
+    <p>必要なのは、なんらかの言語の <strong>基礎文法</strong> と <strong>ターミナル操作</strong> だけです。株価データや金融の予備知識は要りません。むしろ「知らない」状態から作った方が、指数化や間引きといった一つひとつの考え方が腑に落ちます。</p>
+    <p>この教材は<strong>概念の登り方</strong>を渡すもので、コード例は「概念コード」（言語を問わない疑似コード寄り）です。実装言語は自由——参考実装は Go の標準ライブラリのみで書かれており、リポジトリの <code>src/</code> にあります。読了目安は、通して読むだけなら2〜3時間、手を動かしながらで全体10〜20時間ほど。</p>
+
+    <div class="box map"><div class="box-k">☰ 道具箱 — この教材で使う金融の言葉</div>
+      <p>予備知識は要らない、と書きました。とはいえ言葉だけは通じないと進めないので、<strong>この5つ</strong>をここで渡しておきます。逆に言えば、<strong>これ以外の金融知識は最後まで一切要りません</strong>。</p>
+      <ul>
+        <li><strong>株価指数</strong> — 複数の銘柄の値動きを1つの数字にまとめたもの。「市場全体が上がったか下がったか」を表す代表値です（S&amp;P500 = 米国の主要500社、日経平均 = 日本の主要225社、NASDAQ = 米国のハイテク中心、SOX = 半導体関連）。</li>
+        <li><strong>終値（おわりね）</strong> — その日の取引が終わった時点の値。1日1つに決まるので、日次のグラフはこれを並べたものになります。この教材が扱うのは終値だけです。</li>
+        <li><strong>営業日 / 休場日</strong> — 市場が開いている日 / 閉じている日。土日祝は取引が無いので<strong>データそのものが存在しません</strong>。国ごとに休みが違うことが、後で効いてきます（第05章）。</li>
+        <li><strong>pt（ポイント）</strong> — 指数の単位。円やドルではなく「指数の目盛り」です。だからS&amp;P500の4,800ptと日経平均の40,000円は、<strong>そもそも直接比べられません</strong>。この教材が解く問題の出発点です。</li>
+        <li><strong>指数化（リベース）</strong> — 「開始日を100とみなして、そこからの動きを％で表す」変換。単位も桁も違う指数どうしを同じ土俵に載せる技です。詳しくは第05章（この教材の山場）で扱います。</li>
+      </ul>
+    </div>
+
+    <h2>完成品を先に触ってみる（任意）</h2>
+    <p>これから作るものの完成形が、参考実装として <code>src/</code> にあります。ゴールを知ってから登る山は迷いません。Go が入っていれば5分で動きます。</p>
+    <pre><code><span class="cm"># src の中で（Go 1.26+ / 標準ライブラリのみ）</span>
+<span class="kw">cd</span> src
+go build -o stock-dashboard.exe . <span class="kw">&amp;&amp;</span> ./stock-dashboard.exe
+<span class="cm"># → http://127.0.0.1:8787/ をブラウザで開く</span></code></pre>
+    <p>指数を選び、期間を変え、「指数化（開始=100）」に切り替えてみてください。この教材は、この画面が一本の線からどう組み上がるかを、第00章から第08章までの9段の階段に分けて説明します。<strong>先に完成品を触らなくても、序章から順に読めば大丈夫</strong>です。</p>
+
+    <div class="box map"><div class="box-k">☰ この教材の約束ごと</div>
+      <ul>
+        <li>コード例は<strong>概念コード</strong>です。参考実装（<code>src/</code>）の Go とは一対一ではなく、「考え方」を示します。</li>
+        <li>各章末の <strong>手を動かす</strong> が、その章の「完了条件」です。</li>
+        <li>この教材で作るものは<strong>個人の学習用途に限定</strong>します。データの再配布や商用公開はしません（詳しくは第01章）。</li>
+      </ul>
+    </div>
+
+    <p class="hero-rule">それでは、一番小さな一歩から。</p>
+    <p>最初の章で作るのは「ダミーの終値を、折れ線で画面に出す」だけの小さな部品です。地味に見えますが、<strong>線が出る感動</strong>——それが、このダッシュボード全体の出発点になります。</p>
+
+    <div class="chap-foot">
+      <span></span>
+      <a class="pager next" href="00-line.html"><span class="dir">次へ →</span>第00章 · 一本の線を引く</a>
+    </div>
+  </main>
+</div>
+</body>
+</html>

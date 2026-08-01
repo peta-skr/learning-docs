@@ -1,0 +1,234 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>ゼロから作るテキストエディタ — はじめに・準備</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500;600&family=Source+Serif+4:opsz,wght@8..60,400;8..60,600;8..60,700&family=Noto+Serif+JP:wght@400;600;700&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<div class="shell">
+
+  <aside class="spine">
+    <a class="wordmark" href="index.html">MINT EDITOR · from scratch</a>
+    <div class="book-title">ゼロから作る<br>テキストエディタ</div>
+    <div class="book-sub">TypeScript と Canvas で mint editor を組む</div>
+
+    <div class="legend"><span>読む <b>↓</b></span><span>組む <b>↑</b></span></div>
+
+    <nav aria-label="目次">
+      <ul class="toc">
+        <li><a class="nav-item current" aria-current="page" href="index.html"><span class="nav-num">序</span><span class="nav-label">はじめに・準備<span class="nav-tag">Setup</span></span></a></li>
+        <li><a class="nav-item" href="00-overview.html"><span class="nav-num">00</span><span class="nav-label">文字を打てる箱の正体<span class="nav-tag">Overview</span></span></a></li>
+        <li><a class="nav-item" href="01-buffer.html"><span class="nav-num">01</span><span class="nav-label">テキストを持つ<span class="nav-tag">Buffer</span></span></a></li>
+        <li><a class="nav-item" href="02-document.html"><span class="nav-num">02</span><span class="nav-label">行とカーソル<span class="nav-tag">Doc</span></span></a></li>
+        <li><a class="nav-item" href="03-history.html"><span class="nav-num">03</span><span class="nav-label">編集と取り消し<span class="nav-tag">Undo</span></span></a></li>
+        <li><a class="nav-item" href="04-view.html"><span class="nav-num">04</span><span class="nav-label">画面に描く<span class="nav-tag">Canvas</span></span></a></li>
+        <li><a class="nav-item" href="05-input.html"><span class="nav-num">05</span><span class="nav-label">入力を受ける<span class="nav-tag">Input</span></span></a></li>
+        <li><a class="nav-item" href="06-search.html"><span class="nav-num">06</span><span class="nav-label">複数カーソルと検索<span class="nav-tag">Multi</span></span></a></li>
+        <li><a class="nav-item" href="07-highlight.html"><span class="nav-num">07</span><span class="nav-label">色をつける<span class="nav-tag">Syntax</span></span></a></li>
+        <li><a class="nav-item" href="08-ime.html"><span class="nav-num">08</span><span class="nav-label">日本語を打つ<span class="nav-tag">IME</span></span></a></li>
+        <li><a class="nav-item" href="09-assemble.html"><span class="nav-num">09</span><span class="nav-label">開いて保存する・組み立て<span class="nav-tag">Assemble</span></span></a></li>
+      </ul>
+    </nav>
+
+    <div class="spine-foot">
+      各章は一つの部品・機能。<br>下（バッファ）から上（UI）へ<br>積み上げて動かしていく。
+    </div>
+  </aside>
+
+  <main class="reading">
+    <div class="eyebrow"><span>序章</span><span class="depth">— はじめに・準備</span></div>
+    <h1>エディタは、魔法ではない</h1>
+    <p class="lede">まっさらな画面をクリックすると、カーソルが点滅する。キーを叩けば、そこに文字が生える。Enter を押せば行が割れ、日本語に切り替えれば変換候補が浮かぶ。あの当たり前の手触りの裏で何が起きているのか — それを、動くコードを一歩ずつ追いながら解き明かしていく本です。</p>
+
+    <p>エディタを「使う」ことは毎日していても、「中で何が起きているか」を説明できる人は多くありません。テキストをどう持つのか、カーソルはどこにいるのか、なぜ大きなファイルでも軽いのか、Undo はどうやって過去に戻るのか、日本語の変換中の文字はどこに置かれているのか。言葉は知っていても、実際に動くものを一度も作ったことがなければ、それはまだ理解ではなく暗記です。</p>
+
+    <p>この本の方針はひとつです。<strong>作って理解する。</strong> Monaco や CodeMirror のようなエディタ用ライブラリは<strong>いっさい使いません</strong>。空の <code>&lt;canvas&gt;</code> と1本の文字列から始めて、その上に少しずつ部品を積み上げ、最後にはブラウザで開いて<strong>日本語を IME で打ち、複数カーソルで一括編集し、Undo で過去に戻れる</strong>、小さいけれど本物のコードエディタ「mint editor」を TypeScript で組み上げます。実装は約 2,600 行、テストを含めても約 3,300 行。ひとりの人間が全部を読み切れる大きさです。</p>
+
+    <blockquote>
+      作れないものを、私は理解していない。
+      <cite>Richard Feynman</cite>
+    </blockquote>
+
+    <h2>この本の読み方</h2>
+    <p>章は、そのまま mint editor の<strong>部品の層</strong>に対応しています。左の目次を見てください。一番下が「テキストを持つデータ構造（バッファ）」、その上に「行とカーソル」「編集と取り消し」が乗り、さらに上に「画面への描画」「入力の受け取り」、そして「複数カーソル・検索・色・日本語」といった機能が積まれます。<strong>組むときは下から上へ</strong>。土台のないところに描画は乗りません。文字列を正しく編集できないうちに、画面はまともに描けないからです。</p>
+
+    <div class="ascii">mint editor の全体像 — 10 の層（章）
+
+  ┌──────────────────────────────────────────────┐
+  │ 09 組み立て   ファイル入出力・司令塔・UI       │ ← 第09章
+  ├──────────────────────────────────────────────┤
+  │ 06 複数ｶｰｿﾙ  07 色つけ  08 日本語(IME)          │ ← 第06〜08章
+  │            （エディタ体験を仕上げる各機能）     │
+  ├──────────────────────────────────────────────┤
+  │ 04 描画（Canvas・可視範囲だけ）  05 入力受付     │ ← 第04〜05章
+  ├──────────────────────────────────────────────┤
+  │ 03 編集と取り消し（Undo / Redo）                │ ← 第03章
+  ├──────────────────────────────────────────────┤
+  │ 02 行とカーソル（Document・位置の変換）         │ ← 第02章
+  ├──────────────────────────────────────────────┤
+  │ 01 テキストを持つ（ピーステーブル）             │ ← 第01章
+  ├──────────────────────────────────────────────┤
+  │ 00 全体像と TextBuffer という「境界」           │ ← 第00章
+  └──────────────────────────────────────────────┘
+                    ▼
+              1 枚の &lt;canvas&gt;（ブラウザ上で完結）</div>
+
+    <p>各章は<strong>ステップ</strong>に分かれています。1ステップ =「コードを1かたまり書いて（読んで）、動かして、確認する」の単位です。ステップごとに次のものが必ずあります。</p>
+
+    <ul>
+      <li><strong>コードの全文</strong> — 断片ではなく、その時点で必要なコードすべてを載せます。本書のコードはリポジトリの <code>src/src/</code> にある完成版と一致しています。</li>
+      <li><strong>コードの解説</strong> — 初見でつまずきやすい行は、取り出して説明します。</li>
+      <li><strong>動かして確認</strong> — 実際に打つコマンドと、通るはずのテスト。「読んだだけ」で先に進まないための関所です。</li>
+    </ul>
+
+    <p>章末には<strong>つまずき FAQ</strong> と<strong>理解度チェック</strong>があります。理解度チェックの問いに自分の言葉で答えられたら、その章は卒業です。</p>
+
+    <div class="box map"><div class="box-k">☰ 進め方は2通り</div>
+      <ol>
+        <li><strong>読む派</strong> — <code>src/</code> の完成コードをエディタで開き、本書を横に置いて読み進め、各ステップの「動かして確認」を実行する。<em>初心者にはこちらをおすすめします。</em></li>
+        <li><strong>写経派</strong> — 空の Vite + TypeScript プロジェクトを自分で作り、本書のコードを手で打ちながら組み上げる。時間はかかりますが、いちばん力がつきます。動かなくなったら <code>src/</code> と差分を見比べれば復帰できます。</li>
+      </ol>
+    </div>
+
+    <h2>前提と、かかる時間</h2>
+    <p>必要なのは <strong>TypeScript の基礎</strong>（変数・関数・クラス・<code>interface</code>・配列）と、<strong>ブラウザ・Canvas がどういうものか</strong>のざっくりした感覚、そして<strong>ターミナル操作</strong>だけです。エディタ内部の予備知識はまったく要りません。むしろ「知らない」状態から作った方が、一つひとつの概念が腑に落ちます。</p>
+    <p>本書で多用する道具（<code>interface</code> による境界、<code>readonly</code>、UTF-16 のオフセット、Canvas 2D の描画、DOM 非依存で純粋ロジックを切り出す設計、vitest でのテスト）は、この序章の「TypeScript と本書の道具箱」でまとめて解説し、各章でも初出のたびに <strong>TS メモ</strong>というボックスで補足します。分からない文法が出てきたら、まずそこを見てください。</p>
+    <p>読了目安は、読む派で <strong>1章あたり1.5〜3時間、全体で15〜25時間</strong>。1日1ステップでも1〜2ヶ月で完走できます。急がないこと。1章飛ばすと次の章は必ず分からなくなる構成なので、<strong>順番に、確認コマンドを全部通しながら</strong>進んでください。</p>
+
+    <h2>テキストエディタとは何か — 3行で</h2>
+    <p>先に、これから作るものの正体を短く言い切っておきます。煎じ詰めれば、エディタは次の3つの仕事をする箱です。</p>
+    <ul>
+      <li>エディタは<strong>文字列を持つデータ構造</strong>です。編集中のテキストをメモリ上に保持し、「どこに何文字挿入・削除するか」を効率よくこなします（だから大きなファイルでも軽い）。</li>
+      <li>その文字列の上に<strong>カーソルと編集操作</strong>があります。位置を数え、範囲を選び、挿入・削除・取り消しをする。ここがエディタの頭脳です。</li>
+      <li>そして<strong>画面への描画と入力の受け取り</strong>があります。見えている範囲だけを <code>&lt;canvas&gt;</code> に描き、キーボード・マウス・IME からの入力を編集操作に翻訳します。</li>
+    </ul>
+    <p>この3行を「自分の書いたコードで説明できる」状態が、本書のゴールです。第00章では、この4つの部品（テキスト / カーソルと編集 / 描画 / 入力）を分解し、いちばん下の「テキストを持つ」の<strong>境界</strong>から作り始めます。</p>
+
+    <h2>環境構築</h2>
+    <p>やることは3つだけです。Node を入れ、コードを手元に置き、テストが通ることを確かめます。</p>
+
+    <h3>1. Node.js をインストールする</h3>
+    <p><a href="https://nodejs.org/" target="_blank" rel="noopener">nodejs.org</a> から自分の OS 用のインストーラを入れて、ターミナルで確認します。本書のコード（Vite 5 系）は <strong>Node 18 以上</strong>を想定しています。<code>node</code> と一緒に <code>npm</code> も入ります。</p>
+    <pre class="term"><code><span class="ps">$</span> node -v
+<span class="out">v20.11.0</span>
+<span class="ps">$</span> npm -v
+<span class="out">10.2.4</span></code></pre>
+
+    <h3>2. コードを手元に置く</h3>
+    <p>本書のコード一式はリポジトリの <code>src/</code> ディレクトリです。以後、<strong>本書のコマンドはすべて <code>src/</code> の中で実行します</strong>。実装は「DOM を知らない純粋ロジック」と「ブラウザに触る DOM 層」の2つに、はっきり分けてあります。</p>
+    <div class="ascii">src/
+├── package.json            ← 依存とスクリプト（dev / build / test）
+├── index.html              ← 入口の HTML（&lt;div id="app"&gt; だけ。中身は main.ts が組む）
+├── src/
+│   ├── main.ts             ← 組み立て・&lt;canvas&gt; の設置・ツールバー（第09章）
+│   ├── core/               ← DOM 非依存の純粋ロジック（単体テストの対象）
+│   │   ├── buffer.ts       ← TextBuffer 境界 + SimpleBuffer（第00章）
+│   │   ├── pieceTable.ts   ← ピーステーブル（本命バッファ・第01章）
+│   │   ├── document.ts     ← 行とオフセットの変換・applyEdits（第02章）
+│   │   ├── history.ts      ← Undo / Redo（第03章）
+│   │   ├── selection.ts    ← 複数カーソル・範囲（第06章）
+│   │   ├── search.ts       ← 検索・置換（第06章）
+│   │   ├── tokenizer.ts    ← 字句解析（第07章）
+│   │   └── highlighter.ts  ← 色分け（第07章）
+│   └── editor/             ← DOM 層（ブラウザに触る）
+│       ├── editor.ts       ← 司令塔（実は DOM 非依存でテスト可能）
+│       ├── view.ts         ← Canvas 描画（可視範囲のみ・第04章）
+│       ├── metrics.ts      ← 文字幅の計測（第04章）
+│       ├── input.ts        ← キー・マウス・IME の受付（第05・08章）
+│       ├── fileio.ts       ← 開く / 保存する（第09章）
+│       └── findbar.ts      ← 検索バー UI（第06章）
+└── e2e/smoke.mjs           ← Playwright E2E（受け入れ基準をなぞる）</div>
+
+    <div class="gonote"><div class="box-k">TS メモ · core と editor を分ける理由</div>
+      <p>本書の実装は、フォルダを <code>core/</code> と <code>editor/</code> に分けています。<code>core/</code> は<strong>ブラウザの API（<code>document</code>・<code>window</code>・<code>&lt;canvas&gt;</code>）を一切触らない純粋な TypeScript</strong>です。だから Node 上の vitest でそのままテストできます。壊れやすいロジック — バッファの編集、Undo のまとめ方、複数カーソルの衝突 — は全部こちらに置き、機械で何百回も検査します。<code>editor/</code> はブラウザに触る層で、画面描画やキーイベントを扱います。「純粋なロジックを DOM から引き剥がす」——この分離こそが、エディタのように複雑なものを<strong>テスト可能</strong>にし、一歩ずつ確実に積み上げられる鍵です。第00章で作る <code>TextBuffer</code> 境界は、この分離の最初の一手です。</p>
+    </div>
+
+    <h3>3. テストが通ることを確かめる</h3>
+    <pre class="term"><code><span class="ps">$</span> cd src
+<span class="ps">$</span> npm install
+<span class="out">added 42 packages in 6s</span>
+<span class="ps">$</span> npm test
+<span class="out">✓ src/core/pieceTable.test.ts …（略）
+ Test Files  7 passed (7)
+      Tests  70 passed (70)</span></code></pre>
+    <p><code>70 passed</code> になれば準備完了です。このテスト群（vitest 70件）は、各章の「完了の合図」を機械的に検収するものでもあります。1件でも赤いまま先へ進まないでください。</p>
+
+    <div class="box hazard"><div class="box-k">⚠ 落とし穴 — 日本語を含むパスで Vite が落ちることがある（Windows）</div>
+      <p>Windows で <code>npm run dev</code>（Vite）を動かすとき、<strong>プロジェクトの絶対パスに日本語（全角文字）が含まれていると</strong>、Vite が <code>exit 0xC0000409</code> でクラッシュする事例があります。本書のテスト（<code>npm test</code>）と型チェック（<code>npm run build</code>）は Node 上で完結するので影響を受けませんが、<strong>ブラウザで完成品を触る</strong>ときに困ることがあります。その場合はコードを英語だけのパス（例 <code>C:\work\mint\</code>）にコピーしてから <code>npm run dev</code> してください。</p>
+    </div>
+
+    <h3>おまけ: 完成品を先に触ってみる</h3>
+    <p>これから作るものの完成形を、先に触っておきましょう。ゴールを知ってから登る山は、迷いません。<code>src/</code> で開発サーバを立ち上げ、表示された URL をブラウザで開きます。</p>
+    <pre class="term"><code><span class="ps">$</span> npm run dev
+<span class="out">  VITE v5.4.x  ready in 320 ms
+  ➜  Local:   http://localhost:5173/</span></code></pre>
+    <p>ブラウザで開いたら、次を試してみてください。これがこの本のゴールです。</p>
+    <ul>
+      <li><strong>文字を打つ</strong> — クリックしてカーソルを置き、英数字を打つ。Enter で改行、Backspace で削除。</li>
+      <li><strong>日本語を打つ</strong> — IME をオンにして「にほんご」と打ち、変換候補が<strong>カーソルの真下</strong>に出て、確定すると1回の編集として入るのを見る。</li>
+      <li><strong>複数カーソル</strong> — <code>Alt</code> を押しながら数か所をクリックしてカーソルを増やし、同じ文字を一括で打ち込む。</li>
+      <li><strong>取り消し</strong> — <code>Ctrl+Z</code> で連続入力がまとめて1回で戻り、<code>Ctrl+Y</code> でやり直せる。</li>
+    </ul>
+    <p>ライブラリの助けを借りず、たった 2,600 行でここまで動きます。この本はこれから10章かけて、この一つひとつの手触りの裏側を、自分のコードで説明できるようになるまで潜っていきます。</p>
+
+    <h2>TypeScript と本書の道具箱</h2>
+    <p>エディタの実装は「文字列を切り貼りし、位置を数え、画面へ描き、入力を翻訳する」世界です。最初にまとめて顔合わせしておきます。<strong>いま全部を覚える必要はありません。</strong>各章で出てきたときに、ここへ戻って確認できれば十分です。</p>
+
+    <h3>interface — 部品どうしの「境界」を先に決める</h3>
+    <p>TypeScript の <code>interface</code> は「この形さえ満たしていれば、中身は何でもいい」という<strong>契約</strong>です。本書では、これを部品と部品の<strong>境界</strong>を切るのに使います。たとえば「テキストを持つ人（バッファ）」に求めるのは、突き詰めれば「読む」と「置き換える」だけ。それだけを <code>interface</code> に書いておけば、上の層は中身の実装を知らずに済みます。</p>
+    <pre><code><span class="kw">interface</span> <span class="ty">TextBuffer</span> {
+  <span class="kw">readonly</span> length: <span class="ty">number</span>;
+  slice(from: <span class="ty">number</span>, to: <span class="ty">number</span>): <span class="ty">string</span>;   <span class="cm">// 読む</span>
+  replace(from: <span class="ty">number</span>, to: <span class="ty">number</span>, text: <span class="ty">string</span>): <span class="ty">void</span>; <span class="cm">// 置き換える</span>
+  <span class="cm">// …（実物にはもう1つ getText() がある。第00章で全文を見ます）</span>
+}</code></pre>
+    <p>この <code>interface</code> があるおかげで、素朴な実装（第00章の <code>SimpleBuffer</code>）と、速い実装（第01章の <code>PieceTableBuffer</code>）を、上の層に一切影響を与えず<strong>差し替え</strong>られます。境界を先に決めるのが、本書のいちばん大事な設計作法です。</p>
+
+    <h3>readonly と number — 位置は「文字数」で数える</h3>
+    <p>エディタで「位置」を表す方法は2つあります。本書では文書先頭からの<strong>文字数（オフセット）</strong>を基本に、必要なときだけ <code>(行, 桁)</code> に変換します。</p>
+    <table>
+      <tr><th>表し方</th><th>意味</th><th>使う場面</th></tr>
+      <tr><td>オフセット（<code>number</code>）</td><td>文書先頭から数えた文字数</td><td>編集ロジック（挿入・削除）。素直で速い</td></tr>
+      <tr><td>Position（<code>{line, column}</code>）</td><td>行番号と桁番号</td><td>画面表示・ステータスバー・クリック位置</td></tr>
+    </table>
+    <p><code>readonly length</code> のように <code>readonly</code> を付けると「読めるが書き換えられない」プロパティになります。バッファの長さは外から勝手にいじられては困るので、こうして守ります。<code>number</code> の「文字数」は正確には <strong>UTF-16 のコード単位数</strong>で、絵文字のようにサロゲートペアを含むと1文字が2単位になることがあります。この落とし穴は第01章で正面から扱います。</p>
+
+    <h3>Canvas 2D — 画面は「毎フレーム描き直す」</h3>
+    <p>本書は文字を <code>&lt;div&gt;</code> や DOM で並べません。1枚の <code>&lt;canvas&gt;</code> に、見えている行だけを<strong>自分で描き</strong>ます。Canvas 2D の道具はごくわずかです。</p>
+    <table>
+      <tr><th>呼び出し</th><th>意味</th></tr>
+      <tr><td><code>ctx.fillText(s, x, y)</code></td><td>文字列 <code>s</code> を座標 <code>(x, y)</code> に描く</td></tr>
+      <tr><td><code>ctx.measureText(s).width</code></td><td>文字列 <code>s</code> を描いたときの幅（ピクセル）</td></tr>
+      <tr><td><code>ctx.fillRect(x, y, w, h)</code></td><td>矩形を塗る（選択範囲やカーソルの描画に）</td></tr>
+    </table>
+    <p>「DOM に文字を並べる」のではなく「絵として描く」から、10万行あっても<strong>見えている数十行だけ</strong>描けば済み、軽い。この発想が第04章の心臓になります。</p>
+
+    <h3>DOM 非依存設計 — ロジックをブラウザから引き剥がす</h3>
+    <p>本書のコアロジック（<code>core/</code>）は <code>document</code> も <code>window</code> も触りません。純粋な入力（文字列と数値）を受け取り、純粋な出力を返す関数とクラスの集まりです。だから Node 上でテストでき、ブラウザを開かずに何百回も検査できます。「エディタは複雑だからテストしにくい」という思い込みを、この分離が壊します。</p>
+
+    <h3>vitest — 正しさを機械に見張らせる</h3>
+    <p>本書のテストは <code>vitest</code> で書かれています。<code>it("説明", () =&gt; { expect(actual).toBe(expected) })</code> の形で「こう動くはず」を宣言し、<code>npm test</code> で一括検証します。とくに第01章では、素朴な <code>SimpleBuffer</code> を<strong>正解（オラクル）</strong>として、速いピーステーブルにランダムな編集を2000回浴びせ、両者の結果が完全一致することを確かめます。「速い実装が正しい」を、目視ではなく機械で保証する——これが本書の品質の背骨です。</p>
+
+    <h2>この本の約束ごと</h2>
+    <ul>
+      <li>コードブロックの上のラベル（例: <code>core/buffer.ts</code>）は、そのコードが <code>src/src/</code> のどのファイルにあるかを示します。</li>
+      <li>紙面の都合で一部を省くときは、必ず <code>// …（後のステップで）</code> のように省略を明示します。黙って削ることはしません。</li>
+      <li><strong>TS メモ</strong> = TypeScript の文法・設計作法の補足。<strong>⚠ 落とし穴</strong> = 実際にバグになりやすい箇所。<strong>▸ 動かして確認</strong> = 実行するコマンドと期待されるテスト結果です。</li>
+    </ul>
+
+    <p class="hero-rule">それでは、一番下の層から。</p>
+    <p>最初の章（第00章）で作るのは、まだ画面もカーソルもありません。「エディタとは何か」を4つの部品に分解し、いちばん下の「テキストを持つ」の<strong>境界（インターフェース）</strong>を1つ引き、その素朴な実装を書くだけです。地味に見えますが、この1本の境界が、以降10章ぶんの積み上げと、全 70 件のテストの土台になります。</p>
+
+    <div class="chap-foot">
+      <span></span>
+      <a class="pager next" href="00-overview.html"><span class="dir">次へ →</span>第00章 · 文字を打てる箱の正体</a>
+    </div>
+  </main>
+</div>
+</body>
+</html>

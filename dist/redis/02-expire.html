@@ -1,0 +1,541 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>第02章 有効期限 — Redis をつくる</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500;600&family=Source+Serif+4:opsz,wght@8..60,400;8..60,600;8..60,700&family=Noto+Serif+JP:wght@400;600;700&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<div class="shell">
+
+  <aside class="spine">
+    <a class="wordmark" href="index.html">MINI-REDIS · from scratch</a>
+    <div class="book-title">Redis を<br>つくる</div>
+    <div class="book-sub">Go で RESP から Sorted Set まで</div>
+
+    <div class="legend"><span>読む <b>↓</b></span><span>組む <b>↑</b></span></div>
+
+    <nav aria-label="目次">
+      <ul class="toc">
+        <li><a class="nav-item" href="index.html"><span class="nav-num">序</span><span class="nav-label">はじめに・準備<span class="nav-tag">Setup</span></span></a></li>
+        <li><a class="nav-item" href="00-server.html"><span class="nav-num">00</span><span class="nav-label">返事をするサーバ<span class="nav-tag">RESP</span></span></a></li>
+        <li><a class="nav-item" href="01-keyspace.html"><span class="nav-num">01</span><span class="nav-label">キーと値<span class="nav-tag">Store</span></span></a></li>
+        <li><a class="nav-item current" aria-current="page" href="02-expire.html"><span class="nav-num">02</span><span class="nav-label">有効期限<span class="nav-tag">Expire</span></span></a></li>
+        <li><a class="nav-item" href="03-string.html"><span class="nav-num">03</span><span class="nav-label">数としての文字列<span class="nav-tag">String</span></span></a></li>
+        <li><a class="nav-item" href="04-list.html"><span class="nav-num">04</span><span class="nav-label">List<span class="nav-tag">List</span></span></a></li>
+        <li><a class="nav-item" href="05-hash.html"><span class="nav-num">05</span><span class="nav-label">Hash<span class="nav-tag">Hash</span></span></a></li>
+        <li><a class="nav-item" href="06-set.html"><span class="nav-num">06</span><span class="nav-label">Set とエンコーディング<span class="nav-tag">Set</span></span></a></li>
+        <li><a class="nav-item" href="07-zset.html"><span class="nav-num">07</span><span class="nav-label">Sorted Set と skiplist<span class="nav-tag">ZSet</span></span></a></li>
+        <li><a class="nav-item" href="08-pubsub.html"><span class="nav-num">08</span><span class="nav-label">Pub/Sub<span class="nav-tag">PubSub</span></span></a></li>
+        <li><a class="nav-item" href="09-finish.html"><span class="nav-num">09</span><span class="nav-label">仕上げと設計判断<span class="nav-tag">Finish</span></span></a></li>
+      </ul>
+    </nav>
+
+    <div class="spine-foot">
+      各章は一つのデータ型・機能。<br>下（RESP）から上（Sorted Set）へ<br>積み上げて動かしていく。
+    </div>
+  </aside>
+
+  <main class="reading">
+    <div class="progress-tag">第02章 / 全10章 · 層: EXPIRE · 読了目安 2〜3時間</div>
+    <div class="eyebrow"><span>EXPIRE</span><span class="depth">— キースペースの時間軸</span></div>
+    <h1>有効期限</h1>
+    <p class="lede">Redis のキーは、放っておけば永遠に残ります。ですがキャッシュやセッションのように「<strong>◯秒だけ生きていればいい</strong>」値も無数にあります。この章では、キーに<strong>失効時刻</strong>を刻み、時が来たら自動で消える仕組みを作ります。肝は、消し方が<strong>2本立て</strong>だということ — 触ったときに消す<strong>Lazy 失効</strong>と、誰も触らなくても背後で消して回る<strong>Active 失効</strong>。なぜ両方が要るのか。その理由が、この章の主題です。</p>
+
+    <div class="box goal"><div class="box-k">◈ この章のゴール</div>
+      <p>次の 2 つを、自分の目と手で確認できたら達成です。</p>
+      <ol>
+        <li><code>go test -run TestExpireLazyAndTTL -v</code> と <code>go test -run TestActiveExpire -v</code> が PASS する。<code>EXPIRE</code>→<code>TTL</code>→<code>PERSIST</code> の往復と、<strong>触らなくても消える</strong>Active 失効が動くのを見る。</li>
+        <li><code>go test -run TestExpireOverflow -v</code> が PASS する。巨大すぎる期限が「即削除の誤動作」ではなく<strong>エラーで弾かれ、キーが無傷で残る</strong>ことを目視する。細部の堅さこそ本家らしさです。</li>
+      </ol>
+    </div>
+
+    <div class="box map"><div class="box-k">☰ この章のステップ</div>
+      <ol>
+        <li><a href="#step-1">失効時刻をどこに持つか — <code>expires</code> テーブル</a></li>
+        <li><a href="#step-2">失効時刻を刻む — <code>Expire</code> と <code>cmdExpire</code></a></li>
+        <li><a href="#step-3">Lazy 失効 — 読むついでに消す（<code>getLocked</code>）</a></li>
+        <li><a href="#step-4">残り時間を答える — <code>TTL</code> / <code>PTTL</code> / <code>PERSIST</code></a></li>
+        <li><a href="#step-5">Active 失効 — サンプリングと 25% ルール（<code>expireCycle</code>）</a></li>
+        <li><a href="#step-6">背後で回し続ける — <code>activeExpireLoop</code> と ticker</a></li>
+        <li><a href="#step-7">テストを読む — 触らずに消えることを確かめる</a></li>
+      </ol>
+    </div>
+
+    <h2>失効時刻をどこに持つか</h2>
+    <p>第01章で作った <code>Store</code> は、キーと値をしまう <code>data</code> という辞書を持っていました。ここに「有効期限」を足すとき、最初に決めるべきは<strong>失効時刻をどこに持つか</strong>です。素朴には「値の隣に賞味期限を貼る」方法が思いつきますが、Redis は違う道を選びました。<strong>期限を持つキーだけを集めた、もう一枚の辞書</strong>を別に用意するのです。それが <code>expires</code> テーブルです。</p>
+    <p>第01章で見た <code>Store</code> の定義を、期限まわりに焦点を当ててもう一度眺めます。</p>
+
+    <div class="file-tag">store.go（第01章で定義済み・再掲）</div>
+    <pre><code><span class="cm">// Store はキースペース本体。</span>
+<span class="cm">//   - data:    キー → 値。値は string / *List / Hash / *Set / *ZSet のどれか</span>
+<span class="cm">//   - expires: キー → 失効時刻。有効期限を持つキーだけがここに載る</span>
+<span class="cm">//</span>
+<span class="cm">// ロックは RWMutex ではなく Mutex。Lazy 失効を入れると「読むだけの操作」が</span>
+<span class="cm">// 失効キーの削除（＝書き込み）を伴うため、読み書きを区別する意味が薄くなる。</span>
+<span class="kw">type</span> <span class="ty">Store</span> <span class="kw">struct</span> {
+	mu      sync.<span class="ty">Mutex</span>
+	data    <span class="kw">map</span>[<span class="ty">string</span>]<span class="ty">any</span>
+	expires <span class="kw">map</span>[<span class="ty">string</span>]time.<span class="ty">Time</span>
+}</code></pre>
+
+    <p><code>data</code> と <code>expires</code> は<strong>別々の辞書</strong>で、キー文字列を共通の鍵として横に並んでいます。「<code>k</code> という値がある」ことは <code>data["k"]</code> の有無で決まり、「<code>k</code> に期限がある」ことは <code>expires["k"]</code> の有無で決まる。<strong>期限を持たないキーは <code>expires</code> に一切現れません</strong>。これが効いてくるのは第5ステップの Active 失効です。「期限を持つキーだけ」を走査したいとき、<code>data</code> 全体（何百万件あるかもしれない）ではなく <code>expires</code> だけ見ればよい。多くのキーが無期限な現実のワークロードで、この分離が掃除のコストを劇的に下げます。</p>
+    <p>ロックが <code>RWMutex</code> ではなく <code>Mutex</code> なのも、実は有効期限のせいです。ふつう「読むだけ」の操作は複数同時に許してよい（<code>RWMutex</code> の読みロック）はずですが、これから作る<strong>Lazy 失効</strong>は「<code>GET</code> のような読み取りが、失効キーを見つけたらその場で削除する」——つまり<strong>読み取りが書き込みを兼ねる</strong>ので、読み書きを分ける旨味が薄れます。だから素直に単一 <code>Mutex</code> にしています。この判断の全文は最終章のADRにあります。</p>
+
+    <div class="gonote"><div class="box-k">GO メモ · time.Time と time.Duration</div>
+      <p>Go の時間表現は2種類あり、役割が違います。<code>time.Time</code> は「<strong>時刻の1点</strong>」（例: 2026年7月13日 10:00:00）。<code>time.Duration</code> は「<strong>長さ</strong>」（例: 100秒）で、正体は <code>int64</code> のナノ秒です。<code>time.Now()</code> が現在時刻（<code>Time</code>）を、<code>t.Add(d)</code> が「時刻 + 長さ = 時刻」を、<code>time.Until(t)</code> が「その時刻まであと何秒か」を <code>Duration</code> で返します。本章の <code>expires</code> は<strong>失効する時刻そのもの</strong>（<code>Time</code>）を持ちます。「あと何秒」ではなく「いつ切れるか」を保存するのがコツで、そうすれば途中で時計を見るたびに残りを引き算で出せます。<code>time.Second</code>・<code>time.Millisecond</code> は「1秒」「1ミリ秒」ぶんの <code>Duration</code> 定数です。</p>
+    </div>
+
+    <h2>なぜ Lazy と Active の2本立てなのか</h2>
+    <p>コードに入る前に、この章の背骨——<strong>失効の2本立て</strong>——の理由を先に腹落ちさせます。ここが分かれば、あとのコードは「なるほどそう書くしかない」と読めます。</p>
+    <p>期限切れのキーを消す方法は、大きく2つ考えられます。</p>
+    <ul>
+      <li><strong>Lazy 失効（アクセス駆動）</strong>: キーを触った瞬間だけ「もう切れてる?」と確認し、切れていたらそこで消す。<code>GET k</code> したとき、<code>k</code> が期限切れなら「無い」と答えつつ削除する。</li>
+      <li><strong>Active 失効（時間駆動）</strong>: 誰も触らなくても、バックグラウンドで定期的に期限テーブルを見回り、切れたキーを消して回る。</li>
+    </ul>
+    <p>もし<strong>Lazy だけ</strong>にすると、致命的な穴が開きます。<strong>二度と誰もアクセスしないキーは、永遠にメモリに居座る</strong>のです。1時間で切れるセッションを100万件作り、そのうち99万件は二度とアクセスされなかったとしたら——Lazy 失効はアクセスされないキーに手を出せないので、切れたはずの99万件がずっとメモリを食い続けます。「有効期限を付けたのにメモリが減らない」。これは実運用で本当に起きる事故です。</p>
+    <p>逆に<strong>Active だけ</strong>にすると、こんどはレイテンシとの戦いになります。全キーの期限を毎回きっちり調べれば取りこぼしはありませんが、キーが増えるほど掃除が重くなり、その間サーバが止まります。かといって間隔を空ければ、<strong>切れているのにまだ消えていないキー</strong>を <code>GET</code> で引いてしまい、「幽霊」を返しかねません。</p>
+    <p>だから Redis は<strong>両方</strong>を使います。<strong>Lazy 失効が「正しさ」を保証し</strong>（触った瞬間に必ず失効を判定するので、切れたキーは絶対に見えない）、<strong>Active 失効が「メモリ」を回収する</strong>（誰も触らないキーも背後で消えていく）。Active は全数調査ではなく、あとで見る<strong>サンプリング + 25% ルール</strong>で「ほどほどに掃除して、重くなりすぎたらやめる」という妥協をします。メモリとレイテンシのトレードオフを、2つの機構の分担で捌く——これが Redis の失効設計の核心です。</p>
+
+    <div class="ascii">失効の2本立て — なぜ両方要るのか
+
+  ┌─ Lazy 失効 ────────────┐   触った時だけ判定して消す
+  │  GET k → 切れてる? → 消す │   → 「正しさ」を保証（幽霊を返さない）
+  └────────────────────────┘   ✗ 触らないキーは永遠に残る
+
+  ┌─ Active 失効 ──────────┐   背後で定期巡回して消す
+  │  100ms ごとに20件サンプル │   → 「メモリ」を回収（触らなくても消える）
+  └────────────────────────┘   ✗ 全数調査は重い → サンプリングで妥協
+
+  両方あって初めて「正しく、かつ漏れなく」失効する</div>
+
+    <h2 class="step" id="step-1"><span class="step-no">Step 1</span>失効時刻をどこに持つか — expires テーブル</h2>
+    <p>Step 1 は概念の確認です。<code>expires</code> テーブルの「載る／載らない」のルールを、コードの契約として言葉にしておきます。この章のすべての関数が、この契約の上で動きます。</p>
+    <table>
+      <tr><th>状態</th><th><code>data[k]</code></th><th><code>expires[k]</code></th><th><code>TTL k</code> の答え</th></tr>
+      <tr><td>キーが無い</td><td>無</td><td>無</td><td><code>-2</code></td></tr>
+      <tr><td>値はあるが無期限</td><td>有</td><td>無</td><td><code>-1</code></td></tr>
+      <tr><td>期限つき（生存中）</td><td>有</td><td>有</td><td>残り秒数</td></tr>
+      <tr><td>期限つき（失効済み・未回収）</td><td>有</td><td>有</td><td>触れば <code>-2</code>（＝消える）</td></tr>
+    </table>
+    <p>いちばん下の行が、この章の面白いところです。<strong>「失効時刻を過ぎたのに、まだ <code>data</code>・<code>expires</code> に残っている」瞬間</strong>が実在します。Active 失効がまだ巡回してきておらず、誰もそのキーに触っていないと、物理的にはメモリに居座っているのです。ですが Lazy 失効のおかげで、<strong>誰かが触った途端に「無い」（<code>-2</code>）と答え、その場で消えます</strong>。「論理的には切れている」と「物理的にまだ在る」の食い違いを、触った瞬間に解消する——これが次のステップ以降で繰り返し出てくるパターンです。</p>
+
+    <div class="box hazard"><div class="box-k">⚠ 落とし穴 — 「無い」には2種類ある</div>
+      <p><code>TTL</code> の答えの <code>-2</code>（キーが無い）と <code>-1</code>（値はあるが無期限）は、初見だと取り違えます。<strong><code>-2</code> は「そもそもキーが存在しない」</strong>（失効済みで消えた場合も含む）、<strong><code>-1</code> は「キーはあるが期限が付いていない」</strong>。この2つを混同すると「無期限なのに消えたと誤判定する」バグに直結します。本家 Redis と同じ規約なので、数字ごと覚えてしまうのが早いです。</p>
+    </div>
+
+    <h2 class="step" id="step-2"><span class="step-no">Step 2</span>失効時刻を刻む — Expire と cmdExpire</h2>
+    <p>まず「期限を付ける」側から作ります。<code>Store</code> のメソッド <code>Expire</code> が失効時刻を <code>expires</code> に書き込む本体で、コマンド層の <code>cmdExpire</code> が <code>EXPIRE</code>/<code>PEXPIRE</code> コマンドの引数を捌いてそれを呼びます。まず <code>Store.Expire</code> から。</p>
+
+    <div class="file-tag">store.go</div>
+    <pre><code><span class="cm">// Expire は相対時間で失効時刻を設定する。キーが無ければ false。</span>
+<span class="cm">// 0 以下を指定されたら、その場で削除する（本家と同じ）。</span>
+<span class="kw">func</span> (s *<span class="ty">Store</span>) Expire(key <span class="ty">string</span>, d time.<span class="ty">Duration</span>) <span class="ty">bool</span> {
+	s.mu.Lock()
+	<span class="kw">defer</span> s.mu.Unlock()
+	<span class="kw">if</span> _, ok := s.getLocked(key); !ok {
+		<span class="kw">return</span> <span class="kw">false</span>
+	}
+	<span class="kw">if</span> d &lt;= <span class="st">0</span> {
+		s.removeLocked(key)
+		<span class="kw">return</span> <span class="kw">true</span>
+	}
+	s.expires[key] = time.Now().Add(d)
+	<span class="kw">return</span> <span class="kw">true</span>
+}</code></pre>
+
+    <p>逐行で追います。まず <code>s.mu.Lock()</code> でストア全体を守り（第01章と同じ作法）、<code>defer</code> で確実に解放します。次の <code>s.getLocked(key)</code> が肝で、これは第01章で作った「値を取るヘルパー」ですが、<strong>実は Lazy 失効を仕込んである</strong>（次のステップで中身を読みます）。ここで <code>ok</code> が <code>false</code> なら「キーが無い（あるいは既に切れていて消えた）」なので、期限の付けようがなく <code>false</code> を返します。<code>EXPIRE no 100</code> が <code>0</code> を返すのはこの分岐です。</p>
+    <p>次の <code>if d &lt;= 0</code> が、細部だけれど大事なところ。<strong>0 以下の期間を指定されたら、期限を付けるのではなく<em>その場で削除</em>する</strong>のが本家の挙動です。「すでに過去の時刻に失効させろ」という指示は、実質「今すぐ消せ」と同じだからです。<code>EXPIRE k2 -1</code> がキーを消す（テストで <code>EXISTS k2</code> が <code>0</code> になる）のはこれ。</p>
+    <p>正の期間なら、最後の <code>s.expires[key] = time.Now().Add(d)</code>。<strong>現在時刻に長さ <code>d</code> を足した「失効する時刻」</strong>を <code>expires</code> テーブルに書き込みます。ここで「あと何秒」ではなく「いつ切れるか」を保存しているのがポイント。以後どのタイミングで残りを問われても、<code>time.Until(exp)</code> の引き算一発で答えられます。</p>
+    <p>では、この <code>Expire</code> を呼ぶコマンド層 <code>cmdExpire</code> です。<code>expire.go</code> の全文はこの関数から始まります。</p>
+
+    <div class="file-tag">expire.go</div>
+    <pre><code><span class="kw">package</span> main
+
+<span class="kw">import</span> (
+	<span class="st">"math"</span>
+	<span class="st">"strconv"</span>
+	<span class="st">"time"</span>
+)
+
+<span class="cm">// EXPIRE key seconds / PEXPIRE key milliseconds</span>
+<span class="kw">func</span> cmdExpire(s *<span class="ty">Store</span>, args []<span class="ty">string</span>, unit time.<span class="ty">Duration</span>, name <span class="ty">string</span>) <span class="ty">string</span> {
+	<span class="kw">if</span> len(args) != <span class="st">3</span> {
+		<span class="kw">return</span> errorMsg(<span class="st">"ERR wrong number of arguments for '"</span> + name + <span class="st">"' command"</span>)
+	}
+	n, err := strconv.ParseInt(args[<span class="st">2</span>], <span class="st">10</span>, <span class="st">64</span>)
+	<span class="kw">if</span> err != <span class="kw">nil</span> {
+		<span class="kw">return</span> errorMsg(<span class="st">"ERR value is not an integer or out of range"</span>)
+	}
+	<span class="cm">// Duration への変換がオーバーフローする値は拒否する。</span>
+	<span class="cm">// 通すと符号が折り返して「巨大な期限のつもりが即削除」という誤動作になる。</span>
+	<span class="kw">if</span> n &gt; math.MaxInt64/int64(unit) || n &lt; math.MinInt64/int64(unit) {
+		<span class="kw">return</span> errorMsg(<span class="st">"ERR invalid expire time in '"</span> + name + <span class="st">"' command"</span>)
+	}
+	<span class="kw">if</span> s.Expire(args[<span class="st">1</span>], time.<span class="ty">Duration</span>(n)*unit) {
+		<span class="kw">return</span> integer(<span class="st">1</span>)
+	}
+	<span class="kw">return</span> integer(<span class="st">0</span>)
+}</code></pre>
+
+    <p>1つの関数で <code>EXPIRE</code>（秒）と <code>PEXPIRE</code>（ミリ秒）の<strong>両方</strong>を捌けるように、単位 <code>unit</code>（<code>time.Second</code> か <code>time.Millisecond</code>）とコマンド名 <code>name</code> を引数で受け取る作りです。<code>dispatch</code> 側は <code>cmdExpire(s, args, time.Second, "expire")</code> と <code>cmdExpire(s, args, time.Millisecond, "pexpire")</code> の2通りで呼び分けます。エラー文言の <code>'expire'</code>/<code>'pexpire'</code> が正しく切り替わるのは、この <code>name</code> のおかげです。</p>
+    <p>頭から。引数が3個（コマンド名 + キー + 数値）でなければ引数エラー。<code>strconv.ParseInt(args[2], 10, 64)</code> で秒数（またはミリ秒数）を <code>int64</code> として読み、数字でなければ「integer でない」エラー。ここまでは定型です。本章で<strong>いちばん唸らされる3行</strong>が、その次に来ます。</p>
+
+    <pre><code><span class="kw">if</span> n &gt; math.MaxInt64/int64(unit) || n &lt; math.MinInt64/int64(unit) {
+	<span class="kw">return</span> errorMsg(<span class="st">"ERR invalid expire time in '"</span> + name + <span class="st">"' command"</span>)
+}</code></pre>
+
+    <p>これが<strong>オーバーフロー検査</strong>です。次の行で <code>time.Duration(n)*unit</code> という掛け算をします。<code>Duration</code> は <code>int64</code> のナノ秒なので、<code>unit</code> が <code>time.Second</code>（＝10億ナノ秒）だと、<code>n</code> に大きな秒数を入れた瞬間 <code>n × 10億</code> が <code>int64</code> の上限を軽々超えます。オーバーフローすると <code>int64</code> は<strong>符号がぐるっと折り返して負の値</strong>になり——さっきの <code>Expire</code> を思い出してください——<code>d &lt;= 0</code> の分岐に落ちて<strong>キーが即削除</strong>されます。「100年後に切れるつもりで指定したのに、その場で消えた」。これは実際に本家 Redis でも過去に踏まれた地雷です。</p>
+    <p>だから掛け算を<strong>する前に</strong>、「<code>n × unit</code> が <code>int64</code> に収まるか」を割り算で先に確かめます。<code>n &gt; math.MaxInt64/int64(unit)</code> は「<code>n</code> が『上限 ÷ 単位』を超えているか」——超えていれば掛けた瞬間あふれる、という判定です。掛けてから調べるのでは手遅れ（もうあふれている）なので、<strong>割ってから調べる</strong>のがオーバーフロー検査の定石です。あふれる値は「invalid expire time」で門前払いし、キーには一切触りません。</p>
+
+    <div class="box hazard"><div class="box-k">⚠ 落とし穴 — 境界は単位に依存する</div>
+      <p>この検査の閾値は <code>unit</code> で変わります。上限は「<code>MaxInt64 ÷ unit</code>」なので、実際に計算するとこうなります。</p>
+      <table>
+        <tr><th>コマンド</th><th><code>unit</code></th><th>通る上限（<code>MaxInt64 ÷ unit</code>）</th></tr>
+        <tr><td><code>EXPIRE</code></td><td><code>time.Second</code>（10億ns）</td><td><code>9223372036</code> 秒（約292年）</td></tr>
+        <tr><td><code>PEXPIRE</code></td><td><code>time.Millisecond</code>（100万ns）</td><td><code>9223372036854</code> ミリ秒（同じく約292年）</td></tr>
+      </table>
+      <p>単位が1000分の1になったぶん、<strong>通る「数値」は1000倍大きくなります</strong>。ただし表す<strong>時間の長さ</strong>はどちらも約292年で同じ——<code>int64</code> ナノ秒で表せる範囲そのものが約292年だからです。単位が変えるのは「時計の目盛りの細かさ」であって、時計の全長ではありません。</p>
+      <p>ここで<strong>取り違えやすい点</strong>を釘刺ししておきます。<code>MaxInt64</code> そのもの（<code>9223372036854775807</code>）は、<strong><code>EXPIRE</code> でも <code>PEXPIRE</code> でも弾かれます</strong>。上の表のとおり <code>PEXPIRE</code> の上限ですら <code>9223372036854</code> で、<code>MaxInt64</code> はそれより6桁も大きいからです。単位依存が効くのは、その<strong>あいだ</strong>にある値です。テスト <code>TestExpireOverflow</code> はまさにこの2段構えを突いています——<code>9223372036854775807</code> は <code>EXPIRE</code>・<code>PEXPIRE</code> の<strong>両方でエラー</strong>になり（かつキーは無傷で <code>TTL</code> も <code>-1</code> のまま）、その一方で <code>PEXPIRE k 9223372036854</code>（秒なら溢れるが、ミリ秒なら収まる値）は <code>:1</code> で成功し、その後 <code>PTTL</code> が正の値を返します。「大きすぎる = 常にエラー」ではなく「掛け算があふれるならエラー」——判定の主語が<strong>数値そのものではなく数値×単位</strong>だ、というのが本家らしい厳密さです。</p>
+      <p>下限側の <code>n &lt; math.MinInt64/int64(unit)</code> も対称の理由です。桁外れの<strong>負の</strong>秒数を掛けると今度は正の方向に折り返し、「即削除のつもりが遠い未来の期限」になってしまう。なお <code>EXPIRE k -1</code> のような普通の負値はこの検査を素通りし（<code>-1</code> は下限をはるかに上回るため）、<code>Expire</code> の <code>d &lt;= 0</code> 分岐で意図どおり即削除されます。検査が狙っているのはあくまで「掛けると符号が折り返す桁」だけです。</p>
+    </div>
+
+    <p>検査を抜けたら <code>time.Duration(n)*unit</code> で正しい <code>Duration</code> に組み立て、<code>s.Expire</code> を呼びます。成功なら <code>:1</code>、キーが無くて付けられなければ <code>:0</code>。これで「期限を刻む」側が完成です。</p>
+
+    <div class="gonote"><div class="box-k">GO メモ · なぜ n×unit があふれるのか（int64 と Duration）</div>
+      <p><code>time.Duration</code> の実体は <code>int64</code> で、単位は<strong>ナノ秒</strong>です。だから <code>time.Second</code> という定数の中身は「1」ではなく「1,000,000,000」（10億）。<code>int64</code> の上限は約 9.2×10<sup>18</sup> なので、秒数として指定できる上限は「9.2×10<sup>18</sup> ÷ 10億 ≒ 92億秒（約292年）」です。それを超える秒数を <code>Duration</code> に変換しようとすると <code>int64</code> があふれ、Go では<strong>ラップアラウンド</strong>（上限の次は下限へ折り返す）が起きて負値になります。C言語出身なら見慣れた挙動ですが、Go でもオーバーフローは例外を投げず<strong>黙って折り返す</strong>ので、掛け算の前に自前で検査するしかありません。<code>math.MaxInt64</code> / <code>math.MinInt64</code> はその上限・下限の定数です。</p>
+    </div>
+
+    <div class="box do"><div class="box-k">▸ 動かして確認</div>
+      <p>オーバーフロー検査が効いていることを、専用テストで確かめます。巨大な期限がエラーになり、かつ<strong>キーが無傷で残る</strong>のがポイントです。</p>
+      <pre class="term"><code><span class="ps">$</span> go test -run TestExpireOverflow -v
+<span class="out">=== RUN   TestExpireOverflow
+--- PASS: TestExpireOverflow (0.00s)
+PASS</span></code></pre>
+      <p>このテストは <code>EXPIRE k 9223372036854775807</code> が <code>-ERR invalid expire time</code> で弾かれ、その直後の <code>EXISTS k</code> が <code>1</code>（キーは生きている）、<code>TTL k</code> が <code>-1</code>（期限も付いていない）を返すことを確認します。「エラーを返すだけでなく、失敗しても副作用を残さない」——検査が正しく機能している証です。</p>
+    </div>
+
+    <h2 class="step" id="step-3"><span class="step-no">Step 3</span>Lazy 失効 — 読むついでに消す</h2>
+    <p>いよいよ失効の1本目、<strong>Lazy 失効</strong>です。驚くべきことに、この仕組みの本体はたった数行で、しかも第01章ですでに書いた <code>getLocked</code> の中に隠れています。<code>Del</code>・<code>Exists</code>・<code>Type</code>・<code>Get</code> ——値を読むあらゆる操作は、必ずこの <code>getLocked</code> を通ります。だからここに失効判定を1個仕込むだけで、<strong>あらゆるアクセスが自動的に失効チェックを兼ねる</strong>ようになります。</p>
+
+    <div class="file-tag">store.go</div>
+    <pre><code><span class="cm">// getLocked はキーの値を返す。失効済みならその場で消して「無い」と答える（Lazy失効）。</span>
+<span class="kw">func</span> (s *<span class="ty">Store</span>) getLocked(key <span class="ty">string</span>) (<span class="ty">any</span>, <span class="ty">bool</span>) {
+	v, ok := s.data[key]
+	<span class="kw">if</span> !ok {
+		<span class="kw">return</span> <span class="kw">nil</span>, <span class="kw">false</span>
+	}
+	<span class="kw">if</span> exp, hasExp := s.expires[key]; hasExp &amp;&amp; time.Now().After(exp) {
+		delete(s.data, key)
+		delete(s.expires, key)
+		<span class="kw">return</span> <span class="kw">nil</span>, <span class="kw">false</span>
+	}
+	<span class="kw">return</span> v, <span class="kw">true</span>
+}</code></pre>
+
+    <p>逐行で。まず <code>s.data[key]</code> で値を引き、そもそも無ければ即 <code>nil, false</code>（「無い」）。ここまでは第01章のまま。<strong>Lazy 失効はその次の <code>if</code> 一発</strong>です。</p>
+    <pre><code><span class="kw">if</span> exp, hasExp := s.expires[key]; hasExp &amp;&amp; time.Now().After(exp) {</code></pre>
+    <p>この行を分解します。<code>exp, hasExp := s.expires[key]</code> は「このキーに失効時刻が登録されているか」を <code>expires</code> テーブルに問い合わせる。Step 1 で強調したとおり<strong>期限を持つキーだけが <code>expires</code> に載る</strong>ので、無期限のキーは <code>hasExp == false</code> で、この <code>if</code> をすり抜けます（＝失効しない）。<code>hasExp</code> が真で、なおかつ <code>time.Now().After(exp)</code>——現在時刻が失効時刻を<strong>過ぎている</strong>——なら、いよいよ失効です。</p>
+    <p>失効と判定したら、<code>delete(s.data, key)</code> と <code>delete(s.expires, key)</code> で<strong>両方の辞書から消し</strong>、<code>nil, false</code>（「無い」）を返します。呼び出し側（<code>GET</code> など）から見れば、<strong>切れたキーは最初から存在しなかったかのように振る舞う</strong>。物理的にはさっきまでメモリに在ったのに、触った瞬間に消える——Step 1 の表の「失効済み・未回収」の行が、この <code>if</code> で回収される瞬間です。</p>
+    <p>この <code>getLocked</code> を、<code>Del</code>/<code>Exists</code>/<code>Type</code>/<code>Keys</code> がどう使っているか。第01章の <code>Del</code> を再掲します。</p>
+
+    <div class="file-tag">store.go（Del — getLocked 経由で Lazy 失効が効く）</div>
+    <pre><code><span class="kw">func</span> (s *<span class="ty">Store</span>) Del(keys ...<span class="ty">string</span>) <span class="ty">int</span> {
+	s.mu.Lock()
+	<span class="kw">defer</span> s.mu.Unlock()
+	n := <span class="st">0</span>
+	<span class="kw">for</span> _, k := <span class="kw">range</span> keys {
+		<span class="kw">if</span> _, ok := s.getLocked(k); ok {
+			s.removeLocked(k)
+			n++
+		}
+	}
+	<span class="kw">return</span> n
+}</code></pre>
+
+    <p><code>Del</code> は削除件数を数えて返しますが、<strong>すでに失効しているキーを数えてはいけません</strong>（もう論理的には存在しないので）。<code>getLocked</code> を通すことで、失効キーは <code>ok == false</code> となり件数に含まれない——しかも <code>getLocked</code> が<strong>ついでに消す</strong>ので、二重削除の心配もない。「読み取りヘルパーに失効判定を集約する」という設計が、こうして全コマンドを一気に正しくします。</p>
+
+    <div class="box hazard"><div class="box-k">⚠ 落とし穴 — Keys だけは getLocked を通さない</div>
+      <p><code>Keys</code>（<code>KEYS *</code> の実体）は例外的に <code>getLocked</code> を使わず、走査中に自前で失効を判定します。</p>
+      <pre><code><span class="kw">for</span> k := <span class="kw">range</span> s.data {
+	<span class="kw">if</span> exp, hasExp := s.expires[k]; hasExp &amp;&amp; now.After(exp) {
+		<span class="kw">continue</span> <span class="cm">// 失効済みは見せない（削除は Active 失効に任せる）</span>
+	}
+	...
+}</code></pre>
+      <p>なぜ消さずに <code>continue</code>（スキップ）で済ませるのか。ここは<strong>言語の制約ではなく設計の判断</strong>です。Go の <code>range</code> 中に <code>delete</code> すること自体は仕様上まったく安全で（まだ到達していないキーが消えれば、そのキーは以降現れないだけ）、実際このすぐ後の Step 5 で読む <code>expireCycle</code> は <code>range s.expires</code> の<strong>中で</strong> <code>delete</code> しています。問題は別のところにあります——<code>KEYS</code> は「一覧を見せるだけ」の<strong>読み取りコマンド</strong>なのに、走査のついでに削除まで始めると、<code>KEYS *</code> を1回打っただけで数万キーの削除が走り、その間ずっとロックを握り続けることになる。だから <code>Keys</code> は「失効済みは<strong>見せないだけ</strong>」に留め、実際の削除は Active 失効（Step 5）に任せる、と役割を分けています。「見せない」と「消す」を切り離せるのも、Lazy と Active の2本立てがあればこそです。</p>
+    </div>
+
+    <div class="gonote"><div class="box-k">GO メモ · time.Now().After(exp) と map の代入付き if</div>
+      <p><code>t1.After(t2)</code> は「<code>t1</code> が <code>t2</code> より後か」を返す <code>bool</code> です。<code>time.Now().After(exp)</code> で「今は失効時刻を過ぎたか」を素直に書けます（<code>&gt;</code> のような比較演算子は <code>time.Time</code> には使えないので、必ずこのメソッドを使います）。<br>
+      <code>if exp, hasExp := s.expires[key]; hasExp &amp;&amp; ...</code> の形は、Go の「<strong>初期化付き if</strong>」です。<code>;</code> の前で変数を宣言し、<code>;</code> の後の条件で使う。map の <code>v, ok := m[k]</code> は「値と、キーが存在したかの真偽」の2値を返すので、これを <code>if</code> の先頭で受けて、そのまま <code>ok</code>（ここでは <code>hasExp</code>）で分岐する——map の存在確認の定番イディオムです。<code>exp</code>/<code>hasExp</code> のスコープはこの <code>if</code> の中だけに閉じ、周囲を汚しません。</p>
+    </div>
+
+    <h2 class="step" id="step-4"><span class="step-no">Step 4</span>残り時間を答える — TTL / PTTL / PERSIST</h2>
+    <p>期限を刻めて、切れたら消える。あとは「<strong>あと何秒残っている?</strong>」と「<strong>期限を外す</strong>」を用意すれば、有効期限まわりのコマンドが一通り揃います。まず残り時間を返す <code>Store.PTTL</code> から。</p>
+
+    <div class="file-tag">store.go</div>
+    <pre><code><span class="cm">// PTTL は残り時間をミリ秒で返す。キーが無ければ -2、無期限なら -1。</span>
+<span class="kw">func</span> (s *<span class="ty">Store</span>) PTTL(key <span class="ty">string</span>) <span class="ty">int64</span> {
+	s.mu.Lock()
+	<span class="kw">defer</span> s.mu.Unlock()
+	<span class="kw">if</span> _, ok := s.getLocked(key); !ok {
+		<span class="kw">return</span> -<span class="st">2</span>
+	}
+	exp, hasExp := s.expires[key]
+	<span class="kw">if</span> !hasExp {
+		<span class="kw">return</span> -<span class="st">1</span>
+	}
+	<span class="kw">return</span> int64(time.Until(exp) / time.Millisecond)
+}</code></pre>
+
+    <p>Step 1 の表がそのままコードになっています。まず <code>getLocked</code>——ここでも Lazy 失効が効くので、<strong>切れているキーに <code>TTL</code> すると、その場で消えて <code>-2</code> が返る</strong>（テストの <code>PEXPIRE k 30</code>→60ms 待ち→<code>TTL k</code> が <code>-2</code> になるのがこれ）。<code>getLocked</code> が <code>false</code> なら <code>-2</code>（キーが無い）。生きているキーについては <code>expires</code> を引き、期限が登録されていなければ <code>-1</code>（無期限）。期限があれば、<code>time.Until(exp)</code> で「失効時刻まであと何ナノ秒」を出し、<code>/ time.Millisecond</code> でミリ秒に直して返します。「いつ切れるか」を保存しておいたから、残りが引き算一発で出る——Step 2 の設計が効きました。</p>
+    <p>コマンド層 <code>cmdTTL</code> は、この <code>PTTL</code>（ミリ秒）を <code>TTL</code>（秒）と共用します。</p>
+
+    <div class="file-tag">expire.go（つづき）</div>
+    <pre><code><span class="cm">// TTL key（秒） / PTTL key（ミリ秒）</span>
+<span class="kw">func</span> cmdTTL(s *<span class="ty">Store</span>, args []<span class="ty">string</span>, name <span class="ty">string</span>) <span class="ty">string</span> {
+	<span class="kw">if</span> len(args) != <span class="st">2</span> {
+		<span class="kw">return</span> errorMsg(<span class="st">"ERR wrong number of arguments for '"</span> + name + <span class="st">"' command"</span>)
+	}
+	ms := s.PTTL(args[<span class="st">1</span>])
+	<span class="kw">if</span> ms &lt; <span class="st">0</span> {
+		<span class="kw">return</span> integer64(ms) <span class="cm">// -2: キーが無い / -1: 無期限</span>
+	}
+	<span class="kw">if</span> name == <span class="st">"ttl"</span> {
+		<span class="kw">return</span> integer64((ms + <span class="st">500</span>) / <span class="st">1000</span>) <span class="cm">// 四捨五入で秒に（本家と同じ）</span>
+	}
+	<span class="kw">return</span> integer64(ms)
+}</code></pre>
+
+    <p>まず <code>PTTL</code> でミリ秒の残りを取ります。<code>ms &lt; 0</code> なら <code>-2</code>/<code>-1</code> という<strong>符号付きの特別値</strong>なので、秒に変換せずそのまま返す（負値を1000で割ったら意味が壊れます）。ここが正の残り時間なら、<code>TTL</code>（秒）と <code>PTTL</code>（ミリ秒）で分岐します。<code>PTTL</code> はミリ秒のまま返せばよい。<code>TTL</code> は<strong>秒に丸める</strong>のですが、その丸め方に本家らしさが出ています。</p>
+
+    <pre><code><span class="kw">return</span> integer64((ms + <span class="st">500</span>) / <span class="st">1000</span>) <span class="cm">// 四捨五入で秒に</span></code></pre>
+
+    <p>単純に <code>ms / 1000</code> とすると<strong>切り捨て</strong>になります。残り 1500ms なら 1 秒、残り 999ms なら 0 秒。これだと「あと1秒近く残っているのに <code>TTL</code> が <code>0</code>」という気持ち悪い答えになります。そこで <code>(ms + 500) / 1000</code>——<strong>500 を足してから割る</strong>ことで四捨五入します。1500ms なら <code>(1500+500)/1000 = 2</code>、999ms なら <code>(999+500)/1000 = 1</code>。本家 Redis の <code>TTL</code> がまさにこの四捨五入で、<code>EXPIRE k 100</code> の直後に <code>TTL k</code> を打つとちゃんと <code>100</code>（99 ではなく）が返るのはこのおかげです。テストの <code>EXPIRE k 100</code>→<code>TTL k</code> が <code>:100</code> になるのを確かめてください。</p>
+
+    <div class="box hazard"><div class="box-k">⚠ 落とし穴 — 秒への丸めを切り捨てにすると 1 ずれる</div>
+      <p><code>TTL</code> を <code>ms / 1000</code>（切り捨て）で実装すると、<code>EXPIRE k 100</code> の<strong>直後</strong>に <code>TTL k</code> を打ったとき、経過したわずかな時間のせいで残りが <code>99999ms</code> のように 100000 をわずかに下回り、切り捨てで <code>99</code> が返ってしまいます。「100 秒にしたのに 99 と表示される」——ユーザーからはバグに見えます。<code>+500</code> の四捨五入は、この「直後に 1 ずれる」を防ぐための、地味だが本家と挙動を揃える大事な一手です。<code>PTTL</code>（ミリ秒）にはこの丸めが無い（そのままミリ秒を返す）点にも注意。</p>
+    </div>
+
+    <p>最後に「期限を外す」<code>PERSIST</code> です。<code>Store.Persist</code> とコマンド層 <code>cmdPersist</code> を続けて見ます。</p>
+
+    <div class="file-tag">store.go</div>
+    <pre><code><span class="kw">func</span> (s *<span class="ty">Store</span>) Persist(key <span class="ty">string</span>) <span class="ty">bool</span> {
+	s.mu.Lock()
+	<span class="kw">defer</span> s.mu.Unlock()
+	<span class="kw">if</span> _, ok := s.getLocked(key); !ok {
+		<span class="kw">return</span> <span class="kw">false</span>
+	}
+	<span class="kw">if</span> _, hasExp := s.expires[key]; !hasExp {
+		<span class="kw">return</span> <span class="kw">false</span>
+	}
+	delete(s.expires, key)
+	<span class="kw">return</span> <span class="kw">true</span>
+}</code></pre>
+
+    <p><code>PERSIST</code> は「期限つきのキーを<strong>無期限に戻す</strong>」操作です。<code>getLocked</code> でキーの存在（と Lazy 失効）を確認し、無ければ <code>false</code>。次に <code>expires</code> を引いて、<strong>そもそも期限が付いていなければ <code>false</code></strong>（外すべき期限が無い）。期限があれば <code>delete(s.expires, key)</code> で<strong><code>expires</code> テーブルからだけ消し</strong>ます——<code>data</code> はそのまま。値は残し、期限だけ剥がす。これで Step 1 の表の「値はあるが無期限」の状態に戻ります。テストの <code>PERSIST k</code> が最初は <code>:1</code>（期限を外せた）、続けてもう一度 <code>PERSIST k</code> すると <code>:0</code>（もう外す期限が無い）になるのが、この2段の <code>false</code> 分岐です。</p>
+
+    <div class="file-tag">expire.go（つづき・これで全文）</div>
+    <pre><code><span class="kw">func</span> cmdPersist(s *<span class="ty">Store</span>, args []<span class="ty">string</span>) <span class="ty">string</span> {
+	<span class="kw">if</span> len(args) != <span class="st">2</span> {
+		<span class="kw">return</span> errorMsg(<span class="st">"ERR wrong number of arguments for 'persist' command"</span>)
+	}
+	<span class="kw">if</span> s.Persist(args[<span class="st">1</span>]) {
+		<span class="kw">return</span> integer(<span class="st">1</span>)
+	}
+	<span class="kw">return</span> integer(<span class="st">0</span>)
+}</code></pre>
+
+    <p>コマンド層は素直です。引数を確認して <code>Persist</code> を呼び、成否を <code>:1</code>/<code>:0</code> で返すだけ。これで <code>EXPIRE</code>/<code>PEXPIRE</code>/<code>TTL</code>/<code>PTTL</code>/<code>PERSIST</code> の5コマンドが揃い、<code>expire.go</code> は全文読み終えました。</p>
+
+    <div class="box do"><div class="box-k">▸ 動かして確認</div>
+      <p>ここまでで、期限を「刻む／残りを問う／外す」と Lazy 失効が動きます。まとめて確認しましょう。</p>
+      <pre class="term"><code><span class="ps">$</span> go test -run TestExpireLazyAndTTL -v
+<span class="out">=== RUN   TestExpireLazyAndTTL
+--- PASS: TestExpireLazyAndTTL (0.06s)
+PASS</span></code></pre>
+      <p>このテストは <code>TTL</code> の <code>-1</code>/<code>-2</code>、<code>EXPIRE</code>→<code>TTL</code>→<code>PERSIST</code> の往復、そして <code>PEXPIRE k 30</code> で 30ms の期限を付けて 60ms 待ち、<code>GET k</code> が <code>$-1</code>（nil）・<code>TTL k</code> が <code>-2</code> になる<strong>Lazy 失効</strong>を検証します。「触った瞬間に消える」が機械で確かめられました。</p>
+    </div>
+
+    <h2 class="step" id="step-5"><span class="step-no">Step 5</span>Active 失効 — サンプリングと 25% ルール</h2>
+    <p>ここまでで <strong>Lazy 失効</strong>（1本目）が完成しました。でも導入で確認したとおり、Lazy だけでは<strong>誰も触らないキーが永遠に残る</strong>。2本目——背後で消して回る <strong>Active 失効</strong>——を作ります。心臓は <code>expireCycle</code> です。</p>
+
+    <div class="file-tag">store.go</div>
+    <pre><code><span class="cm">// expireCycle は失効テーブルからサンプリングして失効キーを消す、を</span>
+<span class="cm">// 「消えた割合が高い間」繰り返す。本家の activeExpireCycle の縮小版。</span>
+<span class="kw">func</span> (s *<span class="ty">Store</span>) expireCycle() {
+	<span class="kw">const</span> sampleSize = <span class="st">20</span>
+	<span class="kw">const</span> maxRounds = <span class="st">16</span>
+	<span class="kw">for</span> round := <span class="st">0</span>; round &lt; maxRounds; round++ {
+		s.mu.Lock()
+		now := time.Now()
+		sampled, expired := <span class="st">0</span>, <span class="st">0</span>
+		<span class="kw">for</span> key, exp := <span class="kw">range</span> s.expires { <span class="cm">// map の走査順はランダム ≒ サンプリング</span>
+			<span class="kw">if</span> sampled &gt;= sampleSize {
+				<span class="kw">break</span>
+			}
+			sampled++
+			<span class="kw">if</span> now.After(exp) {
+				delete(s.data, key)
+				delete(s.expires, key)
+				expired++
+			}
+		}
+		s.mu.Unlock()
+		<span class="cm">// サンプルの25%未満しか失効していなければ、もう十分きれい</span>
+		<span class="kw">if</span> sampled == <span class="st">0</span> || expired*<span class="st">4</span> &lt; sampled {
+			<span class="kw">return</span>
+		}
+	}
+}</code></pre>
+
+    <p>この関数の設計思想は「<strong>全部は調べない。ランダムに少しだけ味見して、汚れていたらもう一口</strong>」です。順に読みます。</p>
+    <p><code>sampleSize = 20</code> は<strong>1ラウンドで味見する件数</strong>、<code>maxRounds = 16</code> は<strong>ラウンドの上限</strong>。外側の <code>for round</code> ループがラウンドを回し、内側の <code>for key, exp := range s.expires</code> が<strong>期限つきキーだけ</strong>（Step 1 で分離した <code>expires</code> テーブル）を走査します。<code>data</code> 全体ではなく <code>expires</code> だけを見るのが効きどころ——無期限のキーが何百万あろうと、掃除の対象にすら入りません。</p>
+    <p>内側ループでは、20件（<code>sampleSize</code>）に達したら <code>break</code>。それまでの各キーについて <code>now.After(exp)</code> で失効判定し、切れていたら <code>data</code>・<code>expires</code> の両方から <code>delete</code> して <code>expired</code> を数えます。ここで<strong>Go の map 走査順がランダムであること</strong>が、そのまま<strong>ランダムサンプリング</strong>として使われています(下の GO メモ)。「先頭から順に」ではなく「毎回バラバラの20件」を見るので、期限テーブルのどこが汚れていても均等に当たります。</p>
+    <p>そして<strong>この関数のキモ、25% ルール</strong>——</p>
+    <pre><code><span class="kw">if</span> sampled == <span class="st">0</span> || expired*<span class="st">4</span> &lt; sampled {
+	<span class="kw">return</span>
+}</code></pre>
+    <p><code>expired*4 &lt; sampled</code> は「<strong>失効率が 25% 未満か</strong>」の判定です（<code>expired/sampled &lt; 0.25</code> を、割り算を避けて両辺に <code>×4</code> したもの）。味見した20件のうち5件以上（25%以上）が切れていたら、「このテーブルはまだ汚れている」と見て<strong>もう1ラウンド回す</strong>。5件未満（25%未満）なら「もう十分きれい」と判断して <code>return</code> で切り上げます。<code>sampled == 0</code>（期限つきキーが1つも無い）なら、掃除するものが無いので即終了。</p>
+    <p>この適応的な仕組みが賢いところです。<strong>切れたキーが大量にあるときは、25% を超え続ける限り最大16ラウンド、集中的に掃除する</strong>。逆に<strong>ほとんど切れていない平常時は、1ラウンド味見しただけで(25%未満なので)すぐ切り上げる</strong>。「暇なときは軽く、汚れているときは重点的に」——固定の全数調査では実現できない、負荷に応じた掃除量の自動調整です。これが本家 Redis の <code>activeExpireCycle</code> の縮小版で、メモリ回収とレイテンシのバランスを取る中核ロジックです。</p>
+
+    <div class="gonote"><div class="box-k">GO メモ · map の走査順はなぜランダムか</div>
+      <p>Go では <code>for k := range m</code> の走査順が<strong>実行のたびにランダム</strong>になるよう、言語仕様で意図的に決められています（他の多くの言語のように挿入順や内部ハッシュ順に依存しません）。これは「たまたま動く順序依存コード」を書かせないための設計判断です。本章はこの性質を<strong>逆手に取り</strong>、<code>range s.expires</code> の先頭 20 件を「ランダムに選んだ 20 件」として使っています。専用の乱数抽選を書かずにサンプリングが手に入るのは、この仕様のおかげ。ただし「本当に一様乱択か」は保証の範囲外なので、統計的な厳密さが要る場面では別途乱数を使うべきですが、失効掃除の近似としては十分実用的です。</p>
+    </div>
+
+    <div class="box hazard"><div class="box-k">⚠ 落とし穴 — なぜ 25% で「打ち切る」のか（Lazy だけではメモリが減らない、の裏返し）</div>
+      <p>「切れたキーは<strong>全部</strong>消せばいいのに、なぜ 25% 未満で手を止めるのか」と思うかもしれません。答えは<strong>レイテンシ</strong>です。<code>expireCycle</code> はロックを取って走るので、その間クライアントの要求は待たされます。全数を毎回きっちり掃除すれば取りこぼしゼロですが、キーが増えるほど1回の掃除が長くなり、サーバが定期的に固まります。25% ルールは「大半が切れている領域だけ重点的に掃除し、きれいになったら即引き上げる」ことで、<strong>掃除に費やす時間に自然な上限</strong>をかけています。取りこぼした(まだ物理的に残る)少数の失効キーは、次のサイクルか、あるいは誰かが触ったときの<strong>Lazy 失効</strong>が拾います。Active が「ほどほど」で済むのは、Lazy が正しさを保証してくれる相棒だから——2本立ての分担が、ここで最終的に噛み合います。</p>
+    </div>
+
+    <h2 class="step" id="step-6"><span class="step-no">Step 6</span>背後で回し続ける — activeExpireLoop と ticker</h2>
+    <p><code>expireCycle</code> は「1回ぶんの掃除」でした。これを<strong>永遠に、定期的に</strong>回す仕掛けが <code>activeExpireLoop</code> です。第00章の <code>main</code> で <code>go srv.store.activeExpireLoop(nil)</code> と<strong>専用の goroutine</strong>で起動していたのを覚えているでしょうか。その正体がこれです。</p>
+
+    <div class="file-tag">store.go（これで store.go の失効系は全文）</div>
+    <pre><code><span class="cm">// activeExpireLoop は定期的に expireCycle を回す。stop は主にテスト用。</span>
+<span class="kw">func</span> (s *<span class="ty">Store</span>) activeExpireLoop(stop &lt;-<span class="kw">chan</span> <span class="kw">struct</span>{}) {
+	t := time.NewTicker(<span class="st">100</span> * time.Millisecond)
+	<span class="kw">defer</span> t.Stop()
+	<span class="kw">for</span> {
+		<span class="kw">select</span> {
+		<span class="kw">case</span> &lt;-t.C:
+			s.expireCycle()
+		<span class="kw">case</span> &lt;-stop:
+			<span class="kw">return</span>
+		}
+	}
+}</code></pre>
+
+    <p>短いですが、Go の並行処理の定番が凝縮されています。<code>time.NewTicker(100 * time.Millisecond)</code> は「<strong>100ミリ秒ごとに合図を送る</strong>」時計を作ります。返り値 <code>t</code> の <code>t.C</code> がその合図の届くチャネルで、100ms ごとに値が1つ流れてきます。<code>defer t.Stop()</code> は、この関数を抜けるとき ticker を止めてリソースを解放する予約(ticker を止め忘れると裏で動き続けます)。</p>
+    <p>本体は無限ループ <code>for { select { ... } }</code>。<code>select</code> は「<strong>複数のチャネルを同時に待ち、最初に届いた方の <code>case</code> を実行する</strong>」Go の仕組みです。ここでは2つを待っています。<code>&lt;-t.C</code>——100ms の合図が来たら <code>s.expireCycle()</code> を1回実行する。<code>&lt;-stop</code>——停止シグナルが来たら <code>return</code> でループを抜ける。平常時はひたすら前者が発火し続け、100ms ごとに掃除が走ります。</p>
+    <p>この <code>stop</code> チャネルは主に<strong>テスト用</strong>です。本番の <code>main</code> では <code>activeExpireLoop(nil)</code> と <code>nil</code> を渡します。<code>nil</code> チャネルからの受信は<strong>永遠にブロックする</strong>（＝決して発火しない）ので、<code>&lt;-stop</code> の <code>case</code> は選ばれず、ループは止まらず回り続けます。テストで「掃除ループを途中で止めたい」ときだけ、本物のチャネルを渡して閉じます。<code>nil</code> チャネルが「絶対に反応しない口」として使える——Go の <code>select</code> ならではの小技です。</p>
+
+    <div class="gonote"><div class="box-k">GO メモ · time.Ticker / select / nil チャネル</div>
+      <p><code>time.NewTicker(d)</code> は「<code>d</code> 間隔で <code>C</code> チャネルに時刻を送り続ける」時計です。1回だけなら <code>time.NewTimer</code> や <code>time.After</code>、繰り返しなら <code>Ticker</code>、と使い分けます。使い終わったら <code>Stop()</code> が必須(GC 任せにできない裏の goroutine が絡むため)。<br>
+      <code>select</code> は「チャネル版の <code>switch</code>」で、複数の受信・送信のうち準備ができたものを1つ選んで実行します。全部がまだなら、いずれかが準備できるまで<strong>待ちます</strong>。<br>
+      チャネルの型は <code>&lt;-chan struct{}</code>——<strong>受信専用</strong>（矢印が左向き）で、中身は<strong>空構造体 <code>struct{}</code></strong>。「値そのものに意味はなく、届いたという事実だけ伝えたい(シグナル)」ときは、サイズ 0 の <code>struct{}</code> を流すのが Go の慣習です。そして <code>nil</code> のチャネルは受信も送信も<strong>永遠にブロック</strong>するので、<code>select</code> の中で「この <code>case</code> は絶対に選ばれてほしくない」を表現するのに使えます。</p>
+    </div>
+
+    <div class="box hazard"><div class="box-k">⚠ 落とし穴 — 掃除ループもロックを取る（サーバ本体と同じ Mutex）</div>
+      <p><code>activeExpireLoop</code> は <code>main</code> とは<strong>別の goroutine</strong>で走り、<code>expireCycle</code> の中で <code>s.mu.Lock()</code> を取ります。つまり<strong>クライアントの要求を捌く goroutine と、掃除の goroutine が、同じ <code>Store.mu</code> を奪い合う</strong>。これは意図した設計です——共有データ(<code>data</code>/<code>expires</code>)を触る以上、掃除もロックの規律に従わねばならない。だからこそ Step 5 の <code>expireCycle</code> は「1ラウンドごとに <code>Lock</code>→処理→<code>Unlock</code>」と<strong>こまめにロックを放し</strong>、16ラウンドをぶっ通しで抱え込みません。もし全ラウンドを1回のロックで抱えたら、その間クライアントは全員待ちぼうけ。「掃除は分割して、こまめにロックを譲る」——並行サーバでバックグラウンド処理を書くときの鉄則です。</p>
+    </div>
+
+    <h2 class="step" id="step-7"><span class="step-no">Step 7</span>テストを読む — 触らずに消えることを確かめる</h2>
+    <p>この章の主張は「<strong>誰もアクセスしなくても、期限切れのキーは消える</strong>」ことでした。それを機械で証明するのが <code>TestActiveExpire</code> です。Lazy 失効なら「触ったから消えた」のか「Active が消したのか」区別がつきませんが、このテストは<strong>意図的に一度も触らない</strong>ことで、Active 失効だけの働きを浮き彫りにします。</p>
+
+    <div class="file-tag">commands_test.go（TestActiveExpire）</div>
+    <pre><code><span class="kw">func</span> TestActiveExpire(t *testing.<span class="ty">T</span>) {
+	srv := newServer()
+	<span class="kw">for</span> i := <span class="st">0</span>; i &lt; <span class="st">50</span>; i++ {
+		key := <span class="st">"k"</span> + string(rune(<span class="st">'a'</span>+i%<span class="st">26</span>)) + string(rune(<span class="st">'0'</span>+i/<span class="st">26</span>))
+		run(srv, <span class="st">"SET"</span>, key, <span class="st">"v"</span>, <span class="st">"PX"</span>, <span class="st">"20"</span>)
+	}
+	time.Sleep(<span class="st">50</span> * time.Millisecond)
+	<span class="cm">// アクセスせずに expireCycle だけで消えることを確認</span>
+	srv.store.expireCycle()
+	srv.store.mu.Lock()
+	remaining := len(srv.store.data)
+	srv.store.mu.Unlock()
+	<span class="kw">if</span> remaining != <span class="st">0</span> {
+		t.Errorf(<span class="st">"active expire left %d keys"</span>, remaining)
+	}
+}</code></pre>
+
+    <p>逐行で。まず 50 個のキーに、それぞれ <code>SET key v PX 20</code> で<strong>20ミリ秒の期限</strong>を付けます(<code>PX</code> は SET のミリ秒期限オプション、第03章)。キー名は <code>ka0</code>・<code>kb0</code>…と一意になるよう組み立てています。次に <code>time.Sleep(50 * time.Millisecond)</code> で 50ms 待つ——20ms の期限はとっくに全部切れています。ですが<strong>ここまで一度も <code>GET</code> していない</strong>ので、Lazy 失効は1件も発火していません。50 個は全部、切れたまま <code>data</code> に居座っています。</p>
+    <p>そして <code>srv.store.expireCycle()</code> を<strong>直接呼び</strong>、Active 失効を1サイクル走らせます。最後に <code>len(srv.store.data)</code> で残ったキー数を数え、<strong><code>0</code> でなければ失敗</strong>。「触っていないのに、掃除ループだけで全部消えた」——これが Active 失効の存在意義そのものの証明です。</p>
+    <p>ここで「<strong>1ラウンド20件なのに、なぜ <code>expireCycle()</code> を1回呼ぶだけで50件が消えるのか</strong>」が気になったなら、その疑問が正解です。答えは Step 5 の25%ルール——<strong>1回の <code>expireCycle()</code> は、失効率が高い間ラウンドを繰り返す</strong>から。実際に数えるとこうなります。</p>
+    <div class="ascii">expireCycle() 1回の中で起きること（50件すべて失効済みの場合）
+
+  round0: sampled=20  expired=20  → 残り30
+          20×4 = 80 ≥ 20 なので「まだ汚い」→ 継続
+  round1: sampled=20  expired=20  → 残り10
+          継続
+  round2: sampled=10  expired=10  → 残り 0     ← expires が尽きたので10件しか採れない
+          10×4 = 40 ≥ 10 なので継続
+  round3: sampled= 0                            ← もう1件も無い
+          sampled == 0 → return（打ち切り）
+
+  合計4ラウンド・50件を掃除して終了。</div>
+    <p>2つ気づいてほしい点があります。1つは <strong>round2 で <code>sampled</code> が20ではなく10になる</strong>こと——内側ループは毎ラウンド <code>range s.expires</code> を<strong>取り直す</strong>ので、残りが10件しかなければ10件で打ち止めです（<code>sampled &gt;= sampleSize</code> の <code>break</code> に到達しない）。もう1つは<strong>終端条件が <code>expired*4 &lt; sampled</code> ではなく <code>sampled == 0</code> のほうだった</strong>こと。全部が失効済みという極端な状況では失効率は常に100%なので25%ルールでは止まらず、「もう調べる対象が無い」で止まります。Step 5 で <code>sampled == 0</code> を「掃除するものが無いので即終了」とだけ紹介した条件が、ここで実際に効いています——<strong>25%ルールと <code>sampled == 0</code> は、止まり方の違う2つの出口</strong>なのです。汚れが減ってきたときは前者で、対象が尽きたときは後者で止まる。</p>
+    <p>末尾の <code>TestServerExpireEndToEnd</code> は、同じことを<strong>本物の TCP 越し</strong>で確かめます。<code>SET temp v PX 50</code> で 50ms 期限を付け、直後の <code>GET temp</code> は <code>"v"</code>、80ms 待った後の <code>GET temp</code> は <code>(nil)</code>、<code>TTL temp</code> は <code>-2</code>。ネットワーク層から失効まで、全部が繋がって動くことの端から端までの証明です。</p>
+
+    <div class="box do"><div class="box-k">▸ 動かして確認</div>
+      <p>この章のクライマックス——<strong>触らずに消える</strong>を実行します。</p>
+      <pre class="term"><code><span class="ps">$</span> go test -run TestActiveExpire -v
+<span class="out">=== RUN   TestActiveExpire
+--- PASS: TestActiveExpire (0.05s)
+PASS</span>
+
+<span class="ps">$</span> go test -run 'TestExpireLazyAndTTL|TestExpireOverflow|TestActiveExpire|TestServerExpireEndToEnd' -v
+<span class="out">=== RUN   TestExpireLazyAndTTL
+--- PASS: TestExpireLazyAndTTL (0.06s)
+=== RUN   TestExpireOverflow
+--- PASS: TestExpireOverflow (0.00s)
+=== RUN   TestActiveExpire
+--- PASS: TestActiveExpire (0.05s)
+=== RUN   TestServerExpireEndToEnd
+--- PASS: TestServerExpireEndToEnd (0.08s)
+PASS
+ok  	redisclone	0.98s</span></code></pre>
+      <p>4本すべて PASS すれば、失効の2本立て——Lazy が正しさを、Active がメモリを——が、揃って動いています。</p>
+    </div>
+
+    <h2>つまずき FAQ</h2>
+    <details class="qa"><summary>期限切れのキーは、切れた「瞬間」に消えるの?</summary>
+      <div class="qa-body"><p>いいえ。ここが Redis の失効の勘所です。失効時刻を過ぎても、キーは<strong>すぐには物理的に消えません</strong>。消えるのは (1) 誰かがそのキーに<strong>触ったとき</strong>（Lazy 失効が <code>getLocked</code> で消す）、または (2) <strong>Active 失効の巡回</strong>（100ms ごとの <code>expireCycle</code>）がそのキーをサンプリングで拾ったとき、のどちらかです。だから「切れたのにまだメモリに在る」瞬間は正常に存在します。ただし<strong>論理的には切れた瞬間から「無い」扱い</strong>で、<code>GET</code> しても <code>TTL</code> しても正しく「無い」と答えます(触った途端に物理削除も走ります)。「見え方」と「物理削除」を分けているのがポイントです。</p></div>
+    </details>
+    <details class="qa"><summary>Active 失効が 100ms ごとに 20 件だけなら、何百万件の失効キーはいつ消えるの?</summary>
+      <div class="qa-body"><p>「20件だけ」なのは<strong>1ラウンド</strong>の話で、25% ルールで失効率が高い間は最大16ラウンド(＝1サイクルで最大320件)まで回ります。さらに大量に切れていれば毎サイクル(100ms ごと)で失効率が高止まりし、集中的に掃除が続きます。とはいえ、瞬間的に膨大な数が切れると回収が追いつかない可能性は残ります——そのぶんは、いずれ誰かが触ったときの<strong>Lazy 失効</strong>が拾うか、次サイクル以降で徐々に消えます。本家 Redis も同じ「サンプリング + 適応的反復」で、完全回収の即時性より<strong>サーバを固めない</strong>ことを優先した設計です。この妥協点の是非は最終章でも触れます。</p></div>
+    </details>
+    <details class="qa"><summary>なぜ <code>expires</code> を <code>data</code> と別テーブルにするの? 値に期限を貼ればいいのでは?</summary>
+      <div class="qa-body"><p>「期限を持つキーだけを効率よく走査したい」からです。もし期限を各値に貼ると、Active 失効の <code>expireCycle</code> は「どのキーが期限つきか」を知るために <code>data</code> 全体(無期限キーも含む何百万件)を舐める羽目になります。期限つきキーだけを集めた <code>expires</code> テーブルがあれば、<code>range s.expires</code> で<strong>掃除すべき候補だけ</strong>を直接サンプリングできる。現実のワークロードは無期限キーが多数派なので、この分離が掃除コストを桁で下げます。加えて <code>PERSIST</code> が「<code>expires</code> から消すだけで値は残す」と素直に書けるのも、テーブルを分けた恩恵です。</p></div>
+    </details>
+
+    <h2>理解度チェック</h2>
+    <p>次の問いに<strong>自分の言葉で</strong>答えられたら、この章は卒業です。</p>
+    <details class="qa"><summary>1. Lazy 失効と Active 失効は、それぞれ何を保証し、なぜ両方が要るのか。</summary>
+      <div class="qa-body"><p><strong>Lazy 失効</strong>は「正しさ」を保証する。キーを触った瞬間(<code>getLocked</code>)に必ず失効判定するので、切れたキーが値として返ることは絶対にない。ただし<strong>誰も触らないキーには手が出せず</strong>、放置すればメモリに永遠に残る。<strong>Active 失効</strong>は「メモリ回収」を担う。背後で定期巡回し、触られないキーも消す。ただし全数調査は重いのでサンプリングで妥協し、取りこぼしが出る。<strong>両方あって初めて</strong>「切れたキーは絶対に見えず(Lazy)、かつ触らなくても最終的に消える(Active)」が成立する。メモリとレイテンシのトレードオフを2機構の分担で捌いている。</p></div>
+    </details>
+    <details class="qa"><summary>2. <code>cmdExpire</code> のオーバーフロー検査は、何を、なぜ、掛け算の前に確かめるのか。</summary>
+      <div class="qa-body"><p><code>time.Duration(n)*unit</code> の掛け算が <code>int64</code> をあふれさせないかを確かめる。<code>Duration</code> はナノ秒単位の <code>int64</code> で、<code>unit</code>(秒=10億ns 等)を掛けると大きな <code>n</code> で簡単に上限超過する。あふれると <code>int64</code> は<strong>負値に折り返し</strong>、<code>Expire</code> の <code>d &lt;= 0</code> 分岐に落ちて<strong>キーが即削除</strong>される誤動作になる。掛けてから調べては手遅れ(もう折り返している)なので、<code>n &gt; MaxInt64/unit</code> と<strong>割り算で先に</strong>判定し、あふれる値はエラーで弾いてキーに触らない。境界は <code>unit</code> 依存で、<code>EXPIRE</code>(秒)の上限は <code>9223372036</code>、<code>PEXPIRE</code>(ミリ秒)の上限は <code>9223372036854</code>——<strong>そのあいだの値</strong>（例: <code>9223372036854</code>）は <code>EXPIRE</code> では弾かれ <code>PEXPIRE</code> では通る。ただし <code>MaxInt64</code> そのものは<strong>どちらでも弾かれる</strong>（<code>PEXPIRE</code> の上限すら6桁下回るため）。</p></div>
+    </details>
+    <details class="qa"><summary>3. <code>expireCycle</code> の「25% ルール」は何を判定し、それによって掃除量がどう変わるのか。</summary>
+      <div class="qa-body"><p><code>expired*4 &lt; sampled</code> で「サンプル20件のうち失効が 25% 未満か」を判定する。25% 以上なら「まだ汚れている」ともう1ラウンド回し(最大16ラウンド)、25% 未満なら「十分きれい」と即 <code>return</code> する。結果、<strong>大量に切れているときは集中的に多ラウンド掃除し、平常時は1ラウンド味見しただけで切り上げる</strong>という<strong>負荷適応</strong>になる。固定の全数調査と違い、掃除に使う時間に自然な上限がかかり、サーバを固めない。取りこぼした少数は Lazy 失効か次サイクルが拾う。</p></div>
+    </details>
+
+    <h2>まとめ — 次の層へ</h2>
+    <p>この章で、キースペースに<strong>時間軸</strong>が入りました。<code>expires</code> という別テーブルに失効時刻を刻み、<code>EXPIRE</code>/<code>TTL</code>/<code>PERSIST</code> で操り、そして2本立ての失効——触った瞬間に消す<strong>Lazy</strong>(<code>getLocked</code>)と、背後でサンプリング掃除する<strong>Active</strong>(<code>expireCycle</code> + <code>activeExpireLoop</code>)——で、切れたキーを漏れなく回収する。オーバーフロー検査や秒への四捨五入といった細部まで、本家の挙動に揃えました。「有効期限を付けたのにメモリが減らない」という実運用の事故が、なぜ2本立てで防げるのか——その理屈が手の内に入ったはずです。</p>
+    <p>次の第03章では、いままで「ただの文字列」として扱ってきた値に<strong>意味</strong>を与えます。<code>INCR</code>/<code>DECR</code> で文字列を<strong>数として</strong>足し引きし、<code>APPEND</code> で継ぎ足し、<code>SET</code> に <code>EX</code>/<code>PX</code>(この章で見た期限オプション)や <code>NX</code>/<code>XX</code> を付ける。文字列コマンドの奥にある「数値パースと境界」の細やかさを覗きます。</p>
+
+    <div class="chap-foot">
+      <a class="pager" href="01-keyspace.html"><span class="dir">← 前へ</span>第01章 · キーと値</a>
+      <a class="pager next" href="03-string.html"><span class="dir">次へ →</span>第03章 · 数としての文字列</a>
+    </div>
+  </main>
+</div>
+</body>
+</html>

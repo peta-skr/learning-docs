@@ -1,0 +1,470 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>第00章 いちばん小さいジャッジ — 手を動かして作るオンラインジャッジ</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500;600&family=Source+Serif+4:opsz,wght@8..60,400;8..60,600;8..60,700&family=Noto+Serif+JP:wght@400;600;700&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<div class="shell">
+
+  <aside class="spine">
+    <a class="wordmark" href="index.html">JUDGE · from scratch</a>
+    <div class="book-title">手を動かして作る<br>オンラインジャッジ</div>
+    <div class="book-sub">Go で サンドボックスから Web まで</div>
+
+    <div class="legend"><span>読む <b>↓</b></span><span>組む <b>↑</b></span></div>
+
+    <nav aria-label="目次">
+      <ul class="toc">
+        <li><a class="nav-item" href="index.html"><span class="nav-num">序</span><span class="nav-label">はじめに・準備<span class="nav-tag">Setup</span></span></a></li>
+        <li><a class="nav-item current" aria-current="page" href="00-smallest.html"><span class="nav-num">00</span><span class="nav-label">いちばん小さいジャッジ<span class="nav-tag">Judge</span></span></a></li>
+        <li><a class="nav-item" href="01-process.html"><span class="nav-num">01</span><span class="nav-label">プロセスと標準入出力<span class="nav-tag">IO</span></span></a></li>
+        <li><a class="nav-item" href="02-verdict.html"><span class="nav-num">02</span><span class="nav-label">verdict — 判定の種類<span class="nav-tag">Verdict</span></span></a></li>
+        <li><a class="nav-item" href="03-threat.html"><span class="nav-num">03</span><span class="nav-label">なぜ他人のコードは危険か<span class="nav-tag">Threat</span></span></a></li>
+        <li><a class="nav-item" href="04-sandbox.html"><span class="nav-num">04</span><span class="nav-label">コンテナに閉じ込める<span class="nav-tag">Sandbox</span></span></a></li>
+        <li><a class="nav-item" href="05-limits.html"><span class="nav-num">05</span><span class="nav-label">時間とメモリを断ち切る<span class="nav-tag">Limits</span></span></a></li>
+        <li><a class="nav-item" href="06-lang.html"><span class="nav-num">06</span><span class="nav-label">いろんな言語で<span class="nav-tag">Lang</span></span></a></li>
+        <li><a class="nav-item" href="07-store.html"><span class="nav-num">07</span><span class="nav-label">問題とテストケースを持つ<span class="nav-tag">Store</span></span></a></li>
+        <li><a class="nav-item" href="08-queue.html"><span class="nav-num">08</span><span class="nav-label">提出を「あとで」捌く<span class="nav-tag">Queue</span></span></a></li>
+        <li><a class="nav-item" href="09-web.html"><span class="nav-num">09</span><span class="nav-label">画面をつける<span class="nav-tag">Web</span></span></a></li>
+      </ul>
+    </nav>
+
+    <div class="spine-foot">
+      各章は「実行の心臓部」から<br>始めて「Web」へ登る。<br>下（採点の核）から上（画面）へ<br>積み上げて動かしていく。
+    </div>
+  </aside>
+
+  <main class="reading">
+    <div class="progress-tag">第00章 / 全10章 · 層: JUDGE · 読了目安 2〜3時間</div>
+    <div class="eyebrow"><span>JUDGE</span><span class="depth">— 最下層・採点の芯</span></div>
+    <h1>いちばん小さいジャッジ</h1>
+    <p class="lede">オンラインジャッジという言葉は仰々しいですが、煎じ詰めれば<strong>「提出コードを実行して、その標準出力を期待出力と比べ、一致なら AC」</strong>——これだけです。この章では Docker もキューも Web も置き去りにして、その<strong>採点の芯</strong>だけを取り出します。出力を比べる関数、判定の分岐、そして結果を表す7つの verdict。ここが本書のすべての土台になります。</p>
+
+    <div class="box goal"><div class="box-k">◈ この章のゴール</div>
+      <p>次の 3 つを、自分の目と手で確認できたら達成です。</p>
+      <ol>
+        <li><code>go test ./internal/judge/ -run TestCompareOutput -v</code> が PASS する。<code>"8"</code> と <code>"8\n"</code> が「同じ」、<code>"9\n"</code> と <code>"8\n"</code> が「違う」と機械が判定できる。</li>
+        <li>採点の分岐 <code>decideCase</code> が、出力一致で <code>AC</code>、不一致で <code>WA</code>、異常終了で <code>RE</code> を返す道筋を、自分の言葉で追える。</li>
+        <li>7 つの verdict（<code>AC / WA / TLE / MLE / RE / CE / IE</code>）それぞれが「どういう提出のときに出るか」を説明できる。</li>
+      </ol>
+    </div>
+
+    <div class="box map"><div class="box-k">☰ この章のステップ</div>
+      <ol>
+        <li><a href="#step-1">採点とは何か — たった1本の <code>==</code></a></li>
+        <li><a href="#step-2">verdict — 結果を表す7つの記号 — <code>verdict.go</code></a></li>
+        <li><a href="#step-3">出力を比べる — <code>compare.go</code> の <code>CompareOutput</code></a></li>
+        <li><a href="#step-4">なぜ正規化が要るのか — <code>normalizeOutput</code> を逐行で</a></li>
+        <li><a href="#step-5">1ケースの合否を決める — <code>decideCase</code></a></li>
+        <li><a href="#step-6">提出全体をまとめる — <code>JudgeSubmission</code> の骨格</a></li>
+        <li><a href="#step-7">手を動かす — 正規化の境界を自分で試す</a></li>
+      </ol>
+    </div>
+
+    <h2>なぜ「比較」から始めるのか</h2>
+    <p>オンラインジャッジで最初に作るべきものは、Docker でも Web でもありません。<strong>「正解かどうかを決める」その一点</strong>です。どんなに堅牢なサンドボックスを組み、どんなに美しい画面を作っても、「この出力は正解か?」を正しく判定できなければ、それは緑を出す資格のない置物です。だからこの本は、一番下の「採点」の芯から始めます。</p>
+    <p>そして採点の芯は、拍子抜けするほど単純です。<strong>提出コードの標準出力と、問題に登録された期待出力を、文字列として比べる。</strong>一致すれば <code>AC</code>、違えば <code>WA</code>。それだけ。第01章以降で「どう実行するか（プロセス）」「どう隔離するか（Docker）」を厚く扱いますが、その全部は結局、<strong>この比較に食わせる「実際の出力」を安全に手に入れるための工程</strong>にすぎません。芯は、ここにあります。</p>
+
+    <h2>この層が上の層に約束すること</h2>
+    <p>この章で作る層（採点ロジック）が周囲に約束するのは、たったこれだけです。</p>
+    <ul>
+      <li>「実際の出力」と「期待出力」の2つの文字列を渡されたら、<strong>人間の目で見て同じなら「一致」</strong>と判定する（行末の空白や末尾の改行の差では落とさない）。</li>
+      <li>1つの実行結果（終了コード・出力・経過時間）を渡されたら、<strong>7つの verdict のどれか1つ</strong>に落とす。</li>
+      <li>提出全体（複数テストケース）を渡されたら、<strong>1つでも非 AC があればそこで打ち切り、その verdict を提出の verdict とする</strong>。</li>
+    </ul>
+    <p>逆に、この層が<strong>やらない</strong>ことをはっきりさせておきます。コードをどう実行するか、どこで隔離するか、どう時間を測るか — そういう「実行」の面倒は一切見ません。この層から見れば、実行結果はただの構造体（終了コードと出力の入れ物）で、そこから verdict を導くのが仕事です。「採点」と「実行」を分ける。この規律が、危険な実行部分（第03章以降）を採点ロジックから隔離し、10章ぶんの積み上げを可能にします。</p>
+
+    <h2 class="step" id="step-1"><span class="step-no">Step 1</span>採点とは何か — たった1本の <code>==</code></h2>
+    <p>コードを書く前に、これから扱うものの正体を目で確かめます。標準入出力形式のオンラインジャッジでは、1つのテストケースは<strong>「入力（stdin）」と「期待出力（stdout）」の組</strong>です。提出コードにその入力を流し込み、出てきた標準出力を期待出力と比べる。図にするとこうです。</p>
+
+    <div class="ascii">1テストケースの採点
+
+  テストケース          提出コードの実行            判定
+  ┌───────────┐        ┌──────────────┐
+  │ Input     │──────▶│ 提出コードに   │
+  │ "3 5\n"   │  stdin │ stdin を流す   │
+  └───────────┘        └──────┬───────┘
+                              │ stdout
+  ┌───────────┐              ▼
+  │ Expected  │        ┌──────────────┐        ┌─────┐
+  │ "8\n"     │───────▶│  ==（比較）    │───────▶│ AC  │ 一致
+  └───────────┘        └──────────────┘        │ WA  │ 不一致
+                                                └─────┘</div>
+
+    <p>採点の芯は、この絵の真ん中の <code>==</code> です。Go で書けば1行——</p>
+    <pre><code>ok := actual == expected  <span class="cm">// actual: 提出コードの stdout / expected: 期待出力</span></code></pre>
+    <p>——ですが、この素朴な <code>==</code> を<strong>そのまま使うと、正しい提出を WA にしてしまいます</strong>。理由は Step 4 で実演しますが、先に一言でいうと「人間の目には同じでも、末尾の改行や行末の空白が1つ違うだけで <code>==</code> は <code>false</code> になる」から。だから採点では、比較の前に文字列を<strong>正規化</strong>して土俵を揃えます。第00章の実質は、この「正規化を1枚だけ被せた <code>==</code>」を丁寧に作ることです。</p>
+    <p>もう一つ、Step 1 のうちに用語を固めておきます。1提出は<strong>複数のテストケース</strong>を持ちます（「サンプル」だけでなく隠しケースも）。提出全体の verdict は「全ケース AC なら AC、1つでも落ちたらその verdict」。この「1つでも落ちたら打ち切る」規則は Step 6 の <code>JudgeSubmission</code> で実装します。まずは「ケース1件の合否」を組み、それを束ねる、という順で登ります。</p>
+
+    <h2 class="step" id="step-2"><span class="step-no">Step 2</span>verdict — 結果を表す7つの記号 — verdict.go</h2>
+    <p>採点の出口には、必ず<strong>判定（verdict）</strong>が立っています。提出は最終的に、次の7つのうちのどれか1つに落ちます。まずこの7語を目で覚えます。作るファイルは <code>internal/judge/verdict.go</code>。</p>
+
+    <div class="file-tag">internal/judge/verdict.go</div>
+    <pre><code><span class="kw">package</span> judge
+
+<span class="cm">// Verdict は提出の判定結果（要件 §4）。</span>
+<span class="kw">type</span> <span class="ty">Verdict</span> <span class="ty">string</span>
+
+<span class="kw">const</span> (
+	AC  <span class="ty">Verdict</span> = <span class="st">"AC"</span>  <span class="cm">// Accepted</span>
+	WA  <span class="ty">Verdict</span> = <span class="st">"WA"</span>  <span class="cm">// Wrong Answer</span>
+	TLE <span class="ty">Verdict</span> = <span class="st">"TLE"</span> <span class="cm">// Time Limit Exceeded</span>
+	MLE <span class="ty">Verdict</span> = <span class="st">"MLE"</span> <span class="cm">// Memory Limit Exceeded</span>
+	RE  <span class="ty">Verdict</span> = <span class="st">"RE"</span>  <span class="cm">// Runtime Error</span>
+	CE  <span class="ty">Verdict</span> = <span class="st">"CE"</span>  <span class="cm">// Compile Error</span>
+	IE  <span class="ty">Verdict</span> = <span class="st">"IE"</span>  <span class="cm">// Internal Error（ジャッジ側の異常。NF-08）</span>
+)</code></pre>
+
+    <p>たった十数行ですが、これが本書全体の「結果の語彙」です。<code>type Verdict string</code> は「<code>Verdict</code> は文字列の一種だ」という宣言。ただの <code>string</code> でも動きますが、専用の型にすることで<strong>「これは判定を表す文字列だ」という意味</strong>が型に乗り、うっかり普通の文字列を混ぜる事故を型検査で防げます。値は <code>"AC"</code> のようなそのまま JSON に載る文字列にしてあるので、API 応答や画面表示でも変換なしに使えます。</p>
+    <p>7つの意味を、提出者の目線で言い換えておきます。ここを曖昧にしたまま先へ進むと、第02章以降で「なぜこの実行結果はこの verdict なのか」が追えなくなります。</p>
+    <table>
+      <tr><th>verdict</th><th>いつ出るか（提出者の目線）</th><th>誰の落ち度か</th></tr>
+      <tr><td><code>AC</code></td><td>全テストケースで、出力が期待どおり。合格。</td><td>—（正解）</td></tr>
+      <tr><td><code>WA</code></td><td>実行はできたが、出力が期待と違う。ロジックの間違い。</td><td>提出者</td></tr>
+      <tr><td><code>TLE</code></td><td>制限時間内に終わらなかった。無限ループや遅すぎるアルゴリズム。</td><td>提出者</td></tr>
+      <tr><td><code>MLE</code></td><td>メモリ上限を超えた。大きすぎる配列など。</td><td>提出者</td></tr>
+      <tr><td><code>RE</code></td><td>実行中に異常終了した。ゼロ除算・配列外・panic など（終了コード ≠ 0）。</td><td>提出者</td></tr>
+      <tr><td><code>CE</code></td><td>そもそもコンパイルが通らなかった。文法エラーなど。</td><td>提出者</td></tr>
+      <tr><td><code>IE</code></td><td>ジャッジ<strong>側</strong>の異常。Docker が落ちた、テストケースが壊れている等。提出者は悪くない。</td><td>ジャッジ（運営）</td></tr>
+    </table>
+    <p>この表で最も大事な区別は、最後の <strong><code>IE</code></strong> です。<code>AC</code> から <code>CE</code> までの6つは<strong>提出コードの性質</strong>を表しますが、<code>IE</code> だけは<strong>ジャッジ自身の故障</strong>を表します。要件 NF-08 は「ジャッジ処理の異常は内部エラーとして記録され、利用者の操作を巻き込まない」と定めています。つまり「こちらの都合で採点できなかった」ときに、それを提出者の <code>WA</code> や <code>RE</code> に化けさせては<strong>いけない</strong>。<code>IE</code> は「ごめんなさい、こちらの問題です」を正直に立てるための逃げ場で、本書のジャッジが<strong>疑わしいときは AC を出さない</strong>という思想の中心にいます（Step 6 で何度も効きます）。</p>
+
+    <div class="box hazard"><div class="box-k">⚠ 落とし穴 — IE を「とりあえずのエラー」にしない</div>
+      <p><code>IE</code> は便利なので、実装中「よく分からないエラーは全部 IE」にしたくなります。しかし <code>IE</code> は<strong>「提出者に非がない」という強い主張</strong>です。提出コードのバグ（<code>RE</code>）を <code>IE</code> にすると、提出者は「自分は正しいのにジャッジが壊れている」と誤解します。逆に、ジャッジの故障（本来 <code>IE</code>）を <code>WA</code> にすると、提出者は「正しいのに不正解にされた」と怒ります。<strong>非は提出者にあるのか、ジャッジにあるのか</strong>——この境界を毎回意識するのが、信頼されるジャッジの条件です。Step 5 の <code>decideCase</code> は、まさにこの境界を分岐で引いています。</p>
+    </div>
+
+    <h2 class="step" id="step-3"><span class="step-no">Step 3</span>出力を比べる — compare.go の CompareOutput</h2>
+    <p>語彙が揃ったので、採点の芯 —— 出力比較 —— を書きます。作るファイルは <code>internal/judge/compare.go</code>。この章で扱うのは、その先頭にある <code>CompareOutput</code> と、それが呼ぶ <code>normalizeOutput</code> の2つです（同じファイルには SQL 用の結果セット比較もありますが、それは第06章で扱います）。まず入口の <code>CompareOutput</code> から。</p>
+
+    <div class="file-tag">internal/judge/compare.go</div>
+    <pre><code><span class="kw">package</span> judge
+
+<span class="kw">import</span> (
+	<span class="st">"encoding/json"</span>
+	<span class="st">"fmt"</span>
+	<span class="st">"sort"</span>
+	<span class="st">"strings"</span>
+)
+
+<span class="cm">// CompareOutput は code 問題の出力比較。行末の空白と末尾の空行は正規化する。</span>
+<span class="kw">func</span> CompareOutput(actual, expected <span class="ty">string</span>) <span class="ty">bool</span> {
+	<span class="kw">return</span> normalizeOutput(actual) == normalizeOutput(expected)
+}</code></pre>
+
+    <p>これが Step 1 の絵の <code>==</code> の正体です。ただし、<strong>両方を <code>normalizeOutput</code> に通してから比べています</strong>。素の <code>actual == expected</code> ではなく、<code>normalizeOutput(actual) == normalizeOutput(expected)</code>。この一手間が、正しい提出を守ります。</p>
+    <p>関数の形が美しいことに注目してください。<strong>比較のロジックそのものは <code>==</code> 1つ</strong>。「同じ土俵に乗せる」責任を <code>normalizeOutput</code> に完全に押し出したので、<code>CompareOutput</code> は「正規化してから等値比較」としか言っていません。何を正規化するか（＝どこまでを「同じ」とみなすか）が変わっても、いじるのは <code>normalizeOutput</code> だけ。<strong>「揃える」と「比べる」を分離した</strong>結果、比較の意図が1行で読めます。関数名の下のコメントが「行末の空白と末尾の空行は正規化する」と、まさに「揃える対象」を宣言しているのも道標です。</p>
+
+    <h2 class="step" id="step-4"><span class="step-no">Step 4</span>なぜ正規化が要るのか — normalizeOutput を逐行で</h2>
+    <p>この章のいちばんの肝です。まず「正規化しない <code>==</code>」がなぜ危ういのかを、具体例で体感します。次のような「2数の和」の問題で、期待出力は <code>"8\n"</code> だとします。ある提出が、こう出力しました。</p>
+    <pre class="term"><code><span class="cm"># 期待出力</span>
+<span class="out">8␊</span>            <span class="cm">（␊ = 改行 \n）</span>
+
+<span class="cm"># 提出Aの出力（Println を2回呼んで空行が入った）</span>
+<span class="out">8␊␊</span>
+
+<span class="cm"># 提出Bの出力（printf で改行を付け忘れた）</span>
+<span class="out">8</span>
+
+<span class="cm"># 提出Cの出力（値のあとに余分な空白）</span>
+<span class="out">8␣␣␊</span>         <span class="cm">（␣ = 半角スペース）</span></code></pre>
+    <p>提出 A・B・C はいずれも<strong>人間の目には正解</strong>です。<code>8</code> を出しています。しかし素の <code>==</code> で <code>"8\n"</code> と比べると、A（<code>"8\n\n"</code>）も B（<code>"8"</code>）も C（<code>"8  \n"</code>）も<strong>すべて <code>false</code>——WA</strong>になります。末尾の改行が1個多い、足りない、行末に空白がある。この程度の差で正しい提出を落とすジャッジは、誰にも信用されません。だから比較の前に、こうした「意味のない差」を吸収して土俵を揃える。それが <code>normalizeOutput</code> です。</p>
+
+    <div class="file-tag">internal/judge/compare.go（つづき）</div>
+    <pre><code><span class="kw">func</span> normalizeOutput(s <span class="ty">string</span>) <span class="ty">string</span> {
+	s = strings.ReplaceAll(s, <span class="st">"\r\n"</span>, <span class="st">"\n"</span>)
+	lines := strings.Split(s, <span class="st">"\n"</span>)
+	<span class="kw">for</span> i := <span class="kw">range</span> lines {
+		lines[i] = strings.TrimRight(lines[i], <span class="st">" \t"</span>)
+	}
+	<span class="cm">// 末尾の空行を落とす</span>
+	<span class="kw">for</span> len(lines) &gt; <span class="st">0</span> &amp;&amp; lines[len(lines)-<span class="st">1</span>] == <span class="st">""</span> {
+		lines = lines[:len(lines)-<span class="st">1</span>]
+	}
+	<span class="kw">return</span> strings.Join(lines, <span class="st">"\n"</span>)
+}</code></pre>
+
+    <p>4つの工程を、上から1つずつ。これは「意味を変えない差」を順に潰していく手続きです。</p>
+    <p><strong>① 改行コードを統一する。</strong> <code>strings.ReplaceAll(s, "\r\n", "\n")</code> は、Windows 式の改行 <code>\r\n</code>（CRLF）を Unix 式の <code>\n</code>（LF）に揃えます。提出者の環境やコンテナの違いで改行コードが混ざっても、ここで <code>\n</code> に一本化されるので、以降は「行の区切りは <code>\n</code> だけ」と考えられます。<code>"8\r\n"</code> と <code>"8\n"</code> を同じにするのがこの行の仕事です（テスト <code>crlf</code> がこれを守っています）。</p>
+    <p><strong>② 行に切り分ける。</strong> <code>strings.Split(s, "\n")</code> で文字列を改行ごとに分割し、<code>[]string</code>（行の配列）にします。以降の正規化は「行単位」で行うので、まず行に切るわけです。<code>"a\nb"</code> は <code>["a", "b"]</code> に、<code>"8\n"</code> は <code>["8", ""]</code>（末尾に空文字列が付く点に注意）になります。</p>
+    <p><strong>③ 各行の行末の空白を落とす。</strong> ループで全行に <code>strings.TrimRight(lines[i], " \t")</code> を掛け、<strong>各行の右端</strong>のスペースとタブを削ります。提出 C の <code>"8  "</code> はここで <code>"8"</code> になります。<code>TrimRight</code>（右だけ）である点が重要で、<strong>行頭の空白は落としません</strong>。インデントや桁揃えが意味を持つ問題（例えば図形を描く問題）で、行頭の空白まで消すと正解を落とすからです。「行末の余りは無意味、行頭の空白は有意味」——この非対称が採点の常識です（テスト <code>trailing spaces</code> が前者を、<code>leading space differs</code> が後者を守っています）。</p>
+    <p><strong>④ 末尾の空行を落とす。</strong> 最後のループは、<strong>配列の末尾</strong>にある空行（<code>""</code>）を、空でない行に当たるまで削り続けます。<code>len(lines) &gt; 0 &amp;&amp; lines[len(lines)-1] == ""</code> が「まだ末尾が空行なら」の条件で、<code>lines = lines[:len(lines)-1]</code> でその1行を切り捨てます。これで <code>"8\n"</code>（→ <code>["8",""]</code>）も <code>"8\n\n"</code>（→ <code>["8","",""]</code>）も <code>"8"</code>（→ <code>["8"]</code>）も、すべて末尾の空行が落ちて <code>["8"]</code> に揃います。提出 A・B と期待出力が、ここでようやく一致します。<strong>ただし末尾<em>だけ</em></strong>で、途中の空行は残す点に注意。段落の間に空行を要求する問題があるからです。</p>
+    <p>最後に <code>strings.Join(lines, "\n")</code> で行を <code>\n</code> で綴じ直し、正規化済みの文字列を返します。<code>CompareOutput</code> はこの返り値どうしを <code>==</code> で比べるので、A・B・C・期待出力はすべて <code>"8"</code> になって一致——めでたく <code>AC</code> です。</p>
+
+    <div class="box hazard"><div class="box-k">⚠ 落とし穴 — 正規化を怠ると、空白1つで正解が WA になる</div>
+      <p>これは実装者が最初に踏む地雷です。<code>normalizeOutput</code> を挟まず素の <code>actual == expected</code> で採点すると、<strong>行末の空白1個、末尾の改行1個の差で、正しい提出が容赦なく WA になります</strong>。多くの言語の <code>println</code> は末尾に改行を付けますが、期待出力を人が手で登録するとき改行を付け忘れることも、逆に付けすぎることもある。この「無意味な差」を吸収しないジャッジは、正答者を不正解にして信頼を失います。<strong>逆に、正規化しすぎるのも罪</strong>です。行頭の空白や途中の空行まで潰すと、今度は本当に違う出力を AC にしてしまう。<code>normalizeOutput</code> が「行末と末尾だけ」を削り、「行頭と途中」を守るのは、この<strong>削りすぎと削らなすぎの間の狭い正解</strong>を突いた設計です。テスト <code>TestCompareOutput</code> の9ケースは、まさにこの境界線を全方位から固定しています。</p>
+    </div>
+
+    <div class="gonote"><div class="box-k">GO メモ · strings.Split / TrimRight / スライスの切り詰め</div>
+      <p><code>strings.Split(s, "\n")</code> は文字列を区切り文字で割って <code>[]string</code> を返します。区切りが末尾にあると<strong>最後に空文字列が付く</strong>（<code>"a\n"</code> → <code>["a", ""]</code>）——この性質が、④の「末尾の空行落とし」がちょうど末尾の改行を吸収する理屈です。<br>
+      <code>strings.TrimRight(s, " \t")</code> は「文字列の<strong>右端</strong>から、指定した集合（ここでは半角スペースとタブ）に含まれる文字を削れるだけ削る」。<code>Trim</code>（両端）でも <code>TrimLeft</code>（左端）でもなく <code>TrimRight</code> を選んでいるのが、行頭を守るための意図的な選択です。<br>
+      <code>lines = lines[:len(lines)-1]</code> は<strong>スライスの末尾1要素を切り落とす</strong>定石です。<code>lines[:n]</code> は「先頭から n 個」を指す部分スライスなので、<code>len-1</code> を渡せば末尾が1つ縮みます。ループで回すことで、末尾の空行を「連続している間ずっと」削れます。</p>
+    </div>
+
+    <div class="box do"><div class="box-k">▸ 動かして確認</div>
+      <p>この <code>compare.go</code> だけで、出力比較のテストが通ります。Docker は不要です。</p>
+      <pre class="term"><code><span class="ps">$</span> cd backend
+<span class="ps">$</span> go test ./internal/judge/ -run TestCompareOutput -v
+<span class="out">=== RUN   TestCompareOutput
+--- PASS: TestCompareOutput (0.00s)
+PASS
+ok      judge/internal/judge    0.008s</span></code></pre>
+      <p><code>TestCompareOutput</code> は9つのケースで、正規化の境界をすべて固定しています。<code>trailing newline diff</code>（<code>"8"</code> と <code>"8\n"</code> が同じ）、<code>trailing spaces</code>（<code>"8  \n"</code> と <code>"8\n"</code> が同じ）、<code>crlf</code>（<code>"8\r\n"</code> と <code>"8\n"</code> が同じ）、<code>trailing blank lines</code>（<code>"8\n\n\n"</code> と <code>"8\n"</code> が同じ）は「吸収すべき無意味な差」。一方 <code>wrong value</code>（<code>"9"</code>≠<code>"8"</code>）、<code>leading space differs</code>（<code>" 8"</code>≠<code>"8"</code>、行頭空白は有意味）、<code>multiline wrong order</code>（<code>Buzz→Fizz</code> の順序違い）は「見逃してはいけない本物の差」。この9本が緑になれば、あなたの採点の芯は<strong>正しく甘く、正しく厳しい</strong>ことが機械で保証されます。</p>
+    </div>
+
+    <h2 class="step" id="step-5"><span class="step-no">Step 5</span>1ケースの合否を決める — decideCase</h2>
+    <p>出力比較ができました。しかし現実の採点は「出力を比べる」前に、<strong>そもそも正常に実行できたのか</strong>を確かめねばなりません。無限ループしていないか（TLE）、メモリを食い潰していないか（MLE）、途中で異常終了していないか（RE）。それらを潜り抜けて<strong>正常終了したときに初めて</strong>、出力比較の出番が来ます。この「実行結果 → verdict」の分岐を担うのが <code>decideCase</code> です。ファイルは <code>internal/judge/judge.go</code>。</p>
+    <p>まず、<code>decideCase</code> が受け取る「1ケースの実行結果」を表す型を頭に入れます。実行部分（第04章）が埋めてくれる構造体で、この章では<strong>「こういう情報が渡ってくる」</strong>とだけ捉えれば十分です。</p>
+    <div class="file-tag">internal/judge/protocol.go（CaseOutcome）</div>
+    <pre><code><span class="kw">type</span> <span class="ty">CaseOutcome</span> <span class="kw">struct</span> {
+	Name      <span class="ty">string</span>
+	ExitCode  <span class="ty">int</span>
+	ElapsedMS <span class="ty">int</span>
+	MaxRSSKB  <span class="ty">int</span>
+	Stdout    []<span class="ty">byte</span>
+	Stderr    []<span class="ty">byte</span>
+}</code></pre>
+    <p>6つのフィールドが、それぞれ何のために使われるかを先に押さえます。</p>
+    <ul>
+      <li><code>ExitCode</code> … プロセスの<strong>終了コード</strong>（<code>0</code> = 正常終了）。<code>decideCase</code> の主役です。</li>
+      <li><code>Stdout</code> … 標準出力。<strong>これを期待値と比べます</strong>。<code>[]byte</code> なので、比較の前に <code>string(c.Stdout)</code> で文字列に変換します（Go では「バイト列」と「文字列」は別の型で、明示的な変換が要ります）。</li>
+      <li><code>Stderr</code> … 標準エラー出力。<code>MLE</code> 判定のヒントに使います（第02章）。</li>
+      <li><code>ElapsedMS</code> … 経過時間（ミリ秒）。制限時間の超過判定に使います。</li>
+      <li><code>MaxRSSKB</code> … 最大メモリ使用量（KB）。<code>decideCase</code> では使わず、<code>JudgeSubmission</code> が<strong>提出全体の最大値</strong>として記録します（全ケースを通じていちばん食った値を1つ持つ）。</li>
+      <li><code>Name</code> … ケース名。順序が食い違っていないかの照合に使います（第02章）。</li>
+    </ul>
+    <p>加えて、問題ごとの制限時間 <code>p.TimeLimitMS</code>（ミリ秒）も判定に使います。</p>
+
+    <div class="gonote"><div class="box-k">GO メモ · プロセスの終了コード — <code>0</code> / <code>124</code> / <code>137</code> の読み方</div>
+      <p>次のコードは、いきなり <code>124</code> や <code>137</code> という数字を見て verdict を決めます。<strong>この数字が読めないと、この章の中心が丸ごと暗記になります</strong>ので、先に土台を作っておきます。</p>
+      <p>Unix のプロセスは、終わるときに <strong><code>0</code>〜<code>255</code> の整数</strong>を親に返します。これが<strong>終了コード</strong>（exit status）です。慣習は明快で、<strong><code>0</code> は正常終了、それ以外はすべて何らかの異常</strong>。<code>exit(1)</code> のようにプログラムが自分で返す値もあれば、<strong>外から強制的に殺されたとき</strong>に合成される値もあります。ジャッジで重要なのは後者です。</p>
+      <p>プロセスが<strong>シグナル</strong>（プロセスに送る「止まれ」などの合図）<code>n</code> で殺されると、終了コードは <strong><code>128 + n</code></strong> として報告されます。だから：</p>
+      <div class="ascii">137 = 128 + 9   → シグナル 9 = SIGKILL（問答無用で消す。拒否できない）
+143 = 128 + 15  → シグナル 15 = SIGTERM（穏やかな終了要求。無視もできる）
+139 = 128 + 11  → シグナル 11 = SIGSEGV（不正なメモリアクセス）</div>
+      <p><strong><code>137</code> を見たら「SIGKILL で殺された」</strong>と読めれば十分です。誰が殺したのか——多くはカーネルの <strong>OOM killer</strong>（Out Of Memory killer。メモリが枯渇したとき、犯人のプロセスを強制終了する OS の仕組み）です。だから <code>137</code> は<strong>まずメモリ超過を疑う</strong>手がかりになります。</p>
+      <p>もう1つ、<code>124</code> は系統が違います。これは <strong><code>timeout</code> コマンド</strong>（GNU coreutils）が「<strong>時間内に終わらなかったので打ち切った</strong>」ときに返す<strong>専用の値</strong>です。<code>128+n</code> とは無関係の、独立した合図だと捉えてください。本書のジャッジは提出コードを <code>timeout</code> で包んで走らせる（第05章）ので、時間超過はこの <code>124</code> で一意に分かります。</p>
+      <p>まとめると、この章で必要なのは3つだけです。<strong><code>0</code>＝正常</strong>、<strong><code>124</code>＝時間切れ</strong>、<strong><code>137</code>＝SIGKILL で殺された（多くはメモリ）</strong>。<code>137</code> には実はもう1つの犯人がいるのですが、それは第02章でじっくり扱います。</p>
+    </div>
+
+    <p>この情報を見て verdict を1つ選ぶのが <code>decideCase</code> です。全文を載せます。</p>
+
+    <div class="file-tag">internal/judge/judge.go（decideCase）</div>
+    <pre><code><span class="cm">// decideCase は1ケースの verdict を決める（02_tech_stack.md の判定ロジック）。</span>
+<span class="kw">func</span> decideCase(c <span class="ty">CaseOutcome</span>, p *store.<span class="ty">Problem</span>, tc store.<span class="ty">Testcase</span>) <span class="ty">Verdict</span> {
+	<span class="kw">switch</span> {
+	<span class="kw">case</span> c.ExitCode == <span class="st">111</span>:
+		<span class="kw">return</span> IE <span class="cm">// sql シード投入失敗（問題データ側の異常）</span>
+	<span class="kw">case</span> c.ExitCode == <span class="st">124</span>:
+		<span class="cm">// timeout コマンドが時間超過で発火した専用コード（ランナーが -s TERM で送る）。</span>
+		<span class="cm">// TLE を elapsed に頼らず exit コードだけで確定できる。</span>
+		<span class="kw">return</span> TLE
+	<span class="kw">case</span> c.ExitCode != <span class="st">0</span> &amp;&amp; bytes.Contains(c.Stderr, []<span class="ty">byte</span>(<span class="st">"heap out of memory"</span>)):
+		<span class="cm">// node はコンテナ上限より先に V8 ヒープ上限で自死する。</span>
+		<span class="cm">// 正常終了(exit 0)の提出が偶然この文字列を出力しても MLE にしないよう、</span>
+		<span class="cm">// 異常終了を条件に加える。</span>
+		<span class="kw">return</span> MLE
+	<span class="kw">case</span> c.ExitCode == <span class="st">137</span>:
+		<span class="cm">// SIGKILL(128+9)。時間超過は 124 で捕捉済みなので、ここに来る 137 は</span>
+		<span class="cm">// 原則カーネル OOM killer による停止（＝メモリ超過）とみなす。</span>
+		<span class="cm">// 例外: 提出が SIGTERM を握りつぶし timeout の -k(3s猶予) で KILL された場合も 137。</span>
+		<span class="cm">// その場合 elapsed は必ず制限時間を超えるので、制限超過のときだけ TLE に倒す</span>
+		<span class="cm">// （制限時間内で 137 になったものは真の OOM なので MLE のまま）。</span>
+		<span class="kw">if</span> c.ElapsedMS &gt; p.TimeLimitMS {
+			<span class="kw">return</span> TLE
+		}
+		<span class="kw">return</span> MLE
+	<span class="kw">case</span> c.ExitCode != <span class="st">0</span>:
+		<span class="kw">return</span> RE
+	}
+	<span class="cm">// exit 0: 出力比較</span>
+	<span class="kw">if</span> c.ElapsedMS &gt; p.TimeLimitMS {
+		<span class="kw">return</span> TLE
+	}
+	<span class="kw">if</span> p.Type == <span class="st">"sql"</span> {
+		ok, err := CompareResultSet(string(c.Stdout), tc.Expected, p.SQLOrderMatters)
+		<span class="kw">if</span> err != <span class="kw">nil</span> || !ok {
+			<span class="kw">return</span> WA
+		}
+		<span class="kw">return</span> AC
+	}
+	<span class="kw">if</span> !CompareOutput(string(c.Stdout), tc.Expected) {
+		<span class="kw">return</span> WA
+	}
+	<span class="kw">return</span> AC
+}</code></pre>
+
+    <p>この関数の形は<strong>「異常を先に潰し、生き残ったものだけを比較にかける」</strong>という一本道です。上から順に、なぜその分岐がその位置にあるのかを追います。順序そのものに意味があるので、順番に読んでください。</p>
+    <p><strong>終了コードによる分岐（switch）が先。</strong> <code>switch { case ... }</code> は条件を上から評価し、最初に真になった枝で <code>return</code> します。ここに並ぶのは<strong>「そもそも正常に走ったか」の検査</strong>です。プロセスの<strong>終了コード</strong>を主な手がかりにしています。Unix では正常終了が <code>0</code>、それ以外は何らかの異常。この慣習に乗って、まず異常系を全部さばきます。</p>
+    <ul>
+      <li><code>ExitCode == 111</code> → <code>IE</code>。これは SQL 問題で、採点の前提となる「シードデータ（初期テーブル）の投入」に失敗したときのコードです。<strong>提出者ではなく問題データ側の異常</strong>なので、Step 2 で強調した通り <code>WA</code> にせず <code>IE</code>（ジャッジ側の非）に倒します。</li>
+      <li><code>ExitCode == 124</code> → <code>TLE</code>。<code>124</code> は Unix の <code>timeout</code> コマンドが「時間切れで対象を打ち切った」ときに返す専用コードです。実行を <code>timeout 2 ./solution</code> のように包んでおけば、時間超過を<strong>経過時間の計測に頼らず、終了コードだけで確定</strong>できます。時計より終了コードの方が確実だからです。</li>
+      <li><code>ExitCode != 0 &amp;&amp; Stderr に "heap out of memory"</code> → <code>MLE</code>。Node.js は、コンテナのメモリ上限に達する<strong>前に</strong>、V8 エンジン自身のヒープ上限で自死し、この文字列をエラー出力に吐きます。だから「異常終了 かつ その文言がある」を Node 特有の MLE と見なします。<strong>「異常終了(exit ≠ 0)」を条件に加えている</strong>のが肝で、正常終了した提出が偶然 <code>"heap out of memory"</code> という<em>文字列</em>を出力しただけで MLE にしてしまう誤爆を防いでいます。</li>
+      <li><code>ExitCode == 137</code> → 原則 <code>MLE</code>、ただし時間超過なら <code>TLE</code>。<code>137</code> は <code>128 + 9</code>、つまり <strong>SIGKILL で殺された</strong>ことを表します。カーネルの OOM killer（メモリ枯渇時にプロセスを強制終了する仕組み）が発火すると <code>137</code> になるので、通常はメモリ超過＝<code>MLE</code>。ただし例外があります。提出が終了シグナル（SIGTERM）を握りつぶすと、<code>timeout</code> が猶予後に SIGKILL を送り、これも <code>137</code> になる。その場合は<strong>必ず制限時間を超えている</strong>ので、<code>ElapsedMS &gt; TimeLimitMS</code> のときだけ <code>TLE</code> に倒し、制限時間内での <code>137</code> は真の OOM として <code>MLE</code> のままにします。「同じ終了コードでも文脈で verdict が変わる」——ここが判定の機微です。</li>
+      <li>上のどれにも当たらない <code>ExitCode != 0</code> → <code>RE</code>。特定できない異常終了は、すべて<strong>実行時エラー</strong>にまとめます。panic、ゼロ除算、配列外アクセスなど、提出コードが自力でクラッシュしたケースです。</li>
+    </ul>
+    <p><strong>そして switch を抜けたら、それは「正常終了(exit 0)」を意味します。</strong> ここでようやく出力比較の出番——ですが、その前にもう一つ関門があります。<code>c.ElapsedMS &gt; p.TimeLimitMS</code>。<code>timeout</code> の <code>124</code> で捕まえきれなかった「正常終了はしたが、実は制限時間をわずかに超えていた」ケースを、経過時間で拾って <code>TLE</code> に倒します。終了コード（<code>124</code>）と経過時間の<strong>二段構えで TLE を守っている</strong>わけです。</p>
+    <p><strong>すべての関門を潜り抜けて、初めて出力比較。</strong> ここで問題の種類（<code>p.Type</code>）で枝分かれします。SQL 問題なら <code>CompareResultSet</code>（結果セットの一致比較、第06章で扱う）、それ以外の通常の問題なら Step 3 で作った <code>CompareOutput</code>。比較が真なら <code>AC</code>、偽なら <code>WA</code>。この章の主役 <code>CompareOutput</code> が、長い分岐の一番奥、<strong>「異常が何一つなかったとき」にだけ呼ばれる</strong>のが見て取れます。採点とは「まず正常に走ったことを確かめ、それから出力を比べる」——<code>decideCase</code> はその手続きを、そのままコードの縦の流れにしたものです。</p>
+
+    <div class="box hazard"><div class="box-k">⚠ 落とし穴 — 判定の順序を入れ替えてはいけない</div>
+      <p><code>decideCase</code> の分岐は<strong>順序に意味があります</strong>。もし出力比較を先にやってしまうと、無限ループでタイムアウトした提出（<code>124</code>）の「途中までの出力」がたまたま期待値と一致して <code>AC</code> になる、といった事故が起きます。<strong>異常検査は必ず比較より前</strong>。同様に、<code>137</code>（SIGKILL）の分岐を <code>124</code>（timeout）より前に置くと、時間超過が MLE に化けます。「終了コードの意味を、特殊なものから順に、正常(exit 0)を最後に」——この序列は判定ロジックの背骨で、崩すと verdict が静かに壊れます。verdict の間違いはテストでも気づきにくい（緑が出てしまう）ので、順序は特に慎重に守ってください。</p>
+    </div>
+
+    <h2 class="step" id="step-6"><span class="step-no">Step 6</span>提出全体をまとめる — JudgeSubmission の骨格</h2>
+    <p><code>decideCase</code> は「1ケースの合否」を決めます。しかし1つの提出は複数のテストケースを持ちます。それらを束ね、<strong>コンパイル → 実行 → 判定</strong>という提出全体の流れを統べるのが <code>JudgeSubmission</code> です。この章では、その全文ではなく<strong>骨格</strong>——3段の流れと、判定ループの要所——を読みます（実行の中身は第04章以降）。まず3段の流れを絵にします。</p>
+
+    <div class="ascii">JudgeSubmission — 1提出の採点の流れ
+
+  ┌── コンパイル段 ──────────────────────┐
+  │ 提出コードをコンパイル                  │
+  │   失敗 → CE で即終了                   │
+  │   成功 → 実行可能物（バイナリ）を得る    │
+  └──────────────┬───────────────────────┘
+                 ▼
+  ┌── 実行段 ────────────────────────────┐
+  │ 全テストケースを実行し、各ケースの        │
+  │ 実行結果（CaseOutcome）を集める          │
+  └──────────────┬───────────────────────┘
+                 ▼
+  ┌── 判定段 ────────────────────────────┐
+  │ ケースごとに decideCase で verdict を    │
+  │ 決め、最初の非 AC で打ち切る（§5.1）      │
+  │ 全 AC なら AC                           │
+  └──────────────────────────────────────┘</div>
+
+    <p>骨格をコードで見ます。長いので、この章で理解すべき<strong>3段の背骨</strong>に絞って引用し、実行の詳細は <code>// …（第04章で）</code> と省略します。</p>
+
+    <div class="file-tag">internal/judge/judge.go（JudgeSubmission・骨格）</div>
+    <pre><code><span class="cm">// JudgeSubmission は コンパイル段 → 実行段（提出ごとに1コンテナ、ケースはコンテナ内でループ）→ 判定 を行う。</span>
+<span class="kw">func</span> (j *<span class="ty">Judger</span>) JudgeSubmission(ctx context.<span class="ty">Context</span>, job <span class="ty">Job</span>, onCase <span class="ty">OnCaseResult</span>) *<span class="ty">JudgeOutput</span> {
+	spec, err := SpecFor(job.Language, job.Problem.Type)
+	<span class="kw">if</span> err != <span class="kw">nil</span> {
+		<span class="kw">return</span> &amp;<span class="ty">JudgeOutput</span>{Verdict: IE, InternalNote: err.Error()}
+	}
+	<span class="kw">if</span> len(job.Cases) == <span class="st">0</span> {
+		<span class="kw">return</span> &amp;<span class="ty">JudgeOutput</span>{Verdict: IE, InternalNote: <span class="st">"problem has no testcases"</span>}
+	}
+
+	<span class="cm">// --- コンパイル段（CE 判定） ---</span>
+	<span class="kw">var</span> artifact []<span class="ty">byte</span>
+	<span class="kw">if</span> spec.CompileCmd != <span class="kw">nil</span> {
+		cres, ierr := j.compile(ctx, spec, job.Code)
+		<span class="kw">if</span> ierr != <span class="kw">nil</span> {
+			<span class="kw">return</span> &amp;<span class="ty">JudgeOutput</span>{Verdict: IE, InternalNote: ierr.Error()}
+		}
+		<span class="kw">if</span> !cres.OK {
+			<span class="kw">return</span> &amp;<span class="ty">JudgeOutput</span>{Verdict: CE, CompileOutput: truncateStr(cres.Message, <span class="st">64</span>&lt;&lt;<span class="st">10</span>)}
+		}
+		artifact = cres.Artifact
+	}
+
+	<span class="cm">// --- 実行段 ---</span>
+	runRes, outcome, ierr := j.runCases(ctx, spec, job.Code, artifact, job.Problem, job.Cases)
+	<span class="kw">if</span> ierr != <span class="kw">nil</span> {
+		<span class="kw">return</span> &amp;<span class="ty">JudgeOutput</span>{Verdict: IE, InternalNote: ierr.Error()}
+	}
+	<span class="cm">// …（ランナーが偽装したケース数を報告していないか等の検査。第02章で解説）</span>
+
+	<span class="cm">// --- 判定 ---</span>
+	out := &amp;<span class="ty">JudgeOutput</span>{Verdict: AC}
+	<span class="kw">for</span> i, tc := <span class="kw">range</span> job.Cases {
+		<span class="kw">var</span> v <span class="ty">Verdict</span>
+		<span class="cm">// …（i 番目のケースの実行結果 c を取り出す。詳細は後の章）</span>
+		v = decideCase(c, job.Problem, tc)
+		<span class="cm">// …（実行時間・メモリの最大値を out に記録）</span>
+		<span class="kw">if</span> onCase != <span class="kw">nil</span> {
+			onCase(tc, v, timeMS, memKB, actual, stderrStr) <span class="cm">// ケース単位で逐次通知（第08章）</span>
+		}
+		<span class="kw">if</span> v != AC {
+			out.Verdict = v
+			<span class="kw">break</span> <span class="cm">// 最初の非 AC で打ち切り（§5.1）</span>
+		}
+	}
+	<span class="cm">// …（Done・Truncated の検査。全 AC でも採点が不完全なら IE。第01章・第02章）</span>
+	<span class="kw">return</span> out
+}</code></pre>
+
+    <p>骨格の要点は4つです。この章では「採点の背骨がどう流れるか」を掴めれば十分で、<code>compile</code> や <code>runCases</code> の中身は後の章に委ねます。</p>
+    <p><strong>入口で「無理な採点」を IE に倒す。</strong> 先頭2つの <code>if</code> が門番です。言語と問題タイプの組み合わせが未対応（<code>SpecFor</code> がエラー）だったり、テストケースが1件も無かったりしたら、採点そのものが成立しないので <code>IE</code> を返します。<strong>提出者に非がないのに採点できない状況</strong>——Step 2 で立てた <code>IE</code> の定義そのままです。ここで <code>WA</code> を返したら、正しい提出を「あなたの間違い」と誣告することになります。</p>
+    <p><strong>コンパイル段は CE の関所。</strong> 言語がコンパイルを要する（<code>spec.CompileCmd != nil</code>、Go など）なら、まずコンパイルします。ここで<strong>2種類の失敗を区別</strong>しているのが読みどころです。<code>ierr</code>（コンパイル<em>器</em>を起動できなかった等、ジャッジ側の事故）は <code>IE</code>。<code>!cres.OK</code>（コンパイルは走ったが、提出コードに文法エラーがあった）は <code>CE</code>。<strong>同じ「コンパイルできなかった」でも、非がジャッジ側なら IE、提出者側なら CE</strong>。この分別が、信頼されるジャッジの細部です。コンパイル成功なら、その成果物（<code>artifact</code>、ビルドされたバイナリ）を実行段へ渡します。</p>
+    <p><strong>実行段は「結果を集める」だけ。</strong> <code>runCases</code> が全テストケースを実行し、各ケースの結果（<code>outcome</code>）を集めて返します。ここでも実行器の起動失敗は <code>IE</code>。この段の<strong>中身</strong>——どう隔離し、どう時間を測り、どうケースを回すか——こそが第04〜05章の主題で、いまは「実行結果が集まって戻ってくる箱」として素通りしてよい部分です。採点ロジック（この章）と実行機構（後の章）が、<code>runCases</code> という一本の線できれいに分かれているのが分かります。</p>
+    <p><strong>判定段は decideCase を回して、最初の非 AC で打ち切る。</strong> <code>out</code> の verdict を楽観的に <code>AC</code> で初期化し、ケースを1つずつ <code>decideCase</code> にかけます。<strong><code>if v != AC { out.Verdict = v; break }</code></strong> ——この <code>break</code> が MVP 仕様（<code>02_mvp_spec.md</code>）§5.1「最初の非 AC で打ち切り」の実装です。10ケース中3番目で <code>WA</code> なら、4番目以降は<strong>採点しません</strong>。提出全体の verdict はその <code>WA</code> になります。全ケースを <code>AC</code> で走り切ったときだけ、初期値の <code>AC</code> がそのまま提出の verdict として残る——これが「全テストケースで期待どおりなら AC」（要件 §4）の姿です。<code>onCase</code> コールバックは、ケース1件ごとに結果を外へ通知する仕掛けです。「3件目まで通過、採点中…」という<strong>途中経過を画面に出すための配管</strong>で、第07〜08章で DB と画面に繋ぎます（現状その途中経過が実際には見えない理由は、第08章 Step 6 で扱います）。</p>
+
+    <div class="gonote"><div class="box-k">GO メモ · ポインタ返し &amp;JudgeOutput{...} と、複数戻り値の err 分岐</div>
+      <p><code>return &amp;JudgeOutput{Verdict: IE, ...}</code> の <code>&amp;</code> は「この構造体リテラルの<strong>アドレス</strong>（ポインタ）を返す」という意味です。関数の戻り値型が <code>*JudgeOutput</code>（ポインタ）なので、その場で作った値へのポインタを返しています。Go では小さくない結果や、後で書き換えたい結果を<strong>ポインタで返す</strong>のが一般的です。<br>
+      <code>cres, ierr := j.compile(...)</code> のように<strong>「結果」と「エラー」を2つ同時に受け取り、<code>if ierr != nil</code> で真っ先に異常を処理する</strong>のは Go の最も基本的な作法です。<code>JudgeSubmission</code> が何度も <code>if ... != nil { return IE }</code> を繰り返すのは冗長に見えますが、これが「異常は握り潰さず、その場で正しい verdict に変換して返す」という規律の現れです。異常を静かに無視すると、後段で「なぜか AC が出ない」という追いにくいバグになります。</p>
+    </div>
+
+    <div class="box do"><div class="box-k">▸ 動かして確認</div>
+      <p>この章で読んだ採点ロジックのうち、<strong>Docker 不要で機械検証できる芯</strong>を通しておきます。比較と判定のテストは実行機構（第04章）を必要としないので、いまここで緑にできます。</p>
+      <pre class="term"><code><span class="ps">$</span> cd backend
+<span class="ps">$</span> go test ./internal/judge/ -run 'TestCompareOutput|TestCompareResultSet' -v
+<span class="out">=== RUN   TestCompareOutput
+--- PASS: TestCompareOutput (0.00s)
+=== RUN   TestCompareResultSet
+--- PASS: TestCompareResultSet (0.00s)
+PASS
+ok      judge/internal/judge    0.011s</span></code></pre>
+      <p><code>TestCompareOutput</code> がこの章の主役 <code>normalizeOutput</code> を、<code>TestCompareResultSet</code> が SQL 用の <code>CompareResultSet</code>（第06章の主題ですが、同じ <code>compare.go</code> に同居しています）を検証します。この2本が緑なら、あなたの<strong>採点の芯——「同じ」と「違う」を正しく見分ける目——は完成</strong>です。実行機構（Docker）を積むのはこの次以降ですが、その上でどれだけ危険なコードを走らせても、最後にそれを合否に変えるのはこの章のロジックです。</p>
+    </div>
+
+    <h2 class="step" id="step-7"><span class="step-no">Step 7</span>手を動かす — 正規化の境界を自分で試す</h2>
+    <p>ここまでの話——「採点の芯は、正規化を1枚被せた <code>==</code> にすぎない」——を、テストを<strong>いじって</strong>体で確かめます。<code>compare_test.go</code> のテストケースは、正規化の境界を固定した「仕様書」です。ここに新しい行を足して、自分の予想と機械の答えを突き合わせます。</p>
+    <p>まず、<code>TestCompareOutput</code> のテーブルに次の1行を足してみてください。</p>
+    <div class="file-tag">internal/judge/compare_test.go（tests テーブルに追記して実験）</div>
+    <pre><code>{<span class="st">"middle blank line kept"</span>, <span class="st">"a\n\nb\n"</span>, <span class="st">"a\nb\n"</span>, <span class="cm">/* want */</span> <span class="kw">false</span>},</code></pre>
+    <p>これは「途中の空行」の扱いを問うています。<code>"a\n\nb"</code>（a と b の間に空行）と <code>"a\nb"</code>（空行なし）は、同じか違うか? <code>normalizeOutput</code> は<strong>末尾の空行しか落とさない</strong>ので、途中の空行は残ります。したがって両者は<strong>違う</strong>——<code>want: false</code> が正解です。テストを走らせて、緑になることを確かめてください。</p>
+    <pre class="term"><code><span class="ps">$</span> go test ./internal/judge/ -run TestCompareOutput -v
+<span class="out">--- PASS: TestCompareOutput (0.00s)</span></code></pre>
+    <div class="box do"><div class="box-k">▸ さらに手を動かすなら</div>
+      <p>余力があれば、次を試してみてください。答えは自分の目で確かめられます。</p>
+      <ol>
+        <li><code>{"tab trailing", "8\t\n", "8\n", true}</code> を足す。行末のタブは <code>TrimRight(…, " \t")</code> で落ちるので <code>true</code> のはず。予想通りか?</li>
+        <li><code>{"leading tab differs", "\t8\n", "8\n", false}</code> を足す。行頭のタブは<strong>落ちない</strong>ので <code>false</code> のはず。行末と行頭の非対称を体で覚える。</li>
+        <li>（実験）試しに <code>normalizeOutput</code> の <code>TrimRight</code> を <code>strings.TrimSpace</code>（両端を削る）に書き換えてみる。<code>leading space differs</code> のテストが<strong>落ちる</strong>ことを確認し、「なぜ行頭を守らねばならないか」を失敗から理解する。確認したら必ず元に戻すこと。</li>
+      </ol>
+    </div>
+
+    <h2>つまずき FAQ</h2>
+    <details class="qa"><summary>なぜ「実際の出力」と「期待出力」を、素の <code>==</code> で比べてはいけないの?</summary>
+      <div class="qa-body"><p>人間の目には同じ出力でも、末尾の改行が1個多い・行末に空白がある・改行コードが <code>\r\n</code> だ、といった<strong>意味のない差</strong>で <code>==</code> は <code>false</code> になるからです。多くの言語の <code>println</code> は末尾に改行を付けますし、期待出力を手で登録するときズレも生じます。これらを吸収しないと、正しい提出を WA にしてしまい、ジャッジが信用されません。<code>normalizeOutput</code> で「行末の空白」と「末尾の空行」だけを揃えてから比べる——甘すぎず厳しすぎない一枚を被せるのが答えです。</p></div>
+    </details>
+    <details class="qa"><summary>行末の空白は落とすのに、なぜ行頭の空白は落とさないの?</summary>
+      <div class="qa-body"><p>行末の余分な空白は<strong>ほぼ常に無意味</strong>（見えないゴミ）ですが、行頭の空白は<strong>意味を持つことがある</strong>からです。インデントで木構造を表す問題、空白で図形を描く問題、桁を揃えて表を出す問題——こうした問題では行頭の空白が正解の一部です。<code>TrimRight</code>（右端だけ）を使い <code>Trim</code>（両端）を避けているのは、この「行末は無意味・行頭は有意味」という採点の常識を守るためです。<code>TestCompareOutput</code> の <code>leading space differs</code> がこの一線を固定しています。</p></div>
+    </details>
+    <details class="qa"><summary><code>decideCase</code> はなぜ出力比較より先に終了コードを見るの?</summary>
+      <div class="qa-body"><p>「正常に走ったか」を先に確かめないと、比較が無意味になるからです。無限ループでタイムアウトした提出は、途中までの出力がたまたま期待値と一致することがあります。もし比較を先にやると、それを <code>AC</code> にしてしまう。だから <code>decideCase</code> は「異常検査（TLE / MLE / RE）を全部済ませ、正常終了(exit 0)が確定したものだけを出力比較にかける」という順序を厳守します。異常を潰してから比べる——採点の鉄則です。</p></div>
+    </details>
+    <details class="qa"><summary><code>IE</code> は「その他のエラー」の置き場所? 何でも <code>IE</code> にしていい?</summary>
+      <div class="qa-body"><p>いけません。<code>IE</code> は<strong>「提出者に非はなく、ジャッジ側が壊れた」という明確な主張</strong>です。提出コードのバグ（本来 <code>RE</code>）を <code>IE</code> にすると提出者は「自分は正しいのにジャッジが壊れている」と誤解し、逆にジャッジの故障（本来 <code>IE</code>）を <code>WA</code> にすると「正しいのに落とされた」と怒ります。毎回「非は提出者か、ジャッジか」を問うのが正しい使い方です。<code>JudgeSubmission</code> が「テストケース0件」「言語未対応」「コンパイラ起動失敗」を <code>IE</code> にし、「提出コードの文法エラー」を <code>CE</code> にするのは、この境界を律儀に引いた結果です。</p></div>
+    </details>
+
+    <h2>理解度チェック</h2>
+    <p>次の問いに<strong>自分の言葉で</strong>答えられたら、この章は卒業です。</p>
+    <details class="qa"><summary>1. オンラインジャッジの「採点の芯」を1文で言うと何か。<code>normalizeOutput</code> はなぜ必要か。</summary>
+      <div class="qa-body"><p>芯は<strong>「提出コードの標準出力を期待出力と比べ、一致なら AC、違えば WA」</strong>。実装上は Go の <code>==</code> 1本。ただし素の <code>==</code> は、末尾の改行・行末の空白・改行コードの差といった<strong>意味のない違い</strong>で正しい提出を WA にしてしまう。<code>normalizeOutput</code> は比較の前に「改行コードの統一・行末空白の除去・末尾空行の除去」で両者を同じ土俵に揃え、この誤判定を防ぐ。ただし行頭の空白と途中の空行は<strong>残す</strong>（有意味なため）。</p></div>
+    </details>
+    <details class="qa"><summary>2. 7つの verdict のうち、<code>IE</code> だけが他と本質的に違う。何が違うか。</summary>
+      <div class="qa-body"><p>他の6つ（<code>AC / WA / TLE / MLE / RE / CE</code>）は<strong>提出コードの性質</strong>——正しいか、遅いか、重いか、落ちたか、コンパイルできないか——を表す。<code>IE</code> だけは<strong>ジャッジ自身の故障</strong>を表し、「提出者に非はない」という主張になる（要件 NF-08）。だからテストケース0件・言語未対応・Docker やコンパイラの起動失敗など、採点が成立しない状況で立てる。提出者のバグを <code>IE</code> に、ジャッジの故障を <code>WA</code> にしてはならない。</p></div>
+    </details>
+    <details class="qa"><summary>3. <code>JudgeSubmission</code> の判定ループにある <code>break</code> は、どんな要件を実装しているか。</summary>
+      <div class="qa-body"><p>MVP 仕様（<code>02_mvp_spec.md</code>）§5.1「<strong>最初の非 AC で打ち切り</strong>」。提出全体の verdict を <code>AC</code> で楽観初期化し、テストケースを1つずつ <code>decideCase</code> にかけ、<code>v != AC</code> になった瞬間にその verdict を採用して <code>break</code> でループを抜ける。以降のケースは採点しない。全ケースを <code>AC</code> で走り切ったときだけ初期値の <code>AC</code> が残り、それが「全テストケースで期待どおりなら AC」（§4）の実装になる。</p></div>
+    </details>
+
+    <h2>まとめ — 次の層へ</h2>
+    <p>この章で、オンラインジャッジの一番下——<strong>合否を決める芯</strong>——ができました。7つの verdict という結果の語彙を定め、出力を「甘すぎず厳しすぎず」比べる <code>normalizeOutput</code> を組み、実行結果を verdict に落とす <code>decideCase</code> の分岐を追い、それらを束ねる <code>JudgeSubmission</code> の背骨を見ました。まだ Docker も Web もありませんが、<strong>「この出力は正解か?」に正しく答える目</strong>は、もう手の中にあります。</p>
+    <p>ただし、この章には<strong>大きな穴</strong>が一つ残っています。<code>decideCase</code> に渡ってくる「実行結果（<code>CaseOutcome</code>）」——終了コード・標準出力・経過時間——は、<strong>いったい誰が、どうやって手に入れるのか?</strong> 提出コードを実際に走らせ、その出力を捕まえ、時間を測る仕事です。提出コードは、いずれ隔離された Docker コンテナの中で走ります。ホストにいるジャッジ本体と、コンテナの中で提出コードを走らせるランナーは、別々のプロセスです。次の第01章では、この<strong>ホスト⇔ランナー間でファイル一式と実行結果を受け渡す1本のプロトコル</strong>——標準入力に <code>tar</code> でファイルを流し込み、標準出力に <code>base64</code> の行フレームで結果を返す約束——を固めます。採点の芯に食わせる「実際の出力」を境界の向こうから安全に取り出す、その通信の作法を組む最初の一歩です。</p>
+
+    <div class="chap-foot">
+      <a class="pager" href="index.html"><span class="dir">← 前へ</span>序章 · はじめに・準備</a>
+      <a class="pager next" href="01-process.html"><span class="dir">次へ →</span>第01章 · プロセスと標準入出力</a>
+    </div>
+  </main>
+</div>
+</body>
+</html>

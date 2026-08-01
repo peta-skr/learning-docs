@@ -1,0 +1,114 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>期間を自由にする — 指数ダッシュボードを作る</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@400;500;600;700&family=Source+Serif+4:opsz,wght@8..60,400;8..60,500;8..60,600&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<div class="shell">
+
+  <aside class="spine">
+    <a class="wordmark" href="index.html">STOCK · from scratch<span class="tick"> ↗</span></a>
+    <div class="book-title">指数ダッシュボードを<br>つくる</div>
+    <div class="book-sub">好きな指数を、好きな期間で</div>
+
+    <div class="legend-rail"><span>読む <b>↓</b></span><span>組む <b>↑</b></span></div>
+
+    <nav aria-label="目次">
+      <ul class="toc">
+        <li><a class="nav-item" href="index.html"><span class="nav-num">序</span><span class="nav-label">はじめに<span class="nav-tag">Intro</span></span></a></li>
+        <li><a class="nav-item" href="00-line.html"><span class="nav-num">00</span><span class="nav-label">一本の線を引く<span class="nav-tag">Line</span></span></a></li>
+        <li><a class="nav-item" href="01-fetch.html"><span class="nav-num">01</span><span class="nav-label">データを取ってくる<span class="nav-tag">Fetch</span></span></a></li>
+        <li><a class="nav-item" href="02-store.html"><span class="nav-num">02</span><span class="nav-label">貯めて、切り出す<span class="nav-tag">Store</span></span></a></li>
+        <li><a class="nav-item current" aria-current="page" href="03-range.html"><span class="nav-num">03</span><span class="nav-label">期間を自由にする<span class="nav-tag">Range</span></span></a></li>
+        <li><a class="nav-item" href="04-overlay.html"><span class="nav-num">04</span><span class="nav-label">二本目を重ねる<span class="nav-tag">Overlay</span></span></a></li>
+        <li><a class="nav-item" href="05-rebase.html"><span class="nav-num">05</span><span class="nav-label">100にそろえる<span class="nav-tag">Rebase</span></span></a></li>
+        <li><a class="nav-item" href="06-downsample.html"><span class="nav-num">06</span><span class="nav-label">長い期間を軽くする<span class="nav-tag">Sample</span></span></a></li>
+        <li><a class="nav-item" href="07-url.html"><span class="nav-num">07</span><span class="nav-label">URLに状態を持たせる<span class="nav-tag">URL</span></span></a></li>
+        <li><a class="nav-item" href="08-finish.html"><span class="nav-num">08</span><span class="nav-label">仕上げと、次の一歩<span class="nav-tag">Finish</span></span></a></li>
+      </ul>
+    </nav>
+
+    <div class="spine-foot">
+      各章は一段の階段。<br>前の章の「できたこと」が<br>次の章の「困りごと」を呼ぶ。
+    </div>
+  </aside>
+
+  <main class="reading">
+    <div class="progress-tag">第03章 / 全9章 · 層: RANGE · 読了目安 1〜2時間</div>
+    <div class="eyebrow"><span>Range</span><span class="depth">— プリセットの呪いを解く</span></div>
+    <h1>期間を自由にする</h1>
+    <p class="lede">既存サイトの弱点は「プリセットしか無い」こと。ここで、それを構造から解きます。</p>
+
+    <div class="box goal"><div class="box-k">◈ この章のゴール</div>
+      <p>プリセット（1年など）も自由入力も、内部では <code>from / to</code> の<strong>2つの値だけ</strong>で扱えている。</p>
+    </div>
+
+    <h2>プリセットを特別扱いしない</h2>
+    <p>コツはひとつ、<strong>プリセットを特別扱いしないこと</strong>です。「1年」ボタンは機能ではなく<strong>ショートカット</strong>だと考えてください。押した瞬間に「今日から1年前」を計算して <code>from</code> / <code>to</code> を埋めるだけ。埋まってしまえば、あとは自由入力とまったく同じ道を通ります。</p>
+
+    <p>つまり、プリセットは値を作る入口が違うだけで、下流は共通です。これをコードで表すと、こうなります。</p>
+<pre><code><span class="cm">// プリセット = from/to を計算して埋めるだけのショートカット</span>
+preset(<span class="st">"1Y"</span>)  =&gt; { from: today.minus(1, <span class="st">"year"</span>), to: today }
+preset(<span class="st">"YTD"</span>) =&gt; { from: startOfYear(today),        to: today }
+
+<span class="cm">// この先は、自由入力と完全に同じ処理へ合流する。</span></code></pre>
+
+    <p>こうすると、画面が覚えておくべき状態は <code>from</code> と <code>to</code> の2つに減ります。分岐が消え、コードが静かになります。「固定プリセットの呪い」は、プリセットを消すのではなく、<strong>特別扱いをやめる</strong>ことで解けるのです。</p>
+
+    <div class="box note"><div class="box-k">▸ 参考実装はどうしているか — <code>to</code> は空にしている</div>
+      <p>上の概念コードは <code>to: today</code> と書いていますが、<strong>参考実装はプリセット押下時に <code>to</code> を空のまま</strong>にしています（<code>from</code> だけ埋める）。空の <code>to</code> は「持っているぶんの最後まで」を意味します。</p>
+      <p>こうすると「1Y を押したまま翌日開くと、期間が1日伸びる」という挙動になります。<strong>常に最新までを見たい</strong>という日常の使い方には、こちらのほうが素直だからです。</p>
+      <p>代償もあります。<strong>その状態のURLを共有しても、後日開くと同じ画面にはなりません</strong>（終了日が「その人にとっての今日」になる）。第07章でURLに状態を載せるとき、この2つのどちらを取るかがそのまま設計判断になります。「押した瞬間に絶対値へ固める」なら再現性が得られ、「空のままにする」なら常に最新が得られる——<strong>どちらが正しいかではなく、何を優先するか</strong>です。</p>
+    </div>
+
+    <div class="box hazard"><div class="box-k">⚠ つまずきポイント</div>
+      <p>開始日が終了日より後、という入力は必ず起きます（カレンダーの操作順、URLの手打ち、コピペミス）。どう防ぐ／直すかを、この段階で決めておくと後がきれいです。たとえば <code>from &gt; to</code> なら黙って入れ替える、あるいは弾いて既定値に戻す——どちらでもよいので、方針を1つ決めておいてください。</p>
+    </div>
+
+    <div class="box do"><div class="box-k">▸ 手を動かす</div>
+      <ol>
+        <li>プリセット群（1M / 3M / 6M / YTD / 1Y / 3Y / 全期間）を、すべて <code>from</code>/<code>to</code> 生成に統一する。</li>
+        <li>カレンダーからの自由入力を、同じ経路に流し込む。</li>
+        <li>「全期間」は指数ごとにデータの始まりが違うことに気づき、その扱いを決める。（第05章の伏線）</li>
+      </ol>
+    </div>
+
+    <h2>つまずき FAQ</h2>
+    <details class="qa"><summary>「全期間」ボタンは from をどう決めればいい？ 指数ごとに開始日が違うのに。</summary>
+      <div class="qa-body"><p>2通りあります。(A) 表示中の指数のうち<strong>一番古い開始日</strong>に <code>from</code> を合わせる、(B) いっそ <code>from</code> を空（=下限なし）にして、切り出し側で「持っているぶん全部」を返す。参考実装では後者に寄せていて、各系列は自分のデータが始まる日から描き始めます。ここで「系列ごとに始点が違う」という事実に正面から向き合うことになりますが、その本格的な解決は第05章（100にそろえる）で行います。この章では「始点が揃わない」ことに気づけていれば十分です。</p></div>
+    </details>
+    <details class="qa"><summary>プリセットで期間を変えたのに、from/to を state に持つ意味あるの？ ボタン名だけ覚えておけば足りない？</summary>
+      <div class="qa-body"><p>ボタン名（"1Y" など）を状態にすると、自由入力とプリセットで<strong>状態の形が2種類</strong>になり、分岐が増えます。さらに "1Y" は今日を基準に動く相対値なので、状態に持つと「いつ描画したか」で意味が変わってしまいます。<code>from</code>/<code>to</code> という<strong>日付</strong>に落とし込んでおけば、状態は1種類で固定され、後の章でURLに載せる（第07章）ときもそのまま書き出せます。ショートカットは押した瞬間に日付へ変換する、が肝です。</p>
+      <p>なお参考実装は <code>from</code> だけを日付にして <code>to</code> は空（=最後まで）にしています。上の「参考実装はどうしているか」を参照してください。<strong>終了日を固めるか空にするかは、再現性と「常に最新」のどちらを取るかの選択</strong>です。</p></div>
+    </details>
+
+    <h2>理解度チェック</h2>
+    <p>次の問いに自分の言葉で答えてから、答えを開いてください。</p>
+    <details class="qa"><summary>Q1. 「1年」ボタンを機能ではなくショートカットとして扱う、とはどういうことか？</summary>
+      <div class="qa-body"><p>「1年」ボタンに専用の表示ロジックを持たせるのではなく、押された瞬間に <code>from = 今日の1年前</code> / <code>to = 今日</code> を計算して埋めるだけ、ということ。値が埋まった後は自由入力と同じ経路を通るので、プリセット専用の分岐が要らなくなる。</p></div>
+    </details>
+    <details class="qa"><summary>Q2. プリセット名ではなく from/to の2値を状態に持つと、なぜコードが静かになるのか？</summary>
+      <div class="qa-body"><p>状態が1種類（from/to の絶対値）に統一され、「プリセットのときはこう、自由入力のときはこう」という分岐が消えるから。相対値（"1Y"）由来の時間経過でのズレも起きず、後段（切り出し・描画・URL化）はすべて同じ2値だけを見ればよくなる。素直な状態は後で利子を生む、という設計思想の実例。</p></div>
+    </details>
+
+    <div class="box done"><div class="box-k">✓ 完了の合図</div>
+      <p>どのプリセットを押しても、カレンダーで自由に選んでも、内部状態は <code>from</code> / <code>to</code> の2値だけになっている。プリセット専用の分岐が消え、切り出し処理は1本の経路に合流している。「全期間」で指数ごとに始点が違うことにも気づけていれば、第05章への準備は万端です。</p>
+    </div>
+
+    <h2>まとめ — 次の層へ</h2>
+    <p>期間は自由になりました。プリセットの呪いは、機能を削らずに<strong>特別扱いをやめる</strong>ことで解けました。次章では、いよいよ<strong>二本目の指数を重ねます</strong>。線が増えるだけに見えて、ここで本質的な壁——「スケールの違う指数は、そのまま重ねても比べられない」——に正面からぶつかります。第00章で覚えておいた「読みにくさ」が、いよいよ効いてきます。</p>
+
+    <div class="chap-foot">
+      <a class="pager" href="02-store.html"><span class="dir">← 前へ</span>第02章 · 貯めて、切り出す</a>
+      <a class="pager next" href="04-overlay.html"><span class="dir">次へ →</span>第04章 · 二本目を重ねる</a>
+    </div>
+  </main>
+</div>
+</body>
+</html>

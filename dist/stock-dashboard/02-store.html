@@ -1,0 +1,125 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>貯めて、切り出す — 指数ダッシュボードを作る</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@400;500;600;700&family=Source+Serif+4:opsz,wght@8..60,400;8..60,500;8..60,600&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<div class="shell">
+
+  <aside class="spine">
+    <a class="wordmark" href="index.html">STOCK · from scratch<span class="tick"> ↗</span></a>
+    <div class="book-title">指数ダッシュボードを<br>つくる</div>
+    <div class="book-sub">好きな指数を、好きな期間で</div>
+
+    <div class="legend-rail"><span>読む <b>↓</b></span><span>組む <b>↑</b></span></div>
+
+    <nav aria-label="目次">
+      <ul class="toc">
+        <li><a class="nav-item" href="index.html"><span class="nav-num">序</span><span class="nav-label">はじめに<span class="nav-tag">Intro</span></span></a></li>
+        <li><a class="nav-item" href="00-line.html"><span class="nav-num">00</span><span class="nav-label">一本の線を引く<span class="nav-tag">Line</span></span></a></li>
+        <li><a class="nav-item" href="01-fetch.html"><span class="nav-num">01</span><span class="nav-label">データを取ってくる<span class="nav-tag">Fetch</span></span></a></li>
+        <li><a class="nav-item current" aria-current="page" href="02-store.html"><span class="nav-num">02</span><span class="nav-label">貯めて、切り出す<span class="nav-tag">Store</span></span></a></li>
+        <li><a class="nav-item" href="03-range.html"><span class="nav-num">03</span><span class="nav-label">期間を自由にする<span class="nav-tag">Range</span></span></a></li>
+        <li><a class="nav-item" href="04-overlay.html"><span class="nav-num">04</span><span class="nav-label">二本目を重ねる<span class="nav-tag">Overlay</span></span></a></li>
+        <li><a class="nav-item" href="05-rebase.html"><span class="nav-num">05</span><span class="nav-label">100にそろえる<span class="nav-tag">Rebase</span></span></a></li>
+        <li><a class="nav-item" href="06-downsample.html"><span class="nav-num">06</span><span class="nav-label">長い期間を軽くする<span class="nav-tag">Sample</span></span></a></li>
+        <li><a class="nav-item" href="07-url.html"><span class="nav-num">07</span><span class="nav-label">URLに状態を持たせる<span class="nav-tag">URL</span></span></a></li>
+        <li><a class="nav-item" href="08-finish.html"><span class="nav-num">08</span><span class="nav-label">仕上げと、次の一歩<span class="nav-tag">Finish</span></span></a></li>
+      </ul>
+    </nav>
+
+    <div class="spine-foot">
+      各章は一段の階段。<br>前の章の「できたこと」が<br>次の章の「困りごと」を呼ぶ。
+    </div>
+  </aside>
+
+  <main class="reading">
+    <div class="progress-tag">第02章 / 全9章 · 層: STORE · 読了目安 1〜2時間</div>
+    <div class="eyebrow"><span>Store</span><span class="depth">— 任意区間の第一歩</span></div>
+    <h1>貯めて、切り出す</h1>
+    <p class="lede">取ってきたデータを<strong>手元に貯め</strong>、そこから期間を<strong>切り出して</strong>返す。任意区間の第一歩です。</p>
+
+    <div class="box goal"><div class="box-k">◈ この章のゴール</div>
+      <p><code>指数</code> と <code>from / to</code> を指定すると、その期間ぶんの終値の並びが返る。</p>
+    </div>
+
+    <h2>なぜ貯めるのか</h2>
+    <p>前章で、外部から本物の終値を取ってこられるようになりました。ではなぜ、そのたびに毎回取りに行かず、いったん手元に<strong>貯める</strong>のでしょうか。理由は三つあります。</p>
+    <ul class="plain">
+      <li>毎回叩かなくて済む——外部APIには回数制限があります。貯めておけば、そこに優しくなれます。</li>
+      <li>任意区間の切り出しが速い——手元にある並びから区間を抜き出すだけなら、一瞬です。</li>
+      <li>取得元が落ちていても見られる——貯めた分は、相手が停止していても表示できます。</li>
+    </ul>
+    <p>この三つは地味に見えて、あとの章の快適さに直結します。期間をいじって遊べる（第03章）のも、二本重ねてサッと描ける（第04章）のも、手元に貯まっているからこそです。</p>
+
+    <p>貯める形も、これ以上ないくらい素直にします。<strong>1行 = 1指数 × 1日 × 終値</strong>。この平らな形にしておくと、期間で絞るのも、指数を増やすのも、後でぐっと楽になります。</p>
+
+    <h2>期間で切り出す、の中身</h2>
+    <p>「期間で切り出す」と言うと難しそうですが、中身はこれだけです。</p>
+<pre><code><span class="cm">// 期間で切り出す、の中身はこれだけ。</span>
+GET /series?symbol=SP500&amp;from=2024-03-01&amp;to=2024-11-30
+
+<span class="cm">// 概念的には：</span>
+<span class="kw">where</span> symbol = <span class="st">"SP500"</span>
+  <span class="kw">and</span> date &gt;= from
+  <span class="kw">and</span> date &lt;= to
+<span class="kw">order by</span> date</code></pre>
+
+    <p>「期間で絞る」というこの教材の心臓部が、たった二つの不等式で表せることに注目してください。<code>from</code> と <code>to</code> さえあれば、どんな区間でも切り出せます。次章は、この二つの値の扱いをもっと磨く話です。</p>
+
+    <div class="insight"><div class="box-k">◈ 効いてくる設計</div>
+      <p>「平らな1行1レコード」の形は地味ですが、複数指数の重ね（第04章）でも、間引き（第06章）でも、同じ形のまま素直に扱えます。素直さは後で利子を生みます。</p>
+    </div>
+
+    <div class="box hazard"><div class="box-k">⚠ つまずきポイント</div>
+      <p>取り込みを、つい <code>append</code>（追記）で書きたくなります。ところがこれをやると、再取得のたびに<strong>同じ日が二重・三重に積まれ</strong>、線が折り返したように見える壊れ方をします。取得のリトライや後の章の再取得で必ず踏むので、最初から<strong>日付をキーにした上書き</strong>で書いてください。「同じ日が来たら、その日の枠に入れ直す」だけで防げます。</p>
+    </div>
+
+    <div class="box do"><div class="box-k">▸ 手を動かす</div>
+      <ol>
+        <li><code>from</code> / <code>to</code> を省いたときの挙動を決める（全期間を返す、が素直）。</li>
+        <li>存在しない指数を指定されたときの返し方を決める。</li>
+        <li>同じ日のデータを二重に取り込んでも壊れないようにする（上書きで冪等に）。</li>
+      </ol>
+    </div>
+
+    <p>参考実装では、保存をフラットJSON（1指数1ファイル）にしています。<code>src/data/SP500.json</code> のように、date×close の列がただ平らに並んでいるだけ。DBは使いません。取り込みは<strong>日付をキーにした冪等なUpsert</strong>——同じ日が来たら上書きするだけ——なので、二度取り込んでも結果は変わりません。3つ目の「壊れないように」は、こうして担保しています。</p>
+
+    <h2>つまずき FAQ</h2>
+    <details class="qa"><summary>ちゃんとしたデータベース（SQLiteなど）を使わなくていいの？</summary>
+      <div class="qa-body"><p>この規模なら要りません。数字で見ると腑に落ちます——参考実装が実際に貯めているファイルは、S&amp;P500 が約14,250点で661KB、日経平均が約13,898点で615KB。<strong>4指数そろえても合計2.2MB程度</strong>で、1970年代から50年以上ぶんが入っています。全件をメモリに読み込んで端から走査しても、この点数なら数ミリ秒です。DBを入れると「セットアップ・スキーマ・接続」という段差が増えるだけで、得るものがありません。参考実装がフラットJSONを選んだのは、この「規模に対して素直」という判断からです。データが桁違いに増えたら、そのとき初めてDBを検討すれば十分です。</p></div>
+    </details>
+    <details class="qa"><summary>同じ日のデータを二重に取り込んだら、線が二重になったりしませんか？</summary>
+      <div class="qa-body"><p>取り込みを<strong>冪等</strong>——何度やっても結果が同じ——にしておけば、なりません。ポイントは「日付をキーにして上書きする」こと。追記（append）ではなく、その日の枠に入れ直す形にします。参考実装は日付キーのUpsertで、同じ日が来たら黙って上書きします。こうしておくと、取得のリトライやTTL切れの再取得で二重取り込みが起きても、データは常に「1日1レコード」に保たれます。</p></div>
+    </details>
+
+    <h2>理解度チェック</h2>
+    <p>次の問いに自分の言葉で答えてから、答えを開いてください。</p>
+    <details class="qa"><summary>Q1. データを毎回外部から取らず、手元に貯める利点を三つ挙げられますか？</summary>
+      <div class="qa-body"><p>（1）毎回叩かなくて済むので外部APIの回数制限に優しい、（2）手元の並びから抜き出すだけなので任意区間の切り出しが速い、（3）取得元が落ちていても貯めた分は表示できる。この三つが、後の章で期間や指数を自由にいじれる快適さの土台になっています。</p></div>
+    </details>
+    <details class="qa"><summary>Q2. 「期間で切り出す」処理は、本質的にどんな条件で表せますか？</summary>
+      <div class="qa-body"><p>指定した指数について「<code>date &gt;= from</code> かつ <code>date &lt;= to</code>」で絞り、日付順に並べるだけ。心臓部がたった二つの不等式に還元できるのがポイントで、<code>from</code> と <code>to</code> さえあればどんな区間でも切り出せます。次章は、この二値の扱いを磨きます。</p></div>
+    </details>
+
+    <div class="box done"><div class="box-k">✓ 完了の合図</div>
+      <p>指数と <code>from / to</code> を渡すと、その期間ぶんの終値の並びが返ってくる。<code>from</code> / <code>to</code> を省けば全期間が返り、同じ日を二度取り込んでもデータは壊れない。ここまで来たら、この章は勝ちです。</p>
+    </div>
+
+    <h2>まとめ — 次の層へ</h2>
+    <p>貯めて、期間を切り出せるようになりました。でも今の切り出しは、<code>from</code> と <code>to</code> をこちらが正確に渡してやる前提です。実際に使うと「直近1年」「過去5年」のような言い方をしたくなる——けれど、プリセットの選択肢に縛られたくもない。次章では、この二つの値をもっと自由に、けれど散らからないように扱う方法を考えます。</p>
+
+    <div class="chap-foot">
+      <a class="pager" href="01-fetch.html"><span class="dir">← 前へ</span>第01章 · データを取ってくる</a>
+      <a class="pager next" href="03-range.html"><span class="dir">次へ →</span>第03章 · 期間を自由にする</a>
+    </div>
+  </main>
+</div>
+</body>
+</html>

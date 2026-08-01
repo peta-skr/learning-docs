@@ -1,0 +1,448 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>第05章 Hash — Redis をつくる</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500;600&family=Source+Serif+4:opsz,wght@8..60,400;8..60,600;8..60,700&family=Noto+Serif+JP:wght@400;600;700&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<div class="shell">
+
+  <aside class="spine">
+    <a class="wordmark" href="index.html">MINI-REDIS · from scratch</a>
+    <div class="book-title">Redis を<br>つくる</div>
+    <div class="book-sub">Go で RESP から Sorted Set まで</div>
+
+    <div class="legend"><span>読む <b>↓</b></span><span>組む <b>↑</b></span></div>
+
+    <nav aria-label="目次">
+      <ul class="toc">
+        <li><a class="nav-item" href="index.html"><span class="nav-num">序</span><span class="nav-label">はじめに・準備<span class="nav-tag">Setup</span></span></a></li>
+        <li><a class="nav-item" href="00-server.html"><span class="nav-num">00</span><span class="nav-label">返事をするサーバ<span class="nav-tag">RESP</span></span></a></li>
+        <li><a class="nav-item" href="01-keyspace.html"><span class="nav-num">01</span><span class="nav-label">キーと値<span class="nav-tag">Store</span></span></a></li>
+        <li><a class="nav-item" href="02-expire.html"><span class="nav-num">02</span><span class="nav-label">有効期限<span class="nav-tag">Expire</span></span></a></li>
+        <li><a class="nav-item" href="03-string.html"><span class="nav-num">03</span><span class="nav-label">数としての文字列<span class="nav-tag">String</span></span></a></li>
+        <li><a class="nav-item" href="04-list.html"><span class="nav-num">04</span><span class="nav-label">List<span class="nav-tag">List</span></span></a></li>
+        <li><a class="nav-item current" aria-current="page" href="05-hash.html"><span class="nav-num">05</span><span class="nav-label">Hash<span class="nav-tag">Hash</span></span></a></li>
+        <li><a class="nav-item" href="06-set.html"><span class="nav-num">06</span><span class="nav-label">Set とエンコーディング<span class="nav-tag">Set</span></span></a></li>
+        <li><a class="nav-item" href="07-zset.html"><span class="nav-num">07</span><span class="nav-label">Sorted Set と skiplist<span class="nav-tag">ZSet</span></span></a></li>
+        <li><a class="nav-item" href="08-pubsub.html"><span class="nav-num">08</span><span class="nav-label">Pub/Sub<span class="nav-tag">PubSub</span></span></a></li>
+        <li><a class="nav-item" href="09-finish.html"><span class="nav-num">09</span><span class="nav-label">仕上げと設計判断<span class="nav-tag">Finish</span></span></a></li>
+      </ul>
+    </nav>
+
+    <div class="spine-foot">
+      各章は一つのデータ型・機能。<br>下（RESP）から上（Sorted Set）へ<br>積み上げて動かしていく。
+    </div>
+  </aside>
+
+  <main class="reading">
+    <div class="progress-tag">第05章 / 全10章 · 層: HASH · 読了目安 1〜1.5時間</div>
+    <div class="eyebrow"><span>HASH</span><span class="depth">— キーの中の小さな辞書</span></div>
+    <h1>Hash</h1>
+    <p class="lede">前章までで、キースペースは「キー → 一つの値」という大きな辞書でした。この章で足す <code>Hash</code> は、<strong>その値そのものを、もう一段小さな辞書にする</strong>型です。<code>user:1</code> というキーの中に <code>name→"alice"</code>、<code>age→"30"</code> といった<strong>フィールドと値の組</strong>をしまえる。Go では、この「値としての辞書」を <code>map[string]string</code> でそのまま表します。作りは List や Store でもう見た形の反復なので、この章は<strong>差分に集中</strong>します。とりわけ <code>HGETALL</code> が「field と value を<strong>交互に並べた配列</strong>」で返る、この一点を丁寧に見ます。</p>
+
+    <div class="box goal"><div class="box-k">◈ この章のゴール</div>
+      <p>次の 2 つを、自分の目と手で確認できたら達成です。</p>
+      <ol>
+        <li><code>go test -run TestHash -v</code> が PASS する。<code>HSET</code> の「新規追加数」・<code>HGETALL</code> の交互配列・空になったキーの自動削除まで、Hash の約束がひととおり通る。</li>
+        <li>この章のコードを見て「<strong>型の追加はパターンだ</strong>」と言えること。<code>getXxxLocked</code> + 生成 + 空削除 + WRONGTYPE という、第01章から続く型導入の型が、Hash でもそのまま繰り返されているのを見抜く。</li>
+      </ol>
+    </div>
+
+    <div class="box map"><div class="box-k">☰ この章のステップ</div>
+      <ol>
+        <li><a href="#step-1">型を1行で定義する — <code>map</code> をそのまま値にする</a></li>
+        <li><a href="#step-2">取り出しの入口 — <code>getHashLocked</code></a></li>
+        <li><a href="#step-3"><code>HSET</code> と「新しく増えた数」</a></li>
+        <li><a href="#step-4"><code>HGet</code> / <code>HDel</code> と空削除</a></li>
+        <li><a href="#step-5"><code>HGetAll</code> — 交互の配列を組む</a></li>
+        <li><a href="#step-6"><code>HKeys</code> / <code>HVals</code> / <code>HLen</code> / <code>HExists</code></a></li>
+        <li><a href="#step-7">コマンドハンドラと dispatch への接続</a></li>
+      </ol>
+    </div>
+
+    <h2>Hash はキーの中の小さな辞書</h2>
+    <p>Redis の Hash は、日常のプログラミングでいう「オブジェクト」や「レコード」にいちばん近い型です。<code>user:1</code> というキー1つに、<code>name</code>・<code>age</code>・<code>email</code> といった<strong>フィールド</strong>をぶら下げられる。String を <code>user:1:name</code>・<code>user:1:age</code> と何本も並べる代わりに、<strong>関連する値を1つのキーにまとめて</strong>持てるのがうれしさです。</p>
+    <p>本家 Redis は、この Hash を<strong>要素が少ないうちは <code>listpack</code>（コンパクトな連続バイト列）で持ち、増えると <code>hashtable</code> に昇格</strong>させます（片道・戻らない）。小さい Hash が大量にあるとき、メモリを節約するための工夫です。しかし本書は<strong>学習のために、この最適化は追いません</strong>。Go の <code>map[string]string</code> は、まさに「文字列 → 文字列の辞書」そのもの。これを値としてキースペースにしまうだけで、Hash の意味は完全に表せます。エンコーディングの片道昇格という発想自体は、次の第06章（Set）の <code>intset → hashtable</code> でたっぷり味わうので、ここでは素直に <code>map</code> でいきます。</p>
+
+    <h2>この章は「型導入パターン」の反復である</h2>
+    <p>コードを読み始める前に、大事な見取り図を渡しておきます。第01章で Store を、第04章で List を作ったとき、あなたは実は<strong>同じ4つの部品</strong>を毎回組んでいました。Hash もその繰り返しです。</p>
+    <table>
+      <tr><th>部品</th><th>役割</th><th>Hash での姿</th></tr>
+      <tr><td>型の定義</td><td>Go の何で値を表すか</td><td><code>type Hash map[string]string</code></td></tr>
+      <tr><td><code>getXxxLocked</code></td><td>キーから値を取り出す入口。型が違えば WRONGTYPE、無ければ生成 or nil</td><td><code>getHashLocked(key, create)</code></td></tr>
+      <tr><td>各操作メソッド</td><td>ロックを取り、入口を通し、map を読み書き</td><td><code>HSet</code> / <code>HGet</code> / <code>HDel</code> …</td></tr>
+      <tr><td>空削除</td><td>要素が0になったらキーごと消す（Redis の流儀）</td><td><code>HDel</code> 内の <code>removeLocked</code></td></tr>
+    </table>
+    <p>この4部品が見えていれば、この章のコードは<strong>ほとんど「読んだことがある形」</strong>に見えるはずです。だから解説も、List と違う点——<code>HSET</code> の戻り値の意味、<code>HGETALL</code> の並べ方——に厚みを置きます。読み終えたとき「Set も ZSet も、たぶん同じ骨格なんだろうな」と予感できたら、この章は大成功です。</p>
+
+    <h2 class="step" id="step-1"><span class="step-no">Step 1</span>型を1行で定義する — map をそのまま値にする</h2>
+    <p>作るファイルは <code>hash.go</code>。まず型定義から。驚くほど短く、これで Hash 型の本体は終わりです。</p>
+
+    <div class="file-tag">hash.go</div>
+    <pre><code><span class="kw">package</span> main
+
+<span class="cm">// Hash はフィールド → 値のミニ辞書。Go の map をそのまま使う。</span>
+<span class="cm">// 本家は小さいうちは listpack、増えると hashtable に昇格する（片道）。</span>
+<span class="kw">type</span> <span class="ty">Hash</span> <span class="kw">map</span>[<span class="ty">string</span>]<span class="ty">string</span></code></pre>
+
+    <p><code>type Hash map[string]string</code> — これだけです。<code>Hash</code> は <code>map[string]string</code> の<strong>別名（named type）</strong>で、中身はただの Go のマップ。フィールド名も値も文字列なのは、Redis がすべての値をバイト列（本書では文字列）として扱うから。数値を入れたければ <code>"30"</code> のように文字列で持ち、必要な側で <code>strconv</code> して使います（第03章の String と同じ流儀です）。</p>
+    <p>なぜ生の <code>map[string]string</code> ではなく、わざわざ <code>Hash</code> という名前を付けるのか。理由は<strong>キースペースでの型判定</strong>のためです。Store の <code>data</code> は <code>map[string]any</code> で、値には String も List も Set も雑多に入ります。取り出したとき「これは Hash か? それとも List か?」を <code>v.(Hash)</code> という<strong>型アサーション</strong>で見分けたい。そのために独立した型名が要ります。第04章の <code>type List struct { items []string }</code> も、次章の <code>type Set struct{…}</code> も、まったく同じ動機で名前を付けています。ここも「反復」です。<br>
+    ただし1つだけ、第04章と<strong>違う</strong>ところがあります。<code>List</code> は <code>*List</code> という<strong>ポインタ</strong>でキースペースに入れましたが、<code>Hash</code> は <code>Hash</code>（値）のまま入れます。第04章で「ポインタにしないと書き換えが本体に届かない」と学んだのに、なぜここでは値でいいのか——<strong><code>map</code> がもともと参照的に振る舞うから</strong>です。<code>[]string</code> は <code>append</code> で伸びると別の配列に移ることがあるので、入れ物ごと差し替える必要があり、だから <code>*List</code> で本体を指し続ける必要がありました。対して <code>map</code> は、コピーしても<strong>同じハッシュテーブルの実体を指す</strong>ので、<code>h["name"] = "alice"</code> がそのままキースペース内の Hash に届きます。この違いは Step 3 で実際に効いてくるので、頭の隅に置いておいてください。</p>
+
+    <div class="gonote"><div class="box-k">GO メモ · named type としての map[string]string</div>
+      <p>Go では <code>type Hash map[string]string</code> と書くと、<code>map[string]string</code> と<strong>同じ構造だが別の名前を持つ型</strong>ができます。中身の操作（<code>h["name"] = "alice"</code>、<code>v, ok := h["age"]</code>、<code>delete(h, "age")</code>、<code>len(h)</code>、<code>range</code>）は生の map とまったく同じに使えます。<br>
+      値としてしまうときは <code>data[key] = h</code>（<code>Hash</code> は <code>any</code> に代入できる）、取り出すときは <code>h, ok := v.(Hash)</code> で「本当に Hash か?」を確かめる。<strong>マップは参照型</strong>なので、<code>h := data[key].(Hash)</code> で取り出した <code>h</code> に書き込むと、キースペースにしまってある実体が直接書き換わります（コピーは作られません）。この性質が、次のステップで「取り出して、そのまま書き込む」を成立させます。</p>
+    </div>
+
+    <h2 class="step" id="step-2"><span class="step-no">Step 2</span>取り出しの入口 — getHashLocked</h2>
+    <p>次は、キーから Hash を取り出す入口 <code>getHashLocked</code>。この関数が、第01章から続く<strong>型導入パターンの心臓</strong>です。List の <code>getListLocked</code>、この後の Set・ZSet も、名前と型が違うだけで<strong>形はまったく同じ</strong>——見比べる価値があります。</p>
+
+    <div class="file-tag">hash.go（つづき）</div>
+    <pre><code><span class="kw">func</span> (s *<span class="ty">Store</span>) getHashLocked(key <span class="ty">string</span>, create <span class="ty">bool</span>) (<span class="ty">Hash</span>, <span class="ty">error</span>) {
+	v, ok := s.getLocked(key)
+	<span class="kw">if</span> !ok {
+		<span class="kw">if</span> !create {
+			<span class="kw">return</span> <span class="kw">nil</span>, <span class="kw">nil</span>
+		}
+		h := <span class="ty">Hash</span>{}
+		s.data[key] = h
+		<span class="kw">return</span> h, <span class="kw">nil</span>
+	}
+	h, isHash := v.(<span class="ty">Hash</span>)
+	<span class="kw">if</span> !isHash {
+		<span class="kw">return</span> <span class="kw">nil</span>, errWrongType
+	}
+	<span class="kw">return</span> h, <span class="kw">nil</span>
+}</code></pre>
+
+    <p>関数名の末尾 <code>Locked</code> は「<strong>呼び出し側がすでに <code>s.mu</code> をロック済み</strong>である」という約束の印です（第01章の規約）。だからこの中では鍵を取りません。引数 <code>create</code> が、この入口の性格を切り替えるスイッチです。</p>
+    <p>処理は3つに枝分かれします。まず <code>s.getLocked(key)</code> でキースペースを引く（これは第02章の Lazy 失効も兼ねていて、期限切れならここで消えて「無い」と答えます）。</p>
+    <ol>
+      <li><strong>キーが無く、<code>create=false</code></strong>: <code>nil, nil</code> を返す。「Hash も無いし、作りもしない」——読み取り系（<code>HGET</code> など）はこれを受けて「空の結果」を返します。</li>
+      <li><strong>キーが無く、<code>create=true</code></strong>: 空の <code>Hash{}</code> を作って <strong>キースペースに登録してから</strong>返す。書き込み系（<code>HSET</code>）だけがこの道を通り、「無ければ作る」を実現します。</li>
+      <li><strong>キーがある</strong>: <code>v.(Hash)</code> で型を確かめ、Hash なら返す。<strong>String や List だったら <code>errWrongType</code></strong>——これが Redis の <code>WRONGTYPE</code> エラーの正体です。</li>
+    </ol>
+    <p><code>create</code> で「作る/作らない」を分けるのが効いています。もし読み取りでも空の Hash を作ってしまうと、存在しないキーを <code>HGET</code> しただけで空っぽの Hash がキースペースに増殖してしまう。「書くときだけ作る、読むときは作らない」——この非対称が、余計なキーを生まないための規律です。</p>
+
+    <div class="box hazard"><div class="box-k">⚠ 落とし穴 — WRONGTYPE を返すのは「入口」の仕事</div>
+      <p>型チェック（<code>v.(Hash)</code> が失敗したら <code>errWrongType</code>）を、各コマンドではなく<strong>この入口1か所に集約</strong>しているのが要点です。<code>HGET</code>・<code>HSET</code>・<code>HDEL</code> …すべてが <code>getHashLocked</code> を通るので、「String のキーに <code>HGET</code> した」ような型違反は、どのコマンドでも自動的に <code>WRONGTYPE</code> になります。テスト <code>TestTypeAndWrongType</code> が <code>HGET l f</code>（List のキーに Hash 操作）で <code>-WRONGTYPE ...</code> を期待しているのは、まさにこの一点集約が効いていることの確認です。型ごとに入口を1つ作り、そこで型を守る——これが「型の追加がパターン化できる」ことの核心です。</p>
+    </div>
+
+    <h2 class="step" id="step-3"><span class="step-no">Step 3</span>HSet と「新しく増えた数」</h2>
+    <p>入口ができたので、書き込みの <code>HSet</code> です。<code>HSET user:1 name alice age 30</code> のように、<strong>field/value の組をまとめて</strong>設定できます。そして戻り値が独特で——<strong>「新しく増えたフィールドの数」</strong>を返します。</p>
+
+    <div class="file-tag">hash.go（つづき）</div>
+    <pre><code><span class="cm">// HSet は field/value の組をまとめて設定し、「新しく増えたフィールド数」を返す。</span>
+<span class="kw">func</span> (s *<span class="ty">Store</span>) HSet(key <span class="ty">string</span>, fieldVals []<span class="ty">string</span>) (<span class="ty">int</span>, <span class="ty">error</span>) {
+	s.mu.Lock()
+	<span class="kw">defer</span> s.mu.Unlock()
+	h, err := s.getHashLocked(key, <span class="kw">true</span>)
+	<span class="kw">if</span> err != <span class="kw">nil</span> {
+		<span class="kw">return</span> <span class="st">0</span>, err
+	}
+	added := <span class="st">0</span>
+	<span class="kw">for</span> i := <span class="st">0</span>; i+<span class="st">1</span> &lt; len(fieldVals); i += <span class="st">2</span> {
+		<span class="kw">if</span> _, exists := h[fieldVals[i]]; !exists {
+			added++
+		}
+		h[fieldVals[i]] = fieldVals[i+<span class="st">1</span>]
+	}
+	<span class="kw">return</span> added, <span class="kw">nil</span>
+}</code></pre>
+
+    <p>骨格は List と同じです。<code>s.mu.Lock()</code> で全体ロックを取り（<code>defer</code> で確実に解放）、<code>getHashLocked(key, true)</code> で「無ければ作る」入口を通す。<code>err</code> が返るのは型違反（WRONGTYPE）のときだけで、そのときは <code>0, err</code> で即返します。</p>
+    <p>核心はループです。<code>fieldVals</code> は <code>["name","alice","age","30"]</code> のように<strong>field と value が交互に並んだスライス</strong>。<code>i += 2</code> で2つずつ進み、<code>fieldVals[i]</code> が field、<code>fieldVals[i+1]</code> が value。ループ条件 <code>i+1 &lt; len(fieldVals)</code> は「ペアが揃っている間だけ」の意味で、奇数個で末尾が余っても安全に止まります（引数が奇数個かどうかの厳密な検査は、後述のコマンドハンドラ側で行います）。</p>
+    <p>そして戻り値の <code>added</code>。書き込む<strong>前に</strong> <code>if _, exists := h[fieldVals[i]]; !exists</code> で「そのフィールドが<strong>まだ無い</strong>か」を確かめ、無いときだけ <code>added++</code> します。既存フィールドの<strong>上書きは数えない</strong>。だから <code>HSET h name alice age 30</code>（2つとも新規）は <code>2</code> を返し、続けて <code>HSET h name bob</code>（<code>name</code> は上書き）は <code>0</code> を返す——テスト <code>TestHash</code> の最初の2行が、まさにこれを検証しています。</p>
+
+    <div class="gonote"><div class="box-k">GO メモ · カンマ ok で新規判定 — なぜ len の差分では駄目か</div>
+      <p>Go のマップで「キーが存在するか」を調べる定石が <code>v, ok := h[field]</code> の<strong>カンマ ok イディオム</strong>です。<code>ok</code> が <code>false</code> なら未登録、<code>true</code> なら登録済み。ここでは値 <code>v</code> は要らないので <code>_, exists := h[fieldVals[i]]</code> と捨てています。<br>
+      「新規に増えたか」を数えるのに、書き込み前後で <code>len(h)</code> を比較する手もありますが、<strong>まとめて複数ペアを書くと1回の <code>len</code> 比較では正しい増分が取れない</strong>（同じ field を2回指定した場合など）。だからここは1ペアごとに <code>exists</code> を見て確実に数えています。「上書きは0、新規は+1」という Redis の <code>HSET</code> の約束を、素直にコードへ落とした形です。</p>
+    </div>
+
+    <h2 class="step" id="step-4"><span class="step-no">Step 4</span>HGet / HDel と空削除</h2>
+    <p>読み取りの <code>HGet</code> と、削除の <code>HDel</code>。<code>HDel</code> には、この章でもう一つ大事な「<strong>空になったらキーごと消す</strong>」が入ります。まず <code>HGet</code>。</p>
+
+    <div class="file-tag">hash.go（つづき）</div>
+    <pre><code><span class="kw">func</span> (s *<span class="ty">Store</span>) HGet(key, field <span class="ty">string</span>) (<span class="ty">string</span>, <span class="ty">bool</span>, <span class="ty">error</span>) {
+	s.mu.Lock()
+	<span class="kw">defer</span> s.mu.Unlock()
+	h, err := s.getHashLocked(key, <span class="kw">false</span>)
+	<span class="kw">if</span> err != <span class="kw">nil</span> || h == <span class="kw">nil</span> {
+		<span class="kw">return</span> <span class="st">""</span>, <span class="kw">false</span>, err
+	}
+	v, ok := h[field]
+	<span class="kw">return</span> v, ok, <span class="kw">nil</span>
+}</code></pre>
+
+    <p><code>HGet</code> は読み取りなので <code>getHashLocked(key, <strong>false</strong>)</code>（作らない）を通します。ここで返り値の <code>h == nil</code> のチェックに注目——<strong>キーが存在しないとき</strong>、入口は <code>nil, nil</code> を返しました。だから <code>err != nil || h == nil</code> の1行で「型違反のとき」と「そもそもキーが無いとき」の<strong>両方</strong>をまとめて捌けます。前者は <code>err</code> を、後者は「値なし」を返す。フィールド自体の有無は最後の <code>v, ok := h[field]</code> のカンマ ok で判定し、<code>ok</code>（見つかったか）をそのまま呼び出し側へ返します。戻り値が <code>(string, bool, error)</code> の3つなのは、「値・見つかったか・エラー」を分けて伝えるためです。</p>
+
+    <p>続いて <code>HDel</code>。ここに空削除が入ります。</p>
+
+    <div class="file-tag">hash.go（つづき）</div>
+    <pre><code><span class="kw">func</span> (s *<span class="ty">Store</span>) HDel(key <span class="ty">string</span>, fields ...<span class="ty">string</span>) (<span class="ty">int</span>, <span class="ty">error</span>) {
+	s.mu.Lock()
+	<span class="kw">defer</span> s.mu.Unlock()
+	h, err := s.getHashLocked(key, <span class="kw">false</span>)
+	<span class="kw">if</span> err != <span class="kw">nil</span> || h == <span class="kw">nil</span> {
+		<span class="kw">return</span> <span class="st">0</span>, err
+	}
+	n := <span class="st">0</span>
+	<span class="kw">for</span> _, f := <span class="kw">range</span> fields {
+		<span class="kw">if</span> _, ok := h[f]; ok {
+			delete(h, f)
+			n++
+		}
+	}
+	<span class="kw">if</span> len(h) == <span class="st">0</span> {
+		s.removeLocked(key)
+	}
+	<span class="kw">return</span> n, <span class="kw">nil</span>
+}</code></pre>
+
+    <p><code>HDel</code> は複数フィールドを一度に消せます（<code>fields ...string</code> の可変長引数）。各 <code>f</code> について、<strong>存在するときだけ</strong> <code>delete(h, f)</code> して <code>n</code> を増やす。返り値 <code>n</code> は「実際に消えた個数」で、存在しないフィールドを指定しても数えません。テスト <code>HDEL h age none</code> が <code>1</code> を返す（<code>age</code> はあったが <code>none</code> は無かった）のがこれです。</p>
+    <p>そして最後の <strong><code>if len(h) == 0 { s.removeLocked(key) }</code></strong>。フィールドを全部消して Hash が空になったら、<strong>キーそのものをキースペースから削除</strong>します。これは List の <code>LPOP</code> で空になったときとまったく同じ処理で、<strong>Redis の一貫したルール</strong>——「空のコレクションはキーごと消える」——です。テスト <code>TestHash</code> の最後、全フィールドを <code>HDEL</code> したあと <code>EXISTS h</code> が <code>0</code> を返すのが、この動作の確認です。</p>
+
+    <div class="box hazard"><div class="box-k">⚠ 落とし穴 — 空の Hash を残すと EXISTS がズレる</div>
+      <p>もし <code>if len(h) == 0</code> の空削除を忘れると、フィールドを全部消しても<strong>キーだけが空っぽの Hash として残り続けます</strong>。すると <code>EXISTS h</code> が <code>1</code> を返し、<code>TYPE h</code> が <code>hash</code> を返す——「中身は無いのにキーは在る」という、本家 Redis には無い幽霊状態が生まれます。Redis では<strong>「空のコレクションは存在しないのと同じ」</strong>が鉄則で、list / hash / set / zset のすべてで「最後の要素が消えたらキーも消す」を徹底します。この規律を型ごとに忘れずに入れることが、挙動を本家と揃える鍵です。<code>CLAUDE.md</code> の「落とし穴」にもわざわざ書かれているほど、踏みやすい地雷です。</p>
+    </div>
+
+    <h2 class="step" id="step-5"><span class="step-no">Step 5</span>HGetAll — 交互の配列を組む</h2>
+    <p>この章の主役、<code>HGetAll</code> です。<code>HGETALL user:1</code> は Hash の中身を<strong>まるごと</strong>返しますが、その返し方が Redis 独特——<strong>field と value を交互に並べた1本の配列</strong>で返します。</p>
+
+    <div class="ascii">HGETALL user:1  が返す配列（RESP の *）
+
+  *4\r\n              ← 要素は 4 個（= 2ペア × 2）
+  $4\r\nname\r\n      ← [0] field
+  $5\r\nalice\r\n     ← [1] value
+  $3\r\nage\r\n       ← [2] field
+  $2\r\n30\r\n        ← [3] value
+
+  ＝ ["name","alice","age","30"] という平らな一列
+     （field, value, field, value, ... の交互）</div>
+
+    <p>「フィールドと値のペア」なのに、ネストした配列（<code>[["name","alice"],["age","30"]]</code>）ではなく、<strong>平らに1列へ交互に詰める</strong>。これが RESP2 の Hash の返し方です。受け取ったクライアント（<code>redis-cli</code> など）が、偶数番目を key・奇数番目を value として<strong>2つずつ組み直して</strong>辞書に見せています。コードはこうです。</p>
+
+    <div class="file-tag">hash.go（つづき）</div>
+    <pre><code><span class="cm">// HGetAll は [field1, val1, field2, val2, ...] の並びで返す。</span>
+<span class="kw">func</span> (s *<span class="ty">Store</span>) HGetAll(key <span class="ty">string</span>) ([]<span class="ty">string</span>, <span class="ty">error</span>) {
+	s.mu.Lock()
+	<span class="kw">defer</span> s.mu.Unlock()
+	h, err := s.getHashLocked(key, <span class="kw">false</span>)
+	<span class="kw">if</span> err != <span class="kw">nil</span> || h == <span class="kw">nil</span> {
+		<span class="kw">return</span> <span class="kw">nil</span>, err
+	}
+	out := <span class="kw">make</span>([]<span class="ty">string</span>, <span class="st">0</span>, len(h)*<span class="st">2</span>)
+	<span class="kw">for</span> f, v := <span class="kw">range</span> h {
+		out = append(out, f, v)
+	}
+	<span class="kw">return</span> out, <span class="kw">nil</span>
+}</code></pre>
+
+    <p>心臓は <code>out = append(out, f, v)</code> の1行です。<code>range h</code> で map を回し、<strong>1回のループで field と value を続けて2つ append する</strong>。これだけで <code>["name","alice","age","30"]</code> という交互の平らな配列ができます。事前確保 <code>make([]string, 0, len(h)*2)</code> の <code>*2</code> は「フィールド数の2倍（field と value のぶん）」を見越した容量で、append のたびの再確保を避ける定石です。テスト <code>TestHash</code> は <code>HGetAll("h")</code> の結果の <strong>長さが4</strong>（2フィールド × 2）であることを確かめています。</p>
+    <p>この平らな <code>[]string</code> を、実際の RESP 配列（<code>*4\r\n$4\r\nname\r\n...</code>）に変換するのは、後述のコマンドハンドラで <code>bulkArray(items)</code> を呼ぶ一発です。<code>bulkArray</code> は第00章 <code>reply.go</code> で作った「文字列スライスを Bulk String の配列にする」ヘルパー。Hash 側は「交互に並べた <code>[]string</code>」を作るところまでが仕事で、RESP 化は使い回しの部品に任せる——きれいな分業です。</p>
+
+    <div class="box hazard"><div class="box-k">⚠ 落とし穴 — HGETALL の順序は map なので不定</div>
+      <p>ここは Go の <code>map</code> をそのまま使ったことの<strong>代償</strong>が出る場所です。<code>range h</code> は<strong>反復順が実行ごとにランダム</strong>（Go の仕様で、あえてシャッフルされる）。だから同じ Hash でも <code>HGETALL</code> が返すペアの<strong>並び順は毎回変わりえます</strong>。<code>["name","alice","age","30"]</code> のこともあれば <code>["age","30","name","alice"]</code> のこともある。<br>
+      これは<strong>バグではなく、本家 Redis の <code>HGETALL</code> も順序を保証していません</strong>（Hash はそもそも順序無しのデータ型）。ただし本書のテストが「<strong>長さ4</strong>」だけを見て、要素の順序を <code>==</code> で固定比較していないのはこのためです。もし「<code>out[0]=="name"</code>」のような順序前提のテストを書くと、<strong>実行のたびにランダムに落ちる</strong>厄介なテストになります。map を値に使う型（Hash / Set）を検証するときは、<strong>順序に依存しない検証</strong>（長さ・集合としての一致）を書く、と覚えておいてください。<br>
+      なお <code>append(out, f, v)</code> によって<strong>ペアの内部（field→value の隣接）は必ず保たれます</strong>——順不定なのは「ペアの並ぶ順序」だけで、「name の次に alice が来る」ことは崩れません。ここを取り違えないように。</p>
+    </div>
+
+    <h2 class="step" id="step-6"><span class="step-no">Step 6</span>HKeys / HVals / HLen / HExists</h2>
+    <p>残りの4メソッドは、ここまでの型のバリエーションです。速足で片付きます。まず <code>HKeys</code>——ただし<strong>1つのメソッドで <code>HKEYS</code> と <code>HVALS</code> の両方</strong>を担います。</p>
+
+    <div class="file-tag">hash.go（つづき）</div>
+    <pre><code><span class="kw">func</span> (s *<span class="ty">Store</span>) HKeys(key <span class="ty">string</span>, wantVals <span class="ty">bool</span>) ([]<span class="ty">string</span>, <span class="ty">error</span>) {
+	s.mu.Lock()
+	<span class="kw">defer</span> s.mu.Unlock()
+	h, err := s.getHashLocked(key, <span class="kw">false</span>)
+	<span class="kw">if</span> err != <span class="kw">nil</span> || h == <span class="kw">nil</span> {
+		<span class="kw">return</span> <span class="kw">nil</span>, err
+	}
+	out := <span class="kw">make</span>([]<span class="ty">string</span>, <span class="st">0</span>, len(h))
+	<span class="kw">for</span> f, v := <span class="kw">range</span> h {
+		<span class="kw">if</span> wantVals {
+			out = append(out, v)
+		} <span class="kw">else</span> {
+			out = append(out, f)
+		}
+	}
+	<span class="kw">return</span> out, <span class="kw">nil</span>
+}</code></pre>
+
+    <p>引数 <code>wantVals</code> のフラグ1つで、<strong>フィールド名の一覧（<code>HKEYS</code>）</strong>を返すか<strong>値の一覧（<code>HVALS</code>）</strong>を返すかを切り替えます。<code>HGetAll</code> は「両方を交互に」でしたが、こちらは「どちらか片方だけ」。<code>range h</code> で回して <code>wantVals</code> なら <code>v</code>、そうでなければ <code>f</code> を積むだけ。事前確保が <code>len(h)</code>（<code>*2</code> でない）なのは、片方だけなのでフィールド数ぶんで足りるからです。<strong>並び順が不定</strong>なのは <code>HGETALL</code> と同じ理由——map の反復順です。</p>
+    <p>2つのコマンドを1メソッドに畳んだのは、処理がほぼ同一だから。「似た操作はフラグで分ける」のは、コードを増やさないためのささやかな工夫です（このあと <code>HLen</code> / <code>HExists</code> は独立メソッドで、無理に畳んでいません——共通化は「同じ形のときだけ」）。</p>
+
+    <p>残りの <code>HLen</code> と <code>HExists</code> は、もはや説明が要らないほど素直です。</p>
+
+    <div class="file-tag">hash.go（つづき・これで全文）</div>
+    <pre><code><span class="kw">func</span> (s *<span class="ty">Store</span>) HLen(key <span class="ty">string</span>) (<span class="ty">int</span>, <span class="ty">error</span>) {
+	s.mu.Lock()
+	<span class="kw">defer</span> s.mu.Unlock()
+	h, err := s.getHashLocked(key, <span class="kw">false</span>)
+	<span class="kw">if</span> err != <span class="kw">nil</span> || h == <span class="kw">nil</span> {
+		<span class="kw">return</span> <span class="st">0</span>, err
+	}
+	<span class="kw">return</span> len(h), <span class="kw">nil</span>
+}
+
+<span class="kw">func</span> (s *<span class="ty">Store</span>) HExists(key, field <span class="ty">string</span>) (<span class="ty">bool</span>, <span class="ty">error</span>) {
+	s.mu.Lock()
+	<span class="kw">defer</span> s.mu.Unlock()
+	h, err := s.getHashLocked(key, <span class="kw">false</span>)
+	<span class="kw">if</span> err != <span class="kw">nil</span> || h == <span class="kw">nil</span> {
+		<span class="kw">return</span> <span class="kw">false</span>, err
+	}
+	_, ok := h[field]
+	<span class="kw">return</span> ok, <span class="kw">nil</span>
+}</code></pre>
+
+    <p><code>HLen</code> は <code>len(h)</code> を返すだけ——Go のマップの <code>len</code> がそのままフィールド数です。<code>HExists</code> はカンマ ok（<code>_, ok := h[field]</code>）で「そのフィールドがあるか」を <code>bool</code> で返すだけ。どちらも<strong>先頭4行が完全に同じ</strong>——ロックを取り、<code>getHashLocked(key, false)</code> を通し、<code>err != nil || h == nil</code> で早期リターン。この定型の反復こそ、この章が繰り返し見せてきた「型導入パターン」の実体です。5個も6個もメソッドが並んでいるのに、新しく覚えることは<strong>各メソッドの最後の1〜2行だけ</strong>。</p>
+
+    <div class="box do"><div class="box-k">▸ 動かして確認</div>
+      <p><code>hash.go</code> のロジック部分がそろいました。この時点でストア層のテスト（Hash の振る舞い）を走らせられます。</p>
+      <pre class="term"><code><span class="ps">$</span> cd src
+<span class="ps">$</span> go test -run TestHash -v
+<span class="out">=== RUN   TestHash
+--- PASS: TestHash (0.00s)
+PASS
+ok  	redisclone	0.62s</span></code></pre>
+      <p><code>TestHash</code> は <code>HSET</code> の新規追加数（<code>2</code> → 上書きは <code>0</code>）、<code>HGET</code> の値と nil、<code>HLEN</code>・<code>HEXISTS</code>、引数奇数個のエラー、<code>HGETALL</code> の長さ、<code>HDEL</code> と<strong>空削除後の <code>EXISTS h</code> が <code>0</code></strong> までを一気に確認します。この章の Hash の約束が、ひととおりこの1本に詰まっています。</p>
+    </div>
+
+    <h2 class="step" id="step-7"><span class="step-no">Step 7</span>コマンドハンドラと dispatch への接続</h2>
+    <p>最後に、いま作ったストア層のメソッドを<strong>コマンドとして呼べるように</strong>します。<code>hash.go</code> の後半（<code>---- コマンドハンドラ ----</code> より下）が、RESP の引数を受けて RESP の応答を返す薄い層です。まず <code>HSET</code> / <code>HGET</code>。</p>
+
+    <div class="file-tag">hash.go（コマンドハンドラ）</div>
+    <pre><code><span class="cm">// ---- コマンドハンドラ ----</span>
+
+<span class="kw">func</span> cmdHSet(s *<span class="ty">Store</span>, args []<span class="ty">string</span>) <span class="ty">string</span> {
+	<span class="kw">if</span> len(args) &lt; <span class="st">4</span> || (len(args)-<span class="st">2</span>)%<span class="st">2</span> != <span class="st">0</span> {
+		<span class="kw">return</span> errorMsg(<span class="st">"ERR wrong number of arguments for 'hset' command"</span>)
+	}
+	n, err := s.HSet(args[<span class="st">1</span>], args[<span class="st">2</span>:])
+	<span class="kw">if</span> err != <span class="kw">nil</span> {
+		<span class="kw">return</span> errorMsg(err.Error())
+	}
+	<span class="kw">return</span> integer(n)
+}
+
+<span class="kw">func</span> cmdHGet(s *<span class="ty">Store</span>, args []<span class="ty">string</span>) <span class="ty">string</span> {
+	<span class="kw">if</span> len(args) != <span class="st">3</span> {
+		<span class="kw">return</span> errorMsg(<span class="st">"ERR wrong number of arguments for 'hget' command"</span>)
+	}
+	v, ok, err := s.HGet(args[<span class="st">1</span>], args[<span class="st">2</span>])
+	<span class="kw">if</span> err != <span class="kw">nil</span> {
+		<span class="kw">return</span> errorMsg(err.Error())
+	}
+	<span class="kw">if</span> !ok {
+		<span class="kw">return</span> nullBulk()
+	}
+	<span class="kw">return</span> bulkString(v)
+}</code></pre>
+
+    <p>各ハンドラの形は毎回同じ3拍子です——<strong>(1) 引数の個数を検査 → (2) ストアのメソッドを呼ぶ → (3) 結果を RESP に変換</strong>。<code>cmdHSet</code> の引数チェック <code>len(args) &lt; 4 || (len(args)-2)%2 != 0</code> は、「<code>HSET key f v</code>（最低4語）以上で、かつ <code>key</code> を除いた残り（<code>args[2:]</code>）が field/value の<strong>偶数個</strong>」を要求します。奇数個（<code>HSET h odd</code>）はここで弾かれ——テスト <code>TestHash</code> の <code>-ERR wrong number of arguments for 'hset' command</code> がこれです。Step 3 でストア側のループが「ペアが揃っている間だけ」だったのは、この<strong>個数保証を前提</strong>にできるからでした。役割分担——<strong>厳密な引数検査はハンドラ、実処理はストア</strong>——がここにも出ています。</p>
+    <p><code>cmdHGet</code> は結果を <code>ok</code> で振り分けます。フィールドが見つかれば <code>bulkString(v)</code>、無ければ <code>nullBulk()</code>（<code>$-1\r\n</code> = nil）。存在しないフィールドの <code>HGET</code> が <code>redis-cli</code> で <code>(nil)</code> と出るのはこの分岐です（第00章で見た「空文字列と nil は別物」の再登場）。</p>
+
+    <p>残りのハンドラも同じ3拍子です。<code>HGETALL</code> と <code>HKEYS</code>/<code>HVALS</code> だけ見ておきます。</p>
+
+    <div class="file-tag">hash.go（コマンドハンドラ・つづき）</div>
+    <pre><code><span class="kw">func</span> cmdHGetAll(s *<span class="ty">Store</span>, args []<span class="ty">string</span>) <span class="ty">string</span> {
+	<span class="kw">if</span> len(args) != <span class="st">2</span> {
+		<span class="kw">return</span> errorMsg(<span class="st">"ERR wrong number of arguments for 'hgetall' command"</span>)
+	}
+	items, err := s.HGetAll(args[<span class="st">1</span>])
+	<span class="kw">if</span> err != <span class="kw">nil</span> {
+		<span class="kw">return</span> errorMsg(err.Error())
+	}
+	<span class="kw">return</span> bulkArray(items)
+}
+
+<span class="kw">func</span> cmdHKeysVals(s *<span class="ty">Store</span>, args []<span class="ty">string</span>, wantVals <span class="ty">bool</span>, name <span class="ty">string</span>) <span class="ty">string</span> {
+	<span class="kw">if</span> len(args) != <span class="st">2</span> {
+		<span class="kw">return</span> errorMsg(<span class="st">"ERR wrong number of arguments for '"</span> + name + <span class="st">"' command"</span>)
+	}
+	items, err := s.HKeys(args[<span class="st">1</span>], wantVals)
+	<span class="kw">if</span> err != <span class="kw">nil</span> {
+		<span class="kw">return</span> errorMsg(err.Error())
+	}
+	<span class="kw">return</span> bulkArray(items)
+}</code></pre>
+
+    <p><code>cmdHGetAll</code> は Step 5 の交互 <code>[]string</code> を <code>bulkArray(items)</code> で RESP 配列にして返すだけ。<code>cmdHKeysVals</code> は <code>HKEYS</code> と <code>HVALS</code> の共通ハンドラで、<code>wantVals</code>（値が欲しいか）と <code>name</code>（エラー文用のコマンド名）を受け取ります。ストアの <code>HKeys</code> が1メソッドで両方担っていたのに合わせて、ハンドラも1本で済ませています。<code>HLEN</code>（<code>integer(n)</code> を返す）と <code>HEXISTS</code>（<code>1</code>/<code>0</code> を返す）のハンドラも同じ3拍子で、コードは <code>hash.go</code> の末尾に続きます。</p>
+
+    <p>そして、これらを実際にコマンド名へ結びつけるのが <code>command.go</code> の <code>dispatch</code> です。第00章で「後の章で <code>case</code> を足していく」と予告した、まさにその場所。</p>
+
+    <div class="file-tag">command.go（Hash の case・抜粋）</div>
+    <pre><code>	<span class="cm">// --- Hash ---</span>
+	<span class="kw">case</span> <span class="st">"HSET"</span>:
+		<span class="kw">return</span> cmdHSet(s, args)
+	<span class="kw">case</span> <span class="st">"HGET"</span>:
+		<span class="kw">return</span> cmdHGet(s, args)
+	<span class="kw">case</span> <span class="st">"HDEL"</span>:
+		<span class="kw">return</span> cmdHDel(s, args)
+	<span class="kw">case</span> <span class="st">"HGETALL"</span>:
+		<span class="kw">return</span> cmdHGetAll(s, args)
+	<span class="kw">case</span> <span class="st">"HKEYS"</span>:
+		<span class="kw">return</span> cmdHKeysVals(s, args, <span class="kw">false</span>, <span class="st">"hkeys"</span>)
+	<span class="kw">case</span> <span class="st">"HVALS"</span>:
+		<span class="kw">return</span> cmdHKeysVals(s, args, <span class="kw">true</span>, <span class="st">"hvals"</span>)
+	<span class="kw">case</span> <span class="st">"HLEN"</span>:
+		<span class="kw">return</span> cmdHLen(s, args)
+	<span class="kw">case</span> <span class="st">"HEXISTS"</span>:
+		<span class="kw">return</span> cmdHExists(s, args)</code></pre>
+
+    <p><code>HKEYS</code> と <code>HVALS</code> が、同じ <code>cmdHKeysVals</code> を <code>false</code>/<code>true</code> の違いだけで呼び分けているのが見えます。これで <code>redis-cli</code> から <code>HSET</code> と打てば <code>readCommand</code> → <code>dispatch</code> → <code>cmdHSet</code> → <code>s.HSet</code> と流れ、応答が RESP で返る——第00章で作ったパイプラインの上に、Hash が1つの層としてきれいに乗りました。<strong>型を1つ足すのに触ったのは、新ファイル <code>hash.go</code> と、<code>dispatch</code> に <code>case</code> を8行足しただけ</strong>。これが「型の追加はパターン化できる」の到達点です。</p>
+
+    <div class="box do"><div class="box-k">▸ 動かして確認</div>
+      <p>全体ビルドとテストを通します。Hash 単体に加え、型判定（<code>TYPE h</code> → <code>hash</code>、List への Hash 操作で <code>WRONGTYPE</code>）も一緒に確認しておきましょう。</p>
+      <pre class="term"><code><span class="ps">$</span> go test -run 'TestHash|TestTypeAndWrongType' -v
+<span class="out">=== RUN   TestHash
+--- PASS: TestHash (0.00s)
+=== RUN   TestTypeAndWrongType
+--- PASS: TestTypeAndWrongType (0.00s)
+PASS
+ok  	redisclone	0.63s</span></code></pre>
+      <p>2本とも PASS すれば、Hash 型の追加は完了です。<code>getHashLocked</code> による型の一点集約が効いて、他の型への影響ゼロで新しい型が1つ増えました。</p>
+    </div>
+
+    <h2>つまずき FAQ</h2>
+    <details class="qa"><summary><code>HGETALL</code> の結果の順序が実行するたびに変わる。バグ?</summary>
+      <div class="qa-body"><p>バグではありません。中身が Go の <code>map</code> で、<code>range</code> の反復順が<strong>意図的にランダム化</strong>されているためです。本家 Redis の <code>HGETALL</code> も順序を保証していません（Hash は順序無しの型）。ペアの<strong>並ぶ順</strong>は不定ですが、<code>append(out, f, v)</code> によって「field の直後にその value」という<strong>ペアの内部の隣接は必ず保たれます</strong>。順序に依存したい場面（ソート済みで欲しい等）は、そもそも Hash ではなく Sorted Set（第07章）の出番です。</p></div>
+    </details>
+    <details class="qa"><summary><code>HSET</code> の戻り値が「設定した数」ではなく「新しく増えた数」なのはなぜ?</summary>
+      <div class="qa-body"><p>Redis の <code>HSET</code> は<strong>「今回このコマンドで新規に追加されたフィールドの数」</strong>を返す約束だからです。既存フィールドの上書きは <code>0</code>。だから <code>HSET h name alice age 30</code>（2つとも新規）は <code>2</code>、続く <code>HSET h name bob</code>（<code>name</code> は上書き）は <code>0</code>。コード上は書き込み前に <code>_, exists := h[field]</code> で存在を確かめ、無いときだけ <code>added++</code> しています。「何個セットしたか」ではなく「何個<strong>増えたか</strong>」——集合的な差分を返すのが Redis の多くのコマンド（<code>SADD</code> 等）に共通する流儀です。</p></div>
+    </details>
+    <details class="qa"><summary>String のキーに <code>HGET</code> したら何が起きる? どこでエラーになる?</summary>
+      <div class="qa-body"><p><code>getHashLocked</code> の中の <code>v.(Hash)</code> という型アサーションが失敗し、<code>errWrongType</code> が返ります。これがコマンドハンドラで <code>-WRONGTYPE Operation against a key holding the wrong kind of value</code> という RESP エラーになります。重要なのは、この型チェックが<strong>各コマンドではなく <code>getHashLocked</code> の1か所に集約</strong>されている点。<code>HGET</code>・<code>HSET</code>・<code>HDEL</code> …すべてがこの入口を通るので、型ガードを毎回書かずに済み、かつ抜け漏れがありません。<code>TestTypeAndWrongType</code> がこの一点集約を検証しています。</p></div>
+    </details>
+
+    <h2>理解度チェック</h2>
+    <p>次の問いに<strong>自分の言葉で</strong>答えられたら、この章は卒業です。</p>
+    <details class="qa"><summary>1. <code>getHashLocked</code> の引数 <code>create</code> は何を切り替え、なぜ読み取りと書き込みで値を変えるのか。</summary>
+      <div class="qa-body"><p><code>create</code> は「キーが無かったとき、空の Hash を<strong>作って登録するか</strong>」を切り替える。<code>HSet</code> は <code>create=true</code>（無ければ作る）、<code>HGet</code>/<code>HDel</code> など読み取り系は <code>create=false</code>（作らず <code>nil, nil</code> を返す）。もし読み取りでも作ってしまうと、存在しないキーを <code>HGET</code> しただけで<strong>空の Hash がキースペースに増殖</strong>する。「書くときだけ作る」ことで、余計なキーを生まない。</p></div>
+    </details>
+    <details class="qa"><summary>2. <code>HGETALL</code> は Hash の中身をどんな形の配列で返すか。その形はどのコードで作られるか。</summary>
+      <div class="qa-body"><p><code>[field1, val1, field2, val2, ...]</code> という<strong>field と value を交互に並べた平らな1本の配列</strong>で返す（ネストしない）。これは <code>HGetAll</code> の <code>for f, v := range h { out = append(out, f, v) }</code>——1回のループで field と value を<strong>続けて2つ append する</strong>——で作られる。その <code>[]string</code> をコマンドハンドラで <code>bulkArray</code> により RESP 配列（<code>*4\r\n$4\r\nname\r\n...</code>）へ変換する。並ぶ順序は map なので不定だが、ペア内部（field→value）の隣接は保たれる。</p></div>
+    </details>
+    <details class="qa"><summary>3. Hash のフィールドを全部 <code>HDEL</code> したあと、キースペースはどうなるか。なぜそうするのか。</summary>
+      <div class="qa-body"><p><code>HDel</code> の末尾 <code>if len(h) == 0 { s.removeLocked(key) }</code> により、<strong>キーそのものがキースペースから削除される</strong>。Redis では「空のコレクションは存在しないのと同じ」が鉄則で、これを守らないと空っぽの Hash だけが残り、<code>EXISTS</code> が <code>1</code> を、<code>TYPE</code> が <code>hash</code> を返す幽霊状態になる。list / hash / set / zset のすべてで「最後の要素が消えたらキーも消す」を徹底することで、本家 Redis と挙動が揃う。</p></div>
+    </details>
+
+    <h2>まとめ — 次の層へ</h2>
+    <p>この章で、キーの中に<strong>もう一段の辞書</strong>——Hash——を置けるようになりました。<code>type Hash map[string]string</code> の1行で型を定義し、<code>getHashLocked</code> という入口で型を守り、<code>HSET</code>/<code>HGET</code>/<code>HDEL</code>/<code>HGETALL</code>/<code>HKEYS</code>/<code>HVALS</code>/<code>HLEN</code>/<code>HEXISTS</code> を薄く並べる。そして空になったキーは消す。<strong>作りは Store でも List でも見た形の反復</strong>で、新しく覚えたのは <code>HSET</code> の「新規追加数を返す」意味と、<code>HGETALL</code> の「field/value を交互に詰める」返し方——この2点でした。「型を足す手順はパターンだ」という手応えを掴めたなら、この先はもっと軽く進めます。</p>
+    <p>次の第06章では <code>Set</code>（集合）を作ります。ただし Set は Hash より一歩踏み込んで、<strong>エンコーディングの切り替え</strong>——整数だけの小さな集合は <code>intset</code>（ソート済みの <code>[]int64</code>）で、大きくなったら <code>hashtable</code> に昇格——という、この章では避けた「本家の最適化」に踏み込みます。<code>getXxxLocked</code> + 空削除 + WRONGTYPE という骨格は同じまま、値の中の表現が2種類に分かれる。Redis が「メモリのために形を変える」その一端を、いよいよ手を動かして味わいます。</p>
+
+    <div class="chap-foot">
+      <a class="pager" href="04-list.html"><span class="dir">← 前へ</span>第04章 · List</a>
+      <a class="pager next" href="06-set.html"><span class="dir">次へ →</span>第06章 · Set とエンコーディング</a>
+    </div>
+  </main>
+</div>
+</body>
+</html>

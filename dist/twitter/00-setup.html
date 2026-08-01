@@ -1,0 +1,482 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>第00章 土台をつくる — Twitter をつくる</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500;600&family=Source+Serif+4:opsz,wght@8..60,400;8..60,600;8..60,700&family=Noto+Serif+JP:wght@400;600;700&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<div class="shell">
+
+  <aside class="spine">
+    <a class="wordmark" href="index.html">CHIRP · from scratch</a>
+    <div class="book-title">Twitter を<br>つくる</div>
+    <div class="book-sub">Go + PostgreSQL + React で認証からタイムラインまで</div>
+
+    <div class="legend"><span>読む <b>↓</b></span><span>組む <b>↑</b></span></div>
+
+    <nav aria-label="目次">
+      <ul class="toc">
+        <li><a class="nav-item" href="index.html"><span class="nav-num">序</span><span class="nav-label">はじめに・準備<span class="nav-tag">Setup</span></span></a></li>
+        <li><a class="nav-item current" aria-current="page" href="00-setup.html"><span class="nav-num">00</span><span class="nav-label">土台をつくる<span class="nav-tag">Setup</span></span></a></li>
+        <li><a class="nav-item" href="01-auth.html"><span class="nav-num">01</span><span class="nav-label">ユーザーという存在（認証）<span class="nav-tag">Auth</span></span></a></li>
+        <li><a class="nav-item" href="02-post.html"><span class="nav-num">02</span><span class="nav-label">投稿する<span class="nav-tag">Post</span></span></a></li>
+        <li><a class="nav-item" href="03-follow.html"><span class="nav-num">03</span><span class="nav-label">つながる（フォロー）<span class="nav-tag">Follow</span></span></a></li>
+        <li><a class="nav-item" href="04-timeline.html"><span class="nav-num">04</span><span class="nav-label">タイムラインという難問<span class="nav-tag">Timeline</span></span></a></li>
+        <li><a class="nav-item" href="05-reply.html"><span class="nav-num">05</span><span class="nav-label">会話する（リプライ）<span class="nav-tag">Reply</span></span></a></li>
+        <li><a class="nav-item" href="06-like.html"><span class="nav-num">06</span><span class="nav-label">反応する（いいね）<span class="nav-tag">Like</span></span></a></li>
+        <li><a class="nav-item" href="07-perf.html"><span class="nav-num">07</span><span class="nav-label">速くする（N+1と索引）<span class="nav-tag">Perf</span></span></a></li>
+        <li><a class="nav-item" href="08-web.html"><span class="nav-num">08</span><span class="nav-label">画面をつける（React）<span class="nav-tag">Web</span></span></a></li>
+        <li><a class="nav-item" href="09-beyond.html"><span class="nav-num">09</span><span class="nav-label">さらに先へ（発展）<span class="nav-tag">Beyond</span></span></a></li>
+      </ul>
+    </nav>
+
+    <div class="spine-foot">
+      各章は SNS の一つの機能。<br>下（土台）から上（画面）へ<br>積み上げて動かしていく。
+    </div>
+  </aside>
+
+  <main class="reading">
+    <div class="progress-tag">第00章 / 全10章 · 層: Setup · 読了目安 2〜3時間</div>
+    <div class="eyebrow"><span>Setup</span><span class="depth">— 最下層</span></div>
+    <h1>土台をつくる</h1>
+    <p class="lede">どんな SNS も、まず<strong>データをしまう場所</strong>と<strong>それに触るサーバ</strong>がなければ始まりません。この章では、PostgreSQL を Docker で起動し、Go のサーバがそこに接続し、テーブル（users / posts / follows / likes）を用意するところまでを作ります。まだ登録も投稿もできませんが、終えたとき、<code>go run</code> したサーバが「起動しました」とログを吐き、DB には空の4テーブルが並びます。この上に、あとの9章が建ちます。</p>
+
+    <div class="box goal"><div class="box-k">◈ この章のゴール</div>
+      <p>次の 2 つを、自分の目と手で確認できたら達成です。</p>
+      <ol>
+        <li><code>docker compose up -d</code> で PostgreSQL が 5433 番で起動し、<code>go run ./cmd/server</code> が <code>起動しました addr=:8080</code> とログを出して待ち受ける。</li>
+        <li><code>go test ./...</code> が PASS する。サーバ起動時にスキーマが<strong>冪等に</strong>適用され、何度起動してもテーブルが壊れないことを確かめる。</li>
+      </ol>
+    </div>
+
+    <div class="box map"><div class="box-k">☰ この章のステップ</div>
+      <ol>
+        <li><a href="#step-1">なぜ「土台」から始めるのか — 層の順序</a></li>
+        <li><a href="#step-2">データベースを起動する — <code>docker-compose.yml</code></a></li>
+        <li><a href="#step-3">スキーマを設計する — <code>schema.sql</code>（4テーブルの俯瞰）</a></li>
+        <li><a href="#step-4">DB に接続し、スキーマを適用する — <code>store.go</code></a></li>
+        <li><a href="#step-5">サーバの起動口をつくる — <code>main.go</code></a></li>
+        <li><a href="#step-6">動かして確認する — 起動とテスト</a></li>
+      </ol>
+    </div>
+
+    <h2 class="step" id="step-1"><span class="step-no">Step 1</span>なぜ「土台」から始めるのか — 層の順序</h2>
+    <p>SNS で最初に作るべきものは、投稿でもタイムラインでもありません。<strong>データをしまう場所と、それに安全に触る入口</strong>です。ユーザーがいなければ投稿は作れず、投稿がなければタイムラインは組めません。すべての機能は「どこかにデータを永続化して、あとで読み出す」の上に乗っています。だからこの本は、一番下の「土台」の層から始めます。</p>
+    <p>この章で用意するのは3つです。<strong>(1) PostgreSQL を起動する仕組み</strong>（Docker）、<strong>(2) 4つのテーブルの定義</strong>（スキーマ）、<strong>(3) Go サーバがその DB に接続してスキーマを適用する起動処理</strong>。この3つが揃うと、あとの章は「テーブルにこう書き込み、こう読み出す」を足していくだけになります。</p>
+
+    <div class="box map"><div class="box-k">☰ この章のファイルと役割</div>
+      <ul>
+        <li><code>src/docker-compose.yml</code> — PostgreSQL コンテナの定義（Step 2）</li>
+        <li><code>src/backend/internal/store/schema.sql</code> — 4テーブルの定義（Step 3）</li>
+        <li><code>src/backend/internal/store/store.go</code> — 接続プールを作り、スキーマを適用する（Step 4）</li>
+        <li><code>src/backend/cmd/server/main.go</code> — 設定を読み、サーバを起動する（Step 5）</li>
+      </ul>
+    </div>
+
+    <h2 class="step" id="step-2"><span class="step-no">Step 2</span>データベースを起動する — docker-compose.yml</h2>
+    <p>まず、データの置き場所である PostgreSQL を動かせるようにします。自分の PC に PostgreSQL を直接インストールするのではなく、<strong>Docker コンテナ</strong>として起動します。こうすると、バージョンや設定がファイルに書かれて再現でき、要らなくなったら丸ごと消せます。設定は <code>docker-compose.yml</code> 1枚です。</p>
+
+    <div class="file-tag">src/docker-compose.yml</div>
+    <pre><code><span class="cm"># 開発用 PostgreSQL（教材 Chapter 1「土台をつくる」に対応）</span>
+<span class="kw">services</span>:
+  <span class="kw">db</span>:
+    <span class="kw">image</span>: postgres:16
+    <span class="kw">container_name</span>: twitter-sns-db
+    <span class="kw">environment</span>:
+      <span class="kw">POSTGRES_USER</span>: dev
+      <span class="kw">POSTGRES_PASSWORD</span>: dev
+      <span class="kw">POSTGRES_DB</span>: sns
+    <span class="kw">ports</span>:
+      - <span class="st">"5433:5432"</span>
+    <span class="kw">volumes</span>:
+      - db-data:/var/lib/postgresql/data
+    <span class="kw">healthcheck</span>:
+      <span class="kw">test</span>: [<span class="st">"CMD-SHELL"</span>, <span class="st">"pg_isready -U dev -d sns"</span>]
+      <span class="kw">interval</span>: 5s
+      <span class="kw">timeout</span>: 3s
+      <span class="kw">retries</span>: 10
+
+<span class="kw">volumes</span>:
+  <span class="kw">db-data</span>:</code></pre>
+
+    <p>1つずつ読みます。<code>services.db</code> が「db という名前のコンテナを1つ動かす」宣言です。<code>image: postgres:16</code> で PostgreSQL 16 の公式イメージを使います（バージョンを固定しておくと、あとで「動いていたのに動かない」を防げます）。<code>container_name</code> は起動したコンテナの名前で、<code>docker ps</code> で <code>twitter-sns-db</code> と表示されます。</p>
+    <p><code>environment</code> の3行は、コンテナが<strong>初回起動時に</strong>作るユーザー・パスワード・データベースです。ユーザー <code>dev</code>、パスワード <code>dev</code>、データベース名 <code>sns</code>。開発用なので単純な値にしています（この値が、Step 5 の接続文字列 <code>postgres://dev:dev@localhost:5433/sns</code> とぴたり対応します）。</p>
+
+    <p>そして本書で最も注意すべき1行——</p>
+    <pre><code>    <span class="kw">ports</span>:
+      - <span class="st">"5433:5432"</span></code></pre>
+    <p>これは <strong>「ホストの 5433 番を、コンテナの中の 5432 番につなぐ」</strong>という意味です。左が自分の PC 側、右がコンテナの中。PostgreSQL はコンテナの中では既定の 5432 番で動いていますが、それを PC 側では<strong>あえて 5433 番</strong>に出しています。</p>
+
+    <div class="box hazard"><div class="box-k">⚠ 落とし穴 — なぜ 5432 ではなく 5433 なのか</div>
+      <p>PostgreSQL の既定ポートは <code>5432</code> です。もしあなたの PC に、別のプロジェクトの PostgreSQL や、以前入れた PostgreSQL がすでに 5432 番で動いていると、Chirp の DB を <code>5432</code> で出そうとしても<strong>ポートの取り合いになって起動に失敗</strong>します。そこで本書は、衝突を避けるために <strong>PC 側だけ 5433 にずらして</strong>います（コンテナの中は既定の 5432 のまま）。<br>
+      この「ずらし」の代償は、接続するときに <code>5433</code> を明示することだけです。Step 5 の接続文字列が <code>...@localhost:<strong>5433</strong>/sns</code> になっているのはこのためです。ポート番号を間違えると「接続できない」の原因になるので、頭に入れておいてください。</p>
+    </div>
+
+    <p>残りの2つも押さえます。<code>volumes</code> の <code>db-data:/var/lib/postgresql/data</code> は、<strong>データの永続化</strong>です。PostgreSQL がデータを書き込む <code>/var/lib/postgresql/data</code> を、名前付きボリューム <code>db-data</code> に紐づけます。こうしておくと、コンテナを停止・再作成してもデータが消えません（ボリュームは末尾の <code>volumes:</code> ブロックで宣言しています）。<code>healthcheck</code> は「DB が本当に受付可能か」を <code>pg_isready</code> で5秒おきに確認する仕組みで、「コンテナは立ったが中の PostgreSQL はまだ準備中」という起動直後のズレを検知できます。</p>
+
+    <div class="box hazard"><div class="box-k">⚠ 落とし穴 — 初回に古いボリュームが残っていると認証エラー</div>
+      <p><code>environment</code> のユーザー・パスワードは、ボリューム <code>db-data</code> が<strong>空のときにだけ</strong>反映されます。以前に別のパスワードで作ったボリュームが残っていると、新しい <code>POSTGRES_PASSWORD</code> は無視され、古い認証情報のまま。すると Step 5 のサーバが <code>dev:dev</code> で繋ごうとして<strong>認証エラー</strong>になります。この症状が出たら、ボリュームごと消してやり直します。<br>
+      <code>docker compose down -v</code> — この <code>-v</code> がボリュームまで削除するフラグです。消してから <code>docker compose up -d</code> し直せば、<code>dev:dev</code> のクリーンな DB が作り直されます。</p>
+    </div>
+
+    <div class="box do"><div class="box-k">▸ 動かして確認</div>
+      <p>DB を起動して、コンテナが立っていることを確かめます。<code>-d</code> はバックグラウンド起動（detached）です。</p>
+      <pre class="term"><code><span class="ps">$</span> cd src
+<span class="ps">$</span> docker compose up -d
+<span class="out">✔ Network src_default        Created
+✔ Volume "src_db-data"        Created
+✔ Container twitter-sns-db    Started</span>
+<span class="ps">$</span> docker compose ps
+<span class="out">NAME             IMAGE         STATUS                   PORTS
+twitter-sns-db   postgres:16   Up (healthy)             0.0.0.0:5433->5432/tcp</span></code></pre>
+      <p><code>STATUS</code> が <code>Up (healthy)</code> になり、<code>PORTS</code> に <code>5433->5432</code> と出れば成功です。<code>healthy</code> は healthcheck が通った証で、DB が接続を受け付けられる状態だと分かります。</p>
+    </div>
+
+    <h2 class="step" id="step-3"><span class="step-no">Step 3</span>スキーマを設計する — schema.sql（4テーブルの俯瞰）</h2>
+    <p>DB が動いたので、次はその中に<strong>テーブル</strong>を定義します。Chirp の骨格は4つのテーブル — <code>users</code>（誰か）、<code>posts</code>（投稿）、<code>follows</code>（フォロー関係）、<code>likes</code>（いいね）です。この章では<strong>全体を俯瞰する</strong>にとどめ、各テーブルの細かい設計判断（なぜこの索引か、なぜこの主キーか）は、それを使う章で深掘りします。まずは全文を見てください。</p>
+
+    <div class="file-tag">src/backend/internal/store/schema.sql</div>
+    <pre><code><span class="cm">-- Twitter風SNS スキーマ</span>
+<span class="cm">-- 起動時に毎回適用される（IF NOT EXISTS による冪等マイグレーション）</span>
+
+<span class="kw">CREATE TABLE IF NOT EXISTS</span> users (
+    id            <span class="ty">BIGSERIAL</span> <span class="kw">PRIMARY KEY</span>,
+    username      <span class="ty">TEXT</span>        <span class="kw">NOT NULL UNIQUE</span>,
+    display_name  <span class="ty">TEXT</span>        <span class="kw">NOT NULL</span>,
+    email         <span class="ty">TEXT</span>        <span class="kw">NOT NULL UNIQUE</span>,
+    password_hash <span class="ty">TEXT</span>        <span class="kw">NOT NULL</span>,
+    bio           <span class="ty">TEXT</span>        <span class="kw">NOT NULL DEFAULT</span> <span class="st">''</span>,
+    created_at    <span class="ty">TIMESTAMPTZ</span> <span class="kw">NOT NULL DEFAULT</span> now()
+);
+
+<span class="kw">CREATE TABLE IF NOT EXISTS</span> posts (
+    id          <span class="ty">BIGSERIAL</span> <span class="kw">PRIMARY KEY</span>,
+    user_id     <span class="ty">BIGINT</span>      <span class="kw">NOT NULL REFERENCES</span> users(id) <span class="kw">ON DELETE CASCADE</span>,
+    body        <span class="ty">TEXT</span>        <span class="kw">NOT NULL CHECK</span> (char_length(body) <span class="kw">BETWEEN</span> <span class="st">1</span> <span class="kw">AND</span> <span class="st">280</span>),
+    reply_to_id <span class="ty">BIGINT</span>      <span class="kw">REFERENCES</span> posts(id) <span class="kw">ON DELETE CASCADE</span>,
+    created_at  <span class="ty">TIMESTAMPTZ</span> <span class="kw">NOT NULL DEFAULT</span> now()
+);
+
+<span class="cm">-- 「あるユーザーの投稿を新しい順に」のための索引（教材 Chapter 7）</span>
+<span class="kw">CREATE INDEX IF NOT EXISTS</span> idx_posts_user_id_id <span class="kw">ON</span> posts (user_id, id <span class="kw">DESC</span>);
+<span class="cm">-- リプライ一覧のための索引</span>
+<span class="kw">CREATE INDEX IF NOT EXISTS</span> idx_posts_reply_to <span class="kw">ON</span> posts (reply_to_id, id) <span class="kw">WHERE</span> reply_to_id <span class="kw">IS NOT NULL</span>;
+
+<span class="cm">-- id は一覧の並び順・ページネーションの目印。</span>
+<span class="cm">-- created_at はクロック補正（Docker/WSL2等）で逆転しうるため、順序の鍵には連番を使う。</span>
+<span class="kw">CREATE TABLE IF NOT EXISTS</span> follows (
+    id          <span class="ty">BIGSERIAL</span>,
+    follower_id <span class="ty">BIGINT</span>      <span class="kw">NOT NULL REFERENCES</span> users(id) <span class="kw">ON DELETE CASCADE</span>,
+    followee_id <span class="ty">BIGINT</span>      <span class="kw">NOT NULL REFERENCES</span> users(id) <span class="kw">ON DELETE CASCADE</span>,
+    created_at  <span class="ty">TIMESTAMPTZ</span> <span class="kw">NOT NULL DEFAULT</span> now(),
+    <span class="kw">PRIMARY KEY</span> (follower_id, followee_id),
+    <span class="kw">CHECK</span> (follower_id &lt;&gt; followee_id)
+);
+
+<span class="cm">-- 既存DB向けの冪等マイグレーション（新規DBでは no-op）</span>
+<span class="kw">ALTER TABLE</span> follows <span class="kw">ADD COLUMN IF NOT EXISTS</span> id <span class="ty">BIGSERIAL</span>;
+
+<span class="cm">-- フォロワー一覧／フォロイー一覧を新しい順に引くための索引</span>
+<span class="kw">CREATE INDEX IF NOT EXISTS</span> idx_follows_followee_id <span class="kw">ON</span> follows (followee_id, id <span class="kw">DESC</span>);
+<span class="kw">CREATE INDEX IF NOT EXISTS</span> idx_follows_follower_id <span class="kw">ON</span> follows (follower_id, id <span class="kw">DESC</span>);
+
+<span class="kw">CREATE TABLE IF NOT EXISTS</span> likes (
+    user_id    <span class="ty">BIGINT</span>      <span class="kw">NOT NULL REFERENCES</span> users(id) <span class="kw">ON DELETE CASCADE</span>,
+    post_id    <span class="ty">BIGINT</span>      <span class="kw">NOT NULL REFERENCES</span> posts(id) <span class="kw">ON DELETE CASCADE</span>,
+    created_at <span class="ty">TIMESTAMPTZ</span> <span class="kw">NOT NULL DEFAULT</span> now(),
+    <span class="kw">PRIMARY KEY</span> (user_id, post_id)
+);
+
+<span class="cm">-- 「この投稿のいいね数」を数えるための索引</span>
+<span class="kw">CREATE INDEX IF NOT EXISTS</span> idx_likes_post <span class="kw">ON</span> likes (post_id);</code></pre>
+
+    <p>全体を眺めて、この章で押さえたいのは<strong>「4つのテーブルが ID で互いを指し合っている」</strong>という構造です。細部は各章に譲り、俯瞰します。</p>
+
+    <h3>users — 「誰か」を表す</h3>
+    <p>すべての起点です。<code>id BIGSERIAL PRIMARY KEY</code> の <strong><code>BIGSERIAL</code></strong> は「行を追加するたびに 1, 2, 3... と自動で増える 64bit 整数」で、これがそのユーザーの一意な番号になります。<code>username</code> と <code>email</code> は <strong><code>UNIQUE</code></strong>（重複禁止）で、「同じユーザー名は2人いない」を DB が保証します。<code>password_hash</code> は<strong>生パスワードではなくハッシュ</strong>を入れる列です（第01章で bcrypt を使います。生のパスワードを保存することは決してありません）。<code>NOT NULL DEFAULT ''</code> の <code>bio</code> は自己紹介で、未入力なら空文字。<code>created_at TIMESTAMPTZ NOT NULL DEFAULT now()</code> は登録日時で、<code>now()</code> により挿入時に自動で入ります。</p>
+
+    <h3>posts — 「投稿」と、2つのリレーション</h3>
+    <p>投稿テーブルには、他のテーブルを指す線が2本あります。<code>user_id BIGINT NOT NULL REFERENCES users(id)</code> は「この投稿は誰のものか」で、<code>users.id</code> を指します。<strong><code>REFERENCES</code></strong>（外部キー）は「ここに入る値は必ず users に実在する id でなければならない」を DB に守らせる仕組みで、存在しないユーザーの投稿は作れません。<code>ON DELETE CASCADE</code> は「そのユーザーが消えたら、その投稿も一緒に消す」。<code>reply_to_id</code> はもう1本のリレーションで、<strong>posts が自分自身を指す</strong>（<code>REFERENCES posts(id)</code>）ことでリプライ（どの投稿への返信か）を表します。ここが <code>NOT NULL</code> でないのは、通常の投稿はリプライではないから（<code>NULL</code>）です。詳しくは第05章で扱います。</p>
+    <p>そして本文の制約が独特です。</p>
+    <pre><code>    body <span class="ty">TEXT</span> <span class="kw">NOT NULL CHECK</span> (char_length(body) <span class="kw">BETWEEN</span> <span class="st">1</span> <span class="kw">AND</span> <span class="st">280</span>)</code></pre>
+    <p><strong><code>CHECK</code></strong> 制約は「この条件を満たさない行は挿入させない」というルールです。<code>char_length(body) BETWEEN 1 AND 280</code> で「本文は1文字以上280文字以下」を <strong>DB のレベルで</strong>強制しています。空投稿も、281文字の投稿も、DB が門前払いします。アプリ側（Go）でも同じ検証はしますが、DB にも二重で置くことで「アプリの検証をすり抜けても DB が最後の砦になる」多層防御になっています（Twitter の280文字がここに現れます）。</p>
+
+    <h3>follows — 「つながり」を表す</h3>
+    <p>フォロー関係は「誰が誰をフォローしているか」の一覧です。<code>follower_id</code>（フォローする側）と <code>followee_id</code>（される側）の両方が <code>users.id</code> を指します。主キーが <code>PRIMARY KEY (follower_id, followee_id)</code> という<strong>2列の組み合わせ</strong>なのがポイントで、「同じ人が同じ相手を2回フォローする」ことを DB が防ぎます。<code>CHECK (follower_id &lt;&gt; followee_id)</code> の <code>&lt;&gt;</code> は「等しくない」の意味で、<strong>自分で自分をフォローできない</strong>ようにしています。<code>id BIGSERIAL</code> と各索引は、フォロー一覧を新しい順にページ送りするための工夫で、第03章で理由まで掘り下げます。</p>
+
+    <h3>likes — 「いいね」を表す</h3>
+    <p>いいねも follows と似た「関係」のテーブルです。<code>user_id</code>（いいねした人）と <code>post_id</code>（された投稿）の組み合わせが主キーで、<strong>同じ投稿への二重いいねを DB が防ぎます</strong>。「いいねを取り消す」は、この行を消すだけ。「いいね数」は <code>post_id</code> でこの行を数えるだけ。シンプルな設計が、第06章・第07章で効いてきます。</p>
+
+    <div class="box hazard"><div class="box-k">⚠ 落とし穴 — このスキーマの主役は「IF NOT EXISTS」</div>
+      <p>すべての <code>CREATE TABLE</code> と <code>CREATE INDEX</code> に <strong><code>IF NOT EXISTS</code></strong> が付いています。これは「まだ無ければ作る、すでに有れば何もしない」という意味です。おかげでこの <code>schema.sql</code> は、<strong>何度実行しても結果が同じ（冪等）</strong>になります。Step 4 で見るように、Chirp はサーバを起動する<strong>たびに</strong>この SQL を流します。もし <code>IF NOT EXISTS</code> がなければ、2回目の起動で「テーブルはすでに存在する」というエラーで落ちます。<code>IF NOT EXISTS</code> があるからこそ、「起動時に毎回スキーマを流す」という単純な運用が成り立ちます。<br>
+      なお、この方式は<strong>「テーブルを新しく作る」変更にしか対応しません</strong>。既存の列の型を変えるような破壊的な変更は、この仕組みでは扱えず手作業が要ります（<code>ALTER TABLE ... ADD COLUMN IF NOT EXISTS</code> のような追加は、冒頭コメントどおり冪等に書けます）。学習スコープではこの単純な冪等マイグレーションで十分です。</p>
+    </div>
+
+    <h2 class="step" id="step-4"><span class="step-no">Step 4</span>DB に接続し、スキーマを適用する — store.go</h2>
+    <p>テーブルの設計図（<code>schema.sql</code>）ができました。次は、Go サーバがその設計図を持って DB に接続し、<strong>起動時にスキーマを適用する</strong>部分です。これを担うのが <code>store</code> パッケージの入口、<code>store.go</code> です。DB へのアクセスはすべてこの <code>store</code> パッケージに閉じ込め、あとの章で <code>users.go</code> や <code>posts.go</code> を足していきます。まず全文を見ます。</p>
+
+    <div class="file-tag">src/backend/internal/store/store.go</div>
+    <pre><code><span class="cm">// Package store は PostgreSQL への永続化を担う。</span>
+<span class="kw">package</span> store
+
+<span class="kw">import</span> (
+	<span class="st">"context"</span>
+	_ <span class="st">"embed"</span>
+	<span class="st">"errors"</span>
+	<span class="st">"fmt"</span>
+
+	<span class="st">"github.com/jackc/pgx/v5/pgxpool"</span>
+)
+
+<span class="cm">//go:embed schema.sql</span>
+<span class="kw">var</span> schemaSQL <span class="ty">string</span>
+
+<span class="cm">// ドメインエラー。API層はこれを見てHTTPステータスへ変換する。</span>
+<span class="kw">var</span> (
+	ErrNotFound      = errors.New(<span class="st">"not found"</span>)
+	ErrUsernameTaken = errors.New(<span class="st">"username taken"</span>)
+	ErrEmailTaken    = errors.New(<span class="st">"email taken"</span>)
+	ErrForbidden     = errors.New(<span class="st">"forbidden"</span>)
+	ErrSelfFollow    = errors.New(<span class="st">"self follow"</span>)
+)
+
+<span class="kw">type</span> <span class="ty">Store</span> <span class="kw">struct</span> {
+	pool *pgxpool.<span class="ty">Pool</span>
+}
+
+<span class="cm">// New は接続プールを作り、スキーマを適用して Store を返す。</span>
+<span class="kw">func</span> New(ctx context.<span class="ty">Context</span>, dsn <span class="ty">string</span>) (*<span class="ty">Store</span>, <span class="ty">error</span>) {
+	pool, err := pgxpool.New(ctx, dsn)
+	<span class="kw">if</span> err != <span class="kw">nil</span> {
+		<span class="kw">return</span> <span class="kw">nil</span>, fmt.Errorf(<span class="st">"connect: %w"</span>, err)
+	}
+	<span class="kw">if</span> err := pool.Ping(ctx); err != <span class="kw">nil</span> {
+		pool.Close()
+		<span class="kw">return</span> <span class="kw">nil</span>, fmt.Errorf(<span class="st">"ping: %w"</span>, err)
+	}
+	<span class="kw">if</span> _, err := pool.Exec(ctx, schemaSQL); err != <span class="kw">nil</span> {
+		pool.Close()
+		<span class="kw">return</span> <span class="kw">nil</span>, fmt.Errorf(<span class="st">"apply schema: %w"</span>, err)
+	}
+	<span class="kw">return</span> &amp;<span class="ty">Store</span>{pool: pool}, <span class="kw">nil</span>
+}
+
+<span class="kw">func</span> (s *<span class="ty">Store</span>) Close() {
+	s.pool.Close()
+}</code></pre>
+
+    <p>上から順に読みます。まず注目すべきは、<code>schema.sql</code> をどうやって Go に持ち込むかです。</p>
+    <pre><code>	_ <span class="st">"embed"</span>
+	...
+<span class="cm">//go:embed schema.sql</span>
+<span class="kw">var</span> schemaSQL <span class="ty">string</span></code></pre>
+    <p><code>//go:embed schema.sql</code> は、<strong>ビルド時に <code>schema.sql</code> の中身を丸ごと文字列変数 <code>schemaSQL</code> に埋め込む</strong>という指示です。これにより、コンパイルしてできた実行ファイルの<strong>中に</strong>スキーマが入り、実行時に <code>schema.sql</code> というファイルを探す必要がなくなります。「どこで起動しても、バイナリさえあればスキーマを持っている」状態になる。あとで第08章では、この同じ仕組みで React のビルド成果物も埋め込み、<strong>サーバもフロントも1つの実行ファイル</strong>にします。</p>
+
+    <div class="gonote"><div class="box-k">GO メモ · //go:embed と _ "embed"</div>
+      <p><code>//go:embed</code> は Go 1.16 で入った「ファイルをバイナリに埋め込む」ディレクティブです。使うには <code>embed</code> パッケージを import する必要がありますが、コードから <code>embed.XXX</code> を直接呼ばない場合は <strong>ブランク import</strong> <code>_ "embed"</code> と書きます（<code>_</code> は「読み込むが名前は使わない」の印）。<code>//go:embed 対象</code> のコメントは、その<strong>直後の <code>var</code> 宣言</strong>に効きます。埋め込み先を <code>string</code> にすればテキストとして、<code>[]byte</code> や <code>embed.FS</code> にすればバイナリ・複数ファイルとして取り込めます。ここでは SQL をテキストで欲しいので <code>string</code> です。</p>
+    </div>
+
+    <p>次の <code>var ( ErrNotFound = ... )</code> のブロックは、<strong>ドメインエラー</strong>の定義です。「見つからない」「ユーザー名が既に使われている」「禁止された操作」などを、あらかじめ<strong>1個ずつ作った番兵エラー</strong>として持っておきます。<code>store</code> の関数はエラー時にこれらを返し、上の API 層が <code>errors.Is(err, store.ErrNotFound)</code> のように見分けて、適切な HTTP ステータス（404 など）に変換します。この章ではまだ使いませんが、あとの章で <code>store</code> が返すエラーの語彙として効いてきます。</p>
+
+    <p>そして本体、<code>Store</code> 型と <code>New</code> 関数です。<code>Store</code> は <code>pool *pgxpool.Pool</code> というフィールドを1つ持つだけの構造体。この <code>pool</code> が<strong>接続プール</strong>です。</p>
+
+    <div class="gonote"><div class="box-k">GO メモ · なぜ「接続プール」なのか</div>
+      <p>DB への接続は、作るのにコストがかかります。リクエストのたびに接続を開いて閉じていては遅い。そこで <strong>接続プール</strong>（<code>pgxpool</code>）は、あらかじめ何本かの接続を用意して<strong>使い回し</strong>ます。クエリを投げるときはプールから空いている接続を借り、終わったら返す。複数のリクエストが同時に来ても、プールが接続を貸し出して捌きます。Chirp では接続を直接触らず、常にこの <code>pool</code> 越しにクエリを投げます。<code>*pgxpool.Pool</code> は複数の goroutine から同時に使っても安全（スレッドセーフ）に作られているので、そのまま並行に使えます。</p>
+    </div>
+
+    <p><code>New</code> は「接続プールを作り、疎通を確かめ、スキーマを適用して <code>Store</code> を返す」の3段構えです。順に追います。</p>
+    <pre><code>	pool, err := pgxpool.New(ctx, dsn)
+	<span class="kw">if</span> err != <span class="kw">nil</span> {
+		<span class="kw">return</span> <span class="kw">nil</span>, fmt.Errorf(<span class="st">"connect: %w"</span>, err)
+	}</code></pre>
+    <p><code>pgxpool.New(ctx, dsn)</code> が接続プールを作ります。<code>dsn</code>（Data Source Name）は <code>postgres://dev:dev@localhost:5433/sns</code> のような接続文字列で、Step 5 の <code>main.go</code> から渡ってきます。ここでの <code>err</code> は主に「接続文字列の書式がおかしい」といった設定エラーです。<code>fmt.Errorf("connect: %w", err)</code> の <code>%w</code> は元のエラーを<strong>包む</strong>もので、「connect の段階で失敗した」という文脈を足しつつ、元のエラー情報も保持します。</p>
+    <pre><code>	<span class="kw">if</span> err := pool.Ping(ctx); err != <span class="kw">nil</span> {
+		pool.Close()
+		<span class="kw">return</span> <span class="kw">nil</span>, fmt.Errorf(<span class="st">"ping: %w"</span>, err)
+	}</code></pre>
+    <p><code>pgxpool.New</code> は実は<strong>その場では実際に DB へ繋ぎません</strong>（遅延接続）。だから <code>Ping</code> で「本当に DB に届くか」を能動的に確かめます。ここで失敗するのは「DB がまだ起動していない」「ポートが違う（5432 と 5433 の取り違え!）」「パスワードが違う（古いボリューム!）」など、Step 2 の落とし穴で挙げた症状です。失敗したら、作りかけのプールを <code>pool.Close()</code> で確実に閉じてからエラーを返します（開きっぱなしにするとリソースが漏れます）。</p>
+    <pre><code>	<span class="kw">if</span> _, err := pool.Exec(ctx, schemaSQL); err != <span class="kw">nil</span> {
+		pool.Close()
+		<span class="kw">return</span> <span class="kw">nil</span>, fmt.Errorf(<span class="st">"apply schema: %w"</span>, err)
+	}</code></pre>
+    <p>そして<strong>この章の心臓</strong>です。<code>pool.Exec(ctx, schemaSQL)</code> で、<code>//go:embed</code> で取り込んだスキーマ全文を DB に流します。Step 3 で見たとおり <code>schema.sql</code> は <code>IF NOT EXISTS</code> で書かれているので、この行は<strong>何度呼ばれても安全</strong>。初回はテーブルを作り、2回目以降は「もう有る」と判断して何もしません。だから Chirp は「起動するたびに <code>New</code> を呼び、そのたびにスキーマを流す」という単純な運用でよく、マイグレーション専用のツールを別立てする必要がありません。</p>
+    <p>3段すべてを通り抜けたら、<code>return &amp;Store{pool: pool}, nil</code> で、接続済み・スキーマ適用済みの <code>Store</code> を返します。最後の <code>Close</code> はプールを畳む後始末で、Step 5 の <code>main</code> が <code>defer</code> で呼びます。</p>
+
+    <div class="box hazard"><div class="box-k">⚠ 落とし穴 — エラーのたびに pool.Close() を忘れない</div>
+      <p><code>New</code> の途中で失敗したとき、<code>Ping</code> の分岐でも <code>Exec</code> の分岐でも、必ず <code>pool.Close()</code> を呼んでからエラーを返しているのに気づいたでしょうか。<code>pgxpool.New</code> が成功した時点で、プールは（遅延ながら）リソースを握っています。その後の <code>Ping</code> や <code>Exec</code> で失敗して、そのまま <code>return nil, err</code> だけしてしまうと、<strong>プールが閉じられずに漏れます</strong>。「途中で失敗したら、それまでに確保したものを畳んでから抜ける」——リソースを扱う関数の基本作法です。</p>
+    </div>
+
+    <h2 class="step" id="step-5"><span class="step-no">Step 5</span>サーバの起動口をつくる — main.go</h2>
+    <p>DB に繋ぐ <code>store</code> ができました。最後に、それを<strong>起動する入口</strong>を組みます。<code>cmd/server/main.go</code> は、設定（接続先・秘密鍵・待受アドレス）を環境変数から読み、<code>store.New</code> で DB に繋ぎ、HTTP サーバを立ち上げます。この章の完成形です。</p>
+
+    <div class="file-tag">src/backend/cmd/server/main.go</div>
+    <pre><code><span class="kw">package</span> main
+
+<span class="kw">import</span> (
+	<span class="st">"context"</span>
+	<span class="st">"log/slog"</span>
+	<span class="st">"net/http"</span>
+	<span class="st">"os"</span>
+	<span class="st">"time"</span>
+
+	<span class="st">"twitter-sns/frontend_dist"</span>
+	<span class="st">"twitter-sns/internal/api"</span>
+	<span class="st">"twitter-sns/internal/store"</span>
+)
+
+<span class="kw">func</span> envOr(key, fallback <span class="ty">string</span>) <span class="ty">string</span> {
+	<span class="kw">if</span> v := os.Getenv(key); v != <span class="st">""</span> {
+		<span class="kw">return</span> v
+	}
+	<span class="kw">return</span> fallback
+}
+
+<span class="kw">func</span> main() {
+	dsn := envOr(<span class="st">"DATABASE_URL"</span>, <span class="st">"postgres://dev:dev@localhost:5433/sns"</span>)
+	secret := os.Getenv(<span class="st">"JWT_SECRET"</span>)
+	<span class="kw">if</span> secret == <span class="st">""</span> {
+		secret = <span class="st">"dev-secret-do-not-use-in-production"</span>
+		slog.Warn(<span class="st">"JWT_SECRET が未設定のため開発用シークレットを使用します。本番では必ず設定してください。"</span>)
+	}
+	addr := envOr(<span class="st">"ADDR"</span>, <span class="st">":8080"</span>)
+
+	ctx, cancel := context.WithTimeout(context.Background(), <span class="st">30</span>*time.Second)
+	<span class="kw">defer</span> cancel()
+	st, err := store.New(ctx, dsn)
+	<span class="kw">if</span> err != <span class="kw">nil</span> {
+		slog.Error(<span class="st">"データベースに接続できません。docker compose up -d でDBを起動してください。"</span>, <span class="st">"err"</span>, err)
+		os.Exit(<span class="st">1</span>)
+	}
+	<span class="kw">defer</span> st.Close()
+
+	srv := api.NewServer(api.<span class="ty">Config</span>{
+		Store:        st,
+		JWTSecret:    secret,
+		TokenTTL:     <span class="st">7</span> * <span class="st">24</span> * time.Hour,
+		SecureCookie: os.Getenv(<span class="st">"SECURE_COOKIE"</span>) == <span class="st">"1"</span>,
+		Frontend:     frontend_dist.FS(),
+	})
+
+	slog.Info(<span class="st">"起動しました"</span>, <span class="st">"addr"</span>, addr)
+	<span class="kw">if</span> err := http.ListenAndServe(addr, srv.Handler()); err != <span class="kw">nil</span> {
+		slog.Error(<span class="st">"server"</span>, <span class="st">"err"</span>, err)
+		os.Exit(<span class="st">1</span>)
+	}
+}</code></pre>
+
+    <p>小さな道具 <code>envOr</code> から。<code>envOr("DATABASE_URL", "既定値")</code> は「環境変数 <code>DATABASE_URL</code> があればそれを、無ければ既定値を返す」という関数です。<code>os.Getenv</code> は未設定なら空文字を返すので、それを見て分岐しています。この「環境変数優先、無ければ開発用の既定値」という形が、<code>main</code> の設定読み取り全体の基調です。開発では何も設定せずそのまま動き、本番では環境変数で上書きできます。</p>
+
+    <p><code>main</code> の前半は<strong>設定の読み取り</strong>です。3つ読みます。</p>
+    <pre><code>	dsn := envOr(<span class="st">"DATABASE_URL"</span>, <span class="st">"postgres://dev:dev@localhost:5433/sns"</span>)</code></pre>
+    <p>DB の接続先です。既定値 <code>postgres://dev:dev@localhost:5433/sns</code> をよく見てください。ユーザー <code>dev</code>、パスワード <code>dev</code>、ホスト <code>localhost</code>、ポート <strong><code>5433</code></strong>、DB 名 <code>sns</code> — すべて Step 2 の <code>docker-compose.yml</code> の設定とぴたり一致します。とくにポートが <code>5433</code> なのは、Step 2 で「PC 側だけ 5433 にずらした」ことの帰結です。何も環境変数を設定しなければ、この既定値で Docker の DB に繋がります。</p>
+    <pre><code>	secret := os.Getenv(<span class="st">"JWT_SECRET"</span>)
+	<span class="kw">if</span> secret == <span class="st">""</span> {
+		secret = <span class="st">"dev-secret-do-not-use-in-production"</span>
+		slog.Warn(<span class="st">"JWT_SECRET が未設定のため開発用シークレットを使用します。本番では必ず設定してください。"</span>)
+	}</code></pre>
+    <p><code>JWT_SECRET</code> は、第01章で使う<strong>ログイン証（JWT）に署名する秘密鍵</strong>です。これが漏れると誰でも偽のログイン証を作れてしまう、認証の要です。だから本番では必ず環境変数で設定すべきもの。ただし<strong>開発で毎回設定させるのは面倒</strong>なので、未設定なら開発用のダミー鍵にフォールバックします。ここで大事なのが <code>slog.Warn</code> で<strong>警告を出す</strong>ことです。「今ダミー鍵を使っている、本番では必ず設定を」と自分に注意を促す。黙って弱い鍵で動くのが一番危ないので、あえて目立たせています。</p>
+
+    <div class="box hazard"><div class="box-k">⚠ 落とし穴 — 「便利なフォールバック」はセキュリティ穴になりうる</div>
+      <p><code>JWT_SECRET</code> のダミー鍵フォールバックは、開発を楽にする一方で、<strong>設定を忘れたまま本番に出すと致命的</strong>です。ダミー鍵は公開コードに書かれているので、それで署名した JWT は誰でも偽造できます。この設計が許されるのは「未設定なら必ず警告を出す」＋「本番では環境変数を設定する運用」がセットだからです。<strong>便利なフォールバックには、必ず警告と本番手順を添える</strong> — 学習プロジェクトでも守るべき作法です。</p>
+    </div>
+    <p><code>addr := envOr("ADDR", ":8080")</code> は待ち受けアドレスで、既定は 8080 番。ブラウザで <code>http://localhost:8080</code> を開くのはこのためです。</p>
+
+    <p><code>main</code> の後半は<strong>組み立てと起動</strong>です。</p>
+    <pre><code>	ctx, cancel := context.WithTimeout(context.Background(), <span class="st">30</span>*time.Second)
+	<span class="kw">defer</span> cancel()
+	st, err := store.New(ctx, dsn)</code></pre>
+    <p><code>context.WithTimeout(..., 30*time.Second)</code> で「<strong>DB 接続は最大30秒まで待つ</strong>」という寿命付きの <code>ctx</code> を作り、<code>store.New</code> に渡します。DB がなかなか起動しないとき、無限に待ち続けず30秒で見切りをつけるための保険です。<code>defer cancel()</code> は「<code>main</code> を抜けるとき、この <code>ctx</code> に紐づくリソースを片付ける」予約で、<code>context.WithTimeout</code> を使ったら必ず対で書く作法です（序章の GO メモで触れた「時間の管理を持ち回る引数」がこれです）。</p>
+    <pre><code>	<span class="kw">if</span> err != <span class="kw">nil</span> {
+		slog.Error(<span class="st">"データベースに接続できません。docker compose up -d でDBを起動してください。"</span>, <span class="st">"err"</span>, err)
+		os.Exit(<span class="st">1</span>)
+	}
+	<span class="kw">defer</span> st.Close()</code></pre>
+    <p><code>store.New</code> が失敗したら、<strong>エラーメッセージに解決策まで書いて</strong>（「docker compose up -d でDBを起動してください」）ログを出し、<code>os.Exit(1)</code> で異常終了します。DB に繋がらないサーバを中途半端に起動しても意味がないので、ここでプログラムを止めます。成功したら <code>defer st.Close()</code> で「<code>main</code> を抜けるとき接続プールを畳む」を予約します。</p>
+    <pre><code>	srv := api.NewServer(api.<span class="ty">Config</span>{
+		Store:        st,
+		JWTSecret:    secret,
+		TokenTTL:     <span class="st">7</span> * <span class="st">24</span> * time.Hour,
+		SecureCookie: os.Getenv(<span class="st">"SECURE_COOKIE"</span>) == <span class="st">"1"</span>,
+		Frontend:     frontend_dist.FS(),
+	})</code></pre>
+    <p><code>api.NewServer</code> に、これまで用意した部品を<strong>設定として束ねて</strong>渡します。DB アクセスの <code>Store</code>、JWT の秘密鍵、<code>TokenTTL: 7 * 24 * time.Hour</code>（ログイン証の有効期間 = 7日）、<code>SecureCookie</code>（HTTPS 環境でだけ Cookie を送る設定。本番で <code>1</code> にする）、そして <code>Frontend: frontend_dist.FS()</code>。この <code>api</code> パッケージの中身（ルーティング・認証ミドルウェア）は第01章以降で作るので、この章では「設定を渡してサーバを組み立てる呼び出し」として見ておけば十分です。</p>
+
+    <div class="gonote"><div class="box-k">GO メモ · frontend_dist.FS() — フロントもバイナリに入る</div>
+      <p><code>frontend_dist.FS()</code> は、<strong>React のビルド成果物（HTML・JS・CSS）を <code>//go:embed</code> で埋め込んだファイルシステム</strong>を返します。<code>store.go</code> でスキーマを埋め込んだのと同じ仕組みを、今度は画面ファイルに使っています。これにより、<strong>Go サーバは <code>/api/...</code> を処理しつつ、それ以外の URL では埋め込んだ React の画面を配る</strong> — バックエンドとフロントが<strong>1つの実行ファイル</strong>に同居します。配布も起動も1バイナリで済む、個人開発にうれしい構成です。詳しくは第08章で扱うので、いまは「フロントもバイナリの中にいる」とだけ覚えておいてください。</p>
+    </div>
+
+    <pre><code>	slog.Info(<span class="st">"起動しました"</span>, <span class="st">"addr"</span>, addr)
+	<span class="kw">if</span> err := http.ListenAndServe(addr, srv.Handler()); err != <span class="kw">nil</span> {
+		slog.Error(<span class="st">"server"</span>, <span class="st">"err"</span>, err)
+		os.Exit(<span class="st">1</span>)
+	}</code></pre>
+    <p>最後の <code>http.ListenAndServe(addr, srv.Handler())</code> が、<strong>8080 番で HTTP リクエストを待ち受け始める</strong>行です。第1引数が待受アドレス（<code>:8080</code>）、第2引数が「リクエストをどう処理するか」を束ねたハンドラ（<code>api</code> パッケージが用意）。この関数は<strong>正常なら返ってきません</strong>（サーバとして回り続けます）。返ってくるのは「ポートがすでに使われている」など起動に失敗したときで、そのときはエラーを吐いて終了します。手前の <code>slog.Info("起動しました", "addr", addr)</code> が、ゴールで確認する「<code>起動しました addr=:8080</code>」のログです。</p>
+
+    <h2 class="step" id="step-6"><span class="step-no">Step 6</span>動かして確認する — 起動とテスト</h2>
+    <p>4つの部品（<code>docker-compose.yml</code> / <code>schema.sql</code> / <code>store.go</code> / <code>main.go</code>）が揃いました。土台が本当に立つかを、実際に動かして確かめます。</p>
+
+    <div class="box do"><div class="box-k">▸ 動かして確認 — サーバを起動する</div>
+      <p>DB を起動し、サーバを立ち上げます。DB がまだなら先に <code>docker compose up -d</code> を（Step 2）。</p>
+      <pre class="term"><code><span class="ps">$</span> cd src &amp;&amp; docker compose up -d
+<span class="out">✔ Container twitter-sns-db  Started</span>
+<span class="ps">$</span> cd backend &amp;&amp; go run ./cmd/server
+<span class="out">time=2026-07-14T10:00:00.000+09:00 level=INFO msg=起動しました addr=:8080</span></code></pre>
+      <p><code>起動しました addr=:8080</code> と出て、プロンプトが返ってこない（待ち受けている）状態になれば成功です。裏では <code>store.New</code> が DB に繋ぎ、<code>schema.sql</code> を流し、4テーブルを作り終えています。止めるときは <code>Ctrl+C</code>。</p>
+    </div>
+
+    <div class="box do"><div class="box-k">▸ 動かして確認 — テストを通す</div>
+      <p>あわせて、バックエンドの単体テストが通ることも確かめておきます。これらは<strong>認証（<code>internal/auth</code>）と入力検証（<code>internal/api</code>）</strong>の純粋なロジックのテストで、DB を使わずに走ります（第01〜02章で中身を読みます）。<code>store</code> にはまだテストがないので <code>[no test files]</code> と出ますが、<strong>スキーマが冪等に適用されて壊れないこと</strong>は、上の「サーバを起動する」で <code>store.New</code> がそれを実際に行うことで確かめられています。</p>
+      <pre class="term"><code><span class="ps">$</span> cd src/backend
+<span class="ps">$</span> go test ./...
+<span class="out">?   	twitter-sns/cmd/server	[no test files]
+?   	twitter-sns/frontend_dist	[no test files]
+ok  	twitter-sns/internal/api	0.402s
+ok  	twitter-sns/internal/auth	0.611s
+?   	twitter-sns/internal/store	[no test files]</span></code></pre>
+      <p><code>ok</code> が並べば、土台は完成です。</p>
+    </div>
+
+    <div class="box hazard"><div class="box-k">⚠ 落とし穴 — 「接続できません」と出たら</div>
+      <p>サーバ起動時に <code>データベースに接続できません...</code> のエラーが出たら、順に疑ってください。<strong>(1) DB は起動しているか</strong> — <code>docker compose ps</code> で <code>Up (healthy)</code> を確認。<strong>(2) ポートは 5433 か</strong> — 接続文字列と <code>docker-compose.yml</code> の <code>ports</code> が一致しているか。<strong>(3) 古いボリュームが残っていないか</strong> — 認証エラーなら <code>docker compose down -v</code> でボリュームごと作り直す。この3つが、土台でつまずく原因のほぼすべてです。</p>
+    </div>
+
+    <h2>つまずき FAQ</h2>
+    <details class="qa"><summary>なぜマイグレーション専用ツール（golang-migrate 等）を使わず、起動時に <code>schema.sql</code> を流すの?</summary>
+      <div class="qa-body"><p>学習プロジェクトで<strong>単純さを優先</strong>したためです。<code>schema.sql</code> を <code>IF NOT EXISTS</code> で書いておけば、起動のたびに流しても冪等で、テーブルの追加なら問題なく反映されます。専用ツールは「バージョン管理された up/down マイグレーション」や「破壊的変更のロールバック」に強く、本番運用では有力ですが、この規模では <code>pool.Exec(schemaSQL)</code> 一発の方が読みやすい。ただし<strong>既存の列の型変更のような破壊的変更は扱えない</strong>ので、そこは手作業になる、という割り切りです。</p></div>
+    </details>
+    <details class="qa"><summary><code>pgxpool.New</code> の直後に <code>Ping</code> しているのはなぜ? 二度手間では?</summary>
+      <div class="qa-body"><p><code>pgxpool.New</code> は<strong>その場では実際に DB へ繋がない</strong>（遅延接続）からです。設定文字列の書式チェックはしますが、DB が本当に起動して届くかは確かめません。もし <code>Ping</code> を省くと、接続不能なまま <code>New</code> が成功したように見え、<strong>最初のクエリで初めて失敗</strong>します。起動時に <code>Ping</code> して即座に「繋がらない」と分かる方が、原因の特定が早い。「起動時に疎通を確認する」は、DB を使うサーバの定番の作法です。</p></div>
+    </details>
+    <details class="qa"><summary>ポートを 5433 にせず 5432 のまま使ってはダメ?</summary>
+      <div class="qa-body"><p>あなたの PC に<strong>他の PostgreSQL が動いていなければ</strong>、5432 のままでも動きます。本書が 5433 にずらすのは、あくまで「他プロジェクトの PostgreSQL(5432) と衝突しないための予防」です。ただし本書の既定値（<code>docker-compose.yml</code> の <code>ports</code> と <code>main.go</code> の接続文字列）は両方 5433 で揃えてあるので、写経するなら 5433 のまま進めるのが安全です。変えるなら<strong>両方を同時に</strong>変えないと、繋がらなくなります。</p></div>
+    </details>
+
+    <h2>理解度チェック</h2>
+    <p>次の問いに<strong>自分の言葉で</strong>答えられたら、この章は卒業です。</p>
+    <details class="qa"><summary>1. <code>schema.sql</code> を起動のたびに流しても壊れないのはなぜか。</summary>
+      <div class="qa-body"><p>すべての <code>CREATE TABLE</code> / <code>CREATE INDEX</code> に <code>IF NOT EXISTS</code> が付いており、<strong>冪等</strong>だから。初回はテーブルを作り、2回目以降は「もう有る」と判断して何もしない。もし <code>IF NOT EXISTS</code> がなければ、2回目の起動で「テーブルが既に存在する」エラーで落ちる。この冪等性のおかげで、<code>store.New</code> は起動のたびに <code>pool.Exec(schemaSQL)</code> を単純に呼ぶだけでよい。</p></div>
+    </details>
+    <details class="qa"><summary>2. DB ポートが 5433 になっている理由と、その代償は何か。</summary>
+      <div class="qa-body"><p>PostgreSQL の既定ポート <code>5432</code> を、PC 上の別の PostgreSQL と<strong>衝突させないため</strong>に、PC 側だけ <code>5433</code> にずらしている（コンテナ内は既定の 5432 のまま。<code>docker-compose.yml</code> の <code>"5433:5432"</code>）。代償は、<strong>接続文字列で 5433 を明示する必要がある</strong>こと。<code>main.go</code> の既定 DSN が <code>...@localhost:5433/sns</code> になっているのはこのため。ポートを取り違えると <code>Ping</code> が失敗し「接続できません」になる。</p></div>
+    </details>
+    <details class="qa"><summary>3. <code>//go:embed</code> は何をしていて、Chirp のどこで2度使われるか。</summary>
+      <div class="qa-body"><p><code>//go:embed</code> は<strong>ビルド時にファイルの中身を実行ファイルに埋め込む</strong>ディレクティブ。実行時にそのファイルを外部に探しに行かなくて済み、バイナリ単体で完結する。Chirp では2か所で使う: <strong>(1) <code>store.go</code></strong> が <code>schema.sql</code> を <code>string</code> に埋め込み（起動時のスキーマ適用）、<strong>(2) <code>frontend_dist</code></strong> が React のビルド成果物を埋め込み（第08章。フロントも同じバイナリで配信）。結果として、サーバもフロントも1つの実行ファイルにまとまる。</p></div>
+    </details>
+
+    <h2>まとめ — 次の層へ</h2>
+    <p>この章で、Chirp の一番下——<strong>データをしまう場所と、それに触るサーバの起動口</strong>——ができました。PostgreSQL が 5433 番で立ち、Go サーバが <code>store.New</code> でそこに繋ぎ、<code>//go:embed</code> で埋め込んだスキーマを冪等に適用し、users / posts / follows / likes の4テーブルが空のまま待っています。まだ登録も投稿もできませんが、<strong>あとの9章が建つ地面</strong>は、もう固まりました。</p>
+    <p>次の第01章では、この4テーブルのうち最初のひとつ <code>users</code> に命を吹き込みます。ユーザーを登録し（パスワードは bcrypt でハッシュ化して保存）、ログインし（JWT を Cookie に発行）、以後のリクエストで「この人は誰か」を確かめる——認証と認可の骨格を、自分の手で組みます。SNS が「あなた」を認識する、最初の一歩です。</p>
+
+    <div class="chap-foot">
+      <a class="pager" href="index.html"><span class="dir">← 前へ</span>序章 · はじめに・準備</a>
+      <a class="pager next" href="01-auth.html"><span class="dir">次へ →</span>第01章 · ユーザーという存在（認証）</a>
+    </div>
+  </main>
+</div>
+</body>
+</html>

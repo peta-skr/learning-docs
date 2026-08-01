@@ -1,0 +1,493 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>第07章 速くする（N+1と索引） — Twitter をつくる</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500;600&family=Source+Serif+4:opsz,wght@8..60,400;8..60,600;8..60,700&family=Noto+Serif+JP:wght@400;600;700&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<div class="shell">
+
+  <aside class="spine">
+    <a class="wordmark" href="index.html">CHIRP · from scratch</a>
+    <div class="book-title">Twitter を<br>つくる</div>
+    <div class="book-sub">Go + PostgreSQL + React で認証からタイムラインまで</div>
+
+    <div class="legend"><span>読む <b>↓</b></span><span>組む <b>↑</b></span></div>
+
+    <nav aria-label="目次">
+      <ul class="toc">
+        <li><a class="nav-item" href="index.html"><span class="nav-num">序</span><span class="nav-label">はじめに・準備<span class="nav-tag">Setup</span></span></a></li>
+        <li><a class="nav-item" href="00-setup.html"><span class="nav-num">00</span><span class="nav-label">土台をつくる<span class="nav-tag">Setup</span></span></a></li>
+        <li><a class="nav-item" href="01-auth.html"><span class="nav-num">01</span><span class="nav-label">ユーザーという存在（認証）<span class="nav-tag">Auth</span></span></a></li>
+        <li><a class="nav-item" href="02-post.html"><span class="nav-num">02</span><span class="nav-label">投稿する<span class="nav-tag">Post</span></span></a></li>
+        <li><a class="nav-item" href="03-follow.html"><span class="nav-num">03</span><span class="nav-label">つながる（フォロー）<span class="nav-tag">Follow</span></span></a></li>
+        <li><a class="nav-item" href="04-timeline.html"><span class="nav-num">04</span><span class="nav-label">タイムラインという難問<span class="nav-tag">Timeline</span></span></a></li>
+        <li><a class="nav-item" href="05-reply.html"><span class="nav-num">05</span><span class="nav-label">会話する（リプライ）<span class="nav-tag">Reply</span></span></a></li>
+        <li><a class="nav-item" href="06-like.html"><span class="nav-num">06</span><span class="nav-label">反応する（いいね）<span class="nav-tag">Like</span></span></a></li>
+        <li><a class="nav-item current" aria-current="page" href="07-perf.html"><span class="nav-num">07</span><span class="nav-label">速くする（N+1と索引）<span class="nav-tag">Perf</span></span></a></li>
+        <li><a class="nav-item" href="08-web.html"><span class="nav-num">08</span><span class="nav-label">画面をつける（React）<span class="nav-tag">Web</span></span></a></li>
+        <li><a class="nav-item" href="09-beyond.html"><span class="nav-num">09</span><span class="nav-label">さらに先へ（発展）<span class="nav-tag">Beyond</span></span></a></li>
+      </ul>
+    </nav>
+
+    <div class="spine-foot">
+      各章は SNS の一つの機能。<br>下（土台）から上（画面）へ<br>積み上げて動かしていく。
+    </div>
+  </aside>
+
+  <main class="reading">
+    <div class="progress-tag">第07章 / 全10章 · 層: Perf · 読了目安 2.5〜3時間</div>
+    <div class="eyebrow"><span>Perf</span><span class="depth">— もう一つの山場</span></div>
+    <h1>速くする（N+1と索引）</h1>
+    <p class="lede">ここまでで Chirp は、投稿・フォロー・タイムライン・リプライ・いいね——SNS の主要機能を一通り備えました。ローカルで動かせば、どれも一瞬で返ってきます。<strong>けれど、それは投稿がまだ数十件しかないから</strong>です。この章では、一覧表示に潜む<strong>静かな罠</strong>を暴きます。タイムラインの各投稿に「いいね数・自分がいいね済みか・リプライ数」を添えようとすると、素朴に書けば <strong>20件の投稿を出すのに 61 回</strong>も DB に問い合わせてしまう。これが <strong>N+1 問題</strong>です。本章はこれを、投稿ID の<strong>集合</strong>に対する <code>ANY($1)</code> による一括集計へ書き換え、<strong>61 回を 4 回</strong>に畳みます。さらに、その 4 回のクエリを<strong>速く保つ索引</strong>が、なぜあの列順で並んでいるのかを解剖します。第04章のタイムラインと並ぶ、本書<strong>もう一つの山場</strong>です。</p>
+
+    <div class="box goal"><div class="box-k">◈ この章のゴール</div>
+      <p>次の 2 つを、コードの構造から<strong>自分の言葉で説明できたら</strong>達成です。</p>
+      <ol>
+        <li>一覧に集計値（いいね数・いいね有無・リプライ数）を添える処理が、<strong>投稿の件数に依らず一定回数（本体1 ＋ 集計3 = 4クエリ）</strong>で返ることを、<code>GetPostMeta</code> と <code>toPostJSONs</code> のコードを指して説明できる。20件でも100件でも「4回」から増えない理由が言える。</li>
+        <li><code>schema.sql</code> の各索引が<strong>なぜその列順なのか</strong>を説明できる。とくに <code>idx_posts_user_id_id (user_id, id DESC)</code> が、第04章のキーセット <code>WHERE user_id=$1 AND id&lt;$2 ORDER BY id DESC</code> を<strong>そのまま満たす</strong>ことを図で追える。</li>
+      </ol>
+    </div>
+
+    <div class="box map"><div class="box-k">☰ この章のステップ</div>
+      <ol>
+        <li><a href="#step-1">素朴に書くと何が起きるか — 61 クエリの内訳</a></li>
+        <li><a href="#step-2">集合で考える — <code>ANY($1)</code> と <code>GetPostMeta</code> の 3 クエリ</a></li>
+        <li><a href="#step-3">Go 側で貼り合わせる — <code>toPostJSONs</code> と <code>map[int64]PostMeta</code></a></li>
+        <li><a href="#step-4">索引はなぜ効くか — 複合索引の列順とキーセット</a></li>
+        <li><a href="#step-5">動かして確認する — 件数に依存しないことを見る</a></li>
+      </ol>
+    </div>
+
+    <h2 id="intro">動くのに、遅い</h2>
+    <p>この章の敵は、これまでの章と少し毛色が違います。<code>schema.sql</code> の <code>IF NOT EXISTS</code> を忘れれば起動時にエラーで落ち、JWT の改ざん検知を壊せばテスト（<code>TestTokenTamperDetection</code>）が赤くなる——そうした間違いは<strong>すぐ目に見えて</strong>気づけます。ところが N+1 問題は<strong>動きます</strong>。テストは緑のまま、画面もちゃんと表示される。何も壊れていない。ただ、<strong>データが増えると、じわじわ遅くなる</strong>。開発中は投稿が数十件しかないので、61 回のクエリでも一瞬です。だから気づけない。そして本番でユーザーが投稿を積み重ねた頃、あるいはフォロー数が増えてタイムラインが賑わった頃、<strong>初めて刺さります</strong>。</p>
+    <p>「動くのに遅い」——これはコードの正しさの問題ではなく、<strong>形の問題</strong>です。同じ結果を返すコードでも、DB への<strong>問い合わせ方</strong>次第で、速度は桁で変わる。本章はまず、素朴に書いたときに何が起きるかを<strong>クエリの回数で</strong>可視化し（Step 1）、次にそれを<strong>集合の発想</strong>で畳む方法（Step 2・3）、そして畳んだクエリを<strong>速く保つ索引</strong>の設計（Step 4）へと進みます。テーマは終始一つ——<strong>「1件ずつ」をやめて「まとめて」に変える</strong>。</p>
+
+    <div class="box map"><div class="box-k">☰ この章のファイルと役割</div>
+      <ul>
+        <li><code>src/backend/internal/store/posts.go</code> — <code>GetPostMeta</code>：投稿ID集合に対する 3 クエリの一括集計（Step 2）</li>
+        <li><code>src/backend/internal/api/dto.go</code> — <code>toPostJSONs</code>：一覧に集計値をバッチで貼り付ける（Step 3）</li>
+        <li><code>src/backend/internal/store/models.go</code> — <code>PostMeta</code>：集計値を運ぶ小さな構造体（Step 3）</li>
+        <li><code>src/backend/internal/store/schema.sql</code> — 各索引の定義。なぜこの列順か（Step 4）</li>
+      </ul>
+    </div>
+
+    <h2 class="step" id="step-1"><span class="step-no">Step 1</span>素朴に書くと何が起きるか — 61 クエリの内訳</h2>
+    <p>まず、罠の姿をはっきりさせます。タイムラインは、投稿の一覧です。第04章で作った <code>ListTimeline</code> が、自分とフォロイーの投稿を新しい順に<strong>20件</strong>返してくれます。この 20件を、そのまま画面に出すだけなら 1 クエリで済みます。問題は、各投稿に<strong>「反応の情報」</strong>を添えたいことです。Twitter 風の画面を思い浮かべてください。1件の投稿の下には必ず、<strong>いいねの数</strong>・<strong>自分がいいね済みか（ハートが赤いか）</strong>・<strong>リプライの数</strong>が並びます。この 3 つは、投稿テーブル本体には入っていません。<code>likes</code> テーブルと <code>posts</code> テーブル（リプライ）を<strong>数えて</strong>初めて分かる値です。</p>
+    <p>そこで、いちばん素直に書くとこうなります。「投稿を20件取る。<strong>その一件ごとに</strong>、いいね数を数え、自分のいいねを確かめ、リプライ数を数える」。日本語にすると自然で、実際こう書いてしまいがちです。擬似コードで示します（これは<strong>Chirp が採らなかった</strong>反面教師の形です）。</p>
+
+    <div class="file-tag">素朴版（擬似コード — これは採用しない）</div>
+    <pre><code><span class="cm">// タイムラインを20件取る … これで 1 クエリ</span>
+posts := store.ListTimeline(ctx, userID, <span class="kw">nil</span>, <span class="st">20</span>)
+
+<span class="kw">for</span> _, p := <span class="kw">range</span> posts {           <span class="cm">// 20件を1件ずつ回す</span>
+    p.LikeCount = countLikes(p.ID)      <span class="cm">// ← 投稿ごとに 1 クエリ</span>
+    p.LikedByMe = didILike(p.ID, me)    <span class="cm">// ← 投稿ごとに 1 クエリ</span>
+    p.ReplyCount = countReplies(p.ID)   <span class="cm">// ← 投稿ごとに 1 クエリ</span>
+}</code></pre>
+
+    <p>このコードは<strong>正しく動きます</strong>。結果も合っています。けれど、DB に何回問い合わせているかを数えてみてください。本体で 1 回。そのあと、ループが 20 周まわり、<strong>1 周ごとに 3 回</strong>問い合わせる。合計は——</p>
+
+    <div class="ascii">素朴版のクエリ内訳（投稿 20 件）
+
+  ┌─────────────────────────────────────────────┬────────┐
+  │ 本体：ListTimeline で投稿を20件取る          │   1    │
+  ├─────────────────────────────────────────────┼────────┤
+  │ いいね数    countLikes()    × 20件           │  20    │
+  │ いいね有無  didILike()      × 20件           │  20    │
+  │ リプライ数  countReplies()  × 20件           │  20    │
+  ├─────────────────────────────────────────────┼────────┤
+  │ 合計                                         │  61    │
+  └─────────────────────────────────────────────┴────────┘
+
+     1  +  ( 3 × 20 )  =  61 回
+     └本体┘  └─ 1件ごとに3クエリ ─┘</div>
+
+    <p><strong>1 ＋ (3 × 20) = 61 回</strong>。20 件の投稿を出すために、DB に 61 回も往復しています。これが <strong>N+1 問題</strong>の典型です。名前の由来は、「本体の 1 クエリ」＋「各行ごとの N クエリ」から来ています（ここでは 1 行あたり 3 種類あるので、正確には 1 ＋ 3N ですが、本質は同じ——<strong>行の数に比例してクエリが増える</strong>という一点です）。</p>
+
+    <div class="box hazard"><div class="box-k">⚠ 落とし穴 — N+1 は「動くけど遅い」から気づけない</div>
+      <p>N+1 問題のいちばん厄介なところは、<strong>バグとして顔を出さない</strong>ことです。結果は正しい。テストも通る（テストデータは数件なので一瞬で終わる）。画面も期待どおり。どこにも赤信号がありません。開発中、投稿が 30 件のときは 61 回のクエリも数ミリ秒で片付くので、誰も遅さに気づかない。<br>
+      顕在化するのは<strong>本番で、データが増えてから</strong>です。1 クエリの往復が仮に 1ミリ秒でも、61 回なら 61ミリ秒。さらにタイムラインの表示件数を増やしたり、同時アクセスが重なると、この往復回数が効いてきて、ある日「タイムラインの表示が妙に重い」という報告が来る。原因が<strong>コードの見た目のどこにも書いていない</strong>（ループの中で関数を呼んでいるだけ）ので、調査も難航します。<strong>「for ループの中で DB に問い合わせていないか」——これは書いた直後に自分で疑うべき、定番のチェックポイントです。</strong></p>
+    </div>
+
+    <p>では、どう直すか。発想を変えます。素朴版は「<strong>1件ずつ</strong>、その投稿のいいねを数える」でした。これを「<strong>20件ぶんの投稿IDをまとめて</strong>、一度に全部のいいねを数える」に変えます。20 回の「1件ずつ数える」を、1 回の「20件ぶんまとめて数える」に畳む。この<strong>「集合で考える」</strong>発想が、次の Step 2 の核心です。</p>
+
+    <h2 class="step" id="step-2"><span class="step-no">Step 2</span>集合で考える — <code>ANY($1)</code> と <code>GetPostMeta</code> の 3 クエリ</h2>
+    <p>素朴版が遅いのは、「投稿ID を 1 つ渡して、そのいいねを数える」を 20 回繰り返すからでした。SQL は本来、<strong>集合を一気に扱うのが得意</strong>な言語です。「この 20 個の投稿ID の<strong>どれかに</strong>該当するいいねを、投稿IDごとに数えてまとめて返せ」——これを 1 本の SQL で書けます。鍵になるのが <code>ANY($1)</code> と <code>GROUP BY</code> です。まず、それを使って 3 クエリに畳んだ本体、<code>GetPostMeta</code> の全文を見ます。この 1 関数が、本章の主役です。</p>
+
+    <div class="file-tag">src/backend/internal/store/posts.go — GetPostMeta</div>
+    <pre><code><span class="cm">// GetPostMeta は投稿IDの集合に対して、いいね数・自分のいいね有無・リプライ数を</span>
+<span class="cm">// まとめて3クエリで取得する（N+1回避、教材 Chapter 7）。</span>
+<span class="kw">func</span> (s *<span class="ty">Store</span>) GetPostMeta(ctx context.<span class="ty">Context</span>, postIDs []<span class="ty">int64</span>, viewerID <span class="ty">int64</span>) (<span class="kw">map</span>[<span class="ty">int64</span>]<span class="ty">PostMeta</span>, <span class="ty">error</span>) {
+	meta := <span class="kw">make</span>(<span class="kw">map</span>[<span class="ty">int64</span>]<span class="ty">PostMeta</span>, <span class="kw">len</span>(postIDs))
+	<span class="kw">if</span> <span class="kw">len</span>(postIDs) == <span class="st">0</span> {
+		<span class="kw">return</span> meta, <span class="kw">nil</span>
+	}
+
+	rows, err := s.pool.Query(ctx,
+		<span class="st">`SELECT post_id, count(*) FROM likes WHERE post_id = ANY($1) GROUP BY post_id`</span>, postIDs)
+	<span class="kw">if</span> err != <span class="kw">nil</span> {
+		<span class="kw">return</span> <span class="kw">nil</span>, err
+	}
+	<span class="kw">for</span> rows.Next() {
+		<span class="kw">var</span> id <span class="ty">int64</span>
+		<span class="kw">var</span> n <span class="ty">int</span>
+		<span class="kw">if</span> err := rows.Scan(&amp;id, &amp;n); err != <span class="kw">nil</span> {
+			rows.Close()
+			<span class="kw">return</span> <span class="kw">nil</span>, err
+		}
+		m := meta[id]
+		m.LikeCount = n
+		meta[id] = m
+	}
+	rows.Close()
+	<span class="kw">if</span> err := rows.Err(); err != <span class="kw">nil</span> {
+		<span class="kw">return</span> <span class="kw">nil</span>, err
+	}
+
+	rows, err = s.pool.Query(ctx,
+		<span class="st">`SELECT post_id FROM likes WHERE user_id = $1 AND post_id = ANY($2)`</span>, viewerID, postIDs)
+	<span class="kw">if</span> err != <span class="kw">nil</span> {
+		<span class="kw">return</span> <span class="kw">nil</span>, err
+	}
+	<span class="kw">for</span> rows.Next() {
+		<span class="kw">var</span> id <span class="ty">int64</span>
+		<span class="kw">if</span> err := rows.Scan(&amp;id); err != <span class="kw">nil</span> {
+			rows.Close()
+			<span class="kw">return</span> <span class="kw">nil</span>, err
+		}
+		m := meta[id]
+		m.LikedByMe = <span class="kw">true</span>
+		meta[id] = m
+	}
+	rows.Close()
+	<span class="kw">if</span> err := rows.Err(); err != <span class="kw">nil</span> {
+		<span class="kw">return</span> <span class="kw">nil</span>, err
+	}
+
+	rows, err = s.pool.Query(ctx,
+		<span class="st">`SELECT reply_to_id, count(*) FROM posts WHERE reply_to_id = ANY($1) GROUP BY reply_to_id`</span>, postIDs)
+	<span class="kw">if</span> err != <span class="kw">nil</span> {
+		<span class="kw">return</span> <span class="kw">nil</span>, err
+	}
+	<span class="kw">for</span> rows.Next() {
+		<span class="kw">var</span> id <span class="ty">int64</span>
+		<span class="kw">var</span> n <span class="ty">int</span>
+		<span class="kw">if</span> err := rows.Scan(&amp;id, &amp;n); err != <span class="kw">nil</span> {
+			rows.Close()
+			<span class="kw">return</span> <span class="kw">nil</span>, err
+		}
+		m := meta[id]
+		m.ReplyCount = n
+		meta[id] = m
+	}
+	rows.Close()
+	<span class="kw">return</span> meta, rows.Err()
+}</code></pre>
+
+    <p>長く見えますが、構造は<strong>同じ形の 3 ブロックの繰り返し</strong>です。1 ブロックが 1 クエリに対応し、それぞれ「いいね数」「自分のいいね有無」「リプライ数」を集めています。まず全体の骨格を掴んでから、1 ブロックずつ解剖します。関数の入口と出口はこうです。</p>
+
+    <pre><code><span class="kw">func</span> (s *<span class="ty">Store</span>) GetPostMeta(ctx context.<span class="ty">Context</span>, postIDs []<span class="ty">int64</span>, viewerID <span class="ty">int64</span>) (<span class="kw">map</span>[<span class="ty">int64</span>]<span class="ty">PostMeta</span>, <span class="ty">error</span>) {
+	meta := <span class="kw">make</span>(<span class="kw">map</span>[<span class="ty">int64</span>]<span class="ty">PostMeta</span>, <span class="kw">len</span>(postIDs))
+	<span class="kw">if</span> <span class="kw">len</span>(postIDs) == <span class="st">0</span> {
+		<span class="kw">return</span> meta, <span class="kw">nil</span>
+	}</code></pre>
+    <p>入力は <code>postIDs []int64</code>（集計したい投稿ID の<strong>集合</strong>）と <code>viewerID int64</code>（「自分がいいね済みか」を見るための、閲覧者のユーザーID）。戻り値は <code>map[int64]PostMeta</code> ——<strong>投稿ID をキーに、その投稿の集計値（<code>PostMeta</code>）を引ける地図</strong>です。最初に <code>make(map[int64]PostMeta, len(postIDs))</code> で、集める分の容量を見込んだ空の地図を用意します。</p>
+    <p>その直後の <code>if len(postIDs) == 0</code> が、地味ですが大切な<strong>早期 return</strong> です。渡された投稿ID が空（タイムラインに 1 件も投稿がない、など）なら、集計するものが何もない。ここで空の <code>meta</code> をそのまま返して抜けます。もしこれを書かずに空スライスのまま <code>ANY($1)</code> に渡すと、「<strong>どの投稿にも該当しない</strong>」空集合に対する問い合わせを 3 回投げることになり、無駄な往復が生じます。<strong>「集合が空なら、DB に触る前に切り上げる」</strong>——集合を扱う関数の定番の入口です。</p>
+
+    <div class="gonote"><div class="box-k">GO メモ · <code>ANY($1)</code> と <code>IN</code> の違い — スライスを 1 プレースホルダで渡す</div>
+      <p>「集合のどれかに一致」を SQL で書く定番は <code>WHERE post_id IN (1, 2, 3, ...)</code> です。しかし <code>IN</code> は、<strong>値の個数だけプレースホルダを並べる</strong>必要があります。20 件なら <code>IN ($1, $2, ..., $20)</code>。件数が変わるたびに SQL 文の形が変わるので、Go 側で「<code>?</code> をカンマで 20 個つなぐ」ような<strong>動的な文字列組み立て</strong>が要り、面倒でミスも招きます。<br>
+      <code>ANY($1)</code> は、その悩みを消します。<strong>スライス（配列）まるごとを、たった 1 個のプレースホルダ <code>$1</code> に渡せる</strong>のです。<code>WHERE post_id = ANY($1)</code> と書いて、<code>$1</code> に <code>postIDs</code>（<code>[]int64</code>）を渡すだけ。要素が 20 個でも 100 個でも、SQL 文の形は 1 文字も変わりません。pgx が Go のスライスを PostgreSQL の配列に変換して渡してくれるので、この 1 行で「集合のどれかに一致」が書けます。意味は <code>IN</code> とほぼ同じ「いずれかに等しい」ですが、<strong>可変長の集合を扱うなら <code>ANY($1)</code> が圧倒的に扱いやすい</strong>——これが Chirp が全面的に <code>ANY</code> を使う理由です。</p>
+    </div>
+
+    <p>では 1 ブロック目、<strong>いいね数</strong>を数えるクエリです。</p>
+    <pre><code>	rows, err := s.pool.Query(ctx,
+		<span class="st">`SELECT post_id, count(*) FROM likes WHERE post_id = ANY($1) GROUP BY post_id`</span>, postIDs)</code></pre>
+    <p>この 1 本を、日本語に訳すとこうです。「<code>likes</code> テーブルから、<strong><code>post_id</code> が <code>$1</code>（= 20件ぶんの投稿ID集合）のどれかに一致する行</strong>を集め、<strong><code>post_id</code> ごとにまとめて（<code>GROUP BY post_id</code>）、その件数（<code>count(*)</code>）を返せ</strong>」。結果は「投稿ID → いいね数」の<strong>表</strong>になります。たとえば投稿 101 に 3 いいね、102 に 0（いいねが無ければ行自体が出ません）、103 に 7 いいね……といった具合。<strong>20 件ぶんの集計が、この 1 クエリで一度に返る</strong>のがポイントです。</p>
+
+    <div class="gonote"><div class="box-k">GO メモ · <code>GROUP BY</code> で「まとめて数える」</div>
+      <p><code>GROUP BY post_id</code> は、「同じ <code>post_id</code> を持つ行を 1 つのグループに束ねる」指示です。束ねたうえで <code>count(*)</code> を書くと、<strong>グループごとの行数</strong>——つまり「その投稿に付いたいいねの数」——が求まります。<code>GROUP BY</code> なしで <code>count(*)</code> を書けば「全部で何いいねか」という 1 個の数になりますが、<code>GROUP BY post_id</code> を付けることで「<strong>投稿ごとに</strong>何いいねか」という<strong>複数行の集計表</strong>になる。「1件ずつ数える」を「グループごとに一気に数える」へ畳む——これが SQL による N+1 退治の心臓部です。なお、いいねが 1 件も無い投稿は、<code>likes</code> にその行が存在しないので、この結果表に<strong>現れません</strong>。だから Go 側の地図では、その投稿の <code>LikeCount</code> は初期値の <code>0</code> のまま残る——これが後で効いてきます。</p>
+    </div>
+
+    <p>続いて、返ってきた集計表を Go 側で受け取る部分です。</p>
+    <pre><code>	<span class="kw">for</span> rows.Next() {
+		<span class="kw">var</span> id <span class="ty">int64</span>
+		<span class="kw">var</span> n <span class="ty">int</span>
+		<span class="kw">if</span> err := rows.Scan(&amp;id, &amp;n); err != <span class="kw">nil</span> {
+			rows.Close()
+			<span class="kw">return</span> <span class="kw">nil</span>, err
+		}
+		m := meta[id]
+		m.LikeCount = n
+		meta[id] = m
+	}
+	rows.Close()
+	<span class="kw">if</span> err := rows.Err(); err != <span class="kw">nil</span> {
+		<span class="kw">return</span> <span class="kw">nil</span>, err
+	}</code></pre>
+    <p><code>rows.Next()</code> で、集計表を 1 行ずつ手繰ります。各行は「投稿ID <code>id</code> と、そのいいね数 <code>n</code>」の組。<code>rows.Scan(&amp;id, &amp;n)</code> で 2 列を変数に取り出します。そして地図への書き込みが 3 行——</p>
+    <pre><code>		m := meta[id]      <span class="cm">// 現在の集計値を取り出す（無ければゼロ値）</span>
+		m.LikeCount = n    <span class="cm">// いいね数だけ埋める</span>
+		meta[id] = m       <span class="cm">// 地図に書き戻す</span></code></pre>
+    <p>この「取り出して・1 項目だけ埋めて・書き戻す」パターンは、3 ブロックすべてで繰り返されます。理由は<strong>集計が 3 回に分かれている</strong>から。1 回目のクエリでは <code>LikeCount</code> だけ、2 回目では <code>LikedByMe</code> だけ、3 回目では <code>ReplyCount</code> だけを埋める。だから毎回、既存の <code>PostMeta</code> を <code>m := meta[id]</code> で取り出し、担当の 1 項目を上書きし、<code>meta[id] = m</code> で戻す。こうすると、3 つのクエリの結果が<strong>同じ地図の上に少しずつ積み重なって</strong>いきます。</p>
+
+    <div class="gonote"><div class="box-k">GO メモ · なぜ <code>meta[id].LikeCount = n</code> と直接書けないのか</div>
+      <p>Go の map の値が<strong>構造体</strong>（ここでは <code>PostMeta</code>）のとき、<code>meta[id].LikeCount = n</code> と<strong>直接フィールドに代入することはできません</strong>（コンパイルエラーになります）。map から取り出した構造体は<strong>コピー</strong>であり、その場で書き換えても地図には反映されないため、Go はこの書き方を禁じています。だから <code>m := meta[id]</code> でコピーを手元に取り、<code>m.LikeCount = n</code> でコピーを書き換え、<code>meta[id] = m</code> でコピーごと地図に戻す——という 3 段を踏みます。少し冗長に見えますが、これが「map の値が構造体のとき、その一部を更新する」Go の正しい作法です。</p>
+    </div>
+
+    <p>ループを抜けたら <code>rows.Close()</code> で結果セットを閉じ、<code>rows.Err()</code> で「手繰る途中でエラーが無かったか」を確かめます。ここで <code>rows.Close()</code> の<strong>タイミング</strong>に注目してください。次のブロックでは、<strong>同じ <code>rows</code> 変数を使い回して</strong>2 本目のクエリを投げます（<code>rows, err = s.pool.Query(...)</code> と、<code>:=</code> ではなく <code>=</code> の再代入）。1 本目の結果セットを閉じずに 2 本目を投げると、<strong>接続が前の結果で塞がったまま</strong>になり、問題が起きます。だから次のクエリを投げる<strong>前に</strong>、必ず <code>rows.Close()</code> で前の結果を畳んでおく。この「使い終わった <code>rows</code> は次を投げる前に閉じる」が、複数クエリを直列に投げる関数での鉄則です。</p>
+
+    <div class="box hazard"><div class="box-k">⚠ 落とし穴 — <code>rows.Close()</code> はエラー時にも呼ぶ</div>
+      <p><code>rows.Scan</code> が失敗したときのコードをよく見てください。<code>return nil, err</code> の<strong>直前に</strong> <code>rows.Close()</code> を呼んでいます。ループの途中でエラーが起きて、そのまま <code>return</code> だけしてしまうと、<strong>開きっぱなしの結果セットが残り、接続がプールに返らず漏れます</strong>。第00章の <code>store.New</code> で「エラーのたびに <code>pool.Close()</code> を忘れない」と学んだのと同じ作法が、ここでも効いています。「途中で抜けるときも、それまでに掴んだリソースを畳んでから抜ける」——正常系の <code>rows.Close()</code> だけでなく、<strong>異常系の <code>rows.Close()</code> も</strong>忘れないのがポイントです。</p>
+    </div>
+
+    <p>2 ブロック目、<strong>自分がいいね済みか</strong>を調べるクエリです。ここだけ形が少し違います。</p>
+    <pre><code>	rows, err = s.pool.Query(ctx,
+		<span class="st">`SELECT post_id FROM likes WHERE user_id = $1 AND post_id = ANY($2)`</span>, viewerID, postIDs)</code></pre>
+    <p>訳すと「<code>likes</code> から、<strong><code>user_id</code> が <code>$1</code>（＝閲覧者本人）で、かつ <code>post_id</code> が <code>$2</code> の集合のどれかに一致する</strong>行の <code>post_id</code> を返せ」。<strong>「自分が」「この 20 件のうち、どれに」いいねしたか</strong>を、1 クエリで一気に洗い出します。ここでは数える必要がない（<code>count</code> も <code>GROUP BY</code> も無い）——<strong>「その投稿ID が結果に出てくれば、自分はいいね済み」</strong>という真偽だけが欲しいからです。だから Go 側も、返ってきた <code>post_id</code> について <code>m.LikedByMe = true</code> と旗を立てるだけ。結果に出てこなかった投稿は、地図の初期値 <code>false</code> のまま——「いいねしていない」を意味します。プレースホルダが <code>$1</code>（<code>viewerID</code>）と <code>$2</code>（<code>postIDs</code>）の 2 つになっている点にも注意してください。</p>
+
+    <p>3 ブロック目、<strong>リプライ数</strong>を数えるクエリです。これは 1 ブロック目とそっくりですが、数える先が違います。</p>
+    <pre><code>	rows, err = s.pool.Query(ctx,
+		<span class="st">`SELECT reply_to_id, count(*) FROM posts WHERE reply_to_id = ANY($1) GROUP BY reply_to_id`</span>, postIDs)</code></pre>
+    <p>訳すと「<code>posts</code> テーブルから、<strong><code>reply_to_id</code> が <code>$1</code> の集合のどれかに一致する</strong>行（＝この 20 件のいずれかへの<strong>リプライ</strong>）を集め、<strong><code>reply_to_id</code> ごとにまとめて</strong>件数を数えよ」。第05章で見たとおり、リプライは <code>posts</code> テーブルの中で <code>reply_to_id</code> が「どの投稿への返信か」を指すのでした。だから「投稿 101 へのリプライ数」は、「<code>reply_to_id = 101</code> の投稿を数える」ことに等しい。それを 20 件ぶん、<code>ANY($1)</code> と <code>GROUP BY reply_to_id</code> で一気に集計します。いいね数のクエリが <code>likes</code> を数えたのに対し、こちらは <code>posts</code> が<strong>自分自身を</strong>指す構造を数えている——対象テーブルは違えど、「集合に対して <code>GROUP BY</code> で数える」骨格は同じです。</p>
+    <p>最後の <code>return meta, rows.Err()</code> で、3 回の集計を積み重ねた地図を返します。ここまでで、<strong>3 本の SQL</strong> によって「いいね数・いいね有無・リプライ数」がすべて <code>meta</code> の上に揃いました。素朴版が投稿ごとに 60 回（3×20）投げていたものが、投稿の件数に依らず<strong>ちょうど 3 回</strong>に畳まれています。</p>
+
+    <div class="ascii">ANY($1) 版：投稿ID集合を「まとめて」集計する
+
+   postIDs = [101, 102, 103, ... , 120]   ← 20件ぶんのIDを1つの集合として渡す
+        │
+        ├─▶ ① SELECT post_id, count(*)  FROM likes
+        │       WHERE post_id = ANY($1)  GROUP BY post_id        …… いいね数    (1 クエリ)
+        │
+        ├─▶ ② SELECT post_id            FROM likes
+        │       WHERE user_id=$1 AND post_id = ANY($2)           …… 自分のいいね (1 クエリ)
+        │
+        └─▶ ③ SELECT reply_to_id, count(*) FROM posts
+                WHERE reply_to_id = ANY($1) GROUP BY reply_to_id …… リプライ数   (1 クエリ)
+
+   本体 ListTimeline (1)  +  集計 ①②③ (3)  =  4 クエリ  ← 件数が増えても変わらない</div>
+
+    <div class="ascii">61 → 4 の対比
+
+   素朴版      1  +  ( 3 × 20 )  =  61 クエリ   ← 投稿が増えると 1+3N で増え続ける
+                    └ 件数に比例 ┘
+
+   ANY版       1  +      3       =   4 クエリ   ← 投稿が 20→100 でも 4 のまま（定数）
+                    └ 件数に依らず一定 ┘</div>
+
+    <p>この対比が、本章のすべてです。素朴版のクエリ数は <strong>1 + 3N</strong>（N は投稿件数）で、件数に<strong>比例して</strong>増えます。<code>ANY($1)</code> 版は <strong>1 + 3 = 4</strong> で、件数が 20 だろうと 100 だろうと<strong>変わりません（定数）</strong>。「行の数だけクエリが増える」を「行の数に関わらず一定回数」に変えた——これが N+1 退治の成果です。</p>
+
+    <h2 class="step" id="step-3"><span class="step-no">Step 3</span>Go 側で貼り合わせる — <code>toPostJSONs</code> と <code>map[int64]PostMeta</code></h2>
+    <p><code>GetPostMeta</code> は「投稿ID の集合 → 集計値の地図」を返してくれました。しかし、これだけでは画面に出せません。タイムラインの各投稿は、本体（本文・作者・日時）と集計値（いいね数など）が<strong>1 つにまとまった形</strong>で返ってほしい。その「貼り合わせ」を担うのが <code>toPostJSONs</code> です。第02章で JSON 変換の入口として一度触れましたが、ここでは<strong>バッチ化の実装</strong>として深掘りします。まず、貼り合わせる先の器を確認します。</p>
+
+    <div class="file-tag">src/backend/internal/store/models.go — PostMeta</div>
+    <pre><code><span class="cm">// PostMeta は一覧表示に必要な集計値。投稿IDの集合に対してバッチで引く（N+1回避）。</span>
+<span class="kw">type</span> <span class="ty">PostMeta</span> <span class="kw">struct</span> {
+	LikeCount  <span class="ty">int</span>
+	LikedByMe  <span class="ty">bool</span>
+	ReplyCount <span class="ty">int</span>
+}</code></pre>
+    <p><code>PostMeta</code> は、Step 2 で 3 回に分けて埋めた<strong>3 つの集計値だけ</strong>を持つ小さな構造体です。<code>LikeCount</code>（いいね数）、<code>LikedByMe</code>（自分がいいね済みか）、<code>ReplyCount</code>（リプライ数）。<code>GetPostMeta</code> が返す地図 <code>map[int64]PostMeta</code> は、「投稿ID → この 3 つ組」の対応表というわけです。ここで<strong>ゼロ値</strong>が効いてきます。Go では <code>int</code> のゼロ値は <code>0</code>、<code>bool</code> のゼロ値は <code>false</code>。だから <code>GetPostMeta</code> のクエリ結果に現れなかった投稿（＝いいねもリプライも 0 件）は、地図に明示的に入っていなくても、<code>meta[id]</code> で引けば「<code>LikeCount: 0, LikedByMe: false, ReplyCount: 0</code>」という<strong>正しいゼロ値</strong>が返ります。「0 件を特別扱いしなくていい」——これが Step 2 で「いいねが無い投稿は結果表に現れない」を許せた理由です。</p>
+
+    <p>次に、貼り合わせの本体です。</p>
+    <div class="file-tag">src/backend/internal/api/dto.go — toPostJSONs</div>
+    <pre><code><span class="cm">// toPostJSONs は投稿一覧に集計値（いいね数など）をバッチで付与する。</span>
+<span class="kw">func</span> (s *<span class="ty">Server</span>) toPostJSONs(ctx context.<span class="ty">Context</span>, posts []store.<span class="ty">Post</span>, viewerID <span class="ty">int64</span>) ([]<span class="ty">PostJSON</span>, <span class="ty">error</span>) {
+	ids := <span class="kw">make</span>([]<span class="ty">int64</span>, <span class="kw">len</span>(posts))
+	<span class="kw">for</span> i, p := <span class="kw">range</span> posts {
+		ids[i] = p.ID
+	}
+	meta, err := s.store.GetPostMeta(ctx, ids, viewerID)
+	<span class="kw">if</span> err != <span class="kw">nil</span> {
+		<span class="kw">return</span> <span class="kw">nil</span>, err
+	}
+	out := <span class="kw">make</span>([]<span class="ty">PostJSON</span>, <span class="kw">len</span>(posts))
+	<span class="kw">for</span> i, p := <span class="kw">range</span> posts {
+		m := meta[p.ID]
+		out[i] = <span class="ty">PostJSON</span>{
+			ID:        p.ID,
+			Body:      p.Body,
+			ReplyToID: p.ReplyToID,
+			CreatedAt: p.CreatedAt,
+			Author: <span class="ty">UserJSON</span>{
+				ID:          p.UserID,
+				Username:    p.Username,
+				DisplayName: p.DisplayName,
+			},
+			LikeCount:  m.LikeCount,
+			LikedByMe:  m.LikedByMe,
+			ReplyCount: m.ReplyCount,
+		}
+	}
+	<span class="kw">return</span> out, <span class="kw">nil</span>
+}</code></pre>
+
+    <p>この関数は、<strong>2 つのループの間に、たった 1 回の <code>GetPostMeta</code> 呼び出しを挟む</strong>——それだけの構造です。順に追います。</p>
+    <pre><code>	ids := <span class="kw">make</span>([]<span class="ty">int64</span>, <span class="kw">len</span>(posts))
+	<span class="kw">for</span> i, p := <span class="kw">range</span> posts {
+		ids[i] = p.ID
+	}</code></pre>
+    <p>1 つ目のループは<strong>「ID を集める」</strong>だけ。投稿の一覧 <code>posts</code>（第04章の <code>ListTimeline</code> などが返した 20 件）から、各投稿の <code>ID</code> だけを抜き出して <code>ids []int64</code> というスライスに詰めます。これが Step 2 の <code>GetPostMeta</code> に渡す「投稿ID の集合」になります。<strong>ここではまだ DB に一切触れていません</strong>——メモリ上でスライスを作っているだけです。</p>
+    <pre><code>	meta, err := s.store.GetPostMeta(ctx, ids, viewerID)</code></pre>
+    <p>そして<strong>この 1 行</strong>が、N+1 退治の要です。集めた <code>ids</code> をまとめて <code>GetPostMeta</code> に渡し、<strong>一度だけ</strong>呼ぶ。この 1 回の呼び出しの中で、Step 2 の 3 クエリが走り、「投稿ID → 集計値」の地図 <code>meta</code> が返ってきます。素朴版なら、このあとのループの<strong>中で</strong> DB を叩いていました。ここでは、ループに入る<strong>前に</strong>、必要な集計をすべて済ませてしまう。<strong>「ループの前にまとめて引く」——これがバッチ化の一言でいう本質です。</strong></p>
+    <pre><code>	out := <span class="kw">make</span>([]<span class="ty">PostJSON</span>, <span class="kw">len</span>(posts))
+	<span class="kw">for</span> i, p := <span class="kw">range</span> posts {
+		m := meta[p.ID]
+		out[i] = <span class="ty">PostJSON</span>{
+			...
+			LikeCount:  m.LikeCount,
+			LikedByMe:  m.LikedByMe,
+			ReplyCount: m.ReplyCount,
+		}
+	}</code></pre>
+    <p>2 つ目のループは<strong>「貼り合わせ」</strong>です。もう一度 <code>posts</code> を回りますが、今度は DB に触れません。各投稿 <code>p</code> について、その集計値を <code>m := meta[p.ID]</code> で<strong>地図から引くだけ</strong>（メモリ上の map アクセスなので一瞬です）。そして本体の情報（<code>ID</code>・<code>Body</code>・<code>Author</code> など）と、地図から引いた集計値（<code>m.LikeCount</code> ほか）を 1 つの <code>PostJSON</code> に組み立て、<code>out</code> に並べます。<strong>DB への往復は最初の <code>GetPostMeta</code> 1 回きり</strong>で、あとの貼り合わせはすべてメモリ内で完結する——ここが素朴版との決定的な違いです。</p>
+
+    <div class="ascii">toPostJSONs のデータの流れ
+
+   posts (20件, 本体のみ)
+      │
+      │ ループ①：IDを集める（DBに触らない）
+      ▼
+   ids = [101,102,...,120]
+      │
+      │ GetPostMeta を 1 回だけ呼ぶ  ←──── ここで 3 クエリ（Step 2）
+      ▼
+   meta = { 101:{Like:3,Me:true,Reply:1}, 102:{...}, ... }   ← 投稿ID→集計値の地図
+      │
+      │ ループ②：本体 + meta[p.ID] を貼り合わせる（DBに触らない）
+      ▼
+   out (20件, 本体 + 集計値 = 画面に出せる完成形)</div>
+
+    <p>まとめると、一覧を返す処理全体のクエリ数は——<strong>本体 1 回（<code>ListTimeline</code>）＋ <code>GetPostMeta</code> の 3 回 ＝ 合計 4 回</strong>。<code>toPostJSONs</code> の 2 つのループは、何件あっても DB に触らないので、クエリ数を増やしません。<strong>投稿が 20 件でも 100 件でも、この 4 回は変わらない</strong>。第04章のタイムライン取得と、この章の集計バッチ化が組み合わさって、Chirp の一覧表示は「件数に依らず一定回数のクエリ」で返るようになりました。</p>
+
+    <h2 class="step" id="step-4"><span class="step-no">Step 4</span>索引はなぜ効くか — 複合索引の列順とキーセット</h2>
+    <p>クエリの<strong>回数</strong>は 4 回に畳めました。しかし、話はもう一段あります。その 4 回の 1 本 1 本が<strong>速い</strong>とは限らないのです。たとえば「<code>user_id = 42</code> の投稿を新しい順に」というクエリは、もし <code>posts</code> テーブルを<strong>頭から全部なめて</strong>該当行を探すなら、投稿が 100 万件あれば 100 万行を調べることになる。クエリの回数を減らしても、1 回が遅ければ元も子もない。ここで効くのが<strong>索引（index）</strong>です。<code>schema.sql</code> には、この章のために設計された索引が並んでいます。まず該当部分を再掲します。</p>
+
+    <div class="file-tag">src/backend/internal/store/schema.sql（索引の定義）</div>
+    <pre><code><span class="cm">-- 「あるユーザーの投稿を新しい順に」のための索引（教材 Chapter 7）</span>
+<span class="kw">CREATE INDEX IF NOT EXISTS</span> idx_posts_user_id_id <span class="kw">ON</span> posts (user_id, id <span class="kw">DESC</span>);
+<span class="cm">-- リプライ一覧のための索引</span>
+<span class="kw">CREATE INDEX IF NOT EXISTS</span> idx_posts_reply_to <span class="kw">ON</span> posts (reply_to_id, id) <span class="kw">WHERE</span> reply_to_id <span class="kw">IS NOT NULL</span>;
+
+<span class="cm">-- フォロワー一覧／フォロイー一覧を新しい順に引くための索引</span>
+<span class="kw">CREATE INDEX IF NOT EXISTS</span> idx_follows_followee_id <span class="kw">ON</span> follows (followee_id, id <span class="kw">DESC</span>);
+<span class="kw">CREATE INDEX IF NOT EXISTS</span> idx_follows_follower_id <span class="kw">ON</span> follows (follower_id, id <span class="kw">DESC</span>);
+
+<span class="cm">-- 「この投稿のいいね数」を数えるための索引</span>
+<span class="kw">CREATE INDEX IF NOT EXISTS</span> idx_likes_post <span class="kw">ON</span> likes (post_id);</code></pre>
+
+    <p>索引とは、ひとことで言えば<strong>「本の巻末索引」</strong>です。本文（テーブル）を頭から全部読まなくても、索引を引けば「その語がどのページにあるか」に一足飛びで辿り着ける。DB の索引も同じで、「<code>user_id = 42</code> の行はテーブルのどこか」を、全行を調べずに見つけられるよう、<strong>あらかじめ並べ替えた道しるべ</strong>を別に持っておく仕組みです。ただし索引には<strong>設計</strong>が要ります。とくに<strong>複数の列をまとめた索引（複合索引）</strong>は、<strong>列の順番</strong>が命です。1 つずつ見ていきます。</p>
+
+    <h3><code>idx_likes_post (post_id)</code> — いちばん素直な索引</h3>
+    <p>まずは単一列の索引から。<code>idx_likes_post ON likes (post_id)</code> は、Step 2 の 1 本目のクエリ <code>SELECT post_id, count(*) FROM likes WHERE post_id = ANY($1) GROUP BY post_id</code> のための索引です。このクエリは <code>likes</code> テーブルを <code>post_id</code> で絞り込んで数えます。<code>post_id</code> に索引があれば、「<code>post_id = 101</code> のいいね行はどこか」を全走査せずに見つけられ、集計が速い。いいねは人気投稿だと何千件にもなりうるので、この索引が「いいね数え上げ」を支えます。単一列なので、列順の悩みはありません。</p>
+
+    <h3><code>idx_posts_user_id_id (user_id, id DESC)</code> — この章のハイライト</h3>
+    <p>本章でいちばん味わうべきなのが、この複合索引です。これは第04章のキーセットページネーション——「あるユーザーの投稿を、新しい順に、続きから」——のためのもの。第04章の <code>ListUserPosts</code> が投げるクエリの WHERE 句と ORDER 句を思い出してください。</p>
+    <pre><code>	<span class="kw">WHERE</span> p.user_id = $1 <span class="kw">AND</span> ($2::bigint <span class="kw">IS NULL OR</span> p.id &lt; $2)
+	<span class="kw">ORDER BY</span> p.id <span class="kw">DESC</span> <span class="kw">LIMIT</span> $3</code></pre>
+    <p>このクエリがやりたいことは 3 つです。<strong>(1) <code>user_id</code> で等値の絞り込み</strong>（そのユーザーの投稿だけ）、<strong>(2) <code>id &lt; $2</code> で範囲の絞り込み</strong>（前ページの最後より古いもの）、<strong>(3) <code>id DESC</code> で並べ替え</strong>（新しい順）。索引 <code>(user_id, id DESC)</code> は、この 3 つに<strong>そのまま応えられる</strong>形をしています。なぜか。複合索引は、辞書のように<strong>先頭の列でまず並び、同じ値の中で次の列で並ぶ</strong>からです。図にするとこうです。</p>
+
+    <div class="ascii">idx_posts_user_id_id = (user_id, id DESC) の中身のイメージ
+
+   user_id ┃ id (各 user_id の中で降順 DESC)
+   ━━━━━━━━╋━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+      41   ┃ 980, 640, 210, 55
+      42   ┃ 903, 902, 811, 807, 640, 512, ...   ← user_id=42 はここに固まっている
+      43   ┃ 771, 300
+                    ▲
+                    │ WHERE user_id=42 で「42 のブロック」に一足飛び（等値）
+                    │ そのブロックは既に id 降順に並んでいる
+                    │   → id<$2 の範囲も、ORDER BY id DESC も、
+                    │     このブロックを上から読むだけで満たせる</div>
+
+    <p>索引の<strong>第 1 列が <code>user_id</code></strong> なので、「<code>user_id = 42</code>」の等値条件で、42 の投稿が固まっている<strong>一角に一足飛び</strong>で入れます。そして索引の<strong>第 2 列が <code>id DESC</code></strong> なので、その一角は<strong>すでに id の降順に並んでいる</strong>。だから「<code>id &lt; $2</code>（続きから）」の範囲指定も、「<code>ORDER BY id DESC</code>（新しい順）」の並べ替えも、<strong>そのブロックを上から <code>LIMIT</code> 件ぶん読むだけ</strong>で満たせます。並べ替えのための余計な作業（ソート）も、全行走査も要りません。<strong>WHERE と ORDER BY が、索引を読む動作にそのまま溶ける</strong>——これがキーセットページネーションと複合索引が「相性抜群」といわれる理由です。</p>
+
+    <div class="box hazard"><div class="box-k">⚠ 複合索引の列順の原則 — 「等値の列 → 範囲・並びの列」</div>
+      <p>複合索引でいちばん間違えやすいのが<strong>列の順番</strong>です。原則はこうです。<strong>WHERE で等値（<code>=</code>）で絞る列を先に、範囲（<code>&lt;</code>・<code>&gt;</code>）や並べ替え（<code>ORDER BY</code>）に使う列を後に</strong>置く。<code>(user_id, id DESC)</code> はまさにこの形——等値の <code>user_id</code> が先、範囲＆並びの <code>id</code> が後です。<br>
+      もし逆に <code>(id, user_id)</code> と並べたらどうなるか。索引はまず <code>id</code> で並ぶので、「<code>user_id = 42</code> の投稿」は索引のあちこちに<strong>散らばって</strong>しまい、一足飛びに集められません。等値で絞る列を先頭に置くからこそ、その値の行が索引上の<strong>一箇所に固まり</strong>、そこを起点に範囲・並びが効く。<strong>「等値で場所を特定 → その中を範囲・順序で読む」</strong>——複合索引の列順は、この 2 段構えを意識して決めます。</p>
+    </div>
+
+    <h3><code>idx_posts_reply_to (reply_to_id, id) WHERE reply_to_id IS NOT NULL</code> — 部分索引</h3>
+    <p>次は、Step 2 の 3 本目（リプライ数）や第05章のリプライ一覧のための索引です。<code>(reply_to_id, id)</code> という列順は、先ほどの原則どおり——「<code>reply_to_id</code> で等値に絞り、<code>id</code> で並べる」。注目すべきは末尾の <strong><code>WHERE reply_to_id IS NOT NULL</code></strong> です。これは<strong>部分索引（partial index）</strong>といって、「<strong>条件を満たす行だけを索引に載せる</strong>」指定です。<code>posts</code> テーブルの大半は<strong>通常の投稿</strong>で、<code>reply_to_id</code> が <code>NULL</code>（＝リプライではない）です。リプライ検索には <code>NULL</code> の行は一切要らない。だから索引には <code>reply_to_id IS NOT NULL</code> の行（＝実際のリプライ）<strong>だけ</strong>を載せる。こうすると索引が<strong>小さくなり</strong>、リプライ検索がさらに速く、更新のコストも軽くなります。「要る行だけを索引に載せる」——無駄を削る一手です。</p>
+
+    <h3><code>idx_follows_followee_id</code> / <code>idx_follows_follower_id</code> — フォロー関係の両方向</h3>
+    <p>最後は <code>follows</code> テーブルの 2 本です。<code>idx_follows_followee_id (followee_id, id DESC)</code> は「<strong>この人を</strong>フォローしている人の一覧（フォロワー一覧）」を、<code>idx_follows_follower_id (follower_id, id DESC)</code> は「この人が<strong>フォローしている</strong>人の一覧（フォロイー一覧）」を、それぞれ新しい順に引くための索引です。フォロー関係は「誰が誰を」の<strong>両方向</strong>から辿りたいので、索引も 2 本用意します。列順はどちらも <code>(等値で絞る側, id DESC)</code>——先ほどの原則と同じ形です。第04章のタイムライン取得でフォロイーの集合を引くとき、<code>idx_follows_follower_id</code> が効いています。</p>
+
+    <div class="box do"><div class="box-k">▸ 概念確認 — 索引が効いているかは <code>EXPLAIN</code> で覗ける</div>
+      <p>「この索引は本当に使われているのか?」を確かめる道具が、PostgreSQL の <code>EXPLAIN</code> です。クエリの前に <code>EXPLAIN</code> を付けて実行すると、DB が<strong>そのクエリをどう処理するつもりか（実行計画）</strong>を教えてくれます。</p>
+      <pre class="term"><code><span class="ps">sns=&gt;</span> EXPLAIN SELECT * FROM posts
+         WHERE user_id = 42 AND id &lt; 900 ORDER BY id DESC LIMIT 20;
+<span class="out">                          QUERY PLAN
+--------------------------------------------------------------
+ Limit  ...
+   -&gt;  Index Scan using idx_posts_user_id_id on posts  ...
+         Index Cond: ((user_id = 42) AND (id &lt; 900))</span></code></pre>
+      <p><code>Index Scan using idx_posts_user_id_id</code> と出れば、狙いどおり<strong>その索引を使って</strong>絞り込んでいる証拠です。もしここが <code>Seq Scan</code>（順次走査＝全行なめ）になっていたら、索引が効いていません。厳密な速度は環境やデータ量に左右されるので、本書は「何ミリ秒か」ではなく<strong>「実行計画に索引名が出るか」</strong>という構造で判断します。学習段階では、<strong>クエリの回数を数える</strong>（Step 5）ことと、この <code>EXPLAIN</code> で<strong>索引が使われる形になっているか</strong>を見る、この 2 つで十分です。</p>
+    </div>
+
+    <div class="box hazard"><div class="box-k">⚠ 落とし穴 — 索引は「貼れば貼るほど速い」ではない</div>
+      <p>索引が読み取りを速くすると学ぶと、「全部の列に索引を貼ればいいのでは?」と思うかもしれません。それは間違いです。索引には<strong>代償</strong>があります。<strong>(1) 書き込みが遅くなる</strong>——行を <code>INSERT</code>・<code>UPDATE</code>・<code>DELETE</code> するたびに、その列の索引も<strong>すべて</strong>更新しなければならない。索引が 5 本あれば、1 回の書き込みで 5 本の索引を保守します。<strong>(2) 容量を食う</strong>——索引は本文とは別の実体を持つので、貼るほどディスクを消費します。<strong>(3) 使われない索引は純粋な負債</strong>——どのクエリも使わない索引は、速度に一切貢献せず、書き込みだけ重くする。<br>
+      だから Chirp の索引は、<strong>実際に投げるクエリから逆算して</strong>必要な分だけ貼っています。<code>idx_posts_user_id_id</code> はキーセット用、<code>idx_likes_post</code> はいいね集計用、というように、<strong>1 本 1 本に「これはどのクエリのため」という理由がある</strong>。索引は「読み取りの速さ」と「書き込みの重さ・容量」のトレードオフ。<strong>「よく投げるクエリを、必要な索引で支える」</strong>——貼りすぎず、足りなさすぎず、が設計です。</p>
+    </div>
+
+    <h2 class="step" id="step-5"><span class="step-no">Step 5</span>動かして確認する — 件数に依存しないことを見る</h2>
+    <p>この章の成果は、目で「速くなった」と感じるものではありません（開発データでは元々一瞬なので）。確かめるべきは<strong>「クエリの回数が、投稿の件数に依存しない」</strong>という構造そのものです。これは 2 つの方法で確認できます。</p>
+
+    <div class="box do"><div class="box-k">▸ 概念確認 — コードの構造から「4 回」を導く</div>
+      <p>いちばん確実なのは、<strong>コードを指でなぞって数える</strong>ことです。一覧を返すハンドラ（例：タイムライン）が DB に触る箇所を、順に追ってください。</p>
+      <ol>
+        <li><strong>本体（1 回）</strong>：<code>ListTimeline</code>（または <code>ListUserPosts</code> 等）が投稿を <code>LIMIT</code> 件取得 → <strong>1 クエリ</strong>。</li>
+        <li><strong>集計（3 回）</strong>：<code>toPostJSONs</code> が <code>GetPostMeta</code> を<strong>1 回だけ</strong>呼ぶ。その中で「いいね数 / 自分のいいね / リプライ数」の <strong>3 クエリ</strong>。</li>
+        <li><strong>貼り合わせ（0 回）</strong>：<code>toPostJSONs</code> の 2 つのループは、<strong>DB に一切触らない</strong>（ID を集める・地図から引くだけ）。</li>
+      </ol>
+      <p>合計 <strong>1 + 3 + 0 = 4 クエリ</strong>。ここで大事なのは、この <strong>3 も 0 も、投稿の件数 <code>len(posts)</code> に一度も掛かっていない</strong>ことです。<code>GetPostMeta</code> は集合をまとめて 1 回呼ぶだけ、ループは DB を叩かない。だから投稿が 20 件でも 100 件でも、クエリ数は <strong>4 のまま動かない</strong>。素朴版なら 2. と 3. が投稿ごとに 3 回ずつ走って <code>1 + 3N</code> になっていたはずが、集合化によって定数に畳まれた——この構造が、この章の答えです。</p>
+    </div>
+
+    <div class="box do"><div class="box-k">▸ 動かして確認 — ログでクエリ数を見る／件数を変えて比べる</div>
+      <p>手を動かして確かめたいなら、DB が受け取ったクエリを<strong>ログに出して数える</strong>のが直感的です。PostgreSQL は、受け取った全 SQL を記録させられます（開発 DB でのみ行う設定です）。</p>
+      <pre class="term"><code><span class="ps">sns=&gt;</span> SET log_statement = 'all';   <span class="out">-- このセッションの SQL を全部ログに出す</span></code></pre>
+      <p>この状態でタイムラインを 1 回開き、Docker のログ（<code>docker compose logs db</code>）に流れた <code>SELECT</code> を数えます。投稿が並ぶ画面 1 回の表示につき、<strong><code>posts</code> の本体 1 本</strong>と、<strong><code>likes</code>／<code>posts</code> への集計 3 本</strong>——<strong>合わせて 4 本</strong>だけが出るはずです。次にテストデータを増やして投稿を 20 件から 100 件にし、もう一度開いてみてください。表示件数が増えても、<strong>ログに出る SELECT の本数は 4 のまま</strong>。もし素朴版だったら、ここが 61 本、301 本……と件数に比例して膨らんでいたはずです。<strong>「件数を変えても、クエリの本数が変わらない」</strong>——これを自分の目で見たとき、N+1 退治が腑に落ちます。</p>
+    </div>
+
+    <p>そして Step 4 の索引が効いているかは、先ほどの <code>EXPLAIN</code> で「実行計画に <code>Index Scan using idx_...</code> が出るか」を見れば確認できます。<strong>回数は「4 回に畳めたか」、1 回の速さは「索引が使われる形か」</strong>——この 2 つの視点で、Chirp の一覧表示は「件数が増えてもスケールする」構造になっています。</p>
+
+    <h2>つまずき FAQ</h2>
+    <details class="qa"><summary>N+1 は「動く」のに、なぜ開発中に気づけないの?</summary>
+      <div class="qa-body"><p>N+1 は<strong>正しさのバグではなく、形（性能）の問題</strong>だからです。結果は合っていて、テストも緑、画面も正常。壊れたところが一つも無いので、赤信号が出ません。しかも開発中はテストデータが数十件しかなく、61 回のクエリでも一瞬で終わるため、<strong>遅さそのものが顕在化しません</strong>。刺さるのは本番でデータが増えてから——1 回の往復が積み重なって「なぜかタイムラインが重い」となった頃です。原因が「ループの中で関数を呼んでいるだけ」という<strong>見た目に問題のないコード</strong>に潜むので、調査も難しい。だから対策は事後ではなく事前——<strong>「for ループの中で DB に問い合わせていないか?」を、書いた直後に自分で疑う</strong>のが唯一の確実な防御です。この章の <code>toPostJSONs</code> のように、<strong>ループの前にまとめて引く</strong>形を最初から選ぶ習慣が効きます。</p></div>
+    </details>
+    <details class="qa"><summary><code>ANY($1)</code> と <code>IN (...)</code> は結局どう違うの? どちらを使うべき?</summary>
+      <div class="qa-body"><p>意味はほぼ同じ「集合のいずれかに一致」ですが、<strong>渡し方</strong>が決定的に違います。<code>IN (1, 2, 3)</code> は<strong>値の個数だけプレースホルダが要る</strong>ので、20 件なら <code>IN ($1, ..., $20)</code> と、件数に応じて SQL 文の形を Go 側で組み立てねばなりません。件数が変わるたびに文が変わり、動的な文字列連結はミスや SQL インジェクションの温床にもなります。対して <code>ANY($1)</code> は<strong>スライスまるごとを 1 個のプレースホルダに渡せる</strong>——<code>WHERE post_id = ANY($1)</code> の <code>$1</code> に <code>[]int64</code> を渡すだけで、要素数が何個でも SQL 文は不変です（pgx がスライスを配列に変換します）。だから <strong>「個数が実行時に決まる集合」を扱うなら <code>ANY($1)</code> がほぼ常に有利</strong>。Chirp が <code>GetPostMeta</code> で一貫して <code>ANY</code> を使うのはこのためです。<code>IN</code> は「<code>IN ('draft','published')</code> のように、集合が固定・少数のとき」に読みやすさで選ぶ程度です。</p></div>
+    </details>
+    <details class="qa"><summary>索引を貼れば読み取りが速くなるなら、全部の列に貼ればいいのでは?</summary>
+      <div class="qa-body"><p>いいえ、索引には<strong>代償</strong>があります。第一に<strong>書き込みが遅くなる</strong>——<code>INSERT</code>／<code>UPDATE</code>／<code>DELETE</code> のたびに、その列の索引をすべて更新するので、索引が多いほど 1 回の書き込みが重くなります。第二に<strong>容量を食う</strong>——索引は本文とは別の実体で、貼るほどディスクを消費します。第三に<strong>使われない索引はただの負債</strong>——どのクエリも参照しない索引は、速度に一切貢献せず、書き込みだけ重くします。だから索引は「読み取りの速さ」と「書き込みの重さ・容量」の<strong>トレードオフ</strong>であり、貼る基準は<strong>「実際によく投げるクエリを支えるか」</strong>です。Chirp の索引が「キーセット用」「いいね集計用」「リプライ検索用（部分索引）」と、1 本ずつ<strong>担当クエリを持って</strong>いるのはこの考え方の表れです。「よく使う読み取りだけを、必要な索引で支える」——貼りすぎず、足りなさすぎず、がちょうどいい設計です。</p></div>
+    </details>
+
+    <h2>理解度チェック</h2>
+    <p>次の問いに<strong>自分の言葉で</strong>答えられたら、この章は卒業です。</p>
+    <details class="qa"><summary>1. 投稿 20 件の一覧に集計値を添えるとき、素朴に書くと何回、<code>GetPostMeta</code> 方式なら何回のクエリになるか。内訳とともに説明せよ。</summary>
+      <div class="qa-body"><p>素朴版は <strong>61 回</strong>。内訳は「本体 1 回（<code>ListTimeline</code> で 20 件取得）＋ 各投稿ごとに『いいね数・いいね有無・リプライ数』の 3 クエリ × 20 件 ＝ 60 回」で、<code>1 + 3×20 = 61</code>。件数 N に対して <code>1 + 3N</code> と<strong>比例して増える</strong>。<code>GetPostMeta</code> 方式は <strong>4 回</strong>。内訳は「本体 1 回 ＋ <code>GetPostMeta</code> 内の 3 クエリ（いいね数を <code>GROUP BY</code> / 自分のいいね / リプライ数を <code>GROUP BY</code>、いずれも <code>ANY($1)</code> で投稿ID集合を一括処理）」で <code>1 + 3 = 4</code>。<code>toPostJSONs</code> の 2 つのループは DB に触れないので加算されない。投稿が 20 件でも 100 件でも <strong>4 のまま（件数に依らず定数）</strong>。<strong>61 → 4</strong> が本章の成果。</p></div>
+    </details>
+    <details class="qa"><summary>2. <code>idx_posts_user_id_id (user_id, id DESC)</code> は、なぜこの列順なのか。キーセットのクエリと絡めて説明せよ。</summary>
+      <div class="qa-body"><p>キーセットのクエリ <code>WHERE user_id=$1 AND id&lt;$2 ORDER BY id DESC</code> は、<strong>(1) <code>user_id</code> で等値に絞り、(2) <code>id</code> で範囲を絞り、(3) <code>id</code> で並べ替える</strong>。複合索引は「先頭列でまず並び、同じ値の中で次の列で並ぶ」ので、<strong>等値で絞る <code>user_id</code> を先頭</strong>に置くと、そのユーザーの投稿が索引上の<strong>一箇所に固まり</strong>、等値条件で一足飛びに入れる。<strong>第 2 列を <code>id DESC</code></strong> にすると、そのブロックは<strong>すでに id の降順</strong>に並んでいるので、<code>id&lt;$2</code> の範囲も <code>ORDER BY id DESC</code> の並べ替えも、ブロックを上から <code>LIMIT</code> 件読むだけで満たせる（追加のソートも全走査も不要）。原則は<strong>「等値の列を先、範囲・並びの列を後」</strong>。逆順 <code>(id, user_id)</code> だと <code>user_id=42</code> の行が索引全体に散らばり、一足飛びにできない。</p></div>
+    </details>
+    <details class="qa"><summary>3. <code>GetPostMeta</code> で、いいねもリプライも 0 件の投稿は結果のクエリに現れない。それでも <code>PostMeta</code> が正しく <code>0</code>／<code>false</code> になるのはなぜか。</summary>
+      <div class="qa-body"><p><strong>Go のゼロ値</strong>のおかげ。<code>GROUP BY</code> の集計クエリは、いいねが 1 件も無い投稿の行を<strong>返さない</strong>（<code>likes</code> に該当行が無い）。だが戻り値の地図 <code>map[int64]PostMeta</code> から <code>meta[id]</code> で引くと、キーが未登録でも <code>PostMeta</code> の<strong>ゼロ値</strong>（<code>LikeCount: 0</code>／<code>LikedByMe: false</code>／<code>ReplyCount: 0</code>）が返る。<code>int</code> のゼロ値は <code>0</code>、<code>bool</code> は <code>false</code> なので、これらは「いいね 0 件・未いいね・リプライ 0 件」という<strong>正しい状態</strong>に一致する。だから <code>toPostJSONs</code> は、地図に載っていない投稿を特別扱いせず、<code>m := meta[p.ID]</code> で引いてそのまま貼れる。「0 件を明示的に埋めなくてよい」——ゼロ値がデフォルトとして意味を持つ、Go らしい設計。</p></div>
+    </details>
+
+    <h2>まとめ — 次の層へ</h2>
+    <p>この章で、Chirp の一覧表示は<strong>「件数が増えても壊れない」構造</strong>を手に入れました。素朴に書けば投稿ごとに集計を問い合わせて <strong>61 回</strong>のクエリになるところを、投稿ID の<strong>集合</strong>に対する <code>ANY($1)</code> と <code>GROUP BY</code> で一括集計し、本体 1 ＋ 集計 3 の <strong>4 回</strong>に畳みました（<code>GetPostMeta</code>）。Go 側は <code>map[int64]PostMeta</code> に 3 回の結果を積み重ね、<code>toPostJSONs</code> が「ループの前に一度だけ引く」バッチ化で本体と貼り合わせる。そしてその 4 本のクエリを<strong>速く保つ索引</strong>——複合索引の列順が「等値の列 → 範囲・並びの列」であること、キーセットがその索引にそのまま溶けること、部分索引で無駄を削ることまで解剖しました。<strong>「1 件ずつ」をやめて「まとめて」に変える</strong>——性能設計の核心を、実装の手触りで掴めたはずです。</p>
+    <p>ここまでで、Chirp の<strong>バックエンドは完成</strong>です。認証・投稿・フォロー・タイムライン・リプライ・いいね、そして性能。API はすべて揃いました。次の第08章では、いよいよ<strong>画面</strong>をつけます。React でタイムラインを描き、投稿フォームを置き、ハートを押せるようにする。そして第00章の <code>frontend_dist.FS()</code> で予告した——<strong>React のビルド成果物を <code>//go:embed</code> で Go バイナリに埋め込み、サーバもフロントも 1 つの実行ファイルにまとめる</strong>——あの構成を完成させます。データを速く返すバックエンドの上に、人が触れる顔を乗せる。最後の層へ進みましょう。</p>
+
+    <div class="chap-foot">
+      <a class="pager" href="06-like.html"><span class="dir">← 前へ</span>第06章 · 反応する（いいね）</a>
+      <a class="pager next" href="08-web.html"><span class="dir">次へ →</span>第08章 · 画面をつける（React）</a>
+    </div>
+  </main>
+</div>
+</body>
+</html>

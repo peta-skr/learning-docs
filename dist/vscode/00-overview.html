@@ -1,0 +1,371 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>第00章 文字を打てる箱の正体 — ゼロから作るテキストエディタ</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500;600&family=Source+Serif+4:opsz,wght@8..60,400;8..60,600;8..60,700&family=Noto+Serif+JP:wght@400;600;700&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<div class="shell">
+
+  <aside class="spine">
+    <a class="wordmark" href="index.html">MINT EDITOR · from scratch</a>
+    <div class="book-title">ゼロから作る<br>テキストエディタ</div>
+    <div class="book-sub">TypeScript と Canvas で mint editor を組む</div>
+
+    <div class="legend"><span>読む <b>↓</b></span><span>組む <b>↑</b></span></div>
+
+    <nav aria-label="目次">
+      <ul class="toc">
+        <li><a class="nav-item" href="index.html"><span class="nav-num">序</span><span class="nav-label">はじめに・準備<span class="nav-tag">Setup</span></span></a></li>
+        <li><a class="nav-item current" aria-current="page" href="00-overview.html"><span class="nav-num">00</span><span class="nav-label">文字を打てる箱の正体<span class="nav-tag">Overview</span></span></a></li>
+        <li><a class="nav-item" href="01-buffer.html"><span class="nav-num">01</span><span class="nav-label">テキストを持つ<span class="nav-tag">Buffer</span></span></a></li>
+        <li><a class="nav-item" href="02-document.html"><span class="nav-num">02</span><span class="nav-label">行とカーソル<span class="nav-tag">Doc</span></span></a></li>
+        <li><a class="nav-item" href="03-history.html"><span class="nav-num">03</span><span class="nav-label">編集と取り消し<span class="nav-tag">Undo</span></span></a></li>
+        <li><a class="nav-item" href="04-view.html"><span class="nav-num">04</span><span class="nav-label">画面に描く<span class="nav-tag">Canvas</span></span></a></li>
+        <li><a class="nav-item" href="05-input.html"><span class="nav-num">05</span><span class="nav-label">入力を受ける<span class="nav-tag">Input</span></span></a></li>
+        <li><a class="nav-item" href="06-search.html"><span class="nav-num">06</span><span class="nav-label">複数カーソルと検索<span class="nav-tag">Multi</span></span></a></li>
+        <li><a class="nav-item" href="07-highlight.html"><span class="nav-num">07</span><span class="nav-label">色をつける<span class="nav-tag">Syntax</span></span></a></li>
+        <li><a class="nav-item" href="08-ime.html"><span class="nav-num">08</span><span class="nav-label">日本語を打つ<span class="nav-tag">IME</span></span></a></li>
+        <li><a class="nav-item" href="09-assemble.html"><span class="nav-num">09</span><span class="nav-label">開いて保存する・組み立て<span class="nav-tag">Assemble</span></span></a></li>
+      </ul>
+    </nav>
+
+    <div class="spine-foot">
+      各章は一つの部品・機能。<br>下（バッファ）から上（UI）へ<br>積み上げて動かしていく。
+    </div>
+  </aside>
+
+  <main class="reading">
+    <div class="progress-tag">第00章 / 全10章 · 層: OVERVIEW · 読了目安 1.5〜2時間</div>
+    <div class="eyebrow"><span>OVERVIEW</span><span class="depth">— 全体像と最下層の境界</span></div>
+    <h1>文字を打てる箱の正体</h1>
+    <p class="lede">「文字を打てる箱」を、いったんバラバラに分解します。エディタは煎じ詰めると4つの部品でできている —— <strong>テキストを持つデータ構造</strong>、<strong>カーソルと編集操作</strong>、<strong>画面への描画</strong>、<strong>入力の受け取り</strong>。この章ではまず全体像を掴み、いちばん下の「テキストを持つ」の<strong>境界</strong> — <code>TextBuffer</code> というインターフェース — を1本引きます。コードはほんの数十行。でも、この境界が以降10章ぶんの土台になります。</p>
+
+    <div class="box goal"><div class="box-k">◈ この章のゴール</div>
+      <p>次の 2 つを、自分の目と手で確認できたら達成です。</p>
+      <ol>
+        <li><code>TextBuffer</code> インターフェースと <code>SimpleBuffer</code> 実装を読み、「なぜ最初にインターフェースを決めるのか」を自分の言葉で言える。</li>
+        <li><code>npx vitest run src/core/pieceTable.test.ts</code> で、<code>SimpleBuffer</code> を正解（オラクル）に使ったテストが PASS する。この章で書いた <code>SimpleBuffer</code> が、第01章以降の検証の土台であることを目視する。</li>
+      </ol>
+    </div>
+
+    <div class="box map"><div class="box-k">☰ この章のステップ</div>
+      <ol>
+        <li><a href="#step-1">エディタを4つの部品に分解する</a></li>
+        <li><a href="#step-2">位置をどう表すか — オフセットと Position（<code>core/types.ts</code>）</a></li>
+        <li><a href="#step-3">編集を1つの形にまとめる — <code>Edit</code> と <code>SelRange</code></a></li>
+        <li><a href="#step-4">なぜ最初に「境界」を決めるのか</a></li>
+        <li><a href="#step-5">TextBuffer インターフェースを引く（<code>core/buffer.ts</code>）</a></li>
+        <li><a href="#step-6">素朴な実装 SimpleBuffer — 遅いが正しいオラクル</a></li>
+        <li><a href="#step-7">演習: SimpleBuffer を手で動かしてみる</a></li>
+      </ol>
+    </div>
+
+    <h2>なぜ「箱の分解」から始めるのか</h2>
+    <p>エディタで最初に書くべきものは、描画でもキー入力でもありません。<strong>頭の中の地図</strong>です。エディタは一見ひとかたまりの魔法に見えますが、実は役割のはっきり違う部品の集まりです。この地図を持たずにいきなり <code>&lt;canvas&gt;</code> に文字を描き始めると、「テキストの状態」「カーソルの位置」「画面の見た目」が1つのコードに絡まり合い、すぐに手がつけられなくなります。実際、自作エディタが挫折する最大の理由がこれです。</p>
+    <p>だから本書は、最初に箱を分解します。そして分解した部品どうしを<strong>境界（インターフェース）</strong>でつなぎます。境界を挟んでおけば、片方を作り替えても、もう片方は無傷でいられる。この章で引く最初の1本の境界 <code>TextBuffer</code> が、まさにその見本です。</p>
+
+    <h2 class="step" id="step-1"><span class="step-no">Step 1</span>エディタを4つの部品に分解する</h2>
+    <p>「文字を打てる箱」を、機能ではなく<strong>役割</strong>で切ると、次の4つになります。どのエディタも — VSCode も、メモ帳も、mint editor も — 突き詰めればこの4部品でできています。</p>
+
+    <table>
+      <tr><th>部品</th><th>役割</th><th>本書での担当</th></tr>
+      <tr><td>① テキストを持つ</td><td>編集中の文字列を保持し、挿入・削除を効率よくこなす</td><td><code>core/buffer.ts</code> / <code>pieceTable.ts</code></td></tr>
+      <tr><td>② カーソルと編集</td><td>位置を数え、範囲を選び、編集を適用し、取り消す</td><td><code>core/document.ts</code> / <code>history.ts</code> / <code>selection.ts</code></td></tr>
+      <tr><td>③ 画面に描く</td><td>見えている範囲だけを Canvas に描画する</td><td><code>editor/view.ts</code> / <code>metrics.ts</code></td></tr>
+      <tr><td>④ 入力を受ける</td><td>キー・マウス・IME を編集操作に翻訳する</td><td><code>editor/input.ts</code></td></tr>
+    </table>
+
+    <p>この4部品の関係を、データの流れとして描くと次のようになります。<strong>入力が編集を起こし、編集がテキストを変え、テキストが画面に映る</strong> — このぐるりと回る流れが、エディタの心拍です。</p>
+
+    <div class="ascii">エディタの心拍 — 4部品を1周するデータの流れ
+
+  ④ 入力を受ける          ② カーソルと編集
+  ┌──────────┐  Edit 列  ┌──────────────┐
+  │ キー/マウス/IME│ ───────▶ │ どこを何で置換│
+  │ を解釈する    │          │ するかを決める │
+  └──────────┘          └──────┬───────┘
+        ▲                          │ replace(from,to,text)
+        │ 見た目                     ▼
+  ┌──────────┐  テキスト  ┌──────────────┐
+  │ ③ 画面に描く │ ◀─────── │ ① テキストを持つ │
+  │ (Canvas)   │  slice()  │ (TextBuffer)   │
+  └──────────┘          └──────────────┘</div>
+
+    <p>本書は、この4部品を<strong>下から上へ</strong>作ります。まず ①「テキストを持つ」。次に ②「カーソルと編集」。両方そろって初めて ③「描く」と ④「受ける」に意味が出ます。逆順では作れません。何を描くべきテキストも、どこへ入れるべきカーソルも、まだ存在しないからです。</p>
+    <p>そして本書の設計の要は、この4部品のうち <strong>① と ② を「ブラウザを知らない純粋ロジック」（<code>core/</code>）として切り出す</strong>ことです。テキストの持ち方も、カーソルの動きも、Undo のまとめ方も、画面や DOM とは無関係に決まります。だからそれらを Node 上のテストで何百回も検査できる。この章で最初に触る ① は、まさにその「純粋ロジック」の第一号です。</p>
+
+    <h2 class="step" id="step-2"><span class="step-no">Step 2</span>位置をどう表すか — オフセットと Position</h2>
+    <p>4部品のどれもが、絶えず「<strong>位置</strong>」を扱います。カーソルはどこ? 選択範囲の端は? どこに文字を入れる? そこでコードを書く前に、位置の表し方を1か所に定義しておきます。作るファイルは <code>core/types.ts</code>。コア全体で使う基本型の置き場です。まず前半、コメントと <code>Edit</code> / <code>Position</code> から。</p>
+
+    <div class="file-tag">core/types.ts</div>
+    <pre><code><span class="cm">/**
+ * コア全体で使う基本型。
+ *
+ * - オフセット: 文書先頭からの UTF-16 コード単位数で表す位置。編集ロジックはこちらが素直。
+ * - Position: (行, 桁) 表現。画面表示・ステータスバー向け。
+ * - Edit: 「from〜to を text で置き換える」— 挿入・削除・置換をこの1形で表す。
+ */</span>
+
+<span class="kw">export interface</span> <span class="ty">Edit</span> {
+  from: <span class="ty">number</span>;
+  to: <span class="ty">number</span>;
+  text: <span class="ty">string</span>;
+}
+
+<span class="kw">export interface</span> <span class="ty">Position</span> {
+  line: <span class="ty">number</span>;
+  column: <span class="ty">number</span>;
+}</code></pre>
+
+    <p>上から見ます。位置の表し方は<strong>2通り</strong>あり、本書は両方を使い分けます。</p>
+    <p><strong>オフセット</strong>は「文書先頭から数えて何文字目か」を1個の <code>number</code> で表します。たとえば <code>"abcdef"</code> の <code>c</code> と <code>d</code> の間はオフセット <code>3</code>。挿入・削除のような編集ロジックは、この1次元の数のほうが圧倒的に素直です。「オフセット <code>3</code> に <code>"X"</code> を入れる」と言えば済むからです。だから <code>types.ts</code> のコメントは「編集ロジックはこちらが素直」と明言しています。</p>
+    <p>もう1つが <code>Position</code> で、<code>{line, column}</code> —「何行目の何桁目か」で位置を表します。人間が画面で見るとき、あるいはステータスバーに「12行 : 4桁」と出すとき、クリックした場所を特定するときは、こちらが自然です。オフセットと Position は同じ位置を別の座標系で見ているだけで、行の開始位置さえ分かれば相互に変換できます（その変換を担うのが第02章の <code>Document</code> です）。</p>
+
+    <div class="gonote"><div class="box-k">TS メモ · interface と export</div>
+      <p><code>interface</code> は TypeScript で「オブジェクトの形」を宣言する道具です。<code>Position</code> なら「<code>line</code> と <code>column</code> という2つの数を持つ」という形を表します。実行時には何も生み出さず、<strong>型チェックのときだけ働く</strong>（コンパイルすると消える）ので、コストはゼロです。<code>export</code> を付けると、他のファイルから <code>import { Position } from "./types"</code> で使えるようになります。本書は「型は <code>types.ts</code> に集約して <code>export</code> する」方針で、位置や編集の定義がコード中に散らばらないようにしています。</p>
+    </div>
+
+    <h2 class="step" id="step-3"><span class="step-no">Step 3</span>編集を1つの形にまとめる — Edit と SelRange</h2>
+    <p>Step 2 で出てきた <code>Edit</code> こそ、本書の<strong>編集操作の統一形</strong>です。エディタの編集は一見たくさんあるように見えます — 文字を挿入する、範囲を削除する、選択を別の文字で置き換える、改行を入れる、Backspace で消す……。しかし本書は、これらを<strong>たった1つの形</strong>に畳み込みます。</p>
+
+    <div class="ascii">Edit { from, to, text } は挿入・削除・置換を1形で表す
+
+  挿入   from == to、text あり   { from:3, to:3,  text:"X" }  →  3 の位置に "X"
+  削除   from &lt; to、text 空      { from:3, to:5,  text:""  }  →  [3,5) を消す
+  置換   from &lt; to、text あり    { from:3, to:5,  text:"Z" }  →  [3,5) を "Z" に</div>
+
+    <p>「<code>from</code> から <code>to</code> までを <code>text</code> で置き換える」——この1形で、挿入も削除も置換も表せます。挿入は「幅ゼロ（<code>from == to</code>）の範囲を <code>text</code> で置き換える」、削除は「範囲を空文字で置き換える」、置換はそのまま。編集をこの1形に統一しておくと、第02章の「編集を適用する」も、第03章の「編集を取り消す」も、ぜんぶこの <code>Edit</code> の列として一様に扱えます。<strong>編集の種類ごとに別々のコードを書かなくていい</strong> — これが後の章を劇的に簡単にします。</p>
+
+    <p>続いて <code>types.ts</code> の後半。選択範囲を表す <code>SelRange</code> と、その小さなヘルパー3つです。</p>
+
+    <div class="file-tag">core/types.ts（つづき・これで全文）</div>
+    <pre><code><span class="cm">/** 選択範囲。anchor = 選択の始点、head = カーソル本体。anchor === head なら「ただのカーソル」 */</span>
+<span class="kw">export interface</span> <span class="ty">SelRange</span> {
+  anchor: <span class="ty">number</span>;
+  head: <span class="ty">number</span>;
+}
+
+<span class="kw">export function</span> rangeMin(r: <span class="ty">SelRange</span>): <span class="ty">number</span> {
+  <span class="kw">return</span> <span class="ty">Math</span>.min(r.anchor, r.head);
+}
+
+<span class="kw">export function</span> rangeMax(r: <span class="ty">SelRange</span>): <span class="ty">number</span> {
+  <span class="kw">return</span> <span class="ty">Math</span>.max(r.anchor, r.head);
+}
+
+<span class="kw">export function</span> rangeIsEmpty(r: <span class="ty">SelRange</span>): <span class="ty">boolean</span> {
+  <span class="kw">return</span> r.anchor === r.head;
+}</code></pre>
+
+    <p><code>SelRange</code> は「選択範囲」を表しますが、その持ち方に工夫があります。始点と終点を <code>start</code>/<code>end</code> ではなく <strong><code>anchor</code>（錨）と <code>head</code>（頭）</strong>で持つのです。<code>anchor</code> は「選択を始めた場所（動かない側）」、<code>head</code> は「いまカーソルがいる場所（動く側）」。<code>Shift</code> を押しながら矢印キーで選択を広げると、<code>anchor</code> は据え置きで <code>head</code> だけが動きます。</p>
+    <p>そして重要なのが、コメントの最後 —「<code>anchor === head</code> なら『ただのカーソル』」。つまり<strong>幅ゼロの選択範囲が、そのまま「ただのカーソル」</strong>です。選択とカーソルを別々の型にせず、1つの <code>SelRange</code> で表せる。これが第06章の複数カーソルを驚くほど素直にします。カーソルが N 本あるとは、<code>SelRange</code> が N 個ある、というだけのことになるからです。</p>
+    <p>3つのヘルパーは小道具です。<code>rangeMin</code>/<code>rangeMax</code> は「<code>anchor</code> と <code>head</code> のどちらが前か」を気にせず範囲の左端・右端を返します（逆向きに選択することもあるので必要）。<code>rangeIsEmpty</code> は「これはただのカーソルか?」を判定します。どれも1行ですが、範囲を扱うコードのあちこちで効いてきます。</p>
+
+    <div class="box hazard"><div class="box-k">⚠ 落とし穴 — anchor と head を start/end と混同しない</div>
+      <p><code>anchor</code> が必ず前（小さいオフセット）とは<strong>限りません</strong>。文字を右から左へ選択すると、<code>head &lt; anchor</code> になります。だから「範囲の左端」が欲しいときに <code>r.anchor</code> を直接使うとバグります。必ず <code>rangeMin(r)</code> / <code>rangeMax(r)</code> を通してください。<code>anchor</code>/<code>head</code> は「どっちが動くか」を表す<strong>方向</strong>の情報であり、<code>min</code>/<code>max</code> は「どっちが前か」という<strong>位置</strong>の情報。この2つは別物だと最初に頭を分けておくと、選択まわりで転びません。</p>
+    </div>
+
+    <h2 class="step" id="step-4"><span class="step-no">Step 4</span>なぜ最初に「境界」を決めるのか</h2>
+    <p>いよいよ ①「テキストを持つ」に入ります。ですが、その前に本書でいちばん大事な設計の考え方を1つ。<strong>実装を書く前に、境界（インターフェース）を決める。</strong></p>
+    <p>「テキストを持つ人」に、上の層（カーソルや描画）は何を求めるでしょうか。よく考えると、たった2つです。</p>
+    <ul>
+      <li><strong>読む</strong> — 「この範囲の文字列をくれ」（描画するとき、検索するとき）</li>
+      <li><strong>置き換える</strong> — 「この範囲をこの文字で差し替えろ」（挿入・削除・置換 = <code>Edit</code> の適用）</li>
+    </ul>
+    <p>驚くべきことに、これだけです。上の層は「テキストが<strong>どう持たれているか</strong>」—— 1本の文字列なのか、木構造なのか、断片のリストなのか —— を<strong>知る必要がありません</strong>。読めて、置き換えられれば十分。この「上が本当に必要とする最小限」を <code>interface</code> に書き出したものが、<strong>境界</strong>です。</p>
+    <p>境界を先に決めると、2つの大きな見返りがあります。</p>
+    <ol>
+      <li><strong>実装を差し替えられる。</strong> 素朴で遅い実装から、複雑で速い実装へ、上の層に一切触れずに乗り換えられます。本書はまさにこれをします —— 第00章の <code>SimpleBuffer</code>（1本の文字列・遅い）から、第01章の <code>PieceTableBuffer</code>（断片の管理・速い）へ。</li>
+      <li><strong>テストのオラクルが手に入る。</strong> 素朴な実装は「明らかに正しい」ので、それを<strong>正解の基準（オラクル）</strong>として、速い実装に同じ操作を浴びせ、結果が一致するかを機械で検証できます。速い実装のバグを、素朴な実装が炙り出すのです。</li>
+    </ol>
+    <p>この2つ目こそ、本書の品質保証の核です。速いデータ構造は<strong>間違えやすい</strong>。でも間違えても、素朴な実装との一致テストが必ず捕まえてくれる。だから安心して速い実装に挑めます。次のステップで、その境界 <code>TextBuffer</code> を実際に引きます。</p>
+
+    <h2 class="step" id="step-5"><span class="step-no">Step 5</span>TextBuffer インターフェースを引く</h2>
+    <p>Step 4 の「読む」と「置き換える」を、そのまま型にします。作るファイルは <code>core/buffer.ts</code>。まず先頭の設計コメントと、境界そのものである <code>TextBuffer</code> インターフェースです。</p>
+
+    <div class="file-tag">core/buffer.ts</div>
+    <pre><code><span class="cm">/**
+ * TextBuffer — テキストを保持する内部データ構造の境界。
+ *
+ * 上位（Document / Editor）はこのインターフェースしか知らない。
+ * 「読む(slice)」と「置き換える(replace)」さえあれば、挿入・削除・置換は
+ * すべて replace(from, to, text) 1つで表現できる。
+ *
+ * SimpleBuffer は1本の文字列で持つ素朴な実装。
+ * 挿入のたびに後続をすべてコピーするので O(n) だが、
+ * 実装が自明なので「正しさの基準（オラクル）」としてテストで使う。
+ * 本命は pieceTable.ts の PieceTableBuffer。
+ */</span>
+
+<span class="kw">export interface</span> <span class="ty">TextBuffer</span> {
+  <span class="kw">readonly</span> length: <span class="ty">number</span>;
+  <span class="cm">/** [from, to) の文字列を返す */</span>
+  slice(from: <span class="ty">number</span>, to: <span class="ty">number</span>): <span class="ty">string</span>;
+  <span class="cm">/** [from, to) を text で置き換える */</span>
+  replace(from: <span class="ty">number</span>, to: <span class="ty">number</span>, text: <span class="ty">string</span>): <span class="ty">void</span>;
+  getText(): <span class="ty">string</span>;
+}</code></pre>
+
+    <p>このコメントは、Step 4 の設計思想がそのまま文章になったものです。「上位はこのインターフェースしか知らない」「本命は <code>pieceTable.ts</code>」「<code>SimpleBuffer</code> はオラクル」——ここまで読んできたあなたには、もう全部見覚えのある話のはずです。境界を引くとは、こういう「約束」をコードに書き下すことです。</p>
+    <p>インターフェースの中身は4つ。</p>
+    <ul>
+      <li><code>readonly length: number</code> — いま何文字あるか。<code>readonly</code> なので外から <code>buf.length = 5</code> のように書き換えることはできません。長さは中身から決まる<strong>結果</strong>であって、外がいじる値ではないからです。</li>
+      <li><code>slice(from, to): string</code> — <strong>読む</strong>。<code>[from, to)</code>（<code>from</code> は含み <code>to</code> は含まない、半開区間）の文字列を返します。JavaScript の <code>String.prototype.slice</code> と同じ流儀なので直感的です。</li>
+      <li><code>replace(from, to, text): void</code> — <strong>置き換える</strong>。<code>[from, to)</code> を <code>text</code> に差し替えます。Step 3 の <code>Edit</code> がそのまま <code>replace(edit.from, edit.to, edit.text)</code> に化けます。戻り値は <code>void</code>（バッファ自身を書き換えるだけ）。</li>
+      <li><code>getText(): string</code> — 全文をまとめて返す。保存やテストのときに使います。<code>slice(0, length)</code> と同義ですが、意図が明確なので専用メソッドにしています。</li>
+    </ul>
+    <p>たったこれだけ。挿入・削除・置換という3つの操作は、<strong>すべて <code>replace</code> 1つに畳まれています</strong>。Step 3 で <code>Edit</code> を1形に統一したのと、まったく同じ発想です。境界を小さく保つほど、実装は差し替えやすく、テストは書きやすくなります。</p>
+
+    <div class="gonote"><div class="box-k">TS メモ · readonly と void、そして半開区間 [from, to)</div>
+      <p><code>readonly length</code> の <code>readonly</code> は、そのプロパティを「読めるが代入できない」ものにします。実装側では普通の <code>get length()</code>（ゲッター）で提供できます。<code>replace(...): void</code> の <code>void</code> は「返り値がない（副作用だけ）」を表す型です。<br>
+      <code>[from, to)</code> という書き方は<strong>半開区間</strong>で、「<code>from</code> は含む、<code>to</code> は含まない」を意味します。<code>slice(2, 5)</code> ならインデックス 2・3・4 の3文字。この流儀の利点は、<code>slice(a, b)</code> と <code>slice(b, c)</code> をつなぐと <code>slice(a, c)</code> になり、境界の文字を重複も欠落もなく扱えること。文字列・配列の区間を扱うときの標準作法です。</p>
+    </div>
+
+    <h2 class="step" id="step-6"><span class="step-no">Step 6</span>素朴な実装 SimpleBuffer — 遅いが正しいオラクル</h2>
+    <p>境界を引いたら、それを満たす<strong>いちばん素朴な実装</strong>を1つ書きます。<code>SimpleBuffer</code> は、テキストをただ1本の文字列で持ちます。同じ <code>core/buffer.ts</code> の続きです。</p>
+
+    <div class="file-tag">core/buffer.ts（つづき・これで全文）</div>
+    <pre><code><span class="kw">export class</span> <span class="ty">SimpleBuffer</span> <span class="kw">implements</span> <span class="ty">TextBuffer</span> {
+  <span class="kw">private</span> text: <span class="ty">string</span>;
+
+  <span class="kw">constructor</span>(text = <span class="st">""</span>) {
+    <span class="kw">this</span>.text = text;
+  }
+
+  <span class="kw">get</span> length(): <span class="ty">number</span> {
+    <span class="kw">return</span> <span class="kw">this</span>.text.length;
+  }
+
+  slice(from: <span class="ty">number</span>, to: <span class="ty">number</span>): <span class="ty">string</span> {
+    <span class="kw">return</span> <span class="kw">this</span>.text.slice(from, to);
+  }
+
+  replace(from: <span class="ty">number</span>, to: <span class="ty">number</span>, text: <span class="ty">string</span>): <span class="ty">void</span> {
+    <span class="kw">this</span>.text = <span class="kw">this</span>.text.slice(<span class="st">0</span>, from) + text + <span class="kw">this</span>.text.slice(to);
+  }
+
+  getText(): <span class="ty">string</span> {
+    <span class="kw">return</span> <span class="kw">this</span>.text;
+  }
+}</code></pre>
+
+    <p><code>class SimpleBuffer implements TextBuffer</code> の <code>implements TextBuffer</code> が肝です。「このクラスは <code>TextBuffer</code> の契約を満たす」と宣言していて、もし4つのメソッドのどれかが欠けていたり型が違ったりすると、TypeScript がコンパイル時にエラーで教えてくれます。境界に対して実装が<strong>本当に約束を守っているか</strong>を、機械が保証してくれるわけです。</p>
+    <p>中身は拍子抜けするほど単純です。テキストを <code>private text: string</code> に1本持ち、</p>
+    <ul>
+      <li><code>length</code> は文字列の <code>.length</code> をそのまま返すゲッター。</li>
+      <li><code>slice</code> は文字列の <code>.slice</code> に丸投げ。</li>
+      <li><code>getText</code> は文字列をそのまま返す。</li>
+    </ul>
+    <p>心臓は <code>replace</code> の1行です。</p>
+    <pre><code><span class="kw">this</span>.text = <span class="kw">this</span>.text.slice(<span class="st">0</span>, from) + text + <span class="kw">this</span>.text.slice(to);</code></pre>
+    <p>「<strong>前半</strong>（<code>0</code>〜<code>from</code>）＋<strong>差し込む文字</strong>（<code>text</code>）＋<strong>後半</strong>（<code>to</code>〜末尾）」を <code>+</code> でつないで、新しい文字列を丸ごと作り直す。<code>"abcdef"</code> の <code>[2,4)</code> を <code>"XY"</code> にするなら、<code>"ab"</code> ＋ <code>"XY"</code> ＋ <code>"ef"</code> ＝ <code>"abXYef"</code>。挿入なら <code>from == to</code> なので中央に <code>text</code> が刺さるだけ、削除なら <code>text</code> が空なので前半と後半が詰まるだけ。<strong>1行で挿入・削除・置換の全部</strong>が正しく動きます。これが「境界を <code>replace</code> 1つに畳んだ」ことの果実です。</p>
+
+    <div class="box hazard"><div class="box-k">⚠ 落とし穴 — SimpleBuffer は「正しいが遅い」。それでいい</div>
+      <p>この <code>replace</code> は、<strong>1文字挿入するたびに文字列全体をコピーし直します</strong>。10万文字のファイルの先頭に <code>a</code> を1つ打つたびに、10万文字ぶんのコピーが走る —— これは <code>O(n)</code> で、大きなファイルでは目に見えて重くなります。だから <code>SimpleBuffer</code> は<strong>本番のバッファには使いません</strong>。<br>
+      しかし、それでいいのです。<code>SimpleBuffer</code> の値打ちは速さではなく、<strong>誰が見ても正しいと分かること</strong>。この「明らかな正しさ」こそが、第01章で作る速い <code>PieceTableBuffer</code> を検証する<strong>オラクル（正解の物差し）</strong>になります。速さは第01章で手に入れます。この章では「正しい物差し」を手に入れた、と考えてください。</p>
+    </div>
+
+    <div class="gonote"><div class="box-k">TS メモ · implements とダック・タイピング、そしてジェネリクスの予告</div>
+      <p><code>class C implements I</code> は「クラス <code>C</code> がインターフェース <code>I</code> を満たす」ことを<strong>コンパイル時に検査</strong>させる宣言です。実行時には何も起きません（TypeScript の型は消える）。<code>implements</code> を書かなくても、形さえ合っていれば <code>TextBuffer</code> 型の変数に代入できます（TypeScript は「形が合えば同じ型」とみなす構造的型付け＝ダック・タイピング）。それでも <code>implements</code> を明示するのは、<strong>実装漏れをその場で叱ってもらう</strong>ためです。<br>
+      なお TypeScript には、型を「あとから決める」<strong>ジェネリクス</strong>（<code>Array&lt;string&gt;</code> の <code>&lt;string&gt;</code> のような <code>&lt; &gt;</code>）という仕組みもあります。<strong>本書の <code>core/</code>（純粋ロジック）では、これを自分で定義する場面はいちど も出てきません。</strong>扱う型が <code>Edit</code> と <code>SelRange</code> という具体的なものに決まっているので、必要がないからです。第04章以降の DOM 層で <code>Map&lt;string, number&gt;</code>（文字幅のキャッシュ）や <code>Promise&lt;…&gt;</code>（ファイルを開く・第09章）といった<strong>組み込みの形だけ</strong>が顔を出します。いまは「<code>&lt; &gt;</code> が出てきたら、その中は<strong>入れ物に入る値の型</strong>」とだけ読めれば十分です。</p>
+    </div>
+
+    <div class="box do"><div class="box-k">▸ 動かして確認</div>
+      <p>この章で書いた <code>SimpleBuffer</code> は、第01章のピーステーブル・テストの中で<strong>オラクル（正解）</strong>として使われています。そのテストを走らせて、<code>SimpleBuffer</code> が正しい物差しとして機能していることを確かめましょう。</p>
+      <pre class="term"><code><span class="ps">$</span> npx vitest run src/core/pieceTable.test.ts
+<span class="out">✓ src/core/pieceTable.test.ts (6 tests)
+   ✓ 空のバッファに挿入できる
+   ✓ 先頭・末尾・中間の挿入と削除
+   ✓ slice がピース境界をまたいで正しい
+   ✓ 連続タイプでピース数が増えない（末尾）
+   ✓ 連続タイプでピース数が増えない（文書の中間）
+   ✓ ランダム編集 2000 回で SimpleBuffer と一致する
+ Test Files  1 passed (1)
+      Tests  6 passed (6)</span></code></pre>
+      <p>最後の <strong>「ランダム編集 2000 回で SimpleBuffer と一致する」</strong>に注目してください。これが Step 4 で予告した「オラクル一致テスト」の実物です。<code>SimpleBuffer</code>（この章で書いた素朴実装）と <code>PieceTableBuffer</code>（第01章の速い実装）に、まったく同じランダムな編集を2000回浴びせ、<strong>両者の <code>getText()</code> と <code>slice()</code> が完全に一致すること</strong>を検証しています。日本語や絵文字（<code>"abcあい😀\n "</code>）まで混ぜているのは、UTF-16 のサロゲートペアでも壊れないことを確かめるためです。あなたの書いた <code>SimpleBuffer</code> が、この検証の<strong>正解の側</strong>を担っています。</p>
+    </div>
+
+    <div class="box do"><div class="box-k">▸ 全テストもついでに</div>
+      <p>ここまでで <code>core/types.ts</code> と <code>core/buffer.ts</code> が完成です。せっかくなので全 70 件も通しておきましょう（他の章のコードも <code>src/</code> にそろっている前提です）。</p>
+      <pre class="term"><code><span class="ps">$</span> npm test
+<span class="out"> Test Files  7 passed (7)
+      Tests  70 passed (70)</span></code></pre>
+    </div>
+
+    <h2 class="step" id="step-7"><span class="step-no">Step 7</span>演習: SimpleBuffer を手で動かしてみる</h2>
+    <p>境界の手触りを、頭ではなく<strong>手で</strong>掴んでおきます。<code>SimpleBuffer</code> だけを使って、挿入・削除・置換が本当に <code>replace</code> 1つで表せることを確かめます。小さなテストファイルを1つ作ってみましょう。</p>
+
+    <div class="file-tag">core/buffer.playground.test.ts（自分で作る・演習用）</div>
+    <pre><code><span class="kw">import</span> { describe, expect, it } <span class="kw">from</span> <span class="st">"vitest"</span>;
+<span class="kw">import</span> { SimpleBuffer } <span class="kw">from</span> <span class="st">"./buffer"</span>;
+
+describe(<span class="st">"SimpleBuffer で遊ぶ"</span>, () => {
+  it(<span class="st">"replace 1つで挿入・削除・置換ができる"</span>, () => {
+    <span class="kw">const</span> b = <span class="kw">new</span> SimpleBuffer(<span class="st">"abcdef"</span>);
+
+    b.replace(<span class="st">3</span>, <span class="st">3</span>, <span class="st">"XYZ"</span>);        <span class="cm">// 挿入: from == to</span>
+    expect(b.getText()).toBe(<span class="st">"abcXYZdef"</span>);
+
+    b.replace(<span class="st">0</span>, <span class="st">3</span>, <span class="st">""</span>);           <span class="cm">// 削除: text 空</span>
+    expect(b.getText()).toBe(<span class="st">"XYZdef"</span>);
+
+    b.replace(<span class="st">0</span>, <span class="st">3</span>, <span class="st">"---"</span>);        <span class="cm">// 置換: from &lt; to, text あり</span>
+    expect(b.getText()).toBe(<span class="st">"---def"</span>);
+
+    expect(b.slice(<span class="st">0</span>, <span class="st">3</span>)).toBe(<span class="st">"---"</span>); <span class="cm">// 読む</span>
+    expect(b.length).toBe(<span class="st">6</span>);
+  });
+});</code></pre>
+
+    <p>これを <code>src/src/core/</code> に置いて <code>npx vitest run src/core/buffer.playground.test.ts</code> で走らせると PASS します。挿入は <code>from == to</code>、削除は <code>text</code> が空、置換は <code>from &lt; to</code> で <code>text</code> あり。<strong>3種類の操作が、たった1つの <code>replace</code> の引数違いで表せている</strong> —— Step 3・Step 5 で繰り返した主張が、自分の手元で PASS するのを見てください。</p>
+
+    <div class="box do"><div class="box-k">▸ さらに手を動かすなら</div>
+      <p>余力があれば、次を試してみてください。答えは自分の目で確かめられます。</p>
+      <ol>
+        <li>絵文字を入れてみる: <code>b.replace(0, 0, "😀")</code> のあと <code>b.length</code> がいくつになるか。<strong>1 ではなく 2</strong> になるはず（UTF-16 のサロゲートペア）。なぜ 2 なのかは第01章で正面から扱います。</li>
+        <li>範囲を逆に渡してみる: <code>b.slice(5, 2)</code> は何を返すか（JavaScript の <code>slice</code> の挙動を確かめる）。</li>
+        <li>（設計を考える）もし <code>SimpleBuffer</code> の代わりに、まったく別の持ち方（たとえば行ごとの配列）で <code>TextBuffer</code> を実装したら、上の演習テストは<strong>そのまま</strong>通るはずです。なぜ通ると言えるか、Step 4 の「境界」の話に戻って考えてみてください。</li>
+      </ol>
+    </div>
+
+    <h2>つまずき FAQ</h2>
+    <details class="qa"><summary>なぜ挿入・削除・置換を別々のメソッドにせず、<code>replace</code> 1つにまとめるの?</summary>
+      <div class="qa-body"><p>境界を小さく保つためです。メソッドが1つなら、実装側は<strong>1つのロジックだけ正しく書けばよく</strong>、上の層も<strong>1つの呼び方だけ覚えればよい</strong>。挿入は「幅ゼロの置換」、削除は「空文字への置換」と、すべて <code>replace</code> の特殊形として表せます。第03章の Undo でも「置換1つ」を逆向きにするだけで取り消せるので、種類ごとの分岐が消えて劇的に簡単になります。境界は狭いほど強い、というのが本書の一貫した立場です。</p></div>
+    </details>
+    <details class="qa"><summary><code>SimpleBuffer</code> が遅いなら、最初から速い実装を書けばよくない?</summary>
+      <div class="qa-body"><p>順序が逆です。速い実装（ピーステーブル）は<strong>間違えやすい</strong>。断片を継ぎ足したり境界をまたいだりするので、バグが入りやすいのです。そのバグを<strong>何が保証してくれるのか</strong>——それが <code>SimpleBuffer</code> です。「誰が見ても正しい遅い実装」を先に用意し、それをオラクル（正解の物差し）にして速い実装を検証する。この二段構えがあるからこそ、安心して速い実装に挑めます。<code>SimpleBuffer</code> は本番では使いませんが、テストの中で永遠に働き続けます。</p></div>
+    </details>
+    <details class="qa"><summary><code>anchor</code>/<code>head</code> と <code>rangeMin</code>/<code>rangeMax</code>、結局どう使い分けるの?</summary>
+      <div class="qa-body"><p><code>anchor</code>/<code>head</code> は<strong>方向</strong>（どちらが固定でどちらが動くか）、<code>rangeMin</code>/<code>rangeMax</code> は<strong>位置</strong>（どちらが前でどちらが後ろか）です。「選択を <code>Shift+←</code> で広げる」ときは <code>head</code> を動かす（方向の話）。「選択範囲を削除する」ときは <code>rangeMin</code>〜<code>rangeMax</code> を <code>replace</code> する（位置の話）。逆向き選択（<code>head &lt; anchor</code>）があり得るので、範囲を <code>replace</code> に渡す前には必ず <code>rangeMin</code>/<code>rangeMax</code> を通します。</p></div>
+    </details>
+
+    <h2>理解度チェック</h2>
+    <p>次の問いに<strong>自分の言葉で</strong>答えられたら、この章は卒業です。</p>
+    <details class="qa"><summary>1. エディタを構成する4つの部品を挙げ、なぜ「下から上へ」作るのか説明せよ。</summary>
+      <div class="qa-body"><p>4部品は ①<strong>テキストを持つ</strong>（バッファ）、②<strong>カーソルと編集</strong>、③<strong>画面に描く</strong>、④<strong>入力を受ける</strong>。下から作る理由は、上の部品が下に依存するから。描く（③）べきテキストは①がなければ存在せず、入力（④）を翻訳した先の編集は②がなければ適用できない。土台（①②、とくに DOM 非依存の純粋ロジック）を先に固め、テストで正しさを保証してから、その上に描画と入力を乗せる。</p></div>
+    </details>
+    <details class="qa"><summary>2. <code>Edit { from, to, text }</code> という1つの形で、挿入・削除・置換をどう表すか。</summary>
+      <div class="qa-body"><p><strong>挿入</strong>: <code>from == to</code> かつ <code>text</code> あり（幅ゼロの範囲に <code>text</code> を差し込む）。<strong>削除</strong>: <code>from &lt; to</code> かつ <code>text</code> が空（範囲を空文字で置き換える）。<strong>置換</strong>: <code>from &lt; to</code> かつ <code>text</code> あり。どれも「<code>[from, to)</code> を <code>text</code> で置き換える」の特殊形で、<code>TextBuffer.replace</code> 1つで実行できる。編集の種類ごとに別コードを書かずに済むのが利点。</p></div>
+    </details>
+    <details class="qa"><summary>3. 「最初にインターフェース（境界）を決める」ことで得られる2つの見返りは何か。</summary>
+      <div class="qa-body"><p>(1) <strong>実装を差し替えられる</strong>: 境界が「読む・置き換える」だけなら、遅い <code>SimpleBuffer</code> から速い <code>PieceTableBuffer</code> へ、上の層に触れずに乗り換えられる。(2) <strong>テストのオラクルが手に入る</strong>: 明らかに正しい素朴実装を正解の物差しにして、速い実装へ同じ操作を浴びせ、結果の一致を機械で検証できる。速い実装のバグを素朴実装が炙り出す。この二段構えが本書の品質保証の核。</p></div>
+    </details>
+
+    <h2>まとめ — 次の層へ</h2>
+    <p>この章で、エディタの<strong>頭の中の地図</strong>ができました。4つの部品への分解、位置を表す2つの座標系（オフセットと Position）、編集を1形に畳む <code>Edit</code>、選択とカーソルを1つにする <code>SelRange</code>、そしてこの本でいちばん大事な —— <strong>実装より先に境界を引く</strong>という作法。最下層の <code>TextBuffer</code> 境界を1本引き、その素朴な実装 <code>SimpleBuffer</code> を手に入れました。まだ画面もカーソルも動きませんが、以降10章ぶんの土台と、全 70 件のテストの<strong>正解の物差し</strong>は、もう手の中にあります。</p>
+    <p>次の第01章では、この境界の裏側に<strong>本命のバッファ</strong> —— ピーステーブル —— を据えます。<code>SimpleBuffer</code> が1文字ごとに全文コピーして重かった問題を、「元テキストと追記テキストへの<strong>参照の列</strong>」という発想で解きます。そして書き上げたそばから、この章で作った <code>SimpleBuffer</code> がオラクルとして正しさを見張ってくれます。エディタが「大きなファイルでも軽い」最初の一歩です。</p>
+
+    <div class="chap-foot">
+      <a class="pager" href="index.html"><span class="dir">← 前へ</span>序章 · はじめに・準備</a>
+      <a class="pager next" href="01-buffer.html"><span class="dir">次へ →</span>第01章 · テキストを持つ</a>
+    </div>
+  </main>
+</div>
+</body>
+</html>

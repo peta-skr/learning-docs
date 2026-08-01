@@ -1,0 +1,491 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>第08章 提出を「あとで」捌く — 手を動かして作るオンラインジャッジ</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500;600&family=Source+Serif+4:opsz,wght@8..60,400;8..60,600;8..60,700&family=Noto+Serif+JP:wght@400;600;700&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<div class="shell">
+
+  <aside class="spine">
+    <a class="wordmark" href="index.html">JUDGE · from scratch</a>
+    <div class="book-title">手を動かして作る<br>オンラインジャッジ</div>
+    <div class="book-sub">Go で サンドボックスから Web まで</div>
+
+    <div class="legend"><span>読む <b>↓</b></span><span>組む <b>↑</b></span></div>
+
+    <nav aria-label="目次">
+      <ul class="toc">
+        <li><a class="nav-item" href="index.html"><span class="nav-num">序</span><span class="nav-label">はじめに・準備<span class="nav-tag">Setup</span></span></a></li>
+        <li><a class="nav-item" href="00-smallest.html"><span class="nav-num">00</span><span class="nav-label">いちばん小さいジャッジ<span class="nav-tag">Judge</span></span></a></li>
+        <li><a class="nav-item" href="01-process.html"><span class="nav-num">01</span><span class="nav-label">プロセスと標準入出力<span class="nav-tag">IO</span></span></a></li>
+        <li><a class="nav-item" href="02-verdict.html"><span class="nav-num">02</span><span class="nav-label">verdict — 判定の種類<span class="nav-tag">Verdict</span></span></a></li>
+        <li><a class="nav-item" href="03-threat.html"><span class="nav-num">03</span><span class="nav-label">なぜ他人のコードは危険か<span class="nav-tag">Threat</span></span></a></li>
+        <li><a class="nav-item" href="04-sandbox.html"><span class="nav-num">04</span><span class="nav-label">コンテナに閉じ込める<span class="nav-tag">Sandbox</span></span></a></li>
+        <li><a class="nav-item" href="05-limits.html"><span class="nav-num">05</span><span class="nav-label">時間とメモリを断ち切る<span class="nav-tag">Limits</span></span></a></li>
+        <li><a class="nav-item" href="06-lang.html"><span class="nav-num">06</span><span class="nav-label">いろんな言語で<span class="nav-tag">Lang</span></span></a></li>
+        <li><a class="nav-item" href="07-store.html"><span class="nav-num">07</span><span class="nav-label">問題とテストケースを持つ<span class="nav-tag">Store</span></span></a></li>
+        <li><a class="nav-item current" aria-current="page" href="08-queue.html"><span class="nav-num">08</span><span class="nav-label">提出を「あとで」捌く<span class="nav-tag">Queue</span></span></a></li>
+        <li><a class="nav-item" href="09-web.html"><span class="nav-num">09</span><span class="nav-label">画面をつける<span class="nav-tag">Web</span></span></a></li>
+      </ul>
+    </nav>
+
+    <div class="spine-foot">
+      各章は「実行の心臓部」から<br>始めて「Web」へ登る。<br>下（採点の核）から上（画面）へ<br>積み上げて動かしていく。
+    </div>
+  </aside>
+
+  <main class="reading">
+    <div class="progress-tag">第08章 / 全10章 · 層: QUEUE · 読了目安 2〜3時間</div>
+    <div class="eyebrow"><span>QUEUE</span><span class="depth">— 受け付けと採点を分ける層</span></div>
+    <h1>提出を「あとで」捌く</h1>
+    <p class="lede">採点には数秒〜十数秒かかります。コンパイル用の Docker コンテナを1つ立て、続いて実行用のコンテナを1つ立て、その実行コンテナの中で全テストケースを1件ずつ直列に走らせる——これを提出のたびにユーザーの目の前で待たせるわけにはいきません。この章では<strong>「提出を受け付けたら即座に『採点中』を返し、裏で1件ずつ捌く」</strong>非同期処理（要件 NF-09）を組みます。外部のメッセージキューは使いません。Go の <code>channel</code> と goroutine だけで、単一プロセス内に完結する軽量なジョブキューを作ります。</p>
+
+    <div class="box goal"><div class="box-k">◈ この章のゴール</div>
+      <p>次の 3 つを、自分の目と手で確認できたら達成です。</p>
+      <ol>
+        <li>提出 API（<code>POST /api/submissions</code>）が採点の完了を待たず、<strong>即座に <code>202 Accepted</code> と提出 ID を返す</strong>——その「受け付けと採点の分離」を、<code>Worker</code> の <code>Enqueue</code> と <code>process</code> の関係で説明できる。</li>
+        <li>ワーカー goroutine が<strong>キュー（<code>chan int64</code>）から1件ずつ取り出して直列に採点する</strong>理由（Docker の同時起動数を抑え、ホストの資源を守る）を自分の言葉で言える。</li>
+        <li>キューが満杯になったとき（<code>Enqueue</code> の <code>default</code>）、ワーカーが panic したとき（<code>recover</code>）、それぞれ<strong>何が起きるか</strong>を追える。</li>
+      </ol>
+    </div>
+
+    <div class="box map"><div class="box-k">☰ この章のステップ</div>
+      <ol>
+        <li><a href="#step-1">なぜ非同期か — 同期採点が詰まる理由</a></li>
+        <li><a href="#step-2">キューとワーカーの全体像 — 受け付けと採点を分ける</a></li>
+        <li><a href="#step-3">channel でキューを作る — <code>Worker</code> と <code>NewWorker</code></a></li>
+        <li><a href="#step-4">キューに積む — <code>Enqueue</code> と溢れたときの <code>default</code></a></li>
+        <li><a href="#step-5">ワーカー goroutine が1件ずつ捌く — <code>Start</code> の <code>for-select</code></a></li>
+        <li><a href="#step-6">1提出を採点する — <code>process</code> とステータス pending→running→done</a></li>
+        <li><a href="#step-7">API 側から見る — 提出は即 202、フロントはポーリング</a></li>
+      </ol>
+    </div>
+
+    <h2>なぜ「あとで」なのか</h2>
+    <p>第00〜07章で、採点の芯（比較・判定）と、それを支える実行機構（Docker 隔離・時間/メモリ制限・複数言語）、そして問題とテストケースの保管（DB）までを積み上げました。第00章で読んだ <code>JudgeSubmission</code> は、<strong>1提出を最後まで採点しきる</strong>関数です。コンパイルし、全テストケースを Docker で走らせ、verdict を返す。中身は正しい。問題は、<strong>それに数秒〜十数秒かかる</strong>ことです。</p>
+    <p>もし提出 API が「<code>JudgeSubmission</code> を呼び、その戻り値を待ってから応答を返す」という素直な同期処理だったら、どうなるでしょう。ユーザーは提出ボタンを押してから、コンパイルとコンテナ起動が全部終わるまで、<strong>ブラウザの前で十数秒フリーズしたまま待たされます</strong>。しかもその間、その HTTP リクエストを処理している goroutine は採点にかかりきりで、他のリクエストを捌けません。何人か（あるいは本人が連打で）同時に提出したら、サーバは<strong>採点待ちの接続で詰まります</strong>。</p>
+    <p>だから採点は「<strong>あとで</strong>」やります。提出を受けたら、その場では<strong>「受け付けました、採点中です」とだけ即答</strong>し、実際の採点は裏側のワーカーに任せる。ユーザーは待たされず、サーバの受付口はすぐ空く。ユーザーの画面は「採点中…」の表示のまま、少し経ってから結果を<strong>取りに行く</strong>（ポーリングする）。この<strong>受け付けと採点の分離</strong>が、この章で作る非同期処理の核心です。</p>
+
+    <h2>この層が上と下に約束すること</h2>
+    <p>この章で作る層（ジョブキュー）は、上（Web/API）と下（採点ロジック）の間に立ちます。両側への約束をはっきりさせておきます。</p>
+    <ul>
+      <li><strong>上（API）へ</strong>: 提出 ID を渡してくれれば、<strong>ブロックせずに即座にキューへ積む</strong>。積めたら <code>nil</code>、満杯なら即エラーを返す（呼び出し側が <code>503</code> を返せるように）。採点の完了は待たせない。</li>
+      <li><strong>下（採点）へ</strong>: 積まれた提出を、<strong>1件ずつ直列に</strong> <code>JudgeSubmission</code> にかける。同時に2件を Docker へ流し込んだりはしない。</li>
+      <li><strong>DB へ</strong>: 採点の進行に合わせて、提出のステータスを <code>pending</code>（受付済み）→ <code>running</code>（採点中）→ <code>done</code>（確定）と更新する。結果は<strong>ケース単位</strong>で保存する（現状はコンテナ終了後、確定直前に一括で書かれる。コンテナ出力の受け取り方を改めれば、そのまま途中経過を流し込める受け口になっている → Step 6）。</li>
+    </ul>
+    <p>そして、この層が<strong>やらない</strong>ことも明確です。採点そのものの中身（どう比較し、どう Docker で隔離するか）は一切見ません。それは <code>JudgeSubmission</code>（第00〜06章）の仕事です。この層は「<strong>いつ・どの順で・どれだけ並列に</strong>採点を走らせるか」という<strong>スケジューリング</strong>だけを担います。「採点する」と「採点を段取りする」を分ける——この規律が、キューのコードをたった100行に収めています。</p>
+
+    <h2 class="step" id="step-1"><span class="step-no">Step 1</span>なぜ非同期か — 同期採点が詰まる理由</h2>
+    <p>コードを書く前に、「同期だと何が起きるか」を具体的に体感します。仮に提出ハンドラをこう書いたとします（これは<strong>作らない</strong>反面教師です）。</p>
+    <pre><code><span class="cm">// ❌ 同期採点（やってはいけない例）</span>
+<span class="kw">func</span> handleSubmit(w http.<span class="ty">ResponseWriter</span>, r *http.<span class="ty">Request</span>) {
+	id := createSubmission(...)
+	out := judger.JudgeSubmission(ctx, job, ...) <span class="cm">// ← ここで十数秒ブロックする</span>
+	writeJSON(w, <span class="st">200</span>, out)                       <span class="cm">// 採点が終わるまで応答が返らない</span>
+}</code></pre>
+    <p>この <code>JudgeSubmission</code> の一行が、致命的です。中では、コンパイル用のコンテナを1つ（Go なら数秒。JS/SQL などコンパイル不要な言語なら0個）＋実行用のコンテナを1つ立て、その実行コンテナの中で<strong>全テストケースを直列にループ</strong>します。つまり採点1件で立つコンテナは<strong>最大2つ</strong>ですが、時間は「ケース数 × 1ケースの制限時間」がコンテナの中で積み上がる——10ケースで制限時間1秒なら、実行段だけで最悪10秒前後。コンパイル数秒と合わせて軽く十数秒。その間ずっと、この HTTP リクエストの goroutine は<strong>戻ってきません</strong>。結果、こういう連鎖が起きます。</p>
+    <div class="ascii">同期採点が詰まる連鎖
+
+  ① ユーザーが提出ボタンを押す
+       ▼
+  ② handleSubmit が JudgeSubmission を呼ぶ ──┐
+       │  コンパイル用コンテナ 1つ(数秒)      │ この間ずっと
+       │  実行用コンテナ 1つ ─────────────────│ 応答が返らない
+       │    └ 中でケースを直列ループ           │ ＝ ブラウザは
+       │      (ケース数 × 制限時間 が積算)     │   「読み込み中」で
+       ▼                                      │   フリーズ
+  ③ ようやく verdict が返り、応答を書く ──────┘
+
+  さらに悪いこと：
+  ・同時に3人（or 本人が3連打）提出すると
+    → 採点が3件同時に走り、各々が実行コンテナ(メモリ上限256MB)を
+      要求 → 3倍のメモリ上限がホストにのしかかる
+    → 全部が遅くなり、最悪 OOM で共倒れ
+  ・受付口（HTTP goroutine）が採点で塞がり、
+    問題一覧を見るだけの軽いリクエストまで待たされる</div>
+    <p>問題は2つあります。<strong>(1) 応答が遅い</strong>——ユーザーを十数秒待たせるのは、それだけで使い物になりません。<strong>(2) 資源が守れない</strong>——同時提出のぶんだけ Docker コンテナが無制限に立ち上がり、ホストの CPU とメモリを食い潰します。要件で言えば NF-09（提出は非同期に受け付ける）に真っ向から反し、NF の資源制限（第05章）も、コンテナが同時に何個も立てば意味をなしません。</p>
+    <p>解決策は、<strong>「受け付け」と「採点」を時間的に切り離す</strong>ことです。受け付けは一瞬で終わらせ（DB に1行 INSERT してキューに積むだけ）、採点は裏の<strong>1本のワーカー</strong>が、キューから1件ずつ取り出して直列に処理する。こうすれば応答は即座に返り、Docker コンテナは<strong>同時に高々1つ</strong>しか立たないので資源も守れます。この「一瞬の受け付け＋直列の裏方」が、これから作るものです。</p>
+
+    <h2 class="step" id="step-2"><span class="step-no">Step 2</span>キューとワーカーの全体像 — 受け付けと採点を分ける</h2>
+    <p>作るのは <code>internal/judge/worker.go</code> の <code>Worker</code> 型、たった1つです。役割は3つに分かれます——<strong>キューを持つ</strong>・<strong>キューに積む（<code>Enqueue</code>）</strong>・<strong>キューから取り出して採点する（ワーカー goroutine）</strong>。全体を絵にします。</p>
+    <div class="ascii">受け付けと採点の分離 — Worker の全体像
+
+  ┌─ HTTP 側（受け付け・一瞬で終わる）──────────────┐
+  │                                                  │
+  │  POST /api/submissions                           │
+  │    │ ① DB に提出を1行 INSERT（status=pending）   │
+  │    │ ② Enqueue(id) でキューに積む                │
+  │    ▼                                             │
+  │  202 Accepted + {"id": 42} を即返す ─────────────┼──▶ フロントは
+  │                                                  │    このあと
+  └──────────────────┬───────────────────────────────┘    ポーリング
+                     │ キューに id が1つ積まれた
+                     ▼
+  ┌─ Worker のキュー（chan int64, バッファ1024）─────┐
+  │   [ 42 ][ 43 ][   ][   ] ...                      │
+  └──────────────────┬───────────────────────────────┘
+                     │ ワーカー goroutine が
+                     │ 1件ずつ取り出す（直列）
+                     ▼
+  ┌─ ワーカー goroutine（裏方・1本だけ）─────────────┐
+  │  for { id := <-queue                             │
+  │        process(id):                              │
+  │          status=running に更新                   │
+  │          JudgeSubmission(...) ← 採点本体          │
+  │            └ コンテナ終了後、結果をケース単位で   │
+  │              DB 保存（確定直前に一括 → Step 6）   │
+  │          status=done + verdict に更新            │
+  │  }                                               │
+  └──────────────────────────────────────────────────┘</div>
+    <p>絵の要点は「<strong>キュー（<code>chan</code>）が、受け付け側と採点側の唯一の接点</strong>」であることです。HTTP ハンドラは提出 ID をキューに<strong>投げ込むだけ</strong>で、採点の面倒を一切見ずに応答を返せます。ワーカーは、キューから<strong>1件ずつ拾って</strong>採点するだけで、誰が積んだかを気にしません。両者は「キューに <code>int64</code>（提出 ID）が流れる」という細い管一本でつながり、それ以外では独立して動きます。この疎結合が、非同期処理を見通しよくします。</p>
+    <p>なぜキューに流すのが提出<strong>ID（<code>int64</code>）</strong>だけで、提出内容そのもの（コードやテストケース）ではないのか。理由は2つあります。第一に、提出は Step 7 で見るように<strong>すでに DB に保存済み</strong>なので、ID さえあればワーカーが後から全部引ける。第二に、ID だけならサーバが途中で再起動しても、<strong>DB に残った pending の提出を起動時に拾い直せる</strong>（章末の FAQ で触れます）。「キューには軽い参照だけを流し、実体は DB に置く」——これは重い処理をジョブ化するときの定石です。</p>
+
+    <h2 class="step" id="step-3"><span class="step-no">Step 3</span>channel でキューを作る — Worker と NewWorker</h2>
+    <p>まず器を作ります。<code>Worker</code> 型と、その生成関数 <code>NewWorker</code> です。ファイルの先頭から順に読みます。</p>
+
+    <div class="file-tag">internal/judge/worker.go</div>
+    <pre><code><span class="kw">package</span> judge
+
+<span class="kw">import</span> (
+	<span class="st">"context"</span>
+	<span class="st">"fmt"</span>
+	<span class="st">"log"</span>
+
+	<span class="st">"judge/internal/store"</span>
+)
+
+<span class="cm">// Worker は提出キューを直列に処理する（NF-09: 非同期受け付け）。</span>
+<span class="cm">// 並列度1で決定性と資源消費を優先する（単一ユーザー前提）。</span>
+<span class="kw">type</span> <span class="ty">Worker</span> <span class="kw">struct</span> {
+	store  *store.<span class="ty">Store</span>
+	judger *<span class="ty">Judger</span>
+	queue  <span class="kw">chan</span> <span class="ty">int64</span>
+}
+
+<span class="kw">func</span> NewWorker(st *store.<span class="ty">Store</span>, judger *<span class="ty">Judger</span>) *<span class="ty">Worker</span> {
+	<span class="kw">return</span> &amp;<span class="ty">Worker</span>{store: st, judger: judger, queue: <span class="kw">make</span>(<span class="kw">chan</span> <span class="ty">int64</span>, <span class="st">1024</span>)}
+}</code></pre>
+
+    <p><code>Worker</code> が抱えるフィールドは3つだけです。<strong><code>store</code></strong> は提出のステータスや結果を保存する DB 層（第07章）。<strong><code>judger</code></strong> は採点本体、つまり <code>JudgeSubmission</code> を持つ第00〜06章の主役。そして<strong><code>queue</code></strong>——これが<strong>この章の主役、ジョブキューそのもの</strong>です。型は <code>chan int64</code>。「<code>int64</code>（提出 ID）が流れるチャネル」という意味で、<strong>これ一本がキューの実体</strong>です。外部の Redis も RabbitMQ も要りません。Go の言語機能だけでキューが手に入ります。</p>
+    <p>キューの正体を握るのが <code>NewWorker</code> の中の <code>make(chan int64, 1024)</code> です。第2引数の <code>1024</code> が<strong>バッファ容量</strong>——「受信側が受け取る前に、送信側が先に積んでおける個数」です。ここが <code>0</code>（バッファなし）だと、チャネルへの送信は<strong>受信側が受け取るまでブロック</strong>します。それでは <code>Enqueue</code> が「ワーカーが手すきになるまで待つ」ことになり、受け付けが一瞬で終わらなくなってしまう。<strong>バッファを 1024 持たせることで、ワーカーが採点中でも、送信側（HTTP ハンドラ）はブロックせずに積める</strong>——最大1024件までは。この「バッファ付きチャネル」が、受け付けと採点の非同期性を成立させる要です。</p>
+
+    <div class="gonote"><div class="box-k">GO メモ · chan とバッファ付きチャネル make(chan T, n)</div>
+      <p><code>chan int64</code> は「<code>int64</code> が流れる<strong>チャネル</strong>」——goroutine 間で値を安全に受け渡すための、Go 組み込みのパイプです。<code>ch &lt;- v</code> で送信、<code>v := &lt;-ch</code> で受信します。ロックやミューテックスを自分で書かなくても、チャネルを通せば<strong>複数の goroutine が同じキューを安全に共有</strong>できます（"Do not communicate by sharing memory; instead, share memory by communicating" が Go の合言葉）。<br>
+      <code>make(chan int64, 1024)</code> の第2引数がバッファ容量です。<strong>バッファなし（<code>make(chan int64)</code>）</strong>だと送信は受信されるまでブロックする「手渡し」ですが、<strong>バッファあり</strong>だと容量に空きがある限り送信は即座に戻る「郵便受け」になります。ここでは「HTTP ハンドラは投函したらすぐ立ち去りたい」ので、バッファ付きを選びます。バッファが満杯になったら送信はブロックする——が、そのブロックすら避ける工夫が Step 4 の <code>select</code> です。</p>
+    </div>
+
+    <h2 class="step" id="step-4"><span class="step-no">Step 4</span>キューに積む — Enqueue と溢れたときの default</h2>
+    <p>受け付け側が呼ぶのが <code>Enqueue</code> です。「提出 ID をキューに積む。ただし<strong>絶対にブロックしない</strong>」——ここがこの関数のすべてです。</p>
+
+    <div class="file-tag">internal/judge/worker.go（つづき）</div>
+    <pre><code><span class="cm">// Enqueue は提出をキューに積む。満杯なら即エラー（呼び出し側が 503 を返す）。</span>
+<span class="kw">func</span> (w *<span class="ty">Worker</span>) Enqueue(submissionID <span class="ty">int64</span>) <span class="ty">error</span> {
+	<span class="kw">select</span> {
+	<span class="kw">case</span> w.queue &lt;- submissionID:
+		<span class="kw">return</span> <span class="kw">nil</span>
+	<span class="kw">default</span>:
+		<span class="kw">return</span> fmt.Errorf(<span class="st">"judge queue is full"</span>)
+	}
+}</code></pre>
+
+    <p>この <code>select</code> が、この章でいちばん味わってほしいイディオムです。<strong><code>select</code> は複数のチャネル操作のうち、いま実行できるものを選ぶ</strong>制御構文。ここには2つの枝があります。</p>
+    <ul>
+      <li><strong><code>case w.queue &lt;- submissionID:</code></strong> ——「キューに <code>submissionID</code> を送れるなら送る」。バッファに空きがあれば、この送信は即座に成功し、<code>return nil</code>（積めた）で戻ります。</li>
+      <li><strong><code>default:</code></strong> ——「<strong>どの <code>case</code> も今すぐには実行できないとき</strong>に走る枝」。<code>select</code> に <code>default</code> があると、送信可能な <code>case</code> が1つも無い（＝キューが満杯でブロックしてしまう）瞬間に、<strong>ブロックせず即座に</strong> <code>default</code> へ落ちます。ここで <code>"judge queue is full"</code> エラーを返します。</li>
+    </ul>
+    <p>この「<code>select</code> + <code>default</code>」の組み合わせが、<strong>ノンブロッキング送信</strong>という定石です。<code>default</code> が無ければ、キューが満杯のとき <code>w.queue &lt;- submissionID</code> は<strong>ワーカーが1件消化して空きが出るまでブロック</strong>してしまい、HTTP ハンドラが固まります。それでは非同期の意味がありません。<code>default</code> を置くことで「<strong>積めるなら積む、無理なら諦めて即エラー</strong>」に変わり、受け付けは<strong>どんなときも一瞬で終わる</strong>ことが保証されます。</p>
+    <p>では、満杯で <code>Enqueue</code> がエラーを返したとき、呼び出し側はどうするか。Step 7 で全文を見ますが、API 側はこのエラーを受けて<strong>HTTP <code>503 Service Unavailable</code></strong>（いま混んでいるので後で再試行して）を返します。1024 件も採点待ちが溜まっている状況は、単一ユーザー前提のこのジャッジではまず起きませんが、「起きたら黙って握り潰さず、正直に『満杯です』と返す」——ここでも<strong>疑わしいときに嘘の verdict を出さない</strong>という本書の思想が効いています（満杯の提出を勝手に <code>WA</code> にしたりはしません。Step 7 では <code>IE</code> にして「こちらの都合で採点できなかった」と正直に記録します）。</p>
+
+    <div class="gonote"><div class="box-k">GO メモ · select と default によるノンブロッキング操作</div>
+      <p><code>select</code> は「複数のチャネル操作を待ち受け、<strong>準備できたものを1つ選んで実行する</strong>」構文です。<code>switch</code> に似ていますが、条件式ではなく<strong>チャネルの送受信</strong>を並べます。複数の <code>case</code> が同時に可能なら<strong>ランダムに1つ</strong>選ばれ、どれも不可能なら（<code>default</code> が無い限り）いずれか可能になるまで<strong>ブロック</strong>します。<br>
+      ここに <strong><code>default</code></strong> を足すと性質が一変します。「実行可能な <code>case</code> が今この瞬間に1つも無ければ、待たずに <code>default</code> へ行く」。これが<strong>ノンブロッキング</strong>のイディオムです。<code>select { case ch &lt;- v: ...; default: ... }</code> は「送れたら送る、詰まってたら諦める」。逆に <code>select { case v := &lt;-ch: ...; default: ... }</code> は「あれば受け取る、無ければ諦める」。チャネルで詰まりたくない全ての場面で使う、Go の必須パターンです。</p>
+    </div>
+
+    <h2 class="step" id="step-5"><span class="step-no">Step 5</span>ワーカー goroutine が1件ずつ捌く — Start の for-select</h2>
+    <p>キューに積む側ができました。今度は<strong>取り出して採点する側</strong>——裏方のワーカー goroutine です。それを起動するのが <code>Start</code> です。</p>
+
+    <div class="file-tag">internal/judge/worker.go（つづき）</div>
+    <pre><code><span class="kw">func</span> (w *<span class="ty">Worker</span>) Start(ctx context.<span class="ty">Context</span>) {
+	<span class="kw">go</span> <span class="kw">func</span>() {
+		<span class="kw">for</span> {
+			<span class="kw">select</span> {
+			<span class="kw">case</span> &lt;-ctx.Done():
+				<span class="kw">return</span>
+			<span class="kw">case</span> id := &lt;-w.queue:
+				w.process(ctx, id)
+			}
+		}
+	}()
+}</code></pre>
+
+    <p>短いですが、非同期処理の背骨がすべて詰まっています。上から解きます。</p>
+    <p><strong><code>go func() { ... }()</code> でワーカーを<em>別の流れ</em>として起動する。</strong> <code>go</code> キーワードを付けて関数を呼ぶと、その関数は<strong>新しい goroutine（軽量スレッド）</strong>として、呼び出し元とは<strong>並行に</strong>走り出します。<code>Start</code> 自体は <code>go func(){...}()</code> を書いたら<strong>すぐに戻ります</strong>（中の無限ループを待ったりしません）。だから <code>main</code> は <code>worker.Start(ctx)</code> を呼んだあと、そのまま HTTP サーバの起動へ進めます。ワーカーは<strong>裏で回り続ける独立した番人</strong>になります。</p>
+    <p><strong><code>for { select { ... } }</code> が「取り出しては捌く」の永久ループ。</strong> 無限ループの中の <code>select</code> が、2つの入力を待ち受けます。</p>
+    <ul>
+      <li><strong><code>case id := &lt;-w.queue:</code></strong> ——「キューに提出 ID が来たら、それを受け取って <code>w.process(ctx, id)</code> で採点する」。キューが空なら、この受信は<strong>次の1件が積まれるまで静かにブロック</strong>します（CPU を回して待ったりしません。チャネル受信は「来るまで眠る」ので効率的）。1件来たら起きて、<strong><code>process</code> が終わるまで次を取りません</strong>。この「<code>process</code> が終わってからループ先頭に戻り、次の <code>&lt;-w.queue</code> を待つ」構造こそが、<strong>採点を1件ずつ直列に捌く</strong>正体です。</li>
+      <li><strong><code>case &lt;-ctx.Done():</code></strong> ——「<code>ctx</code>（コンテキスト）がキャンセルされたら <code>return</code> でループを抜け、goroutine を終わらせる」。<code>ctx</code> を通じてこのワーカーに「もう終わっていい」と伝えるための出口です。ただし<strong>正直に言うと、本書の <code>main</code> はここに <code>context.Background()</code>（決してキャンセルされないコンテキスト）を渡している</strong>ので、この出口は今の配線では<strong>実際には発火しません</strong>——プロセスは Ctrl-C や kill でそのまま落ち、採点途中だった提出の後始末は、<strong>次回起動時の <code>ResetInterrupted</code>（<code>running</code> を <code>IE</code> に、<code>pending</code> を再エンキュー。章末 FAQ 参照）</strong>が担います。それでもこの停止口を<strong>最初から通しておく</strong>のは、将来グレースフルシャットダウン（キャンセル可能な <code>ctx</code> を渡し、終了前にワーカーを畳む）を入れたくなったときのための保険であり、<strong>停止の管を持たない長生き goroutine を作らない</strong>という行儀のよさの表明でもあります。</li>
+    </ul>
+    <p>ここで<strong>「なぜワーカーは1本だけなのか」</strong>——この章のいちばん大事な設計判断を言葉にします。もし <code>go func(){...}()</code> を <code>for i := 0; i &lt; 5; i++</code> のループで5回起動すれば、5本のワーカーが<strong>同じ <code>w.queue</code> から並行に取り出し</strong>、採点を5並列で走らせられます（チャネルは複数の受信者で安全に共有できる）。速くなりそうに見えます。しかし本書はあえて<strong>1本だけ</strong>にしています。理由は Step 1 で見た通り——採点1件は実行コンテナに<strong>メモリ上限（256MB 等）を丸ごと要求</strong>し、その中でケースを直列に回して CPU を食います。ワーカーを5本にすれば、最悪<strong>5件の採点が同時に走り、実行コンテナ5つ ＝ 5倍のメモリ上限が同時にホストにのしかかり</strong>、ホストの資源を食い潰して共倒れします。<strong>並列度を1に固定する</strong>のは、単一ユーザー・単一ホスト前提のこのジャッジで、<strong>資源消費を予測可能に保ち、採点の順序と結果を決定的にする</strong>ための、意図的で保守的な選択です（型定義のコメント「並列度1で決定性と資源消費を優先する」がこれを宣言しています）。</p>
+
+    <div class="box hazard"><div class="box-k">⚠ 落とし穴 — ワーカーを増やしすぎると Docker が資源を食い潰す</div>
+      <p>「採点が遅いなら並列化すれば速くなる」——この直感は、サンドボックスを伴うジャッジでは危険です。ワーカーを N 本に増やすと、最悪<strong>N 件ぶんの採点が同時に走り</strong>、それぞれが実行コンテナを立ててメモリ制限（第05章で1件あたり 256MB 等に設定した）を丸ごと要求するので、ホストは<strong>N 倍のメモリ上限</strong>を一度に背負います。ホストの物理メモリを超えれば、カーネルの OOM killer が暴れ、<strong>採点中の無関係なコンテナまで巻き込んで殺され</strong>、正しい提出が <code>MLE</code> や <code>IE</code> に化けます。CPU も同様で、N 本が CPU を奪い合えば<strong>全部が遅くなり、時間計測が不安定になって <code>TLE</code> が乱れます</strong>。並列度を上げるなら、<strong>ホストの資源 ÷ 1採点あたりの上限</strong>から逆算した安全な本数に留め、コンテナ側の資源制限（第05章）と<strong>必ずセットで</strong>調整すること。本書が並列度1に固定するのは、この地雷原を最初から避けるためです。単一ユーザーなら1本で全く困りません。</p>
+    </div>
+
+    <div class="gonote"><div class="box-k">GO メモ · go / goroutine / for-select / context.Done()</div>
+      <p><strong><code>go f()</code></strong> は「<code>f()</code> を新しい goroutine で並行に走らせ、自分はすぐ次へ進む」。goroutine は OS スレッドより桁違いに軽く（初期数 KB）、数千・数万を平気で起動できます。ここでは1本しか使いませんが、その軽さゆえに「裏方を1本立てる」ことのコストがほぼゼロなのが Go の強みです。<br>
+      <strong><code>for { select { ... } }</code></strong> は「複数の入力を待ち受けながら回り続ける」goroutine の定番の形。イベントループそのものです。<code>case id := &lt;-w.queue</code> で仕事を、<code>case &lt;-ctx.Done()</code> で停止指示を、同じ <code>select</code> で待てます。<br>
+      <strong><code>ctx.Done()</code></strong> は「このコンテキストがキャンセル/期限切れになったら<strong>閉じられるチャネル</strong>」を返します。閉じたチャネルからの受信は即座に成功するので、<code>case &lt;-ctx.Done(): return</code> は「キャンセルされたら抜ける」を表す慣用句です。長生きする goroutine には必ずこの停止口を付けます。</p>
+    </div>
+
+    <h2 class="step" id="step-6"><span class="step-no">Step 6</span>1提出を採点する — process とステータス pending→running→done</h2>
+    <p>ワーカーが1件取り出すたびに呼ばれるのが <code>process</code> です。ここが「1提出を採点し、DB のステータスを進める」本体です。少し長いので、まず全文を載せ、そのあと4つの塊に分けて読みます。</p>
+
+    <div class="file-tag">internal/judge/worker.go（つづき）</div>
+    <pre><code><span class="cm">// process は1提出を採点する。panic しても該当提出を IE にして生き残る（NF-08）。</span>
+<span class="kw">func</span> (w *<span class="ty">Worker</span>) process(ctx context.<span class="ty">Context</span>, id <span class="ty">int64</span>) {
+	<span class="kw">defer</span> <span class="kw">func</span>() {
+		<span class="kw">if</span> r := <span class="kw">recover</span>(); r != <span class="kw">nil</span> {
+			log.Printf(<span class="st">"judge panic (submission %d): %v"</span>, id, r)
+			_ = w.store.FinishSubmission(id, <span class="kw">string</span>(IE), <span class="st">"judge panicked"</span>, <span class="st">0</span>, <span class="st">0</span>)
+		}
+	}()
+
+	sub, err := w.store.GetSubmission(id)
+	<span class="kw">if</span> err != <span class="kw">nil</span> {
+		log.Printf(<span class="st">"submission %d not found: %v"</span>, id, err)
+		<span class="kw">return</span>
+	}
+	problem, err := w.store.GetProblemByID(sub.ProblemID)
+	<span class="kw">if</span> err != <span class="kw">nil</span> {
+		_ = w.store.FinishSubmission(id, <span class="kw">string</span>(IE), <span class="st">"problem not found"</span>, <span class="st">0</span>, <span class="st">0</span>)
+		<span class="kw">return</span>
+	}
+	cases, err := w.store.GetTestcases(problem.ID)
+	<span class="kw">if</span> err != <span class="kw">nil</span> {
+		_ = w.store.FinishSubmission(id, <span class="kw">string</span>(IE), <span class="st">"failed to load testcases"</span>, <span class="st">0</span>, <span class="st">0</span>)
+		<span class="kw">return</span>
+	}
+	<span class="kw">if</span> err := w.store.SetSubmissionRunning(id); err != <span class="kw">nil</span> {
+		log.Printf(<span class="st">"submission %d: set running: %v"</span>, id, err)
+	}
+
+	out := w.judger.JudgeSubmission(ctx, <span class="ty">Job</span>{
+		SubmissionID: id,
+		Language:     sub.Language,
+		Code:         sub.Code,
+		Problem:      problem,
+		Cases:        cases,
+	}, <span class="kw">func</span>(tc store.<span class="ty">Testcase</span>, v <span class="ty">Verdict</span>, timeMS, memKB <span class="ty">int</span>, actual, stderr <span class="ty">string</span>) {
+		<span class="cm">// ケースごとに逐次保存 → ポーリング中のフロントに進行状況が見える</span>
+		<span class="kw">if</span> err := w.store.AddResult(&amp;store.<span class="ty">SubmissionResult</span>{
+			SubmissionID:  id,
+			TestcaseID:    tc.ID,
+			Verdict:       <span class="kw">string</span>(v),
+			TimeMS:        timeMS,
+			MemoryKB:      memKB,
+			ActualSnippet: actual,
+			StderrSnippet: stderr,
+		}); err != <span class="kw">nil</span> {
+			log.Printf(<span class="st">"submission %d: save case result: %v"</span>, id, err)
+		}
+	})
+
+	<span class="kw">if</span> out.InternalNote != <span class="st">""</span> {
+		log.Printf(<span class="st">"submission %d internal note: %s"</span>, id, out.InternalNote)
+	}
+	<span class="kw">if</span> err := w.store.FinishSubmission(id, <span class="kw">string</span>(out.Verdict), out.CompileOutput, out.MaxTimeMS, out.MaxMemoryKB); err != <span class="kw">nil</span> {
+		log.Printf(<span class="st">"submission %d: finish: %v"</span>, id, err)
+	}
+}</code></pre>
+
+    <p>4つの塊に分けて読みます。<strong>①panic の防波堤 → ②材料を DB から集める → ③採点中(running)に印を付けて採点する → ④結果を確定(done)する</strong>という流れです。</p>
+
+    <p><strong>① 先頭の <code>defer</code> は、ワーカーが死なないための防波堤。</strong> <code>process</code> の一番上にある <code>defer func(){ if r := recover(); ... }()</code> は、<strong>この関数の中で panic が起きても、それを捕まえてワーカー goroutine を生き延びさせる</strong>ための仕掛けです。もしこれが無いと、ある1件の採点中に予期せぬ panic（nil ポインタ参照、想定外のデータなど）が起きた瞬間、<strong>ワーカー goroutine ごと死に、それ以降のすべての提出が永久に採点されなくなります</strong>。<code>recover()</code> は panic を捕まえて通常フローに戻す関数で、ここで捕まえたら「その提出を <code>IE</code>（ジャッジ側の異常、NF-08）にして記録し、ワーカーはループへ戻って次の提出を捌き続ける」。<strong>1件の事故が全体を止めない</strong>——非同期ワーカーの生命線です。</p>
+
+    <p><strong>② 材料を DB から集める。</strong> キューから来たのは提出 <strong>ID だけ</strong>（Step 2 で見た通り）なので、採点に必要な材料を DB から引き直します。<code>GetSubmission(id)</code> で提出本体（言語・コード）、<code>GetProblemByID</code> で問題、<code>GetTestcases</code> でテストケース群。ここで<strong>それぞれの失敗の扱いが違う</strong>のが読みどころです。</p>
+    <ul>
+      <li><strong>提出が見つからない</strong>（<code>GetSubmission</code> がエラー）→ ログを出して <code>return</code> する<strong>だけ</strong>。<code>FinishSubmission</code> すら呼びません。なぜなら、そもそも提出レコードが存在しない以上、<strong>ステータスを更新すべき対象がない</strong>からです（更新しようがない）。ありえない事態なのでログに残して静かに諦めます。</li>
+      <li><strong>問題やテストケースが引けない</strong>（<code>GetProblemByID</code> / <code>GetTestcases</code> がエラー）→ その提出を <code>IE</code> で確定して <code>return</code>。提出は実在するのに採点の前提データが壊れている——これは<strong>提出者に非はなく、ジャッジ/データ側の異常</strong>なので、第00章で立てた <code>IE</code> の定義そのままに <code>IE</code> へ倒します。<code>WA</code> にして正しい提出者を誣告することはしません。</li>
+    </ul>
+
+    <p><strong>③ 「採点中」に印を付けてから、採点本体を呼ぶ。</strong> 材料が揃ったら <code>SetSubmissionRunning(id)</code> でステータスを <code>running</code> に更新します。これがフロントの「採点中…」表示の裏付けです（第07章の <code>SetSubmissionRunning</code> は <code>UPDATE submissions SET status='running'</code> を打つだけ）。そして採点本体 <code>w.judger.JudgeSubmission(ctx, Job{...}, コールバック)</code> を呼びます。第1引数 <code>ctx</code> は締め切り・中断を運ぶ管（序章）、第2引数 <code>Job</code> は「この提出を採点せよ」の材料一式（言語・コード・問題・ケース群）を詰めた箱です。</p>
+    <p>第3引数の<strong>コールバック関数</strong>が、この章ならではの見どころです。<code>JudgeSubmission</code> は<strong>ケース1件の verdict が決まるたびにこの関数を呼びます</strong>（第00章の骨格で見た <code>onCase</code> がこれです）。中身は <code>w.store.AddResult(...)</code>——そのケース1件の結果（verdict・時間・メモリ・実際の出力の断片）を DB へ保存します。ここで正直に言っておくと、<strong>現状の実装では、この「ケースごとの保存」は本当のリアルタイム途中経過にはなっていません</strong>。だから <code>AddResult</code> は数ミリ秒のうちに一気に並び、その直後に <code>FinishSubmission</code>（<code>done</code> 確定）が来ます。ポーリングで「3件目まで通過、採点中…」を捉えるのは実際にはほぼ不可能です。</p>
+
+    <div class="box hazard"><div class="box-k">⚠ 落とし穴 — 詰まっているのは<strong>ランナーではなく、受け手</strong>のほう</div>
+      <p>ちなみに、上のコードに付いているコメント <code>// ケースごとに逐次保存 → ポーリング中のフロントに進行状況が見える</code> は、<strong>実装にそのまま書かれているもの</strong>です（本書は掲載コードを実物と一致させるので、そのまま載せています）。ただし<strong>「見える」の部分は、いまの実装では実現していません</strong>——コード中のコメントが常に現状を正確に述べているとは限らない、という実例でもあります。</p>
+      <p>「途中経過が出ないなら、コンテナの中のランナーが最後にまとめて吐いているのだろう」——そう思うのが自然ですが、<strong>事実は逆</strong>です。ランナー（<code>images/common/loop.sh</code>）は、ケースを1つ走らせるたびに<strong>その場で結果を吐いています</strong>。</p>
+      <pre><code><span class="cm"># images/common/loop.sh（ケースを回すループ部分。冒頭と時間制限まわりは第05章 Step 2）</span>
+for f in cases/*.in; do
+  …1ケース実行…
+  echo <span class="st">"___CASE___ $name $ec $elapsed $maxrss"</span>   <span class="cm">← ループの中！</span>
+  echo <span class="st">"___OUT___"</span> ; … ; echo <span class="st">"___END___"</span>
+  if [ <span class="st">"$ec"</span> -ne 0 ]; then break; fi
+done
+echo <span class="st">"___DONE___"</span></code></pre>
+      <p><strong>では、どこで流れが止まっているのか。ホスト側です。</strong> 第04章の <code>DockerSandbox.Run</code> を思い出してください。<code>cmd.Stdout = capWriter</code> と差して <code>cmd.Run()</code> を呼び、<strong><code>cmd.Run()</code> はコンテナが終了するまで返ってきません</strong>。その間、逐次届いていたはずのフレームは <code>capWriter</code> の中に<strong>ただ溜まっていく</strong>だけです。そして <code>ParseRunOutput(res.Stdout)</code> が走るのは、<strong>全部溜まりきった後</strong>。</p>
+      <div class="ascii">コンテナ（逐次で吐いている）        ホスト（全部溜めてから読む）
+
+  ___CASE___ c001 …  ──┐
+  ___CASE___ c002 …  ──┼──▶ capWriter に蓄積 …（cmd.Run() が返らない）
+  ___CASE___ c003 …  ──┤
+  ___DONE___         ──┘
+                          ▼ コンテナ終了 → cmd.Run() が返る
+                        ParseRunOutput（ここで初めて全件を解釈）
+                          ▼
+                        onCase → AddResult ×3 を数ミリ秒で連打</div>
+      <p><strong>送り手がストリームでも、受け手がバッファすれば、ストリームではなくなる。</strong> これはプロセス間の受け渡しを扱うときに何度も出会う話で、本書の主題そのものです。「どちらが詰まっているのか」は、<strong>両側のコードを見ないと判断できません</strong>——片方だけ見て結論すると、いまのように逆の答えに辿り着きます。</p>
+      <p><strong>ではなぜ全件まとめて1回で保存せず、あえて「ケース単位」で書く形にしているのか。</strong> 直すべき場所が<strong>この受け取り側に閉じている</strong>からです。必要なのは、<code>Sandbox.Run</code> が「全部読み終えてから <code>RunResult</code> を返す」形をやめ、<strong>届いた行から順に解釈してケース1件ぶんを上へ渡す</strong>形に変えること——具体的には <code>Run</code> と、その戻り値を待って <code>ParseRunOutput</code> を呼ぶ <code>runCases</code>、そして完成した配列を回している <code>JudgeSubmission</code> の判定ループが対象になります（<code>Sandbox</code> インターフェースの形自体を変える改修です）。</p>
+      <p>逆に言えば、<strong>そこから上——<code>onCase</code> → <code>AddResult</code> → DB → API → 画面——は1行も変わりません</strong>。<code>onCase</code> が「ケース1件が確定した」と通知する形になっているおかげで、<strong>通知が届くタイミングが早まるだけ</strong>で、受け取る側は何も知らなくてよいからです。</p>
+      <p>ここは正確に言っておきます。<strong>DB のスキーマ（<code>submission_results</code>）は、どちらの作りでも同じ</strong>です——1ケース1行のテーブルに <code>INSERT</code> するのは変わらないので、「全件まとめて保存」でも同じ行が同じ形で入ります。違うのは<strong>「1件確定するたびに通知する」という <code>onCase</code> の形を、採点機構が持っているかどうか</strong>だけ。もし <code>JudgeSubmission</code> が「全ケースの結果を配列で返すだけ」の設計だったら、途中経過を出すにはまず<strong>その通知の口を作るところから</strong>——つまり <code>judge</code> パッケージのインターフェースを変えるところから始めることになります。<strong>いまは一括で並ぶが、そこから先の配管は最初から通してある</strong>——そういう設計です。</p>
+    </div>
+
+    <p><strong>④ 結果を確定する。</strong> <code>JudgeSubmission</code> が戻ってきたら、その提出全体の verdict が <code>out</code> に入っています。<code>FinishSubmission(id, out.Verdict, ...)</code> でステータスを <code>done</code> にし、確定 verdict・コンパイル出力・最大実行時間・最大メモリを書き込みます。これで <code>pending → running → done</code> の三段が完結し、フロントは次のポーリングで「確定した verdict」を受け取れます。<code>out.InternalNote</code>（ジャッジ内部の注記）があればログにだけ残す——ユーザーに見せる必要のない内部情報は、外に漏らさずログ止まりにするのも作法です。</p>
+
+    <div class="ascii">提出ステータスの一生
+
+  作成時         採点開始時        採点完了時
+  ┌─────────┐   ┌─────────┐     ┌──────────────┐
+  │ pending │──▶│ running │────▶│ done         │
+  │(受付済) │   │(採点中) │     │ + verdict    │
+  └─────────┘   └─────────┘     │ (AC/WA/...)  │
+   Enqueue で    SetSubmission   └──────────────┘
+   キューに      Running()        FinishSubmission()
+   積んだ直後    ＝ワーカーが     ＝JudgeSubmission が
+                 取り出して        返した結果を書き込む
+                 採点を始めた
+
+  ※done の直前、ケース結果を AddResult() で
+    ケース単位に一括保存（現状は途中経過ではなく確定直前）
+  ※panic 時: SetRunning 後（採点本体の中）で起きれば
+    pending→running→done(IE)。SetRunning 前の panic のときだけ
+    running を飛ばして done(IE) に直行（いずれも recover が捕まえる）</div>
+
+    <div class="gonote"><div class="box-k">GO メモ · defer + recover による panic の封じ込め</div>
+      <p>Go の <strong>panic</strong> は、通常フローを中断して goroutine のスタックを巻き戻す非常事態です。捕まえないと goroutine（や プロセス）が死にます。<strong><code>recover()</code></strong> は「<code>defer</code> された関数の中で呼ぶと、進行中の panic を捕まえて通常フローに戻す」組み込み関数です。<code>defer func(){ if r := recover(); r != nil { ... } }()</code> という形が定番——<code>defer</code> で関数の出口に予約し、その中で <code>recover()</code> を呼び、返り値が <code>nil</code> でなければ「panic を捕まえた」ことになります。<br>
+      なぜ <code>JudgeSubmission</code> 自体に <code>if err != nil</code> を徹底しているのに、さらに <code>recover</code> が要るのか。<code>err</code> で<strong>予期したエラー</strong>は返せますが、nil ポインタ参照や配列外アクセスといった<strong>予期しないバグ</strong>は panic として飛んできます。<code>process</code> の <code>recover</code> は「予期しない事態でも、その1件を <code>IE</code> にして<strong>ワーカーを生かす</strong>」最後の安全網です。長生きするワーカーには、この防波堤を必ず1枚敷きます。</p>
+    </div>
+
+    <h2 class="step" id="step-7"><span class="step-no">Step 7</span>API 側から見る — 提出は即 202、フロントはポーリング</h2>
+    <p>ワーカー側が完成しました。最後に、<strong>受け付け側（HTTP ハンドラ）がこのキューをどう使うか</strong>を見て、非同期の輪を閉じます。提出 API のハンドラ（<code>internal/api/api.go</code>）の末尾を引用します。</p>
+
+    <div class="file-tag">internal/api/api.go（提出ハンドラの末尾・抜粋）</div>
+    <pre><code>	<span class="cm">// …（リクエストの検証・問題の取得・言語の対応チェックは省略）</span>
+	id, err := s.Store.CreateSubmission(p.ID, req.Language, req.Code)
+	<span class="kw">if</span> err != <span class="kw">nil</span> {
+		writeErr(w, http.StatusInternalServerError, err.Error())
+		<span class="kw">return</span>
+	}
+	<span class="kw">if</span> err := s.Worker.Enqueue(id); err != <span class="kw">nil</span> {
+		_ = s.Store.FinishSubmission(id, <span class="kw">string</span>(judge.IE), <span class="st">"queue full"</span>, <span class="st">0</span>, <span class="st">0</span>)
+		writeErr(w, http.StatusServiceUnavailable, err.Error())
+		<span class="kw">return</span>
+	}
+	<span class="cm">// 非同期受け付け（NF-09）: 即 ID を返し、クライアントはポーリングする</span>
+	writeJSON(w, http.StatusAccepted, <span class="kw">map</span>[<span class="ty">string</span>]<span class="ty">int64</span>{<span class="st">"id"</span>: id})</code></pre>
+
+    <p>受け付け側の仕事は、たった3手です。<strong>①提出を DB に保存し(<code>CreateSubmission</code>、ここで <code>status='pending'</code>) → ②<code>Enqueue(id)</code> でキューに積む → ③<code>202 Accepted</code> と提出 ID を返す。</strong> <code>JudgeSubmission</code> はここには<strong>一切登場しません</strong>。採点は完全にワーカー任せで、ハンドラは<strong>採点の完了を待たずに応答を返して終わり</strong>。これが Step 1 で目指した「受け付けを一瞬で終わらせる」の実装です。</p>
+    <p>2箇所の細部に注目してください。第一に、<strong><code>Enqueue</code> が満杯エラーを返したときの処理</strong>。その提出を <code>FinishSubmission(id, IE, "queue full", ...)</code> で <code>IE</code> に確定させ、HTTP は <code>503 Service Unavailable</code> を返します。DB には <code>pending</code> のまま宙ぶらりんの提出を残さず（キューに積めなかったのだから、誰も採点しない＝永久に <code>pending</code> のままになってしまう）、<strong>正直に「ジャッジ側の都合で採点できなかった(IE)」と記録して閉じる</strong>。第二に、成功時の HTTP ステータスが <code>200 OK</code> ではなく<strong><code>202 Accepted</code></strong>であること。<code>202</code> は「リクエストは<strong>受理したが、処理はまだ完了していない</strong>」を表す、まさに非同期受け付けのためのステータスコードです。返すのは verdict ではなく<strong>提出 ID だけ</strong>——クライアントはこの ID を使って、結果を<strong>あとから取りに来ます</strong>。</p>
+    <p>その「取りに来る」がポーリングです。フロント（第09章）は、提出後にこの ID で <code>GET /api/submissions/{id}</code> を<strong>定期的に叩き</strong>、<code>status</code> が <code>pending</code> や <code>running</code> の間は「採点中…」を表示し続け、<code>status</code> が <code>done</code> になったら、まとめて保存されたケース結果と最終 verdict を表示します（前述の通り、現状はケース結果が <code>done</code> と同時に一括で現れます）。<strong>サーバは push せず、クライアントが pull する</strong>——WebSocket を張らずに、ただの HTTP ポーリングで非同期処理の結果を届ける、単一ユーザーには十分シンプルな設計です。全体の輪を最後に絵にします。</p>
+
+    <div class="ascii">非同期処理の輪 — 受け付けから結果表示まで
+
+  ［フロント］          ［API］              ［Worker］          ［DB］
+     │  POST /api/submissions                    │                 │
+     │────────────────────▶│ CreateSubmission ──┼────────────────▶│ status=pending
+     │                     │ Enqueue(id) ───────▶(キューに積む)    │
+     │  ◀── 202 {id:42} ───│                    │                 │
+     │                     │                    │ id=42 を取り出す │
+     │                     │                    │ SetRunning ─────▶│ status=running
+     │  GET /api/submissions/42                  │ JudgeSubmission  │
+     │────────────────────▶│── status:running ─▶│  実行コンテナで   │
+     │  ◀ "採点中" ────────│                    │  全ケース走破     │
+     │  （ポーリング継続）  │                    │  ケース1-3 の結果 │
+     │                     │                    │  を done 直前に   │
+     │                     │                    │  一括 AddResult ─▶│ 結果3件
+     │                     │                    │ FinishSubmission ▶│ status=done, WA
+     │  GET /api/submissions/42                  │                 │
+     │────────────────────▶│── status:done,WA ─▶│                 │
+     │  ◀ "WA (2/3通過)" ──│                    │                 │
+     ▼                     ▼                    ▼                 ▼</div>
+
+    <div class="box hazard"><div class="box-k">⚠ 落とし穴 — キューが詰まったときに「黙って捨てる」も「無限に待つ」もダメ</div>
+      <p>ジョブキューで事故になりやすいのが<strong>キュー溢れの扱い</strong>です。ありがちな失敗が2つ。<strong>(1) バッファなしチャネル + ブロッキング送信</strong>にすると、ワーカーが手すきになるまで <code>Enqueue</code> が固まり、受け付けが一瞬で終わらない——非同期の意味が消えます。<strong>(2) 溢れたら黙って握り潰す</strong>と、ユーザーは「提出したのに永久に採点されない」提出を抱え、DB に <code>pending</code> の亡霊が残ります。本書は <code>select + default</code> で<strong>ブロックせず</strong>、溢れたら <code>IE</code> + <code>503</code> で<strong>正直に</strong>返す——この両方を同時に満たしています。もう一つの地雷が<strong>ワーカーの死</strong>です。<code>process</code> の <code>recover</code> を外すと、1件の panic でワーカー goroutine ごと死に、<strong>以降すべての提出が永久に <code>pending</code> のまま採点されなくなります</strong>（しかもエラーは出ず、ただ静かに止まる——最も気づきにくい壊れ方）。「詰まっても・落ちても、正直に・生き延びる」——キューの堅牢さはこの2点に尽きます。</p>
+    </div>
+
+    <div class="box do"><div class="box-k">▸ 動かして確認</div>
+      <p>この章のワーカーとキューは、<code>internal/judge</code> パッケージに属します。まずパッケージ全体のテストが緑であることを確かめます（比較・判定・プロトコルのテストが含まれます）。</p>
+      <pre class="term"><code><span class="ps">$</span> cd backend
+<span class="ps">$</span> go test ./internal/judge/ -count=1
+<span class="out">ok      judge/internal/judge    0.412s</span></code></pre>
+      <p>キューの動きは、実際にサーバを立てて<strong>提出が即 <code>202</code> で返り、少し経ってから結果が確定する</strong>のを見るのがいちばんです。Docker Desktop を起動した状態で、バックエンドを立ち上げ、提出 API を叩いてみます（<code>PROBLEM_ID</code> は問題一覧 <code>GET /problems</code> で確認できます）。</p>
+      <pre class="term"><code><span class="ps">$</span> go run ./cmd/server
+<span class="out">listening on http://127.0.0.1:8080</span>
+
+<span class="cm"># 別のターミナルで提出（即座に 202 と id が返る — 採点は待たない）</span>
+<span class="ps">$</span> curl -i -X POST localhost:8080/api/submissions \
+    -H 'Content-Type: application/json' \
+    -d '{"problem_id":1,"language":"go","code":"package main\nimport \"fmt\"\nfunc main(){var a,b int;fmt.Scan(&amp;a,&amp;b);fmt.Println(a+b)}"}'
+<span class="out">HTTP/1.1 202 Accepted
+{"id":42}</span>            <span class="cm">← 採点の完了を待たずに即返る</span>
+
+<span class="cm"># 返ってきた id で結果をポーリング（数秒間、status が running → done に変わる）</span>
+<span class="ps">$</span> curl -s localhost:8080/api/submissions/42
+<span class="out">{"submission":{"id":42,"status":"running","verdict":"", ...},"results":[]}</span>   <span class="cm">← まだ採点中</span>
+<span class="ps">$</span> curl -s localhost:8080/api/submissions/42
+<span class="out">{"submission":{"id":42,"status":"done","verdict":"AC", ...},"results":[ ... ]}</span>    <span class="cm">← 数秒後に確定・結果も一括で載る</span></code></pre>
+      <p>提出した瞬間に <code>202</code> が返り（ブラウザなら固まらない）、そのあとポーリングで <code>running</code> から <code>done</code> へ変わっていく——これが非同期採点の体感です。<strong>採点の進行そのものは、この「ポーリング結果が <code>pending</code>→<code>running</code>→<code>done</code> と変わる」画面で確認します</strong>。ワーカーは正常採点時に進捗ログを出さないからです（<code>process</code> の <code>log.Printf</code> はすべて panic や DB 失敗などのエラー経路専用。<code>SetSubmissionRunning</code> や <code>FinishSubmission</code> の成功はログに出ません）。サーバのターミナルに流れるのは <code>POST /api/submissions</code> や <code>GET /api/submissions/42</code> といった<strong>HTTP アクセスログ</strong>だけです。連続で何件も提出しても、ワーカーは<strong>1件ずつ順番に</strong>捌くので、Docker コンテナが同時に何個も立ち上がって暴れることはありません。</p>
+    </div>
+
+    <div class="box do"><div class="box-k">▸ さらに手を動かすなら</div>
+      <p>キューの性質を、コードをいじって体で確かめます。確認したら必ず元に戻してください。</p>
+      <ol>
+        <li><code>NewWorker</code> のバッファを <code>make(chan int64, 1)</code> に極端に小さくし、<code>Start</code> を呼ぶ<strong>前</strong>（＝受信者がまだいない状態）に <code>Enqueue</code> を連続で呼ぶ短いテストを書く。バッファ1なので1回目は積めるが、<strong>2回目が</strong> <code>"judge queue is full"</code> エラーを返すことを確認し、「バッファ容量 = 溢れる境界」を体で覚える（<code>make(chan int64, 2)</code> にすれば3回目で溢れる、と対応づくのも確かめるとよい）。</li>
+        <li><code>process</code> の先頭の <code>defer func(){ recover() ... }()</code> を<strong>コメントアウト</strong>し、意図的に panic する提出（例えばテストで <code>JudgeSubmission</code> を panic させる）を1件流す。<strong>ワーカー goroutine が死に、以降の提出が採点されなくなる</strong>ことを観察し、なぜ防波堤が要るかを失敗から理解する。確認したら必ず戻すこと。</li>
+        <li><code>Start</code> の <code>go func(){...}()</code> を <code>for i := 0; i &lt; 3; i++ { go func(){...}() }</code> に変えて3並列にし、複数件を同時提出したときに Docker コンテナが同時に立ち上がる様子を <code>docker ps</code> で観察する。資源の食い合いを体感したら、必ず1本に戻すこと。</li>
+      </ol>
+    </div>
+
+    <h2>つまずき FAQ</h2>
+    <details class="qa"><summary>なぜ提出をキューに積むのに、外部の Redis や RabbitMQ を使わないの?</summary>
+      <div class="qa-body"><p>単一ユーザー・単一プロセスのこのジャッジには<strong>過剰</strong>だからです。Redis/RabbitMQ のような外部メッセージキューは、<strong>複数のサーバプロセスにまたがってジョブを分配したい</strong>とき（＝ワーカーが別マシンにいる、サーバを冗長化する）に真価を発揮します。本書のジャッジは、HTTP サーバもワーカーも<strong>同じ1つの Go プロセスの中</strong>にいるので、goroutine 間で値を渡す <code>chan</code> だけで完全にキューが成立します。外部依存が1つも増えず（起動も設定も要らず）、<code>make(chan int64, 1024)</code> の1行でキューが手に入る。「必要になるまで分散させない」——個人開発の健全な選択です。将来ワーカーを別プロセスに切り出したくなったら、そのとき初めて外部キューを検討すればよい。</p></div>
+    </details>
+    <details class="qa"><summary>ワーカーを1本に絞ると採点が遅くならない? 並列にした方が速いのでは?</summary>
+      <div class="qa-body"><p>単一ユーザーなら1本で全く困りません。そもそも「同時に何件も提出が殺到する」状況が起きないからです。逆に、並列化には<strong>資源枯渇のリスク</strong>が伴います。採点1件は実行コンテナを1つ立て、その中でケースを直列に回しながらメモリ制限（第05章）ぶんを丸ごと要求します。ワーカーを N 本にすれば最悪 N 件ぶんの実行コンテナ ＝ N 倍のメモリ上限を同時に食い、ホストの物理メモリを超えれば OOM で共倒れし、正しい提出が <code>MLE</code> や <code>IE</code> に化けます。CPU の奪い合いは時間計測を乱し、<code>TLE</code> も不安定になる。<strong>「速さ」と「資源の予測可能性・結果の決定性」を天秤にかけ、後者を取った</strong>のが並列度1です。どうしても速くしたいなら、まず1採点あたりのコンテナ起動を減らす・イメージを軽くするといった<strong>1件の高速化</strong>を先に検討し、並列化は資源から逆算した安全な本数に留めるべきです。</p></div>
+    </details>
+    <details class="qa"><summary>キューに積むのが提出内容そのものではなく「ID だけ」なのはなぜ?</summary>
+      <div class="qa-body"><p>提出内容は <code>CreateSubmission</code> の時点で<strong>すでに DB に保存済み</strong>なので、ID さえあればワーカーが後から <code>GetSubmission</code> で全部引けるからです。ID（<code>int64</code>）だけを流す利点は2つ。<strong>(1) キューが軽い</strong>——コードやテストケースをチャネルにコピーして詰める必要がなく、8バイトの整数が流れるだけ。<strong>(2) 再起動に強い</strong>——キューはメモリ上の <code>chan</code> なので、サーバが落ちると中身は消えます。しかし提出は DB に <code>pending</code> で残っているので、サーバ起動時に「DB からまだ <code>pending</code> の提出 ID を拾い直して <code>Enqueue</code> し直す」ことで、<strong>採点し損ねた提出を復旧できます</strong>（<code>cmd/server/main.go</code> の起動処理がこれをやっています）。実体を DB に、参照だけをキューに——重い非同期ジョブの基本設計です。</p></div>
+    </details>
+    <details class="qa"><summary><code>process</code> の <code>recover</code> は、<code>JudgeSubmission</code> が <code>if err != nil</code> を徹底しているのに、なぜ必要なの?</summary>
+      <div class="qa-body"><p><code>err</code> で扱えるのは<strong>予期したエラー</strong>だけだからです。ファイルが読めない、Docker が起動しない——こうした<strong>想定内の失敗</strong>は <code>return err</code> で丁寧に <code>IE</code> へ変換できます。しかし nil ポインタ参照、スライスの範囲外アクセス、想定外のデータで割り算がゼロ除算になる——といった<strong>コードのバグ</strong>は、<code>err</code> ではなく <strong>panic</strong> として飛んできます。捕まえなければワーカー goroutine ごと死に、<strong>それ以降すべての提出が永久に採点されなくなります</strong>（しかも静かに止まるので気づきにくい）。<code>process</code> 先頭の <code>defer + recover</code> は「予期しないバグが起きても、その1件だけを <code>IE</code> にして、ワーカーは生き延びて次を捌く」ための最後の安全網です。長生きする goroutine には、<code>err</code> 処理とは別に、この防波堤を必ず1枚敷きます。</p></div>
+    </details>
+
+    <h2>理解度チェック</h2>
+    <p>次の問いに<strong>自分の言葉で</strong>答えられたら、この章は卒業です。</p>
+    <details class="qa"><summary>1. 提出を同期採点（<code>JudgeSubmission</code> の完了を待って応答）にすると、何が起きるか。非同期はそれをどう解決するか。</summary>
+      <div class="qa-body"><p>同期だと、採点に数秒〜十数秒かかる間 HTTP リクエストの goroutine が戻らず、<strong>(1) ユーザーがブラウザの前でフリーズしたまま待たされ</strong>、<strong>(2) 同時提出のぶんだけ Docker コンテナが無制限に立ち上がってホストの資源を食い潰し、受付口も塞がる</strong>。非同期は「受け付け」と「採点」を切り離すことでこれを解く。受け付けは DB に1行 INSERT してキュー（<code>chan</code>）に ID を積むだけで<strong>一瞬で終わり即 <code>202</code> を返す</strong>。採点は裏の<strong>1本のワーカー</strong>がキューから1件ずつ取り出して直列に処理するので、Docker コンテナは同時に高々1つしか立たず資源が守れる。ユーザーは待たされず、結果はあとからポーリングで取りに来る。</p></div>
+    </details>
+    <details class="qa"><summary>2. <code>Enqueue</code> の <code>select { case ...: default: ... }</code> の <code>default</code> は、何を保証しているか。</summary>
+      <div class="qa-body"><p><strong>ノンブロッキング送信</strong>を保証している。<code>select</code> に <code>default</code> があると、送信可能な <code>case</code>（<code>w.queue &lt;- id</code>）が今この瞬間に実行できない——つまり<strong>キューが満杯</strong>——とき、ブロックせず即座に <code>default</code> へ落ちて <code>"judge queue is full"</code> エラーを返す。これにより <code>Enqueue</code> は<strong>キューが満杯でも一瞬で戻る</strong>ことが保証され、受け付け側（HTTP ハンドラ）が固まらない。<code>default</code> が無ければ満杯時に送信がブロックし、受け付けが一瞬で終わる非同期の前提が崩れる。満杯エラーを受けた API 側は、その提出を <code>IE</code> にして <code>503</code> を返す（黙って捨てず、無限に待たず、正直に返す）。</p></div>
+    </details>
+    <details class="qa"><summary>3. なぜワーカーは並列にせず1本に固定し、<code>process</code> の先頭に <code>defer + recover</code> を置くのか。</summary>
+      <div class="qa-body"><p><strong>1本固定の理由</strong>: 採点1件は Docker コンテナを何個も起動して CPU・メモリを食う。ワーカーを N 本に増やすと最悪 N 倍の資源を同時に要求し、ホストの資源を食い潰して OOM で共倒れし、正しい提出が <code>MLE</code>/<code>IE</code> に化ける。単一ユーザー・単一ホストでは、<strong>資源消費を予測可能に保ち、採点順序と結果を決定的にする</strong>ため並列度1が最適。<strong><code>recover</code> の理由</strong>: <code>JudgeSubmission</code> 中に想定外の panic（nil 参照など）が起きると、捕まえなければワーカー goroutine ごと死に、<strong>以降すべての提出が永久に採点されなくなる</strong>。<code>defer + recover</code> は「その1件だけを <code>IE</code>（NF-08）にして、ワーカーは生き延びて次を捌く」ための安全網で、1件の事故が全体を止めないことを保証する。</p></div>
+    </details>
+
+    <h2>まとめ — 次の層へ</h2>
+    <p>この章で、受け付けと採点を切り離す<strong>非同期のジョブキュー</strong>ができました。<code>chan int64</code> 一本をキューにし、<code>Enqueue</code> は <code>select + default</code> でブロックせず積み、<code>Start</code> が立てた<strong>1本のワーカー goroutine</strong> が <code>for-select</code> でキューから1件ずつ取り出して <code>process</code> にかける。<code>process</code> は先頭の <code>recover</code> で自身を守りつつ、提出のステータスを <code>pending → running → done</code> と進め、ケース結果を <code>done</code> 直前にケース単位で保存する（いまは一括だが、それは<strong>ランナーではなくホスト側が出力を溜め込んでいるため</strong>で、その受け取り方を改めれば、この章から上は無変更で途中経過を流せる配管になっている → Step 6）。外部のメッセージキューを一切使わず、Go の <code>channel</code> と goroutine だけで、単一プロセス内に完結する軽量なキューを組み上げました。並列度を1に固定して資源と決定性を守るという保守的な設計判断も、その理由まで含めて手の中にあります。</p>
+    <p>採点の芯（第00章）から、実行機構（第01〜06章）、保管（第07章）、そして非同期の捌き（この章）まで——<strong>ジャッジの裏側（バックエンド）はこれで一通り揃いました</strong>。残る穴はただ一つ。この一連の流れ——問題を選び、コードを書き、提出し、<code>202</code> を受け取り、ポーリングで <code>running</code> から <code>done</code> へ、緑の <code>AC</code> が並ぶまで——を、ユーザーが実際に触る<strong>画面</strong>が、まだありません。次の第09章では、いよいよ Web フロント（React + CodeMirror）を載せ、Go バイナリがそれを静的配信し、ブラウザから提出すると隔離環境で採点されて緑が返る——序章で「先に触ってみた」あの完成形を、自分の手で組み上げます。10章ぶんの積み上げが、一つの動くアプリになる最後の章です。</p>
+
+    <div class="chap-foot">
+      <a class="pager" href="07-store.html"><span class="dir">← 前へ</span>第07章 · 問題とテストケースを持つ</a>
+      <a class="pager next" href="09-web.html"><span class="dir">次へ →</span>第09章 · 画面をつける</a>
+    </div>
+  </main>
+</div>
+</body>
+</html>

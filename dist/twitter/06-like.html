@@ -1,0 +1,377 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>第06章 反応する（いいね） — Twitter をつくる</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500;600&family=Source+Serif+4:opsz,wght@8..60,400;8..60,600;8..60,700&family=Noto+Serif+JP:wght@400;600;700&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<div class="shell">
+
+  <aside class="spine">
+    <a class="wordmark" href="index.html">CHIRP · from scratch</a>
+    <div class="book-title">Twitter を<br>つくる</div>
+    <div class="book-sub">Go + PostgreSQL + React で認証からタイムラインまで</div>
+
+    <div class="legend"><span>読む <b>↓</b></span><span>組む <b>↑</b></span></div>
+
+    <nav aria-label="目次">
+      <ul class="toc">
+        <li><a class="nav-item" href="index.html"><span class="nav-num">序</span><span class="nav-label">はじめに・準備<span class="nav-tag">Setup</span></span></a></li>
+        <li><a class="nav-item" href="00-setup.html"><span class="nav-num">00</span><span class="nav-label">土台をつくる<span class="nav-tag">Setup</span></span></a></li>
+        <li><a class="nav-item" href="01-auth.html"><span class="nav-num">01</span><span class="nav-label">ユーザーという存在（認証）<span class="nav-tag">Auth</span></span></a></li>
+        <li><a class="nav-item" href="02-post.html"><span class="nav-num">02</span><span class="nav-label">投稿する<span class="nav-tag">Post</span></span></a></li>
+        <li><a class="nav-item" href="03-follow.html"><span class="nav-num">03</span><span class="nav-label">つながる（フォロー）<span class="nav-tag">Follow</span></span></a></li>
+        <li><a class="nav-item" href="04-timeline.html"><span class="nav-num">04</span><span class="nav-label">タイムラインという難問<span class="nav-tag">Timeline</span></span></a></li>
+        <li><a class="nav-item" href="05-reply.html"><span class="nav-num">05</span><span class="nav-label">会話する（リプライ）<span class="nav-tag">Reply</span></span></a></li>
+        <li><a class="nav-item current" aria-current="page" href="06-like.html"><span class="nav-num">06</span><span class="nav-label">反応する（いいね）<span class="nav-tag">Like</span></span></a></li>
+        <li><a class="nav-item" href="07-perf.html"><span class="nav-num">07</span><span class="nav-label">速くする（N+1と索引）<span class="nav-tag">Perf</span></span></a></li>
+        <li><a class="nav-item" href="08-web.html"><span class="nav-num">08</span><span class="nav-label">画面をつける（React）<span class="nav-tag">Web</span></span></a></li>
+        <li><a class="nav-item" href="09-beyond.html"><span class="nav-num">09</span><span class="nav-label">さらに先へ（発展）<span class="nav-tag">Beyond</span></span></a></li>
+      </ul>
+    </nav>
+
+    <div class="spine-foot">
+      各章は SNS の一つの機能。<br>下（土台）から上（画面）へ<br>積み上げて動かしていく。
+    </div>
+  </aside>
+
+  <main class="reading">
+    <div class="progress-tag">第06章 / 全10章 · 層: Like · 読了目安 1.5〜2時間</div>
+    <div class="eyebrow"><span>Like</span><span class="depth">— 冪等性を体で覚える</span></div>
+    <h1>反応する（いいね）</h1>
+    <p class="lede">「いいね」は、SNS のなかで<strong>いちばん軽く押されるボタン</strong>です。指がすべって二度押しすることもあれば、通信が不安定で同じリクエストが2回飛ぶこともある。それでも、いいね数が「2」になってはいけません。この章のテーブルは <code>likes</code> ひとつ、掲載する Go のコードも数十行と、本書で最も小さい部類です。けれど、その小ささのなかに、堅牢な Web サービスを支える大きな概念——<strong>冪等性（べきとうせい）</strong>——が詰まっています。「同じ操作を何度送っても、結果は1回ぶんに収まる」。この一点を、<code>likes</code> の複合主キーと <code>INSERT ... ON CONFLICT DO NOTHING</code> を通して、体で覚えます。</p>
+
+    <div class="box goal"><div class="box-k">◈ この章のゴール</div>
+      <p>次の3つを、curl で自分の手で確認できたら達成です。</p>
+      <ol>
+        <li>投稿にいいねを付けると <code>204 No Content</code> が返る。もう一度<strong>同じいいねを送っても、やはり 204</strong> で、いいね数は <strong>1 のまま</strong>増えない。</li>
+        <li>いいねを外すと <code>204</code>。<strong>すでに外れている状態でもう一度外しても、やはり 204</strong>（エラーにならない）。</li>
+        <li>存在しない投稿にいいねを送ると <code>404 Not Found</code>。DB の外部キーが「実在しない投稿へのいいね」を門前払いする。</li>
+      </ol>
+    </div>
+
+    <div class="box map"><div class="box-k">☰ この章のステップ</div>
+      <ol>
+        <li><a href="#step-1">いいねは、なぜ「関係」なのか — フォローと同型の設計</a></li>
+        <li><a href="#step-2"><code>likes</code> テーブル — 複合主キーが二重を防ぐ</a></li>
+        <li><a href="#step-3">付ける・外す — <code>likes.go</code> の <code>Like</code> / <code>Unlike</code></a></li>
+        <li><a href="#step-4">エンドポイント — 同じパスに POST=付与 / DELETE=解除</a></li>
+        <li><a href="#step-5">冪等性を確かめる — curl の反復と、楽観的更新の予告</a></li>
+      </ol>
+    </div>
+
+    <h2 class="step" id="step-1"><span class="step-no">Step 1</span>いいねは、なぜ「関係」なのか — フォローと同型の設計</h2>
+    <p>いいねと聞くと、投稿に付いている「数」を思い浮かべるかもしれません。しかしデータの形として見ると、いいねは数ではありません。<strong>「誰が」「どの投稿に」反応したか</strong>という、人と投稿のあいだの<strong>関係</strong>です。ここが第03章のフォローとまったく同じ構造だと気づくと、設計が一気に見通せます。</p>
+    <p>フォローは「<strong>ユーザー × ユーザー</strong>」の関係でした（<code>follower_id</code> と <code>followee_id</code>）。いいねは「<strong>ユーザー × 投稿</strong>」の関係です（<code>user_id</code> と <code>post_id</code>）。指し先の一方が「別のユーザー」から「投稿」に変わっただけで、考え方はそっくり写せます。だから本章は、第03章で身につけた「関係テーブル」の設計をもう一度なぞりながら、そこに<strong>冪等性</strong>という主題を重ねていきます。</p>
+
+    <div class="ascii">follows（第03章）              likes（この章）
+─────────────────            ─────────────────
+follower_id ─→ users         user_id ─→ users
+followee_id ─→ users         post_id ─→ posts
+PRIMARY KEY                  PRIMARY KEY
+ (follower_id, followee_id)   (user_id, post_id)
+     ↑                            ↑
+ 同じ組は1回だけ              同じ組は1回だけ
+ ＝二重フォロー不可           ＝二重いいね不可</div>
+
+    <p>「数」はどこに行ったのか——それは<strong>この関係を数え上げた結果</strong>にすぎません。ある投稿のいいね数は「<code>post_id</code> がその投稿を指す <code>likes</code> の行が何本あるか」を数えれば出ます。「自分がいいね済みか」は「自分の <code>user_id</code> とその <code>post_id</code> の組の行が有るか」を見れば分かります。つまり、いいね機能は次の3つの操作に分解できます。</p>
+    <ul>
+      <li><strong>付ける</strong> — <code>(user_id, post_id)</code> の行を1本<strong>足す</strong>（この章）</li>
+      <li><strong>外す</strong> — その行を<strong>消す</strong>（この章）</li>
+      <li><strong>数える・有無を見る</strong> — その行を<strong>読む</strong>（第07章）</li>
+    </ul>
+    <p>この章が扱うのは前の2つ、「足す」と「消す」です。3つめの「数える・有無を見る」は、タイムラインの全投稿ぶんをまとめて数える必要があり、<strong>N+1問題</strong>という別の難所を抱えています。そこは第07章の <code>GetPostMeta</code>（いいね数といいね有無をバッチで集める処理）に丸ごと預けます。この章は「1件のいいねを、いかに壊れなく付け外しするか」に集中します。</p>
+
+    <div class="box map"><div class="box-k">☰ この章のファイルと役割</div>
+      <ul>
+        <li><code>src/backend/internal/store/schema.sql</code> — <code>likes</code> テーブルの定義（Step 2）</li>
+        <li><code>src/backend/internal/store/likes.go</code> — いいねを付ける / 外す（Step 3）</li>
+        <li><code>src/backend/internal/api/post_handlers.go</code> — <code>handleLike</code> / <code>handleUnlike</code>（Step 4）</li>
+        <li><code>src/backend/internal/api/server.go</code> — ルーティング2行（Step 4）</li>
+      </ul>
+    </div>
+
+    <h3>この章の主題 — 冪等性とは何か</h3>
+    <p>先に、本章を貫く言葉を定義しておきます。<strong>冪等（べきとう / idempotent）</strong>とは、<strong>「同じ操作を1回やっても、100回やっても、結果（状態）が同じになる」性質</strong>のことです。数学から来た言葉ですが、Web では次の意味で使います——<strong>同じリクエストを何度送っても、サーバ側の副作用が1回ぶんに収まる</strong>。</p>
+    <p>身近な例で言えば、部屋の電気の「消す」スイッチは冪等です。もう消えている部屋でもう一度「消す」を押しても、部屋は暗いまま。何回押しても結果は「暗い」で一定です。逆に「トグル（今と反対にする）」は冪等ではありません。押すたびに明↔暗が入れ替わり、押した回数で結果が変わってしまう。いいねの「付ける」「外す」は、この電気スイッチの「点ける」「消す」のように<strong>状態を一方向に決める</strong>設計にします。「トグル」にはしません。理由は、ネットワークにあります。</p>
+
+    <div class="box hazard"><div class="box-k">⚠ なぜ冪等性が要るのか — ネットワークは二重送信する</div>
+      <p>ユーザーが「いいね」を押すと、ブラウザはサーバへリクエストを送ります。ところが——<strong>(1) 指が滑って2回タップした</strong>、<strong>(2) 回線が遅く、待ちきれずもう一度押した</strong>、<strong>(3) レスポンスが返る前に通信が切れ、ブラウザやアプリが自動でリトライした</strong>——こうした理由で、<strong>同じ操作のリクエストが2回・3回とサーバに届くことは日常的に起こります</strong>。<br>
+      もし「いいね＝行を1本足す」を素朴に <code>INSERT</code> だけで実装すると、2回届けば2本入り、いいね数が2になる（あるいは主キー違反でエラーになる）。冪等に設計しておけば、何回届いても結果は「いいね1本」で一定。<strong>冪等性は、信頼できないネットワークの上で正しく動くための保険</strong>です。だから軽いボタンほど、冪等でなければなりません。</p>
+    </div>
+
+    <h2 class="step" id="step-2"><span class="step-no">Step 2</span>likes テーブル — 複合主キーが二重を防ぐ</h2>
+    <p>まず器を確認します。<code>likes</code> は第00章の <code>schema.sql</code> に、他の3テーブルと並んで最初から定義済みです。該当部分だけを抜き出します。</p>
+
+    <div class="file-tag">src/backend/internal/store/schema.sql（likes 部分）</div>
+    <pre><code><span class="kw">CREATE TABLE IF NOT EXISTS</span> likes (
+    user_id    <span class="ty">BIGINT</span>      <span class="kw">NOT NULL REFERENCES</span> users(id) <span class="kw">ON DELETE CASCADE</span>,
+    post_id    <span class="ty">BIGINT</span>      <span class="kw">NOT NULL REFERENCES</span> posts(id) <span class="kw">ON DELETE CASCADE</span>,
+    created_at <span class="ty">TIMESTAMPTZ</span> <span class="kw">NOT NULL DEFAULT</span> now(),
+    <span class="kw">PRIMARY KEY</span> (user_id, post_id)
+);
+
+<span class="cm">-- 「この投稿のいいね数」を数えるための索引</span>
+<span class="kw">CREATE INDEX IF NOT EXISTS</span> idx_likes_post <span class="kw">ON</span> likes (post_id);</code></pre>
+
+    <p>列は3つだけ。<code>user_id</code>（いいねした人）、<code>post_id</code>（いいねされた投稿）、<code>created_at</code>（いつ押したか）。そして最終行の <code>PRIMARY KEY (user_id, post_id)</code> が、この章の設計の要です。</p>
+
+    <h3>複合主キーが「二重いいね」を物理的に不可能にする</h3>
+    <p><code>PRIMARY KEY (user_id, post_id)</code> は、<strong>1つの列ではなく、2つの列の組み合わせ</strong>を主キーにする書き方です（<strong>複合主キー</strong>、composite primary key）。主キーには2つの性質があります——<strong>(1) 値が重複しない（UNIQUE）</strong>、<strong>(2) NULL を許さない（NOT NULL）</strong>。複合主キーの場合、この「重複しない」は<strong>「組み合わせとして重複しない」</strong>という意味になります。</p>
+    <p>つまり <code>likes</code> では、<strong>「同じ <code>user_id</code> と同じ <code>post_id</code> の組」は、テーブル全体で1行しか存在できません</strong>。ユーザー42 が投稿100 にいいねする行——<code>(42, 100)</code>——は、あってもたった1本。同じユーザーが<strong>別の</strong>投稿にいいねする <code>(42, 101)</code> は別物なので共存できるし、<strong>別の</strong>ユーザーが同じ投稿にいいねする <code>(43, 100)</code> も共存できます。「同じ人が、同じ投稿に、2回いいね」だけが禁じられる。まさにいいねに欲しいルールそのものです。</p>
+
+    <div class="ascii">likes テーブル（PRIMARY KEY = user_id + post_id の組）
+┌─────────┬─────────┬──────────────┐
+│ user_id │ post_id │ created_at   │
+├─────────┼─────────┼──────────────┤
+│   42    │  100    │ 10:00:00     │  ← ユーザー42 が投稿100 に
+│   42    │  101    │ 10:01:00     │  ← 別の投稿ならOK（組が違う）
+│   43    │  100    │ 10:02:00     │  ← 別の人ならOK（組が違う）
+│   42    │  100    │ 10:03:00     │  ← ✗ 同じ組！ DBが拒否する
+└─────────┴─────────┴──────────────┘</div>
+
+    <p>ここで大事なのは、この「二重禁止」が<strong>アプリのコードの気配りではなく、DB の構造そのものによって保証されている</strong>点です。仮に Go 側で「もういいね済みか」を <code>SELECT</code> で確かめてから <code>INSERT</code> するロジックを書いたとしても、その「確認」と「挿入」のあいだにもう1つのリクエストが割り込めば、両方とも「まだ無い」と判断して2本入れてしまう余地があります（競合状態）。複合主キーは、<strong>DB のレベルで最後の砦</strong>になり、アプリがどうすり抜けようと2本目を弾きます。第00章で <code>CHECK</code> 制約を「多層防御の最後の砦」と呼んだのと、同じ思想です。</p>
+
+    <div class="gonote"><div class="box-k">GO メモ · なぜ likes には id 列（BIGSERIAL）が無いのか</div>
+      <p><code>users</code> や <code>posts</code> には <code>id BIGSERIAL PRIMARY KEY</code> という自動連番の主キーがありました。<code>likes</code> にはそれがありません。理由は、<strong>この行を1本だけで指し示す必要がないから</strong>です。いいねを操作するとき、私たちは常に「誰が・どの投稿に」＝ <code>(user_id, post_id)</code> の組で指定します。「いいね番号 5番を消す」という操作は存在しない。だから代理キー（サロゲートキー）としての <code>id</code> は不要で、<strong>自然キー</strong>である <code>(user_id, post_id)</code> の組をそのまま主キーにするのが素直です。<br>
+      一方 <code>follows</code> テーブルには <code>PRIMARY KEY (follower_id, followee_id)</code> に<em>加えて</em> <code>id BIGSERIAL</code> がありました。あれはフォロー一覧を「新しい順にページ送り」するために<strong>安定した並び順の目印</strong>が要ったからです（第03章）。<code>likes</code> は「一覧をページ送り」する要件が無く、数え上げと有無判定だけなので、連番は要りません。<strong>要件がキーの形を決める</strong>——同じ関係テーブルでも、後の使われ方でこう差が出ます。</p>
+    </div>
+
+    <h3>ON DELETE CASCADE — いいねは、対象が消えたら道連れに</h3>
+    <p>2つの外部キーにはどちらも <code>ON DELETE CASCADE</code> が付いています。<code>REFERENCES users(id) ON DELETE CASCADE</code> は「いいねした<strong>ユーザーが退会したら</strong>、そのユーザーのいいねも一緒に消す」。<code>REFERENCES posts(id) ON DELETE CASCADE</code> は「いいねされた<strong>投稿が削除されたら</strong>、その投稿へのいいねも一緒に消す」。</p>
+    <p>これが無いと、退会したユーザーや削除された投稿を指す<strong>宙に浮いたいいね（孤児レコード）</strong>が残り、いいね数を数えたときに実体のない1票が混ざります。<code>CASCADE</code> は「関係の一方が消えたら、その関係も消える」を DB に自動でやらせる指定で、いいねの整合性を保ちます。加えて、<code>REFERENCES posts(id)</code> は「<strong>実在する投稿にしかいいねできない</strong>」も保証します——存在しない投稿へのいいねは、この外部キーが拒否します。この拒否が Step 3 の <code>404</code> に直結するので、覚えておいてください。</p>
+    <p>末尾の索引 <code>idx_likes_post ON likes (post_id)</code> は、「この投稿のいいね数」を高速に数えるための工夫です。ただし<strong>なぜこの索引で数え上げが速くなるのか</strong>、そして数え上げ自体がなぜ難所（N+1問題）なのかは、集計を扱う第07章の主題です。この章では「いいね数を数える下準備の索引がここに置いてある」とだけ確認して、先に進みます。</p>
+
+    <h2 class="step" id="step-3"><span class="step-no">Step 3</span>付ける・外す — likes.go の Like / Unlike</h2>
+    <p>器ができたので、そこに<strong>行を足す・消す</strong>コードを書きます。<code>store</code> パッケージに <code>likes.go</code> を作り、<code>Like</code>（付ける）と <code>Unlike</code>（外す）の2つのメソッドを置きます。本章の心臓部です。全文を見ます。</p>
+
+    <div class="file-tag">src/backend/internal/store/likes.go</div>
+    <pre><code><span class="kw">package</span> store
+
+<span class="kw">import</span> (
+	<span class="st">"context"</span>
+	<span class="st">"errors"</span>
+
+	<span class="st">"github.com/jackc/pgx/v5/pgconn"</span>
+)
+
+<span class="cm">// Like はいいねを付ける。二重いいねは1件扱い（ON CONFLICT DO NOTHING）。</span>
+<span class="kw">func</span> (s *<span class="ty">Store</span>) Like(ctx context.<span class="ty">Context</span>, userID, postID <span class="ty">int64</span>) <span class="ty">error</span> {
+	_, err := s.pool.Exec(ctx, <span class="st">`
+		INSERT INTO likes (user_id, post_id) VALUES ($1, $2)
+		ON CONFLICT DO NOTHING`</span>,
+		userID, postID)
+	<span class="kw">var</span> pgErr *pgconn.<span class="ty">PgError</span>
+	<span class="kw">if</span> errors.As(err, &amp;pgErr) &amp;&amp; pgErr.Code == <span class="st">"23503"</span> { <span class="cm">// 投稿が存在しない</span>
+		<span class="kw">return</span> ErrNotFound
+	}
+	<span class="kw">return</span> err
+}
+
+<span class="cm">// Unlike はいいねを外す。存在しないいいねの解除も成功扱い（冪等）。</span>
+<span class="kw">func</span> (s *<span class="ty">Store</span>) Unlike(ctx context.<span class="ty">Context</span>, userID, postID <span class="ty">int64</span>) <span class="ty">error</span> {
+	_, err := s.pool.Exec(ctx,
+		<span class="st">`DELETE FROM likes WHERE user_id = $1 AND post_id = $2`</span>, userID, postID)
+	<span class="kw">return</span> err
+}</code></pre>
+
+    <p>たった2つの短いメソッドですが、どちらにも冪等性の工夫が仕込まれています。1つずつ読みます。</p>
+
+    <h3>Like — INSERT ... ON CONFLICT DO NOTHING</h3>
+    <p><code>Like</code> の中身は SQL が1文だけです。</p>
+    <pre><code>	<span class="kw">INSERT INTO</span> likes (user_id, post_id) <span class="kw">VALUES</span> ($1, $2)
+	<span class="kw">ON CONFLICT DO NOTHING</span></code></pre>
+    <p>普通の <code>INSERT INTO likes (user_id, post_id) VALUES ($1, $2)</code> は「この組の行を1本足せ」という命令です。もしすでに同じ組の行が有れば、Step 2 の複合主キーが「重複だ」と判断し、<strong>主キー違反エラー</strong>で失敗します。素朴に <code>INSERT</code> だけ書くと、2回目のいいねはエラーになってしまう——これでは冪等ではありません。</p>
+    <p>そこに付けた <code>ON CONFLICT DO NOTHING</code> が効きます。これは PostgreSQL の構文で、<strong>「もし挿入が制約（この場合は主キー）と衝突（CONFLICT）したら、エラーにせず、何もしない（DO NOTHING）」</strong>という意味です。挙動を整理すると——</p>
+    <ul>
+      <li>まだいいねが無いとき → 行が1本入る（いいねが付く）</li>
+      <li>すでにいいね済みのとき → 主キーと衝突するが、<strong>エラーにならず、静かに何もしない</strong>（行は1本のまま）</li>
+    </ul>
+    <p>どちらの場合も、SQL は<strong>成功</strong>で返り、テーブルの状態は「その組の行が1本ある」で一定になります。これが冪等の実装です。「もう有るなら、そのままでいい」——電気の「点ける」スイッチと同じで、何回押しても結果は「点いている」。二重送信されても、いいね数は決して2になりません。<strong>DB が二重を1件に潰してくれる</strong>のです。</p>
+
+    <div class="gonote"><div class="box-k">GO メモ · ON CONFLICT DO NOTHING と ON CONFLICT DO UPDATE（UPSERT）</div>
+      <p><code>ON CONFLICT</code> には2つの相棒があります。<strong><code>DO NOTHING</code></strong> は「衝突したら何もしない」。いいねのように「有ればそれでいい、上書きしたいデータは無い」ケースにぴったりです。もう一方の <strong><code>DO UPDATE SET ...</code></strong> は「衝突したら、代わりに更新する」で、いわゆる <strong>UPSERT</strong>（無ければ INSERT、有れば UPDATE）を1文で書く定番です。たとえば「設定を保存（無ければ作る、有れば上書き）」なら <code>DO UPDATE</code> を使います。<br>
+      いいねに更新すべき中身はありません（<code>created_at</code> を押し直すたびに更新するのは、むしろ「最初にいいねした時刻」を失う）。だから <code>DO NOTHING</code> が正解。ちなみに第03章のフォロー（<code>follows</code>）も同じ考え方で <code>ON CONFLICT DO NOTHING</code> を使い、二重フォローを冪等に吸収していました。<strong>関係を1本足すだけの操作は、たいてい <code>DO NOTHING</code></strong> と覚えておくと応用が利きます。</p>
+    </div>
+
+    <h3>404 を返す — 外部キー違反(23503)の捕まえ方</h3>
+    <p><code>Like</code> の後半、Go 側のエラー処理を読みます。</p>
+    <pre><code>	<span class="kw">var</span> pgErr *pgconn.<span class="ty">PgError</span>
+	<span class="kw">if</span> errors.As(err, &amp;pgErr) &amp;&amp; pgErr.Code == <span class="st">"23503"</span> { <span class="cm">// 投稿が存在しない</span>
+		<span class="kw">return</span> ErrNotFound
+	}
+	<span class="kw">return</span> err</code></pre>
+    <p><code>ON CONFLICT DO NOTHING</code> は「主キー衝突（＝二重いいね）」を吸収しますが、もう1種類のエラーは吸収しません——<strong>存在しない投稿へのいいね</strong>です。Step 2 の <code>REFERENCES posts(id)</code> により、<code>post_id</code> に実在しない投稿番号を入れると、PostgreSQL は<strong>外部キー違反</strong>を返します。この違反には <code>23503</code> という決まった<strong>エラーコード</strong>（SQLSTATE）が付いています。</p>
+    <p><code>errors.As(err, &amp;pgErr)</code> は、「この <code>err</code> は、その正体をたどると <code>*pgconn.PgError</code>（PostgreSQL 由来の詳細エラー）か?」を確かめ、そうならその中身を <code>pgErr</code> に取り出す関数です。取り出せて、かつ <code>pgErr.Code == "23503"</code>（外部キー違反）なら、これは「実在しない投稿へのいいね」だと分かる。そこで、生の DB エラーをそのまま上に流さず、<strong>ドメインエラー <code>ErrNotFound</code> に翻訳して返します</strong>。この <code>ErrNotFound</code> は第00章の <code>store.go</code> で定義した番兵エラーで、API 層の <code>writeStoreError</code> がこれを <code>404 Not Found</code> に変換します。結果として、存在しない投稿へのいいねはユーザーに <code>404</code> で返る——ゴールの3番目です。</p>
+    <p>それ以外の <code>err</code>（衝突なら <code>ON CONFLICT</code> が吸収済みなので <code>nil</code>、想定外の障害ならその <code>err</code>）は、最後の <code>return err</code> でそのまま返します。<code>nil</code> ならもちろん成功。この<strong>「DB のエラーコードを、意味のあるドメインエラーに翻訳する」</strong>のは、本書で繰り返し出てくる型です（第01章の「ユーザー名重複 → <code>ErrUsernameTaken</code>」も同じ形でした）。DB の都合（<code>23503</code> という数字）を API 層に漏らさず、<code>store</code> の中で「見つからない」という言葉に直しているわけです。</p>
+
+    <div class="gonote"><div class="box-k">GO メモ · errors.As と、pgx のエラーコード</div>
+      <p><code>errors.As(err, target)</code> は、エラーの<strong>チェーン</strong>（<code>%w</code> で包まれた入れ子）を手繰り、<code>target</code> の型に一致するものを探して代入する標準ライブラリの関数です。似た <code>errors.Is</code> が「特定の<strong>値</strong>（<code>ErrNotFound</code> など）か」を判定するのに対し、<code>errors.As</code> は「特定の<strong>型</strong>（<code>*pgconn.PgError</code> など）か」を判定して<strong>中身を取り出す</strong>ときに使います。ここでは中身の <code>.Code</code> フィールドを読みたいので <code>As</code> です。<br>
+      <code>23503</code> は PostgreSQL の SQLSTATE で <code>foreign_key_violation</code> を表す標準コードです。ちなみに主キー・UNIQUE 違反は <code>23505</code>（<code>unique_violation</code>）。もし <code>Like</code> で <code>ON CONFLICT DO NOTHING</code> を書き忘れると、二重いいねはこの <code>23505</code> でエラーになります——<code>ON CONFLICT</code> は、その <code>23505</code> を「静かに何もしない」に変えている、とも読めます。</p>
+    </div>
+
+    <h3>Unlike — DELETE は、消す行が無くても成功する</h3>
+    <p><code>Unlike</code> はさらに単純です。</p>
+    <pre><code>	<span class="kw">DELETE FROM</span> likes <span class="kw">WHERE</span> user_id = $1 <span class="kw">AND</span> post_id = $2</code></pre>
+    <p><code>DELETE FROM likes WHERE user_id = $1 AND post_id = $2</code>——「この組のいいねを消せ」。それだけです。注目すべきは、コメントにある通り<strong>「存在しないいいねの解除も成功扱い（冪等）」</strong>という点。<code>DELETE</code> は、<strong>条件に合う行が0本でもエラーになりません</strong>。1本あれば消して成功、最初から無ければ「0本消した」で成功。どちらも <code>err</code> は <code>nil</code> です。</p>
+    <p>だから <code>Unlike</code> は<strong>特別な工夫をしなくても、そのままで冪等</strong>です。「まだいいねが付いているか」を事前に確認する必要はありません。まだ付いていれば外し、すでに外れていれば何もしない——結果はどちらも「その組のいいねは無い」で一定。これが電気の「消す」スイッチにあたります。何回「消す」を押しても、部屋は暗いまま。</p>
+    <p>ここが <code>Like</code> と対照的で美しいところです。<strong><code>INSERT</code> は放っておくと重複でエラーになるので <code>ON CONFLICT DO NOTHING</code> で冪等化が必要</strong>だが、<strong><code>DELETE</code> は元から冪等</strong>で、何も足さなくてよい。「付ける」と「外す」で必要な手当てが違うのは、SQL の性質の違いから来ています。</p>
+
+    <div class="box hazard"><div class="box-k">⚠ 落とし穴 — Unlike で「消す行が無い」を失敗にしてはいけない</div>
+      <p>素朴に実装すると、<code>Unlike</code> で「削除された行数が0なら <code>404</code> を返す」としたくなるかもしれません。<strong>これは冪等性を壊します</strong>。ユーザーがいいねを外し、レスポンスが返る前に通信が切れてブラウザがリトライすると、2回目の <code>Unlike</code> はもう消す行が無い。ここで <code>404</code> を返すと、ユーザーには「エラー」に見えます——実際には正しく外れているのに。<strong>「望んだ状態（いいねが無い）になっているかどうか」だけが結果</strong>で、「今回自分が消したか」は関係ない。だから <code>Unlike</code> は行数を見ず、常に成功で返します。<code>likes.go</code> が <code>DELETE</code> の結果件数を一切チェックしていないのは、意図的な設計です。</p>
+    </div>
+
+    <h2 class="step" id="step-4"><span class="step-no">Step 4</span>エンドポイント — 同じパスに POST=付与 / DELETE=解除</h2>
+    <p><code>store</code> の <code>Like</code> / <code>Unlike</code> を、HTTP から呼べるようにします。まずルーティング。<code>server.go</code> の該当2行です。</p>
+
+    <div class="file-tag">src/backend/internal/api/server.go（該当2行）</div>
+    <pre><code>	m.HandleFunc(<span class="st">"POST /api/posts/{id}/like"</span>, s.requireAuth(s.handleLike))
+	m.HandleFunc(<span class="st">"DELETE /api/posts/{id}/like"</span>, s.requireAuth(s.handleUnlike))</code></pre>
+    <p>ここに、この章のもう1つの設計判断が現れています。<strong>いいねの付与と解除で、URL は同じ <code>/api/posts/{id}/like</code>。違うのは HTTP メソッドだけ</strong>——付けるなら <code>POST</code>、外すなら <code>DELETE</code>。</p>
+    <p>これは REST の考え方に沿った素直な設計です。<code>/api/posts/{id}/like</code> という URL を「その投稿に対する<strong>あなたのいいね</strong>という資源（リソース）」と見なすと、その資源を<strong>作る</strong>のが <code>POST</code>、<strong>消す</strong>のが <code>DELETE</code>。<code>/like/add</code> と <code>/like/remove</code> のように動詞で URL を分けるより、「同じ資源に対する操作の違いをメソッドで表す」ほうが一貫します。<code>{id}</code> はパスパラメータで、どの投稿かを表します。両方とも <code>s.requireAuth(...)</code> で包まれているのは、<strong>いいねはログインしたユーザーだけの操作</strong>だから（誰がいいねしたかを <code>currentUserID</code> で知る必要がある）。第01章で作った認証ミドルウェアが、ここでも効いています。</p>
+
+    <div class="gonote"><div class="box-k">GO メモ · HTTP メソッドの意味論と、冪等性</div>
+      <p>HTTP のメソッドには「冪等かどうか」という決まりごとがあります。仕様上、<strong><code>GET</code> / <code>PUT</code> / <code>DELETE</code> は冪等であるべき</strong>で、<strong><code>POST</code> は冪等でなくてよい</strong>（=非冪等が原則）とされます。<code>DELETE</code> が冪等というのは、まさに Step 3 の <code>Unlike</code> の性質——「同じ資源を何回消しても、結果は『無い』で一定」——そのものです。だから「いいね解除＝<code>DELETE</code>」は、メソッドの意味とぴたり合っています。<br>
+      一方 <code>POST</code> は本来「送るたびに新しい資源が増える」非冪等な操作（新規投稿の <code>POST /api/posts</code> がまさにそれ。押すたびに投稿が増える）。ところが、いいねの <code>POST /api/posts/{id}/like</code> は <code>ON CONFLICT DO NOTHING</code> によって<strong>冪等に振る舞う POST</strong>にしてあります。メソッドの原則としては非冪等でも、実装で冪等性を持たせている——「二重送信に強くしたい軽い操作」ではよく採られる工夫です。原則を知った上で、目的に合わせて冪等化しているわけです。</p>
+    </div>
+
+    <p>次にハンドラ本体。<code>post_handlers.go</code> から、いいね関連の2つだけを抜き出します（他のハンドラは各章で扱うため省略）。</p>
+
+    <div class="file-tag">src/backend/internal/api/post_handlers.go（handleLike / handleUnlike）</div>
+    <pre><code><span class="cm">// POST /api/posts/{id}/like（FR-10・冪等）</span>
+<span class="kw">func</span> (s *<span class="ty">Server</span>) handleLike(w http.<span class="ty">ResponseWriter</span>, r *http.<span class="ty">Request</span>) {
+	id, ok := parsePostID(w, r)
+	<span class="kw">if</span> !ok {
+		<span class="kw">return</span>
+	}
+	<span class="kw">if</span> err := s.store.Like(r.Context(), currentUserID(r), id); err != <span class="kw">nil</span> {
+		writeStoreError(w, err)
+		<span class="kw">return</span>
+	}
+	w.WriteHeader(http.<span class="ty">StatusNoContent</span>)
+}
+
+<span class="cm">// DELETE /api/posts/{id}/like</span>
+<span class="kw">func</span> (s *<span class="ty">Server</span>) handleUnlike(w http.<span class="ty">ResponseWriter</span>, r *http.<span class="ty">Request</span>) {
+	id, ok := parsePostID(w, r)
+	<span class="kw">if</span> !ok {
+		<span class="kw">return</span>
+	}
+	<span class="kw">if</span> err := s.store.Unlike(r.Context(), currentUserID(r), id); err != <span class="kw">nil</span> {
+		writeStoreError(w, err)
+		<span class="kw">return</span>
+	}
+	w.WriteHeader(http.<span class="ty">StatusNoContent</span>)
+}</code></pre>
+
+    <p>2つのハンドラは、判で押したように同じ3ステップです。<strong>(1) パスの <code>{id}</code> を読み取る、(2) <code>store</code> の <code>Like</code> / <code>Unlike</code> を呼ぶ、(3) 成功なら <code>204 No Content</code> を返す</strong>。順に見ます。</p>
+    <p><code>parsePostID(w, r)</code> は、URL の <code>{id}</code> 部分を数値として読み取る共通関数です（第02章で作りました）。<code>id</code> が数字でない・0以下といった不正なら、この関数の中で <code>404</code> を書いて <code>ok=false</code> を返すので、ハンドラは <code>return</code> するだけ。有効な投稿 ID が取れたら次へ進みます。</p>
+    <p>次に <code>s.store.Like(r.Context(), currentUserID(r), id)</code>。<code>currentUserID(r)</code> は、認証ミドルウェアがリクエストに紐づけた<strong>「今ログインしているユーザーの ID」</strong>を取り出す関数です。つまり「<strong>今の自分</strong>が、<strong>この投稿</strong>にいいねする」を <code>store</code> に依頼している。エラーが返れば <code>writeStoreError(w, err)</code> に丸投げします。ここが Step 3 とつながる要で、<code>Like</code> が返した <code>ErrNotFound</code> は <code>writeStoreError</code> の中で <code>404</code> に変換され、想定外の障害は <code>500</code> になります。ハンドラ自身は「どのエラーを何番にするか」を知らなくてよく、翻訳は一箇所に集約されています。</p>
+
+    <h3>なぜ 200 でも 201 でもなく、204 No Content なのか</h3>
+    <p>成功時の <code>w.WriteHeader(http.StatusNoContent)</code> ——これが <code>204 No Content</code> です。<code>204</code> は「<strong>リクエストは成功した。ただし返す本文（ボディ）は無い</strong>」を意味するステータスコードです。なぜいいねに <code>204</code> がふさわしいのか。</p>
+    <p>いいねを付けた・外した結果として、<strong>クライアントに返すべき新しいデータが特に無いから</strong>です。投稿作成（<code>POST /api/posts</code>）なら、作られた投稿の ID や本文を <code>201 Created</code> とともに返す意味があります。しかしいいねは、成功したという事実さえ伝われば十分。「今この投稿のいいね数はいくつか」「自分はいいね済みか」といった表示は、フロントが別途（第07章の集計 API 経由で）持っている・取り直せる情報です。だから<strong>ボディを空にして、通信量も処理も最小</strong>にする <code>204</code> が合理的です。</p>
+    <p>そして冪等性の観点でも <code>204</code> は都合がよい。<code>200</code>（本文あり成功）だと「今回の結果」を本文に載せたくなり、「1回目と2回目で本文が違う」ような一貫性の悩みが生まれます。<code>204</code> なら<strong>1回目も2回目も、まったく同じ「空の成功」</strong>。同じ操作には同じ応答、という冪等の理想に、レスポンスの形まで揃います。<code>204</code> は本文を返さない約束なので、<code>WriteHeader</code> の後に何も書かないのが正しい作法です。</p>
+
+    <div class="box hazard"><div class="box-k">⚠ 落とし穴 — 204 のレスポンスにボディを書いてはいけない</div>
+      <p><code>204 No Content</code> は HTTP の仕様上<strong>「ボディを持たない」</strong>と決められたステータスです。<code>w.WriteHeader(http.StatusNoContent)</code> の後に <code>w.Write([]byte("ok"))</code> のように本文を書き足すと、仕様違反になり、一部のクライアントやプロキシが混乱します（「本文は無いはずなのにデータが来た」）。いいねのハンドラが <code>WriteHeader</code> だけで終わり、<code>writeJSON</code> を呼んでいないのはこのためです。<strong>「成功したが返すものは無い」ときは <code>204</code>＋空ボディ</strong>——この組み合わせを崩さないでください。</p>
+    </div>
+
+    <h2 class="step" id="step-5"><span class="step-no">Step 5</span>冪等性を確かめる — curl の反復と、楽観的更新の予告</h2>
+    <p>コードが揃いました。いいねの付け外しが本当に冪等かを、<strong>自分の手で</strong>確かめます。ここが本章の山場——同じ操作を2回送って「結果が変わらない」ことを、目で見て納得します。</p>
+
+    <div class="box do"><div class="box-k">▸ 動かして確認 — いいねを2回付けても、数は1</div>
+      <p>ログイン済みの Cookie を <code>cookies.txt</code> に持っている前提です（第01章で取得済み）。まず、<strong>いいねの的になる投稿を1つ作ります</strong>。日本語の本文は <code>-d @-</code> で標準入力から渡します（第02章の注意）。</p>
+      <pre class="term"><code><span class="ps">$</span> curl -s -b cookies.txt -X POST http://localhost:8080/api/posts \
+    -H <span class="st">"Content-Type: application/json"</span> -d @- &lt;&lt;<span class="st">'JSON'</span>
+{"body":"いいねの練習台"}
+JSON
+<span class="out">{"id":6,"body":"いいねの練習台",...,"like_count":0,"liked_by_me":false,"reply_count":0}</span></code></pre>
+      <p>返ってきた <code>id</code>（ここでは <strong>6</strong>）が、これから使う投稿番号です。<strong>あなたの環境では違う数字になります</strong>——ここまでに何本投稿したかで変わるので、以下の <code>6</code> は自分の値に読み替えてください。この投稿に、<strong>同じいいねを2回</strong>送ってみます。<code>-i</code> はレスポンスのステータス行とヘッダを表示するオプションです。</p>
+      <pre class="term"><code><span class="cm"># 1回目のいいね</span>
+<span class="ps">$</span> curl -i -b cookies.txt -X POST http://localhost:8080/api/posts/6/like
+<span class="out">HTTP/1.1 204 No Content</span>
+
+<span class="cm"># 2回目 — 同じいいねをもう一度（二重送信を再現）</span>
+<span class="ps">$</span> curl -i -b cookies.txt -X POST http://localhost:8080/api/posts/6/like
+<span class="out">HTTP/1.1 204 No Content</span></code></pre>
+      <p>2回とも <code>204 No Content</code>。2回目もエラーになりません（<code>ON CONFLICT DO NOTHING</code> が衝突を静かに吸収）。では、いいね数はどうなっているか——投稿を取得して確かめます。</p>
+      <pre class="term"><code><span class="ps">$</span> curl -s -b cookies.txt http://localhost:8080/api/posts/6
+<span class="out">{"id":6,"body":"いいねの練習台",...,"like_count":1,"liked_by_me":true,"reply_count":0}</span></code></pre>
+      <p><code>like_count</code> は <strong><code>1</code></strong>。2回いいねを送ったのに、数は1のまま。DB が二重を1件に潰したのが確認できました。<code>liked_by_me</code> が <code>true</code> なのは「今の自分がいいね済み」を表します（この2つのフィールドを<strong>どう集計しているか</strong>は第07章）。</p>
+    </div>
+
+    <div class="box do"><div class="box-k">▸ 動かして確認 — いいねを2回外しても、成功</div>
+      <p>今度は解除。<code>DELETE</code> を<strong>2回</strong>送ります。</p>
+      <pre class="term"><code><span class="cm"># 1回目の解除</span>
+<span class="ps">$</span> curl -i -b cookies.txt -X DELETE http://localhost:8080/api/posts/6/like
+<span class="out">HTTP/1.1 204 No Content</span>
+
+<span class="cm"># 2回目 — すでに外れているのに、もう一度外す</span>
+<span class="ps">$</span> curl -i -b cookies.txt -X DELETE http://localhost:8080/api/posts/6/like
+<span class="out">HTTP/1.1 204 No Content</span></code></pre>
+      <p>2回目、すでにいいねは外れているのに、やはり <code>204</code>。エラーになりません（<code>DELETE</code> は消す行が無くても成功）。<code>Unlike</code> が元から冪等であることが、これで体感できました。<code>POST</code> も <code>DELETE</code> も、何回送っても結果は一定——<strong>これが冪等性</strong>です。</p>
+    </div>
+
+    <div class="box do"><div class="box-k">▸ 動かして確認 — 存在しない投稿へのいいねは 404</div>
+      <p>最後に、実在しない投稿番号（例：<code>999999</code>）にいいねを送ってみます。</p>
+      <pre class="term"><code><span class="ps">$</span> curl -i -b cookies.txt -X POST http://localhost:8080/api/posts/999999/like
+<span class="out">HTTP/1.1 404 Not Found
+Content-Type: application/json
+
+{"error":{"code":"not_found","message":"対象が見つかりません。削除された可能性があります。"}}</span></code></pre>
+      <p><code>404 Not Found</code>。存在しない投稿へのいいねは、DB の外部キー（<code>REFERENCES posts(id)</code>）が <code>23503</code> で拒否し、<code>Like</code> がそれを <code>ErrNotFound</code> に翻訳し、<code>writeStoreError</code> が <code>404</code> に変換した結果です。Step 2 → Step 3 → Step 4 の設計が、1本の線でつながっているのが見えます。</p>
+    </div>
+
+    <h3>フロントの「楽観的更新」への布石</h3>
+    <p>ここまでは curl でしたが、実際の画面ではユーザーがハートのアイコンを押します。このとき、Chirp のフロント（第08章の <code>PostCard.tsx</code>）は<strong>楽観的更新（optimistic update）</strong>という手法を使います。概念だけ、ここで予告しておきます。</p>
+    <p>楽観的更新とは、<strong>サーバの応答を待たずに、先に画面を「成功したこと」にしてしまう</strong>やり方です。ユーザーがハートを押した瞬間、<code>POST .../like</code> の <code>204</code> が返るのを待たずに、ハートを即座に赤く塗り、いいね数を <code>+1</code> して見せる。そして裏でリクエストを送り、<strong>もし失敗が返ってきたら、そのとき画面を元に戻す</strong>（ハートを白に、数を <code>-1</code> に）。ネットワークの往復（数十〜数百ミリ秒）を待たせない、キビキビした操作感が得られます。</p>
+
+    <div class="ascii">楽観的更新の流れ（第08章 PostCard.tsx で実装）
+    押した瞬間              裏で通信              結果
+─────────────       ─────────────       ─────────────
+♡ 12  ──押す──▶  ♥ 13（先に変える） ──▶ POST /like ─┬─ 204 → そのまま ♥ 13
+                                                    └─ 失敗 → ♡ 12 に戻す</div>
+
+    <p>この手法が成り立つ土台こそ、この章で作った冪等性です。楽観的更新は「たぶん成功する」と<strong>楽観</strong>して先に進むぶん、リトライや二重送信が起こりやすい。もしサーバ側が二重いいねでいいね数を狂わせたり、二重解除でエラーを返したりすれば、画面と実データがずれてしまいます。<strong>サーバが冪等だからこそ、フロントは安心して「先に画面を変える」を選べる</strong>。バックエンドの堅牢さが、フロントの気持ちよさを支えているわけです。実装の詳細は第08章に譲りますが、「なぜ冪等にこだわったか」の答えの一つが、この楽観的更新にあると覚えておいてください。</p>
+
+    <h2>つまずき FAQ</h2>
+    <details class="qa"><summary>なぜ成功なのに <code>200 OK</code> ではなく <code>204 No Content</code> を返すの?</summary>
+      <div class="qa-body"><p>いいねの付け外しでは、<strong>クライアントに返すべき新しいデータが無い</strong>からです。投稿作成のように「作られた資源の中身」を返す必要があれば <code>200</code> / <code>201</code>＋ボディが適切ですが、いいねは「成功した」という事実だけ伝われば十分。<code>204</code> は「成功・ボディ無し」を表す専用のコードで、通信量も処理も最小になります。さらに冪等性の面でも、1回目も2回目もまったく同じ「空の成功」を返せるので、応答の一貫性が保てます。いいね数や自分のいいね有無は、第07章の集計 API 経由でフロントが別に取得します。</p></div>
+    </details>
+    <details class="qa"><summary>二重送信されても大丈夫、というのは具体的にどういう仕組み?</summary>
+      <div class="qa-body"><p>2段構えです。<strong>(1) DB の複合主キー <code>PRIMARY KEY (user_id, post_id)</code></strong> が「同じ人が同じ投稿に2行」を物理的に禁じ、<strong>(2) SQL の <code>ON CONFLICT DO NOTHING</code></strong> が、その禁止に触れたとき（＝2回目のいいね）エラーにせず静かに何もしない。この2つで、いいねの <code>POST</code> は何回届いても結果が「行1本」に収まります。解除の <code>DELETE</code> は、そもそも消す行が無くてもエラーにならない（元から冪等）ので、追加の工夫は不要。だから <code>Unlike</code> は削除件数を一切チェックしていません。指の二度押し、回線待ちの再送、クライアントの自動リトライ——どれが来ても、いいね数は狂いません。</p></div>
+    </details>
+    <details class="qa"><summary>いいねの「数」や「自分が押したか」は、どこで数えているの?</summary>
+      <div class="qa-body"><p>この章ではなく、<strong>第07章</strong>です。いいね数（<code>like_count</code>）といいね有無（<code>liked_by_me</code>）は、<code>likes</code> テーブルを<strong>読んで集計した結果</strong>で、書き込み（付ける・外す）とは別の関心事だからです。とくにタイムラインでは、表示する投稿の数だけ「この投稿のいいね数は?」を繰り返し問い合わせると<strong>N+1問題</strong>（1件の一覧取得＋N件の追加問い合わせ）に陥ります。第07章の <code>GetPostMeta</code> は、複数の投稿 ID を <code>WHERE post_id = ANY($1)</code> で<strong>1回にまとめて</strong>集計し、これを解消します。<code>idx_likes_post</code> 索引が効くのもここ。この章は「1件を壊れなく付け外しする」ことに徹し、集計は第07章に預けています。</p></div>
+    </details>
+
+    <h2>理解度チェック</h2>
+    <p>次の問いに<strong>自分の言葉で</strong>答えられたら、この章は卒業です。</p>
+    <details class="qa"><summary>1. <code>likes</code> の複合主キー <code>(user_id, post_id)</code> は、何を保証しているか。</summary>
+      <div class="qa-body"><p>「<strong>同じユーザーが、同じ投稿に、いいねを2回付ける</strong>」ことを、DB のレベルで物理的に禁じている。複合主キーは「2列の<strong>組み合わせ</strong>が重複しない」を保証するので、<code>(42, 100)</code> の組はテーブルに1行しか存在できない。ただし別の投稿への <code>(42, 101)</code> や、別の人からの <code>(43, 100)</code> は組が違うので共存できる。この二重禁止がアプリのコードではなく DB の構造で保証されている点が重要で、アプリのロジックがすり抜けても最後の砦になる。</p></div>
+    </details>
+    <details class="qa"><summary>2. <code>Like</code> には <code>ON CONFLICT DO NOTHING</code> が要るのに、<code>Unlike</code> には冪等化の工夫が要らないのはなぜか。</summary>
+      <div class="qa-body"><p><code>INSERT</code> と <code>DELETE</code> の性質が違うから。<code>INSERT</code> は、すでに同じ組が有ると<strong>主キー違反（23505）でエラーになる</strong>ので、そのままでは2回目のいいねが失敗する。<code>ON CONFLICT DO NOTHING</code> が「衝突したら静かに何もしない」に変えて冪等化する。一方 <code>DELETE</code> は、<strong>条件に合う行が0本でもエラーにならず成功</strong>するので、すでに外れている状態でもう一度外しても成功する——<strong>元から冪等</strong>。だから <code>Unlike</code> は削除件数もチェックせず、そのまま成功を返す。「付ける」と「外す」で必要な手当てが非対称なのは、SQL の性質の違いに由来する。</p></div>
+    </details>
+    <details class="qa"><summary>3. 存在しない投稿にいいねを送ったとき、<code>404</code> が返るまでの流れを説明せよ。</summary>
+      <div class="qa-body"><p>(1) <code>likes.post_id</code> には <code>REFERENCES posts(id)</code> の外部キーがあり、実在しない投稿番号の <code>INSERT</code> を PostgreSQL が<strong>外部キー違反（SQLSTATE 23503）</strong>で拒否する。(2) <code>Like</code> は <code>errors.As</code> でエラーを <code>*pgconn.PgError</code> として取り出し、<code>Code == "23503"</code> なら<strong>ドメインエラー <code>ErrNotFound</code> に翻訳して返す</strong>。(3) ハンドラ <code>handleLike</code> はそのエラーを <code>writeStoreError</code> に渡し、<code>writeStoreError</code> は <code>errors.Is(err, ErrNotFound)</code> を見て <code>404 Not Found</code> を書く。DB の都合（23503 という数字）を <code>store</code> の中で「見つからない」という言葉に直し、それを API 層が HTTP ステータスに変換する、という2段の翻訳になっている。</p></div>
+    </details>
+
+    <h2>まとめ — 数え上げという次の難所へ</h2>
+    <p>この章で、Chirp に「反応する」機能が付きました。<code>likes</code> テーブルは <code>(user_id, post_id)</code> の複合主キーで二重いいねを物理的に防ぎ、<code>Like</code> は <code>INSERT ... ON CONFLICT DO NOTHING</code> で「何回付けても1件」を、<code>Unlike</code> は <code>DELETE</code> の元来の性質で「何回外しても成功」を実現しました。付与は <code>POST</code>、解除は <code>DELETE</code>、どちらも同じ URL・成功は <code>204 No Content</code>。存在しない投稿へのいいねは外部キーが <code>404</code> に導く。小さなテーブルひとつで、<strong>冪等性</strong>という大きな設計原則を——curl の反復で結果が変わらないことを目で見ながら——手に入れました。この冪等性が、第08章の楽観的更新を安心して選べる土台になります。</p>
+    <p>ただし、私たちはまだ「いいねを付ける・外す」しかしていません。画面に出すには「この投稿にいいねが<strong>何個</strong>付いているか」「<strong>自分は</strong>いいね済みか」を知る必要があります。1件の投稿ならそれは簡単な <code>SELECT COUNT(*)</code> で済む。けれどタイムラインに20件の投稿が並ぶとき、20回 <code>COUNT</code> を投げると——ここに <strong>N+1問題</strong>が口を開けています。次の第07章では、この数え上げを <code>WHERE post_id = ANY($1)</code> のバッチ集計と索引でどう捌くか、Chirp を「速くする」技術の核心に踏み込みます。</p>
+
+    <div class="chap-foot">
+      <a class="pager" href="05-reply.html"><span class="dir">← 前へ</span>第05章 · 会話する（リプライ）</a>
+      <a class="pager next" href="07-perf.html"><span class="dir">次へ →</span>第07章 · 速くする（N+1と索引）</a>
+    </div>
+  </main>
+</div>
+</body>
+</html>

@@ -1,0 +1,1403 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>第04章 表とカタログ — ディスクからつくるデータベース</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500;600&family=Source+Serif+4:opsz,wght@8..60,400;8..60,600;8..60,700&family=Noto+Serif+JP:wght@400;600;700&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<div class="shell">
+
+  <aside class="spine">
+    <a class="wordmark" href="index.html">MINIDB · from scratch</a>
+    <div class="book-title">ディスクから<br>つくるデータベース</div>
+    <div class="book-sub">Go で B+Tree から SQL まで</div>
+
+    <div class="legend"><span>読む <b>↓</b></span><span>組む <b>↑</b></span></div>
+
+    <nav aria-label="目次">
+      <ul class="toc">
+        <li><a class="nav-item" href="index.html"><span class="nav-num">序</span><span class="nav-label">はじめに・準備<span class="nav-tag">Setup</span></span></a></li>
+        <li><a class="nav-item" href="00-disk.html"><span class="nav-num">00</span><span class="nav-label">ディスクとページ<span class="nav-tag">Disk</span></span></a></li>
+        <li><a class="nav-item" href="01-page.html"><span class="nav-num">01</span><span class="nav-label">ページの中身<span class="nav-tag">Page</span></span></a></li>
+        <li><a class="nav-item" href="02-buffer.html"><span class="nav-num">02</span><span class="nav-label">バッファプール<span class="nav-tag">Buffer</span></span></a></li>
+        <li><a class="nav-item" href="03-btree.html"><span class="nav-num">03</span><span class="nav-label">B+Tree 索引<span class="nav-tag">Index</span></span></a></li>
+        <li><a class="nav-item current" aria-current="page" href="04-catalog.html"><span class="nav-num">04</span><span class="nav-label">表とカタログ<span class="nav-tag">Catalog</span></span></a></li>
+        <li><a class="nav-item" href="05-sql.html"><span class="nav-num">05</span><span class="nav-label">SQL を実行する<span class="nav-tag">Query</span></span></a></li>
+        <li><a class="nav-item" href="06-wal.html"><span class="nav-num">06</span><span class="nav-label">壊れない仕組み<span class="nav-tag">WAL</span></span></a></li>
+        <li><a class="nav-item" href="07-txn.html"><span class="nav-num">07</span><span class="nav-label">索引とトランザクション<span class="nav-tag">Txn</span></span></a></li>
+      </ul>
+    </nav>
+
+    <div class="spine-foot">
+      各章は一つの層。<br>下（ディスク）から上（SQL）へ<br>積み上げて動かしていく。
+    </div>
+  </aside>
+
+  <main class="reading">
+    <div class="progress-tag">第04章 / 全8章 · 層: CATALOG · 読了目安 4〜5時間</div>
+    <div class="eyebrow"><span>Catalog</span><span class="depth">— 自分を語る DB</span></div>
+    <h1>表とカタログ</h1>
+    <p class="lede">ここまでは「バイト列」を扱ってきました。ここからは「表」と「列」という言葉を与えます。面白いのは、<strong>表の定義そのものも、また表に入れる</strong>こと。データベースは自分自身を語ります。</p>
+
+    <div class="box goal"><div class="box-k">◈ この章のゴール</div>
+      <p>任意のスキーマ（列の並び）で表を作り、行を入れ、全件取り出せる。プログラムを再起動しても、表の定義とデータが両方残っている。そして DB ファイルを 16 進ダンプで開いたとき、<strong>先頭のマジックナンバーから表の中の 1 行まで、全バイトの意味を自分で説明できる</strong>。</p>
+    </div>
+
+    <div class="box map"><div class="box-k">☰ この章のステップ</div>
+      <ol>
+        <li><a href="#step-1">ヒープファイル — 表に実体を与える</a></li>
+        <li><a href="#step-2">ヒープの取得・削除・全走査</a></li>
+        <li><a href="#step-3">スキーマと Value — 「列」と「値」に名前を与える</a></li>
+        <li><a href="#step-4">タプルをバイト列へ — Encode / Decode</a></li>
+        <li><a href="#step-5">順序を保つキー — memcomparable エンコード</a></li>
+        <li><a href="#step-6">ページ 0 — DB 全体の入口をつくる</a></li>
+        <li><a href="#step-7">カタログレコード — 表の定義を「行」として書く</a></li>
+        <li><a href="#step-8">CREATE TABLE — すべてをつなぐ</a></li>
+      </ol>
+    </div>
+
+    <h2>ここまではバイト列、ここからは表と列</h2>
+    <p>手元にある部品を棚卸ししましょう。第00章でファイルを 4KB のページに切り、第01章でページの中に可変長レコードを詰めました（スロット化ページ）。第02章でページの読み書きをキャッシュ付きの <code>Store</code> インターフェースにまとめ、第03章では「バイト列のキーで探すと TID が返る」B+Tree を作りました。</p>
+    <p>強力な部品群ですが、よく見るとこの世界にはまだ<strong>「users という表」も「id という列」も存在しません</strong>。あるのはページ番号とスロット番号とバイト列だけです。<code>INSERT INTO users VALUES (1, 'alice', 30)</code> を動かすには、少なくとも次の 4 つが必要になります。</p>
+    <ol>
+      <li><strong>表の実体</strong> — 「users の行はどのページたちに入っているか」。行の置き場です。</li>
+      <li><strong>行（タプル）の形</strong> — <code>(1, 'alice', 30)</code> という値の並びを、1 本のバイト列に焼き込む・戻す方法。<strong>タプル</strong>とは「行を構成する値の並び」のことで、本書では行とほぼ同義に使います。</li>
+      <li><strong>キーの形</strong> — 値を B+Tree に入れられる「比較可能なバイト列」へ変換する方法。</li>
+      <li><strong>定義の置き場</strong> — 「どんな表があり、各表にどんな列があるか」という<strong>メタデータ</strong>（データについてのデータ）の保存場所。</li>
+    </ol>
+    <p>この 4 つを作るのが本章です。すべて <code>internal/catalog</code> パッケージに収まっており、合計 660 行ほど。この章を終えると、DB ファイルの中身は 1 バイト残らず説明可能になります。</p>
+
+    <h2>定義はどこに置く? — 自己記述という答え</h2>
+    <p>4 つのうち、いちばん設計の匂いがするのは「定義の置き場」です。表の一覧を JSON ファイルに書く? ファイル先頭に専用の固定領域を切る? どちらも動きますが、本物の RDBMS はもっと美しい手を使います。<strong>表の定義を、ただの表に入れる</strong>のです。</p>
+    <p>PostgreSQL に <code>pg_class</code> や <code>pg_attribute</code> という「システムカタログ」と呼ばれる表があるのをご存じでしょうか。「どんな表があるか」も「各表の列は何か」も、全部ふつうの表として格納されています。DB が自分の仕組み（ページ・行）で自分の構造を記録する — これを<strong>自己記述</strong>（self-describing）と言います。専用フォーマットを別途発明しなくてよいので、コードが増えません。ブートストラップ（起動時の足がかり）に必要なのは、たった一つの約束だけです。</p>
+
+    <div class="ascii">mydata.db の中の「芋づる」— ページ 0 だけ読めれば、あとは全部辿れる
+
+  ページ 0（メタページ）
+  ┌────────────────────────────────────────────┐
+  │ [0:8)  マジックナンバー "MINIDB\x01\x00"      │
+  │ [8:12) カタログヒープの先頭 PageID = 1  ──┐   │
+  └───────────────────────────────────────│───┘
+                                          ▼
+  ページ 1（カタログヒープ = 「表の一覧」という表）
+  ┌────────────────────────────────────────────┐
+  │ レコード: users の定義                        │
+  │   列 = (id INT, name TEXT, age INT)         │
+  │   ヒープ先頭 = ページ 2  ──────────────┐      │
+  └───────────────────────────────────│────────┘
+                                      ▼
+  ページ 2（users のヒープ = データ本体）
+  ┌────────────────────────────────────────────┐
+  │ レコード: (1, 'alice', 30)                   │
+  │ レコード: (2, 'bob', 25)   …                 │
+  └────────────────────────────────────────────┘</div>
+
+    <p>約束とは「<strong>ページ 0 はメタページである</strong>」ということ。起動時にページ 0 を読めば、カタログヒープ（表定義の置き場）の場所が分かる。カタログヒープを走査すれば全部の表の定義が分かる。各定義には、その表のデータ本体（ヒープ）の先頭ページが書いてある。芋づる式です。</p>
+    <p>この章は、この図を下から組み立てていきます。まず「ヒープ」という行の置き場（Step 1〜2）、次に行とキーのバイト列表現（Step 3〜5）、最後にページ 0 とカタログ（Step 6〜8）です。</p>
+
+    <!-- ============================================================ -->
+    <h2 class="step" id="step-1"><span class="step-no">Step 1</span>ヒープファイル — 表に実体を与える</h2>
+    <p>最初に作るのは<strong>ヒープファイル</strong>です。第01章のスロット化ページを、ヘッダの <code>next</code> ポインタで数珠つなぎにしたもの — つまり「ページの連結リスト」で、行の順序を保証しない、いちばん素朴な行の置き場です。「ヒープ（heap = 山積み）」という名前のとおり、空いているところに放り込むだけ。順序が欲しければ B+Tree 索引（第03章）を別に張る、というのが RDBMS の役割分担です。</p>
+
+    <div class="ascii">ヒープファイル = スロット化ページの数珠つなぎ
+
+  first（先頭ページ ID だけ覚えておく）
+    │
+    ▼
+  ┌──────────────┐    ┌──────────────┐    ┌──────────────┐
+  │ ページ 2      │    │ ページ 5      │    │ ページ 9      │
+  │ next = 5 ────┼──▶│ next = 9 ────┼──▶│ next = 無効   │← 末尾
+  │ [行][行][行]  │    │ [行][行]      │    │ [行]          │
+  └──────────────┘    └──────────────┘    └──────────────┘
+                                            満杯になったら
+                                            新ページを足して連結
+
+  行の住所 = TID（ページ ID, スロット番号）… 第03章で B+Tree が返していたあれ</div>
+
+    <p>行 1 件の住所は <strong>TID</strong>（Tuple IDentifier）です。第03章で B+Tree の「値」として登場した <code>btree.TID</code> — <code>(Page, Slot)</code> のペア — が、ここで本来の意味を持ちます。<strong>索引は TID を返し、ヒープは TID で行を返す。</strong>この 2 層の接続が RDBMS の背骨です。</p>
+    <p>ではコードです。構造体と、ヒープの作成・オープン・挿入まで。</p>
+
+    <div class="file-tag">internal/catalog/heap.go</div>
+    <pre><code><span class="kw">package</span> catalog
+
+<span class="kw">import</span> (
+	<span class="st">"errors"</span>
+	<span class="st">"fmt"</span>
+
+	<span class="st">"minidb/internal/btree"</span>
+	<span class="st">"minidb/internal/storage"</span>
+)
+
+<span class="cm">// HeapFile はスロット化ページを next ポインタで数珠つなぎにした「表の実体」。</span>
+<span class="cm">// 行は TID = (PageID, SlotNo) で識別される。行の順序は保証しない。</span>
+<span class="kw">type</span> <span class="ty">HeapFile</span> <span class="kw">struct</span> {
+	st    storage.<span class="ty">Store</span>
+	first storage.<span class="ty">PageID</span>
+}
+
+<span class="cm">// CreateHeap は空のヒープ（1 ページ）を作り、先頭ページ ID を返す。</span>
+<span class="kw">func</span> CreateHeap(st storage.<span class="ty">Store</span>) (storage.<span class="ty">PageID</span>, <span class="kw">error</span>) {
+	<span class="kw">return</span> st.Allocate(<span class="kw">func</span>(_ storage.<span class="ty">PageID</span>, p *storage.<span class="ty">Page</span>) <span class="kw">error</span> {
+		storage.InitSlottedPage(p)
+		<span class="kw">return</span> <span class="kw">nil</span>
+	})
+}
+
+<span class="cm">// OpenHeap は既存ヒープを開く。</span>
+<span class="kw">func</span> OpenHeap(st storage.<span class="ty">Store</span>, first storage.<span class="ty">PageID</span>) *<span class="ty">HeapFile</span> {
+	<span class="kw">return</span> &amp;<span class="ty">HeapFile</span>{st: st, first: first}
+}
+
+<span class="cm">// Insert はレコードを空きのある最初のページに入れる（先頭から線形に探す）。</span>
+<span class="cm">// どのページにも入らなければ末尾に新ページを足す。</span>
+<span class="cm">// 先頭から探すことで、削除で空いた領域がページ単位でも再利用される（FR-02）。</span>
+<span class="kw">func</span> (h *<span class="ty">HeapFile</span>) Insert(rec []<span class="kw">byte</span>) (btree.<span class="ty">TID</span>, <span class="kw">error</span>) {
+	cur := h.first
+	<span class="kw">for</span> {
+		<span class="kw">var</span> slot <span class="kw">uint16</span>
+		<span class="kw">var</span> next storage.<span class="ty">PageID</span>
+		inserted := <span class="kw">false</span>
+		err := h.st.Write(cur, <span class="kw">func</span>(p *storage.<span class="ty">Page</span>) <span class="kw">error</span> {
+			sp := storage.AsSlottedPage(p)
+			next = sp.Next()
+			s, err := sp.Insert(rec)
+			<span class="kw">if</span> err == <span class="kw">nil</span> {
+				slot = s
+				inserted = <span class="kw">true</span>
+				<span class="kw">return</span> <span class="kw">nil</span>
+			}
+			<span class="kw">if</span> errors.Is(err, storage.ErrPageFull) {
+				<span class="kw">return</span> <span class="kw">nil</span> <span class="cm">// 次のページへ</span>
+			}
+			<span class="kw">return</span> err
+		})
+		<span class="kw">if</span> err != <span class="kw">nil</span> {
+			<span class="kw">return</span> btree.<span class="ty">TID</span>{}, err
+		}
+		<span class="kw">if</span> inserted {
+			<span class="kw">return</span> btree.<span class="ty">TID</span>{Page: cur, Slot: slot}, <span class="kw">nil</span>
+		}
+		<span class="kw">if</span> next == storage.InvalidPageID {
+			<span class="cm">// 末尾: 新ページを確保して連結</span>
+			newID, err := h.st.Allocate(<span class="kw">func</span>(_ storage.<span class="ty">PageID</span>, p *storage.<span class="ty">Page</span>) <span class="kw">error</span> {
+				storage.InitSlottedPage(p)
+				<span class="kw">return</span> <span class="kw">nil</span>
+			})
+			<span class="kw">if</span> err != <span class="kw">nil</span> {
+				<span class="kw">return</span> btree.<span class="ty">TID</span>{}, err
+			}
+			<span class="kw">if</span> err := h.st.Write(cur, <span class="kw">func</span>(p *storage.<span class="ty">Page</span>) <span class="kw">error</span> {
+				storage.AsSlottedPage(p).SetNext(newID)
+				<span class="kw">return</span> <span class="kw">nil</span>
+			}); err != <span class="kw">nil</span> {
+				<span class="kw">return</span> btree.<span class="ty">TID</span>{}, err
+			}
+			next = newID
+		}
+		cur = next
+	}
+}
+
+<span class="cm">// …（Get / Delete / Scan は Step 2 で）</span></code></pre>
+
+    <p>コードを上から読み解きます。まず <code>HeapFile</code> 構造体が持つのはたった 2 つ、<code>st</code>（第02章の <code>Store</code> — ディスクでもバッファプールでも同じ顔で使える読み書き口）と <code>first</code>（先頭ページの ID）だけです。<strong>ヒープは自分の全ページ一覧を持ちません。</strong>先頭さえ知っていれば、あとは各ページの <code>next</code> を辿れば全部に届くからです。</p>
+    <p><code>CreateHeap</code> は <code>st.Allocate</code>（新しいページを 1 枚割り当てる、第02章のメソッド）で空のスロット化ページを 1 枚だけ作ります。返ってきたページ ID がそのままヒープの名刺（<code>first</code>）になります。「表を作る」コストはページ 1 枚分、というのは覚えておいてください — Step 8 の <code>CREATE TABLE</code> がこれを呼びます。</p>
+    <p><code>Insert</code> がこのファイルの心臓部です。方針は素直で、<strong>先頭ページから順に「入れてみて、ダメなら次」</strong>。</p>
+    <ul>
+      <li>各ページで第01章の <code>sp.Insert(rec)</code> を試します。成功したらスロット番号が返るので、<code>btree.TID{Page: cur, Slot: slot}</code> — 行の住所 — を作って終了。</li>
+      <li>失敗の理由が <code>storage.ErrPageFull</code>（このページは満杯）なら、それはエラーではなく「次のページへ」の合図です。<code>nil</code> を返してクロージャを正常終了させ、外のループで <code>next</code> へ進みます。</li>
+      <li>末尾（<code>next == storage.InvalidPageID</code>。第01章で決めた「どこも指していない」番兵値）まで来てしまったら、新ページを <code>Allocate</code> して、今の末尾ページの <code>SetNext</code> でつなぎ、そこへ進みます。次の周回で必ず入ります（空ページに入らないレコードは <code>sp.Insert</code> が別のエラーで弾きます）。</li>
+    </ul>
+    <p>コメントにある FR-02 は要件定義書の「削除された領域が再利用されること」という機能要件です。毎回<strong>先頭から</strong>探すおかげで、途中のページで行が削除されて空きができれば、次の挿入がそこを自然に埋めます。第01章の墓標（削除跡）再利用がページ内の再利用だとすれば、こちらはページ単位の再利用です。</p>
+
+    <div class="gonote"><div class="box-k">GO メモ · errors.Is — エラーの「種類」を調べる</div>
+      <p>Go のエラーはただの値なので <code>err == storage.ErrPageFull</code> と比較したくなりますが、エラーは <code>fmt.Errorf("...: %w", err)</code> のように<strong>包まれて</strong>運ばれてくることがあります。<code>errors.Is(err, target)</code> は包み紙を順にほどきながら「中身が target か」を調べる標準の作法です。「満杯なら次のページへ」のような<strong>エラーの種類で分岐する</strong>コードでは、必ず <code>==</code> ではなく <code>errors.Is</code> を使います。</p>
+    </div>
+
+    <div class="box do"><div class="box-k">▸ 動かして確認</div>
+      <p>まだ挿入しかできないのでテストは書けませんが、ここまでの型と関数がきちんと組み上がる（コンパイルが通る）ことを確認しておきます。何も表示されなければ成功です。</p>
+      <pre class="term"><code><span class="ps">$</span> go build ./internal/catalog</code></pre>
+    </div>
+
+    <!-- ============================================================ -->
+    <h2 class="step" id="step-2"><span class="step-no">Step 2</span>ヒープの取得・削除・全走査</h2>
+    <p>置き場ができたので、読み出す・消す・全部なめる、の 3 操作を足してヒープを完成させます。<code>Get</code> と <code>Delete</code> は TID を受け取って第01章のスロット化ページに委譲するだけの薄い皮です。少し面白いのは全走査の <code>Scan</code> — Step 8 で「カタログを読む」「<code>SELECT *</code> する」の両方を支える主役になります。</p>
+
+    <div class="file-tag">internal/catalog/heap.go（続き）</div>
+    <pre><code><span class="cm">// Get は TID のレコードを返す。</span>
+<span class="kw">func</span> (h *<span class="ty">HeapFile</span>) Get(tid btree.<span class="ty">TID</span>) ([]<span class="kw">byte</span>, <span class="kw">error</span>) {
+	<span class="kw">var</span> rec []<span class="kw">byte</span>
+	err := h.st.Read(tid.Page, <span class="kw">func</span>(p *storage.<span class="ty">Page</span>) <span class="kw">error</span> {
+		r, err := storage.AsSlottedPage(p).Get(tid.Slot)
+		rec = r
+		<span class="kw">return</span> err
+	})
+	<span class="kw">if</span> err != <span class="kw">nil</span> {
+		<span class="kw">return</span> <span class="kw">nil</span>, fmt.Errorf(<span class="st">"heap: get %v: %w"</span>, tid, err)
+	}
+	<span class="kw">return</span> rec, <span class="kw">nil</span>
+}
+
+<span class="cm">// Delete は TID のレコードを削除する。</span>
+<span class="kw">func</span> (h *<span class="ty">HeapFile</span>) Delete(tid btree.<span class="ty">TID</span>) <span class="kw">error</span> {
+	<span class="kw">return</span> h.st.Write(tid.Page, <span class="kw">func</span>(p *storage.<span class="ty">Page</span>) <span class="kw">error</span> {
+		<span class="kw">return</span> storage.AsSlottedPage(p).Delete(tid.Slot)
+	})
+}
+
+<span class="cm">// Scan は全レコードを (TID, レコード) の組で列挙する。fn がエラーを返したら中断。</span>
+<span class="kw">func</span> (h *<span class="ty">HeapFile</span>) Scan(fn <span class="kw">func</span>(tid btree.<span class="ty">TID</span>, rec []<span class="kw">byte</span>) <span class="kw">error</span>) <span class="kw">error</span> {
+	cur := h.first
+	<span class="kw">for</span> cur != storage.InvalidPageID {
+		<span class="kw">var</span> next storage.<span class="ty">PageID</span>
+		<span class="kw">var</span> stop <span class="kw">error</span>
+		err := h.st.Read(cur, <span class="kw">func</span>(p *storage.<span class="ty">Page</span>) <span class="kw">error</span> {
+			sp := storage.AsSlottedPage(p)
+			next = sp.Next()
+			<span class="kw">for</span> s := <span class="kw">uint16</span>(<span class="st">0</span>); s &lt; sp.NumSlots(); s++ {
+				<span class="kw">if</span> !sp.IsLive(s) {
+					<span class="kw">continue</span>
+				}
+				rec, err := sp.Get(s)
+				<span class="kw">if</span> err != <span class="kw">nil</span> {
+					<span class="kw">return</span> err
+				}
+				<span class="kw">if</span> err := fn(btree.<span class="ty">TID</span>{Page: cur, Slot: s}, rec); err != <span class="kw">nil</span> {
+					stop = err
+					<span class="kw">return</span> <span class="kw">nil</span>
+				}
+			}
+			<span class="kw">return</span> <span class="kw">nil</span>
+		})
+		<span class="kw">if</span> err != <span class="kw">nil</span> {
+			<span class="kw">return</span> err
+		}
+		<span class="kw">if</span> stop != <span class="kw">nil</span> {
+			<span class="kw">return</span> stop
+		}
+		cur = next
+	}
+	<span class="kw">return</span> <span class="kw">nil</span>
+}</code></pre>
+
+    <p><code>Scan</code> は二重ループです。外側はページの数珠つなぎを <code>next</code> で辿り、内側は各ページのスロットを 0 番から順に見ます。<code>sp.IsLive(s)</code>（第01章）で墓標 — 削除済みスロット — を飛ばすのを忘れないこと。生きている行だけを、TID 付きでコールバック <code>fn</code> に渡します。</p>
+    <p>ひとつ設計の綾があります。<code>fn</code> がエラーを返したとき（呼び出し側が「もう十分」と打ち切りたいときもここに含まれます）、それをそのまま <code>st.Read</code> のクロージャから返してしまうと、「ページ読み取りの失敗」と「利用者による中断」の区別がつきません。そこで <code>stop</code> という変数にいったん退避してクロージャは正常終了させ、外側で <code>stop</code> を返しています。<strong>誰のエラーかを混ぜない</strong>、という小さな規律です。</p>
+    <p>では、このステップまでの成果を検証するテストを読みます。500 件入れてページをまたがせ、Get・Delete・Scan を通す一気通貫のテストです。</p>
+
+    <div class="file-tag">internal/catalog/catalog_test.go（抜粋）</div>
+    <pre><code><span class="cm">// ヒープ: 挿入・取得・削除・走査、ページをまたぐ量でも動く。</span>
+<span class="kw">func</span> TestHeapInsertScanDelete(t *testing.T) {
+	pool := newStore(t, filepath.Join(t.TempDir(), <span class="st">"t.db"</span>))
+	first, err := CreateHeap(pool)
+	<span class="cm">// …（エラー検査は省略）</span>
+	h := OpenHeap(pool, first)
+
+	<span class="kw">var</span> tids []btree.<span class="ty">TID</span>
+	<span class="kw">for</span> i := <span class="st">0</span>; i &lt; <span class="st">500</span>; i++ { <span class="cm">// 500 × ~100B で複数ページにまたがる</span>
+		rec := <span class="kw">make</span>([]<span class="kw">byte</span>, <span class="st">100</span>)
+		rec[<span class="st">0</span>] = <span class="kw">byte</span>(i)
+		rec[<span class="st">1</span>] = <span class="kw">byte</span>(i &gt;&gt; <span class="st">8</span>)
+		tid, err := h.Insert(rec)
+		<span class="cm">// …</span>
+		tids = <span class="kw">append</span>(tids, tid)
+	}
+	<span class="cm">// Get</span>
+	rec, err := h.Get(tids[<span class="st">123</span>])
+	<span class="cm">// …</span>
+	<span class="cm">// Delete して走査から消える</span>
+	<span class="kw">if</span> err := h.Delete(tids[<span class="st">200</span>]); err != <span class="kw">nil</span> {
+		t.Fatal(err)
+	}
+	count := <span class="st">0</span>
+	err = h.Scan(<span class="kw">func</span>(tid btree.<span class="ty">TID</span>, rec []<span class="kw">byte</span>) <span class="kw">error</span> {
+		count++
+		<span class="kw">return</span> <span class="kw">nil</span>
+	})
+	<span class="cm">// …</span>
+	<span class="kw">if</span> count != <span class="st">499</span> {
+		t.Fatalf(<span class="st">"走査件数 = %d, want 499"</span>, count)
+	}
+}</code></pre>
+
+    <p>検証しているのは 3 点です。(1) 100 バイト × 500 件 = 約 50KB は 4KB ページに収まらないので、<strong>ページの継ぎ足しと連結が正しく動かないと挿入自体が失敗する</strong>こと。(2) 途中の 1 件（123 番目）を TID で取り出すと中身が一致すること。(3) 1 件消したら走査の件数がちょうど 499 になる — 墓標がきちんとスキップされていることです。なおテスト冒頭の <code>newStore</code> はテスト用の小さなヘルパで、第00章のディスクマネージャを開いて第02章のバッファプール（64 フレーム）をかぶせたものを返します。ヒープは常に <code>Store</code> 越しに世界を見るので、テストも本番と同じ積み木で行えます。</p>
+
+    <div class="box do"><div class="box-k">▸ 動かして確認</div>
+      <p>ヒープの一気通貫テストを実行します。</p>
+      <pre class="term"><code><span class="ps">$</span> go test ./internal/catalog -run TestHeapInsertScanDelete -v
+<span class="out">=== RUN   TestHeapInsertScanDelete
+--- PASS: TestHeapInsertScanDelete (0.00s)
+PASS
+ok  	minidb/internal/catalog	0.469s</span></code></pre>
+    </div>
+
+    <div class="box hazard"><div class="box-k">⚠ 落とし穴</div>
+      <p><code>Scan</code> の内側ループの上限 <code>sp.NumSlots()</code> は「墓標を含むスロット総数」です（第01章）。もし「生きている行の数」を返す関数だったら、途中に墓標があるときに末尾の生きた行を数え漏らします。<strong>走査の上限は常に「番号の総数」、生死の判定は 1 件ずつ</strong> <code>IsLive</code> で行う — この分担を崩すと、削除を含むテストだけが落ちる嫌なバグになります。</p>
+    </div>
+
+    <!-- ============================================================ -->
+    <h2 class="step" id="step-3"><span class="step-no">Step 3</span>スキーマと Value — 「列」と「値」に名前を与える</h2>
+    <p>ヒープに入れる <code>[]byte</code> の中身を決める番です。その前に、そもそも「列」「型」「値」を Go の型として言語化しておきます。ここで作るのは 4 つの小さな型 — 列の型 <code>ColType</code>、列定義 <code>Column</code>、列定義の並び <code>Schema</code>、そして 1 セルの値 <code>Value</code> です。<strong>スキーマ</strong>とは「表の構造の定義（どんな名前・型の列が、どんな順で並ぶか）」のことです。</p>
+
+    <div class="file-tag">internal/catalog/schema.go</div>
+    <pre><code><span class="cm">// Package catalog はテーブル定義（スキーマ）の管理と、</span>
+<span class="cm">// スキーマに従った行（タプル）のバイト列エンコードを担う（M4）。</span>
+<span class="cm">//</span>
+<span class="cm">// タプル自体は型情報を持たない素のバイト列で、解釈は常にカタログのスキーマから行う。</span>
+<span class="cm">// これが「DB が自己記述的である」ことの実装上の意味（学習サイト第04章）。</span>
+<span class="kw">package</span> catalog
+
+<span class="kw">import</span> (
+	<span class="st">"encoding/binary"</span>
+	<span class="st">"fmt"</span>
+)
+
+<span class="cm">// ColType は列の型。</span>
+<span class="kw">type</span> <span class="ty">ColType</span> <span class="kw">uint8</span>
+
+<span class="kw">const</span> (
+	IntType  <span class="ty">ColType</span> = <span class="st">1</span> <span class="cm">// int64</span>
+	TextType <span class="ty">ColType</span> = <span class="st">2</span> <span class="cm">// 可変長文字列</span>
+)
+
+<span class="kw">func</span> (c <span class="ty">ColType</span>) String() <span class="kw">string</span> {
+	<span class="kw">switch</span> c {
+	<span class="kw">case</span> IntType:
+		<span class="kw">return</span> <span class="st">"INT"</span>
+	<span class="kw">case</span> TextType:
+		<span class="kw">return</span> <span class="st">"TEXT"</span>
+	<span class="kw">default</span>:
+		<span class="kw">return</span> fmt.Sprintf(<span class="st">"type(%d)"</span>, <span class="kw">uint8</span>(c))
+	}
+}
+
+<span class="cm">// Column は列定義。</span>
+<span class="kw">type</span> <span class="ty">Column</span> <span class="kw">struct</span> {
+	Name <span class="kw">string</span>
+	Type <span class="ty">ColType</span>
+}
+
+<span class="cm">// Schema は列定義の並び。タプルのエンコード・デコードの唯一の根拠。</span>
+<span class="kw">type</span> <span class="ty">Schema</span> <span class="kw">struct</span> {
+	Cols []<span class="ty">Column</span>
+}
+
+<span class="cm">// ColIndex は列名から位置を引く。なければ -1。</span>
+<span class="kw">func</span> (s *<span class="ty">Schema</span>) ColIndex(name <span class="kw">string</span>) <span class="kw">int</span> {
+	<span class="kw">for</span> i, c := <span class="kw">range</span> s.Cols {
+		<span class="kw">if</span> c.Name == name {
+			<span class="kw">return</span> i
+		}
+	}
+	<span class="kw">return</span> -<span class="st">1</span>
+}
+
+<span class="cm">// Value は 1 セルの値。Null のとき他フィールドは無効。</span>
+<span class="kw">type</span> <span class="ty">Value</span> <span class="kw">struct</span> {
+	Type <span class="ty">ColType</span>
+	Null <span class="kw">bool</span>
+	Int  <span class="kw">int64</span>
+	Str  <span class="kw">string</span>
+}
+
+<span class="kw">func</span> NewInt(v <span class="kw">int64</span>) <span class="ty">Value</span>    { <span class="kw">return</span> <span class="ty">Value</span>{Type: IntType, Int: v} }
+<span class="kw">func</span> NewText(s <span class="kw">string</span>) <span class="ty">Value</span>  { <span class="kw">return</span> <span class="ty">Value</span>{Type: TextType, Str: s} }
+<span class="kw">func</span> NewNull(t <span class="ty">ColType</span>) <span class="ty">Value</span> { <span class="kw">return</span> <span class="ty">Value</span>{Type: t, Null: <span class="kw">true</span>} }
+
+<span class="kw">func</span> (v <span class="ty">Value</span>) String() <span class="kw">string</span> {
+	<span class="kw">if</span> v.Null {
+		<span class="kw">return</span> <span class="st">"NULL"</span>
+	}
+	<span class="kw">switch</span> v.Type {
+	<span class="kw">case</span> IntType:
+		<span class="kw">return</span> fmt.Sprintf(<span class="st">"%d"</span>, v.Int)
+	<span class="kw">case</span> TextType:
+		<span class="kw">return</span> v.Str
+	<span class="kw">default</span>:
+		<span class="kw">return</span> <span class="st">"?"</span>
+	}
+}
+
+<span class="cm">// …（Encode / Decode は Step 4、EncodeKey / Compare は Step 5 で）</span></code></pre>
+
+    <p>minidb の型はたった 2 つ、<code>INT</code>（64 ビット整数）と <code>TEXT</code>（可変長文字列）です。DATE も FLOAT もありませんが、この 2 つで「固定長の型」と「可変長の型」という両方の代表を押さえています。ここが理解できれば、型を増やすのは単純作業です。</p>
+    <p><code>Schema</code> のコメント「タプルのエンコード・デコードの<strong>唯一の根拠</strong>」に注目してください。次の Step 4 で見るとおり、行のバイト列には型情報が一切入りません。バイト列を意味に戻せるのはスキーマを知る者だけ — だからスキーマは行の解釈の「唯一の根拠」なのです。</p>
+    <p><code>Value</code> は「型タグ付きの何でも入る箱」です。Go に union 型（複数の型のどれか 1 つを入れる型）はないので、<code>Int</code> と <code>Str</code> の両フィールドを持たせて、<code>Type</code> と <code>Null</code> がどれが有効かを示す、という素朴な作りにしています。1 行 = <code>[]Value</code>。この形は第05章の SQL 実行器でも結果の受け渡しにそのまま使われます。</p>
+
+    <div class="gonote"><div class="box-k">GO メモ · String() メソッドと fmt.Stringer</div>
+      <p>型に <code>String() string</code> というメソッドを付けると、その型は標準の <code>fmt.Stringer</code> インターフェースを満たし、<code>fmt.Printf("%v", v)</code> や <code>%s</code> での表示に<strong>自動的に</strong>この文字列が使われます。<code>ColType(1)</code> がログに <code>INT</code> と出るのはこの仕組みのおかげ。デバッグのしやすさは、こういう小さな投資で決まります。なお <code>String()</code> の中で <code>fmt.Sprintf("%v", c)</code> と自分自身を書くと無限再帰になるので、<code>uint8(c)</code> と素の型に戻してから渡しています。</p>
+    </div>
+
+    <div class="box do"><div class="box-k">▸ 動かして確認</div>
+      <p>このステップも宣言が主役なので、コンパイルの確認だけ通しておきます（何も表示されなければ成功）。動く証拠は次のステップでまとめて取ります。</p>
+      <pre class="term"><code><span class="ps">$</span> go build ./internal/catalog</code></pre>
+    </div>
+
+    <!-- ============================================================ -->
+    <h2 class="step" id="step-4"><span class="step-no">Step 4</span>タプルをバイト列へ — Encode / Decode</h2>
+    <p>いよいよ「行の形」を決めます。<code>[]Value</code> をヒープに入れられる 1 本の <code>[]byte</code> に焼き込む <code>Encode</code> と、その逆再生 <code>Decode</code> です。</p>
+    <p>その前に、設計を 1 つ選ばなくてはいけません。<strong>行自身に型情報を持たせるか?</strong> JSON のように「これは数値、これは文字列」と 1 行ごとに自己記述させる形式なら、スキーマがなくても読めます。しかし minidb は逆を選びます。<strong>行は型を知らない素のバイト列</strong>にし、解釈は常にカタログのスキーマから行う。理由は 2 つあります。1 つは省スペース（100 万行あれば型タグも 100 万回繰り返される）。もう 1 つが本質で、<strong>「スキーマは 1 箇所にだけ存在する」という規律</strong>が生まれることです。行ごとに型があると「行の型タグとカタログの型が食い違ったら?」という誰も答えたくない問いが生まれてしまいます。真実の源は 1 つに。</p>
+    <p>採用するレイアウトはこうです。NULL ビットマップを先頭に置き、その後に値を並べるという骨格は PostgreSQL と同系です（ただし固定長部の (offset, len) ポインタ方式や NULL ビットの極性など細部は minidb 独自で、PostgreSQL とは異なります）。</p>
+
+    <div class="ascii">タプルのオンディスク形式
+
++------------------+----------------------------------+----------------+
+| NULL ビットマップ  | 固定長部（列ごとに固定サイズ）       | 可変長部        |
+| ceil(列数/8) byte | INT  → 値そのもの 8 バイト         | TEXT の実体     |
+| ビット=1 なら NULL | TEXT → (offset u16, len u16) 4バイト|                |
++------------------+----------------------------------+----------------+
+                     ↑ 固定長部のサイズはスキーマだけで決まる
+                       → 「i 番目の列」へ計算だけで届く
+
+TEXT は固定長部に「実体はレコード先頭から offset バイト目に len バイト」
+という住所メモ (offset, len) を置き、実体は可変長部に置く（2 段参照）</div>
+
+    <p>ポイントは<strong>固定長部の存在</strong>です。INT は 8 バイト、TEXT は 4 バイト（住所メモ）と、列の型が分かればサイズが決まる。だから「3 番目の列は先頭から何バイト目か」がスキーマだけで計算でき、レコードを先頭から嘗め回さなくても目的の列に直行できます。可変長の TEXT の実体は最後にまとめて置き、固定長部からの (offset, len) で指します。</p>
+    <p>NULL は<strong>ビットマップ</strong>（ビットの並び）で表します。列数分のビットを用意し（8 列ごとに 1 バイト）、i 番目のビットが 1 なら「i 列目は NULL」。NULL の列は固定長部が 0 埋めのまま残ります（読まれないので何でもよい）。</p>
+    <p>コードです。まず列の固定長幅を返すヘルパと、<code>Encode</code>。</p>
+
+    <div class="file-tag">internal/catalog/schema.go（続き）</div>
+    <pre><code><span class="cm">// ---- タプルのオンディスク形式（設計判断 C-1）----</span>
+<span class="cm">//</span>
+<span class="cm">//	[NULLビットマップ ceil(n/8) バイト]（ビット=1 なら NULL）</span>
+<span class="cm">//	[固定長部: 列ごとに INT=8バイト値 / TEXT=4バイト（可変部へのオフセット u16 + 長さ u16）]</span>
+<span class="cm">//	[可変長部: TEXT の実体]</span>
+<span class="cm">//</span>
+<span class="cm">// 固定長部のおかげで「i 番目の列」に計算だけで届く。可変長（TEXT）は</span>
+<span class="cm">// 固定長部に置いた (offset, len) の 2 段参照で解決する。</span>
+
+<span class="kw">func</span> fixedWidth(t <span class="ty">ColType</span>) <span class="kw">int</span> {
+	<span class="kw">if</span> t == IntType {
+		<span class="kw">return</span> <span class="st">8</span>
+	}
+	<span class="kw">return</span> <span class="st">4</span> <span class="cm">// TEXT: offset u16 + len u16</span>
+}
+
+<span class="cm">// Encode はスキーマに従って値の並びをバイト列にする。</span>
+<span class="kw">func</span> (s *<span class="ty">Schema</span>) Encode(vals []<span class="ty">Value</span>) ([]<span class="kw">byte</span>, <span class="kw">error</span>) {
+	<span class="kw">if</span> <span class="kw">len</span>(vals) != <span class="kw">len</span>(s.Cols) {
+		<span class="kw">return</span> <span class="kw">nil</span>, fmt.Errorf(<span class="st">"catalog: 値の数 %d が列数 %d と一致しない"</span>, <span class="kw">len</span>(vals), <span class="kw">len</span>(s.Cols))
+	}
+	bitmapLen := (<span class="kw">len</span>(s.Cols) + <span class="st">7</span>) / <span class="st">8</span>
+	fixedLen := <span class="st">0</span>
+	varLen := <span class="st">0</span>
+	<span class="kw">for</span> i, c := <span class="kw">range</span> s.Cols {
+		<span class="kw">if</span> !vals[i].Null &amp;&amp; vals[i].Type != c.Type {
+			<span class="kw">return</span> <span class="kw">nil</span>, fmt.Errorf(<span class="st">"catalog: 列 %s は %s だが %s が渡された"</span>, c.Name, c.Type, vals[i].Type)
+		}
+		fixedLen += fixedWidth(c.Type)
+		<span class="kw">if</span> c.Type == TextType &amp;&amp; !vals[i].Null {
+			varLen += <span class="kw">len</span>(vals[i].Str)
+		}
+	}
+	buf := <span class="kw">make</span>([]<span class="kw">byte</span>, bitmapLen+fixedLen+varLen)
+	fixedOff := bitmapLen
+	varOff := bitmapLen + fixedLen
+	<span class="kw">for</span> i, c := <span class="kw">range</span> s.Cols {
+		v := vals[i]
+		<span class="kw">if</span> v.Null {
+			buf[i/<span class="st">8</span>] |= <span class="st">1</span> &lt;&lt; (i % <span class="st">8</span>)
+			fixedOff += fixedWidth(c.Type)
+			<span class="kw">continue</span>
+		}
+		<span class="kw">switch</span> c.Type {
+		<span class="kw">case</span> IntType:
+			binary.LittleEndian.PutUint64(buf[fixedOff:], <span class="kw">uint64</span>(v.Int))
+		<span class="kw">case</span> TextType:
+			<span class="kw">if</span> <span class="kw">len</span>(v.Str) &gt; <span class="st">0xFFFF</span> {
+				<span class="kw">return</span> <span class="kw">nil</span>, fmt.Errorf(<span class="st">"catalog: TEXT が長すぎる（%d バイト）"</span>, <span class="kw">len</span>(v.Str))
+			}
+			binary.LittleEndian.PutUint16(buf[fixedOff:], <span class="kw">uint16</span>(varOff))
+			binary.LittleEndian.PutUint16(buf[fixedOff+<span class="st">2</span>:], <span class="kw">uint16</span>(<span class="kw">len</span>(v.Str)))
+			<span class="kw">copy</span>(buf[varOff:], v.Str)
+			varOff += <span class="kw">len</span>(v.Str)
+		}
+		fixedOff += fixedWidth(c.Type)
+	}
+	<span class="kw">return</span> buf, <span class="kw">nil</span>
+}</code></pre>
+
+    <p><code>Encode</code> は 2 パス構成です。1 周目のループは<strong>サイズの計算だけ</strong>（ついでに型検査も）。ビットマップ長 + 固定長部 + 可変長部の合計が分かったら <code>make</code> で 1 回だけメモリを確保します。2 周目が本番の書き込みで、<code>fixedOff</code>（固定長部の書き込み位置）と <code>varOff</code>（可変長部の書き込み位置）という 2 本のカーソルを進めながら埋めていきます。</p>
+    <p>ビットマップ長の <code>(len(s.Cols) + 7) / 8</code> は「8 で割って切り上げ」の定番イディオムです。3 列なら (3+7)/8 = 1 バイト、9 列なら 2 バイト。NULL の列では <code>buf[i/8] |= 1 &lt;&lt; (i % 8)</code> でビットを立て、値は書かずに <code>fixedOff</code> だけ前へ進めます — 固定長部の「席」は NULL でも予約されたまま、という点が「計算だけで i 番目に届く」ことを守っています。</p>
+
+    <div class="gonote"><div class="box-k">GO メモ · ビット演算でビットマップを操る</div>
+      <p><code>1 &lt;&lt; (i % 8)</code> は「1 を左に i%8 個ずらす」= i%8 番目のビットだけが 1 のバイトを作ります（<code>&lt;&lt;</code> は左シフト）。<code>x |= y</code> は OR 代入で、<code>x</code> の中で <code>y</code> の立っているビットを立てます（他のビットは触りません）。読むときは <code>x &amp; y</code>（AND）で「そのビットが立っているか」を調べ、結果が 0 かどうかで判定します。<code>i/8</code> が「何バイト目か」、<code>i%8</code> が「そのバイトの何ビット目か」。ビットマップ操作はこの 3 点セット（<code>&lt;&lt;</code> / <code>|=</code> / <code>&amp;</code>）で全部書けます。</p>
+    </div>
+
+    <p>逆再生の <code>Decode</code> はこうなります。</p>
+
+    <div class="file-tag">internal/catalog/schema.go（続き）</div>
+    <pre><code><span class="cm">// Decode はバイト列をスキーマに従って値の並びへ戻す。</span>
+<span class="kw">func</span> (s *<span class="ty">Schema</span>) Decode(rec []<span class="kw">byte</span>) ([]<span class="ty">Value</span>, <span class="kw">error</span>) {
+	bitmapLen := (<span class="kw">len</span>(s.Cols) + <span class="st">7</span>) / <span class="st">8</span>
+	vals := <span class="kw">make</span>([]<span class="ty">Value</span>, <span class="kw">len</span>(s.Cols))
+	fixedOff := bitmapLen
+	<span class="kw">for</span> i, c := <span class="kw">range</span> s.Cols {
+		<span class="kw">if</span> fixedOff+fixedWidth(c.Type) &gt; <span class="kw">len</span>(rec) {
+			<span class="kw">return</span> <span class="kw">nil</span>, fmt.Errorf(<span class="st">"catalog: レコードが短すぎる（列 %s）"</span>, c.Name)
+		}
+		<span class="kw">if</span> rec[i/<span class="st">8</span>]&amp;(<span class="st">1</span>&lt;&lt;(i%<span class="st">8</span>)) != <span class="st">0</span> {
+			vals[i] = NewNull(c.Type)
+			fixedOff += fixedWidth(c.Type)
+			<span class="kw">continue</span>
+		}
+		<span class="kw">switch</span> c.Type {
+		<span class="kw">case</span> IntType:
+			vals[i] = NewInt(<span class="kw">int64</span>(binary.LittleEndian.Uint64(rec[fixedOff:])))
+		<span class="kw">case</span> TextType:
+			off := <span class="kw">int</span>(binary.LittleEndian.Uint16(rec[fixedOff:]))
+			l := <span class="kw">int</span>(binary.LittleEndian.Uint16(rec[fixedOff+<span class="st">2</span>:]))
+			<span class="kw">if</span> off+l &gt; <span class="kw">len</span>(rec) {
+				<span class="kw">return</span> <span class="kw">nil</span>, fmt.Errorf(<span class="st">"catalog: TEXT 参照がレコード外を指している（列 %s）"</span>, c.Name)
+			}
+			vals[i] = NewText(<span class="kw">string</span>(rec[off : off+l]))
+		}
+		fixedOff += fixedWidth(c.Type)
+	}
+	<span class="kw">return</span> vals, <span class="kw">nil</span>
+}</code></pre>
+
+    <p><code>Decode</code> は <code>Encode</code> の鏡像ですが、1 つだけ姿勢が違います。<strong>入力のバイト列を信用しない</strong>こと。レコード長の検査と、TEXT の (offset, len) がレコードの外を指していないかの検査が入っています。ディスクから読んだバイト列は「自分が書いたもの」とは限らない（ファイル破損・バグ・別物のファイル）ので、疑わずにスライスすると <code>panic</code>（プログラムの強制停止）で死にます。エラーとして丁寧に返すのが低レイヤの行儀です。</p>
+
+    <div class="gonote"><div class="box-k">GO メモ · 文字列とバイト列の変換</div>
+      <p>Go の <code>string</code> は「読み取り専用のバイト列」です。<code>copy(buf[varOff:], v.Str)</code> のように、コピー先が <code>[]byte</code> なら文字列を直接 <code>copy</code> できます。逆方向は <code>string(rec[off : off+l])</code> — バイト列から新しい文字列を作ります（このとき中身がコピーされるので、あとで <code>rec</code> が書き換わっても文字列は安全）。なお <code>len(v.Str)</code> は文字数ではなく<strong>バイト数</strong>です。日本語のような UTF-8 の多バイト文字を含む場合、「あ」1 文字で 3 バイト。オンディスク形式で数えるのは常にバイトです。</p>
+    </div>
+
+    <h3>実際のバイト列を 1 バイトずつ見る</h3>
+    <p>ここが本章の胸突き八丁です。スキーマ <code>(id INT, name TEXT, age INT)</code> の行 <code>(1, 'alice', 30)</code> が、どんな 26 バイトになるか手で追ってみましょう。ビットマップは (3+7)/8 = 1 バイト。固定長部は 8 + 4 + 8 = 20 バイト。可変長部は "alice" の 5 バイトです。</p>
+
+    <div class="ascii">(1, 'alice', 30) のエンコード結果 — 全 26 バイト（16 進）
+
+オフセット  バイト                     意味
+─────────  ────────────────────────  ─────────────────────────────
+[0]        00                        NULL ビットマップ（NULL なし）
+[1:9)      01 00 00 00 00 00 00 00   id = 1（int64、リトルエンディアン）
+[9:11)     15 00                     name の offset = 0x15 = 21
+[11:13)    05 00                     name の len    = 5
+[13:21)    1E 00 00 00 00 00 00 00   age = 30 = 0x1E
+[21:26)    61 6C 69 63 65            "alice"（ASCII: a l i c e）
+           └──── 可変長部はここから。offset 21 =
+                 ビットマップ 1 + 固定長部 20 の直後を正しく指している</div>
+
+    <p>name の offset が 21 になる理屈まで含めて、全部計算で追えたでしょうか。ちなみにこのバイト列は誌面の作文ではなく、Step 8 で<strong>実際の DB ファイルの 16 進ダンプの中に一字一句このまま</strong>現れます。楽しみにしていてください。</p>
+    <p>往復（encode → decode で元に戻る）を守るテストが <code>TestTupleRoundtrip</code> です。NULL・空文字列・負数・日本語を混ぜた 3 ケースを回しています。</p>
+
+    <div class="file-tag">internal/catalog/catalog_test.go（抜粋）</div>
+    <pre><code><span class="cm">// タプルの往復一致: NULL・可変長混在でも encode → decode で元に戻る。</span>
+<span class="kw">func</span> TestTupleRoundtrip(t *testing.T) {
+	s := &amp;<span class="ty">Schema</span>{Cols: []<span class="ty">Column</span>{
+		{<span class="st">"id"</span>, IntType}, {<span class="st">"name"</span>, TextType}, {<span class="st">"age"</span>, IntType}, {<span class="st">"memo"</span>, TextType},
+	}}
+	cases := [][]<span class="ty">Value</span>{
+		{NewInt(<span class="st">1</span>), NewText(<span class="st">"alice"</span>), NewInt(<span class="st">30</span>), NewText(<span class="st">"hello"</span>)},
+		{NewInt(-<span class="st">42</span>), NewText(<span class="st">""</span>), NewNull(IntType), NewNull(TextType)},
+		{NewInt(<span class="st">1</span> &lt;&lt; <span class="st">62</span>), NewText(<span class="st">"日本語テキスト"</span>), NewInt(<span class="st">0</span>), NewText(<span class="st">"x"</span>)},
+	}
+	<span class="kw">for</span> _, vals := <span class="kw">range</span> cases {
+		rec, err := s.Encode(vals)
+		<span class="cm">// …</span>
+		got, err := s.Decode(rec)
+		<span class="cm">// …</span>
+		<span class="kw">for</span> i := <span class="kw">range</span> vals {
+			<span class="kw">if</span> got[i].Null != vals[i].Null || got[i].Int != vals[i].Int || got[i].Str != vals[i].Str {
+				t.Fatalf(<span class="st">"列 %d: got %v, want %v"</span>, i, got[i], vals[i])
+			}
+		}
+	}
+}</code></pre>
+
+    <div class="box do"><div class="box-k">▸ 動かして確認</div>
+      <p>往復一致と、型不一致がちゃんとエラーになること（<code>TestTupleTypeMismatch</code>）を確認します。</p>
+      <pre class="term"><code><span class="ps">$</span> go test ./internal/catalog -run TestTuple -v
+<span class="out">=== RUN   TestTupleRoundtrip
+--- PASS: TestTupleRoundtrip (0.00s)
+=== RUN   TestTupleTypeMismatch
+--- PASS: TestTupleTypeMismatch (0.00s)
+PASS
+ok  	minidb/internal/catalog	0.941s</span></code></pre>
+    </div>
+
+    <!-- ============================================================ -->
+    <h2 class="step" id="step-5"><span class="step-no">Step 5</span>順序を保つキー — memcomparable エンコード</h2>
+    <p>行の形は決まりました。残るバイト列表現はもう 1 つ、<strong>キー</strong>です。第03章の B+Tree を思い出してください。あの木はキーの中身を一切理解せず、<code>bytes.Compare</code> — バイト列を先頭から 1 バイトずつ、符号なし整数として比べる関数 — だけで大小を決めていました。ということは、<code>WHERE age &gt; 28</code> のような検索を索引で正しく動かすには、値を木に入れる前に<strong>「バイト列としての大小」が「値としての大小」と一致する形</strong>に変換しておく必要があります。この変換を<strong>順序保存（memcomparable）エンコード</strong>と呼びます。memory-comparable、つまり「メモリ上のバイト比較だけで正しく比べられる」形式です。</p>
+    <p>「そのまま入れればいいのでは?」と思うかもしれません。反例を 2 つ挙げます。</p>
+    <ul>
+      <li><strong>INT をそのまま</strong>: 負数は 2 の補数表現で最上位ビットが 1、つまりバイト列としては <code>FF…</code> で始まる巨大な値に見えます。素朴に入れると <code>-1 &gt; 1</code> という順序になり、範囲検索が壊れます。</li>
+      <li><strong>タプル形式のリトルエンディアン</strong>: 下位バイトが先に来るので、256 と 1 を比べると 1 バイト目（<code>00</code> vs <code>01</code>）で 1 が勝ってしまいます。桁の重い方から並べる<strong>ビッグエンディアン</strong>が、バイト比較と相性の良い唯一の並びです。</li>
+    </ul>
+    <p>コードを見てから、1 つずつ解きます。</p>
+
+    <div class="file-tag">internal/catalog/schema.go（続き）</div>
+    <pre><code><span class="cm">// EncodeKey は値を順序保存バイト列にする（B+Tree のユーザーキー用）。</span>
+<span class="cm">// bytes.Compare の結果が値の大小と一致するように作る:</span>
+<span class="cm">//   - 先頭 1 バイト: 0x00=NULL, 0x01=非NULL（NULL は最小に整列）</span>
+<span class="cm">//   - INT: 符号ビット反転 + ビッグエンディアン（常に 9 バイト固定長）</span>
+<span class="cm">//   - TEXT: 0x00 → 0x00 0xFF にエスケープし、終端に 0x00 0x00 を置く</span>
+<span class="cm">//</span>
+<span class="cm">// TEXT の終端記号が必要な理由: B+Tree は「ユーザーキー + TID」の連結を</span>
+<span class="cm">// bytes.Compare で比べる。素の文字列のままだと "a" と "a0" のような</span>
+<span class="cm">// 前方一致のキーで、短い方の TID バイトが長い方の本文バイトと比較されて</span>
+<span class="cm">// 順序が乱れる（prefix 問題）。終端 0x00 0x00 は本文に現れ得ない並び</span>
+<span class="cm">// （本文の 0x00 は 0x00 0xFF に化けている）なので、どのキーも他のキーの</span>
+<span class="cm">// 接頭辞にならないことが保証され、順序も保存される（memcomparable 形式）。</span>
+<span class="kw">func</span> EncodeKey(v <span class="ty">Value</span>) []<span class="kw">byte</span> {
+	<span class="kw">if</span> v.Null {
+		<span class="kw">return</span> []<span class="kw">byte</span>{<span class="st">0x00</span>}
+	}
+	<span class="kw">switch</span> v.Type {
+	<span class="kw">case</span> IntType:
+		out := <span class="kw">make</span>([]<span class="kw">byte</span>, <span class="st">9</span>)
+		out[<span class="st">0</span>] = <span class="st">0x01</span>
+		binary.BigEndian.PutUint64(out[<span class="st">1</span>:], <span class="kw">uint64</span>(v.Int)^(<span class="st">1</span>&lt;&lt;<span class="st">63</span>))
+		<span class="kw">return</span> out
+	<span class="kw">case</span> TextType:
+		out := <span class="kw">make</span>([]<span class="kw">byte</span>, <span class="st">0</span>, <span class="st">3</span>+<span class="kw">len</span>(v.Str))
+		out = <span class="kw">append</span>(out, <span class="st">0x01</span>)
+		<span class="kw">for</span> i := <span class="st">0</span>; i &lt; <span class="kw">len</span>(v.Str); i++ {
+			<span class="kw">if</span> v.Str[i] == <span class="st">0x00</span> {
+				out = <span class="kw">append</span>(out, <span class="st">0x00</span>, <span class="st">0xFF</span>)
+			} <span class="kw">else</span> {
+				out = <span class="kw">append</span>(out, v.Str[i])
+			}
+		}
+		<span class="kw">return</span> <span class="kw">append</span>(out, <span class="st">0x00</span>, <span class="st">0x00</span>)
+	}
+	<span class="kw">return</span> []<span class="kw">byte</span>{<span class="st">0x00</span>}
+}</code></pre>
+
+    <h3>INT — 符号ビットを 1 個反転するだけ</h3>
+    <p>核心は <code>uint64(v.Int)^(1&lt;&lt;63)</code> の 1 行です。<code>1&lt;&lt;63</code> は最上位ビット（符号ビット）だけが 1 の値。<code>^</code>（XOR）でそのビットだけを反転します。すると、負数（符号ビット 1）は <code>0x00〜0x7F</code> 始まりの「小さい」バイト列へ、0 以上（符号ビット 0）は <code>0x80〜0xFF</code> 始まりの「大きい」バイト列へ写ります。同符号どうしの順序は 2 の補数表現がもともと保っているので、これだけで全順序が正しくなります。実際のエンコード結果で確かめましょう（この表の値は実装の出力そのままです）。</p>
+
+    <table>
+      <tr><th>値</th><th>素の 2 の補数（BE）</th><th>符号ビット反転後（BE）</th><th>完全なキー（先頭に 0x01）</th></tr>
+      <tr><td><code>-2</code></td><td><code>FF FF FF FF FF FF FF FE</code></td><td><code>7F FF FF FF FF FF FF FE</code></td><td><code>01 7F FF FF FF FF FF FF FE</code></td></tr>
+      <tr><td><code>-1</code></td><td><code>FF FF FF FF FF FF FF FF</code></td><td><code>7F FF FF FF FF FF FF FF</code></td><td><code>01 7F FF FF FF FF FF FF FF</code></td></tr>
+      <tr><td><code>0</code></td><td><code>00 00 00 00 00 00 00 00</code></td><td><code>80 00 00 00 00 00 00 00</code></td><td><code>01 80 00 00 00 00 00 00 00</code></td></tr>
+      <tr><td><code>1</code></td><td><code>00 00 00 00 00 00 00 01</code></td><td><code>80 00 00 00 00 00 00 01</code></td><td><code>01 80 00 00 00 00 00 00 01</code></td></tr>
+    </table>
+
+    <p>左の列（素の 2 の補数）をバイト列として比べると <code>-1 (FF…) &gt; 1 (00…01)</code> で壊れています。反転後は <code>7F… &lt; 80…</code> となり、-2 &lt; -1 &lt; 0 &lt; 1 の順にきれいに整列します。たった 1 ビットの反転で数直線全体がバイト列の辞書順に写る — 個人的に、この実装でいちばん好きな 1 行です。</p>
+
+    <div class="gonote"><div class="box-k">GO メモ · ^（XOR）と int64 → uint64 の変換</div>
+      <p><code>^</code> は排他的論理和（XOR）。「対応するビットが異なるとき 1」なので、<code>x ^ y</code> は「y の立っているビットだけを x で反転する」操作に使えます。また <code>uint64(v.Int)</code> のような符号付き → 符号なしの変換は、<strong>ビットパターンを一切変えません</strong>。-1 (int64) のビットは全部 1 で、uint64 に変換しても全部 1 のまま（= 18446744073709551615）。「数としての意味」は変わりますが「ビット列」は同じ、というのがこの変換の正体で、だからこそ符号ビットいじりの道具に使えます。</p>
+    </div>
+
+    <h3>TEXT — エスケープと終端、そして prefix-free</h3>
+    <p>TEXT はもともと辞書順に並ぶバイト列なので、一見そのまま使えそうです。しかし 2 つ細工が要ります。<strong>本文中の <code>0x00</code> を <code>0x00 0xFF</code> に置き換え（エスケープ）、末尾に <code>0x00 0x00</code>（終端記号）を付ける</strong>。なぜか。</p>
+    <p>第03章の B+Tree は、同じ値を持つ行が複数あってもよいように、木に入れる実際のキーを「ユーザーキー + TID」の<strong>連結</strong>にしていました。ここに罠があります。<code>"a"</code> と <code>"a0"</code> という 2 つの名前を素のまま使うと:</p>
+
+    <div class="ascii">終端記号がない世界 — prefix 問題
+
+  キー1 = "a"  + TID(頁=9, スロット=4)  →  61 | 00 00 00 09 00 04
+  キー2 = "a0" + TID(頁=3, スロット=0)  →  61 30 | 00 00 00 03 00 00
+                                              ↑↑
+                        2 バイト目の比較 = 「キー1 の TID の先頭バイト」vs
+                                          「キー2 の本文 '0'(0x30)」!?
+
+  文字列としては "a" &lt; "a0" のはず。だが実際の比較は TID のバイト次第で
+  どちらにも転ぶ。範囲検索が静かに行を取りこぼす。
+
+終端記号がある世界
+
+  キー1 = 01 61 00 00 | TID…      ("a"  のエンコード + TID)
+  キー2 = 01 61 30 00 00 | TID…   ("a0" のエンコード + TID)
+             ↑
+        3 バイト目どうしの比較 = 「キー1 の終端 00」vs「キー2 の本文 '0'(0x30)」
+        で 00 &lt; 30 が確定。TID は同値キーの中の
+        タイブレークにだけ使われる。常に正しい。</div>
+
+    <p>問題の正体は、<code>"a"</code> が <code>"a0"</code> の<strong>接頭辞（prefix）</strong>になっていることです。片方がもう片方の頭にぴったり重なると、連結キーの比較で「本文と TID が混ざって比較される」瞬間が生まれます。対策は、<strong>どのキーも他のキーの接頭辞にならない</strong>こと — これを <strong>prefix-free</strong> と言います。終端記号 <code>0x00 0x00</code> を全キーの末尾に置けば、キー本文の途中に <code>0x00 0x00</code> という並びは絶対に現れない（本文の <code>0x00</code> はエスケープで <code>0x00 0xFF</code> に化けている）ので、「終端より先に本文が続く」ことと「そこで終わる」ことが必ず区別でき、prefix-free が成立します。しかもエスケープ（<code>00→00 FF</code>）も終端（<code>00 00</code>）も元の辞書順を壊しません。</p>
+    <p>これが冒頭の骨太な関数コメントの中身です。なお <code>EncodeKey</code> の先頭 1 バイト（<code>0x00</code>=NULL / <code>0x01</code>=非 NULL）は、NULL をどんな値よりも小さい位置に整列させるための小さな工夫です。</p>
+
+    <div class="box hazard"><div class="box-k">⚠ 落とし穴</div>
+      <p>この prefix 問題、実は本実装でも<strong>コードレビューで指摘されて直した箇所</strong>でした。恐ろしいのは症状の静かさです。挿入も等値検索も普通に動き、テストも大半が通る。壊れるのは「前方一致する複数のキーが範囲検索の境界に並んだとき」だけで、範囲検索が<strong>途中で打ち切られて行を取りこぼす</strong>という形で現れます。エラーは出ません。結果が黙って少ないだけ。順序保存エンコードを自作するときは、順序のテストだけでなく<strong> prefix-free そのもののテスト</strong>（下の <code>TestEncodeKeyTextPrefixSafe</code> のように全ペアの接頭辞関係を総当たりで検査する）を必ず書いてください。</p>
+    </div>
+
+    <p>最後に、B+Tree を使わない比較（第05章の <code>WHERE</code> 評価などメモリ上で値を直接比べる場面）のための <code>Compare</code> を置いて、schema.go は完成です。</p>
+
+    <div class="file-tag">internal/catalog/schema.go（続き・これでファイル完成）</div>
+    <pre><code><span class="cm">// Compare は同型の値の大小比較（-1/0/+1）。NULL は最小とみなす。</span>
+<span class="kw">func</span> Compare(a, b <span class="ty">Value</span>) <span class="kw">int</span> {
+	<span class="kw">switch</span> {
+	<span class="kw">case</span> a.Null &amp;&amp; b.Null:
+		<span class="kw">return</span> <span class="st">0</span>
+	<span class="kw">case</span> a.Null:
+		<span class="kw">return</span> -<span class="st">1</span>
+	<span class="kw">case</span> b.Null:
+		<span class="kw">return</span> <span class="st">1</span>
+	}
+	<span class="kw">switch</span> a.Type {
+	<span class="kw">case</span> IntType:
+		<span class="kw">switch</span> {
+		<span class="kw">case</span> a.Int &lt; b.Int:
+			<span class="kw">return</span> -<span class="st">1</span>
+		<span class="kw">case</span> a.Int &gt; b.Int:
+			<span class="kw">return</span> <span class="st">1</span>
+		}
+		<span class="kw">return</span> <span class="st">0</span>
+	<span class="kw">case</span> TextType:
+		<span class="kw">switch</span> {
+		<span class="kw">case</span> a.Str &lt; b.Str:
+			<span class="kw">return</span> -<span class="st">1</span>
+		<span class="kw">case</span> a.Str &gt; b.Str:
+			<span class="kw">return</span> <span class="st">1</span>
+		}
+		<span class="kw">return</span> <span class="st">0</span>
+	}
+	<span class="kw">return</span> <span class="st">0</span>
+}</code></pre>
+
+    <p>テストは 2 本あります。<code>TestEncodeKeyPreservesOrder</code> は INT の並びと「NULL が最小」を、<code>TestEncodeKeyTextPrefixSafe</code> は TEXT の順序と prefix-free を検証します。特に後者の後半、<strong>全ペア総当たりで「i のキーが j のキーの接頭辞になっていないか」を検査するループ</strong>は、上の落とし穴の再発防止そのものです。</p>
+
+    <div class="file-tag">internal/catalog/catalog_test.go（抜粋）</div>
+    <pre><code><span class="cm">// EncodeKey の順序保存性: 値の大小とバイト列比較の大小が一致する。</span>
+<span class="kw">func</span> TestEncodeKeyPreservesOrder(t *testing.T) {
+	ints := []<span class="kw">int64</span>{-<span class="st">1</span> &lt;&lt; <span class="st">62</span>, -<span class="st">100</span>, -<span class="st">1</span>, <span class="st">0</span>, <span class="st">1</span>, <span class="st">99</span>, <span class="st">1</span> &lt;&lt; <span class="st">62</span>}
+	<span class="kw">for</span> i := <span class="st">1</span>; i &lt; <span class="kw">len</span>(ints); i++ {
+		a, b := EncodeKey(NewInt(ints[i-<span class="st">1</span>])), EncodeKey(NewInt(ints[i]))
+		<span class="kw">if</span> <span class="kw">string</span>(a) &gt;= <span class="kw">string</span>(b) {
+			t.Fatalf(<span class="st">"intキーの順序が壊れている: %d &gt;= %d"</span>, ints[i-<span class="st">1</span>], ints[i])
+		}
+	}
+	<span class="kw">if</span> <span class="kw">string</span>(EncodeKey(NewNull(IntType))) &gt;= <span class="kw">string</span>(EncodeKey(NewInt(-<span class="st">1</span>&lt;&lt;<span class="st">62</span>))) {
+		t.Fatal(<span class="st">"NULL が最小に整列していない"</span>)
+	}
+}
+
+<span class="cm">// TEXT キーの prefix 安全性: どのキーも他のキーの接頭辞にならず、</span>
+<span class="cm">// 前方一致する文字列（"a" と "a0"）でも順序が保たれる。</span>
+<span class="cm">// これが破れると B+Tree の複合キー（ユーザーキー+TID）の順序が乱れ、</span>
+<span class="cm">// 範囲検索が途中で打ち切られる。</span>
+<span class="kw">func</span> TestEncodeKeyTextPrefixSafe(t *testing.T) {
+	texts := []<span class="kw">string</span>{<span class="st">""</span>, <span class="st">"a"</span>, <span class="st">"a\x00"</span>, <span class="st">"a\x00b"</span>, <span class="st">"a0"</span>, <span class="st">"ab"</span>, <span class="st">"b"</span>}
+	keys := <span class="kw">make</span>([][]<span class="kw">byte</span>, <span class="kw">len</span>(texts))
+	<span class="kw">for</span> i, s := <span class="kw">range</span> texts {
+		keys[i] = EncodeKey(NewText(s))
+	}
+	<span class="kw">for</span> i := <span class="st">1</span>; i &lt; <span class="kw">len</span>(keys); i++ {
+		<span class="kw">if</span> <span class="kw">string</span>(keys[i-<span class="st">1</span>]) &gt;= <span class="kw">string</span>(keys[i]) {
+			t.Fatalf(<span class="st">"TEXT キーの順序が壊れている: %q &gt;= %q"</span>, texts[i-<span class="st">1</span>], texts[i])
+		}
+	}
+	<span class="kw">for</span> i := <span class="kw">range</span> keys {
+		<span class="kw">for</span> j := <span class="kw">range</span> keys {
+			<span class="kw">if</span> i != j &amp;&amp; <span class="kw">len</span>(keys[i]) &lt;= <span class="kw">len</span>(keys[j]) &amp;&amp;
+				<span class="kw">string</span>(keys[j][:<span class="kw">len</span>(keys[i])]) == <span class="kw">string</span>(keys[i]) {
+				t.Fatalf(<span class="st">"%q のキーが %q のキーの接頭辞になっている"</span>, texts[i], texts[j])
+			}
+		}
+	}
+}</code></pre>
+
+    <p>ちなみにテストにも出てくる <code>"a\x00b"</code>（真ん中にゼロバイトを含む文字列）のキーは、実装で出力させると <code>01 61 00 FF 62 00 00</code> になります。先頭の非 NULL マーク、'a'、エスケープされた <code>00 FF</code>、'b'、終端 <code>00 00</code> — 仕様どおりです。</p>
+
+    <div class="box do"><div class="box-k">▸ 動かして確認</div>
+      <pre class="term"><code><span class="ps">$</span> go test ./internal/catalog -run TestEncodeKey -v
+<span class="out">=== RUN   TestEncodeKeyPreservesOrder
+--- PASS: TestEncodeKeyPreservesOrder (0.00s)
+=== RUN   TestEncodeKeyTextPrefixSafe
+--- PASS: TestEncodeKeyTextPrefixSafe (0.00s)
+PASS
+ok  	minidb/internal/catalog	0.758s</span></code></pre>
+    </div>
+
+    <!-- ============================================================ -->
+    <h2 class="step" id="step-6"><span class="step-no">Step 6</span>ページ 0 — DB 全体の入口をつくる</h2>
+    <p>部品が出揃いました。ヒープ（行の置き場）、タプル（行の形）、キー（索引用）。いよいよ章の冒頭で予告した「芋づる」の根っこ、<strong>ページ 0 のメタページ</strong>とカタログを作ります。ファイルは catalog.go に移ります。</p>
+
+    <div class="file-tag">internal/catalog/catalog.go</div>
+    <pre><code><span class="kw">package</span> catalog
+
+<span class="kw">import</span> (
+	<span class="st">"bytes"</span>
+	<span class="st">"encoding/binary"</span>
+	<span class="st">"fmt"</span>
+	<span class="st">"io"</span>
+
+	<span class="st">"minidb/internal/btree"</span>
+	<span class="st">"minidb/internal/storage"</span>
+)
+
+<span class="cm">// カタログは「テーブル定義を格納する、ただのヒープ」。</span>
+<span class="cm">// DB が自分自身の構造を自分の仕組み（ページ・ヒープ）で記録する = 自己記述。</span>
+<span class="cm">//</span>
+<span class="cm">// ページ 0 は DB 全体のメタページ:</span>
+<span class="cm">//</span>
+<span class="cm">//	[0:8)  マジックナンバー "MINIDB\x01\x00"</span>
+<span class="cm">//	[8:12) カタログヒープの先頭 PageID</span>
+<span class="kw">const</span> (
+	MetaPageID storage.<span class="ty">PageID</span> = <span class="st">0</span>
+)
+
+<span class="kw">var</span> magic = [<span class="st">8</span>]<span class="kw">byte</span>{<span class="st">'M'</span>, <span class="st">'I'</span>, <span class="st">'N'</span>, <span class="st">'I'</span>, <span class="st">'D'</span>, <span class="st">'B'</span>, <span class="st">1</span>, <span class="st">0</span>}
+
+<span class="cm">// Table はテーブルのメタデータ。</span>
+<span class="kw">type</span> <span class="ty">Table</span> <span class="kw">struct</span> {
+	Name      <span class="kw">string</span>
+	Schema    <span class="ty">Schema</span>
+	HeapFirst storage.<span class="ty">PageID</span>
+}
+
+<span class="cm">// Index はセカンダリ索引のメタデータ。</span>
+<span class="kw">type</span> <span class="ty">Index</span> <span class="kw">struct</span> {
+	Name   <span class="kw">string</span>
+	Table  <span class="kw">string</span>
+	Col    <span class="kw">string</span>
+	ColIdx <span class="kw">int</span>             <span class="cm">// Table のスキーマ内での列位置</span>
+	Meta   storage.<span class="ty">PageID</span>  <span class="cm">// B+Tree のメタページ</span>
+}
+
+<span class="cm">// Catalog は全テーブル・索引定義のメモリ上のビュー。実体はカタログヒープにある。</span>
+<span class="kw">type</span> <span class="ty">Catalog</span> <span class="kw">struct</span> {
+	heapFirst storage.<span class="ty">PageID</span>
+	tables    <span class="kw">map</span>[<span class="kw">string</span>]*<span class="ty">Table</span>
+	indexes   <span class="kw">map</span>[<span class="kw">string</span>][]*<span class="ty">Index</span> <span class="cm">// テーブル名 → 索引一覧</span>
+	idxByName <span class="kw">map</span>[<span class="kw">string</span>]*<span class="ty">Index</span>
+}</code></pre>
+
+    <p>登場人物を整理します。<code>magic</code> は 8 バイトの<strong>マジックナンバー</strong> — ファイル先頭に置く「これは minidb のファイルです」という署名です。ASCII の <code>MINIDB</code>（6 バイト）+ バージョン番号 <code>1, 0</code>。もしユーザーが間違えて別のファイル（画像とか、他の DB とか）を開いても、先頭 8 バイトの照合で即座に、安全に断れます。多くのファイル形式が同じ流儀を持っています（PNG は <code>\x89PNG…</code>、SQLite は <code>SQLite format 3</code>）。</p>
+    <p><code>Table</code> が表 1 つのメタデータで、名前・スキーマ・そして<strong>データ本体のヒープの先頭ページ ID</strong>。<code>Index</code> はセカンダリ索引（特定の列に張る B+Tree）のメタデータですが、これを実際に使うのは第07章です。本章では「カタログはこういうものも記録できる」という器だけ用意しておきます。</p>
+    <p><code>Catalog</code> 構造体は<strong>メモリ上のビュー（写し）</strong>である点が大事です。真実はあくまでディスクのカタログヒープにあり、<code>Catalog</code> は起動時にそれを読み込んで作るマップの束（表名 → 定義の索引）にすぎません。マップは検索を速くするための便宜で、永続化の主体ではありません。</p>
+    <p>次に、この構造を「作る」<code>Bootstrap</code> と「読む」<code>Load</code>。</p>
+
+    <div class="file-tag">internal/catalog/catalog.go（続き）</div>
+    <pre><code><span class="cm">// Bootstrap は空の DB ファイルにメタページとカタログヒープを作る。</span>
+<span class="cm">// 必ず「ページが 1 枚もない」状態で呼ぶこと（メタページを PageID 0 に置くため）。</span>
+<span class="kw">func</span> Bootstrap(st storage.<span class="ty">Store</span>) <span class="kw">error</span> {
+	metaID, err := st.Allocate(<span class="kw">func</span>(_ storage.<span class="ty">PageID</span>, p *storage.<span class="ty">Page</span>) <span class="kw">error</span> {
+		<span class="kw">return</span> <span class="kw">nil</span> <span class="cm">// 中身はヒープ確保後に書く</span>
+	})
+	<span class="kw">if</span> err != <span class="kw">nil</span> {
+		<span class="kw">return</span> err
+	}
+	<span class="kw">if</span> metaID != MetaPageID {
+		<span class="kw">return</span> fmt.Errorf(<span class="st">"catalog: メタページが PageID %d に割り当てられた（0 であるべき。空でない DB に Bootstrap した疑い）"</span>, metaID)
+	}
+	heapFirst, err := CreateHeap(st)
+	<span class="kw">if</span> err != <span class="kw">nil</span> {
+		<span class="kw">return</span> err
+	}
+	<span class="kw">return</span> st.Write(MetaPageID, <span class="kw">func</span>(p *storage.<span class="ty">Page</span>) <span class="kw">error</span> {
+		<span class="kw">copy</span>(p[<span class="st">0</span>:<span class="st">8</span>], magic[:])
+		binary.LittleEndian.PutUint32(p[<span class="st">8</span>:<span class="st">12</span>], <span class="kw">uint32</span>(heapFirst))
+		<span class="kw">return</span> <span class="kw">nil</span>
+	})
+}
+
+<span class="cm">// Load はメタページからカタログを読み込む。</span>
+<span class="kw">func</span> Load(st storage.<span class="ty">Store</span>) (*<span class="ty">Catalog</span>, <span class="kw">error</span>) {
+	c := &amp;<span class="ty">Catalog</span>{
+		tables:    <span class="kw">map</span>[<span class="kw">string</span>]*<span class="ty">Table</span>{},
+		indexes:   <span class="kw">map</span>[<span class="kw">string</span>][]*<span class="ty">Index</span>{},
+		idxByName: <span class="kw">map</span>[<span class="kw">string</span>]*<span class="ty">Index</span>{},
+	}
+	err := st.Read(MetaPageID, <span class="kw">func</span>(p *storage.<span class="ty">Page</span>) <span class="kw">error</span> {
+		<span class="kw">if</span> !bytes.Equal(p[<span class="st">0</span>:<span class="st">8</span>], magic[:]) {
+			<span class="kw">return</span> fmt.Errorf(<span class="st">"catalog: マジックナンバー不一致（minidb のファイルではない）"</span>)
+		}
+		c.heapFirst = storage.<span class="ty">PageID</span>(binary.LittleEndian.Uint32(p[<span class="st">8</span>:<span class="st">12</span>]))
+		<span class="kw">return</span> <span class="kw">nil</span>
+	})
+	<span class="kw">if</span> err != <span class="kw">nil</span> {
+		<span class="kw">return</span> <span class="kw">nil</span>, err
+	}
+	heap := OpenHeap(st, c.heapFirst)
+	err = heap.Scan(<span class="kw">func</span>(_ btree.<span class="ty">TID</span>, rec []<span class="kw">byte</span>) <span class="kw">error</span> {
+		<span class="kw">return</span> c.applyRecord(rec)
+	})
+	<span class="kw">if</span> err != <span class="kw">nil</span> {
+		<span class="kw">return</span> <span class="kw">nil</span>, err
+	}
+	<span class="kw">return</span> c, <span class="kw">nil</span>
+}
+
+<span class="cm">// …（applyRecord などレコードの読み書きは Step 7、CreateTable は Step 8 で）</span></code></pre>
+
+    <p><code>Bootstrap</code>（新しい DB ファイルの初期化）は 3 手です。(1) ページを 1 枚割り当てる — 空のファイルなら必ず 0 番になるはず。(2) カタログ用のヒープを 1 本作る（Step 1 の <code>CreateHeap</code>。空ファイルなら 1 番になる）。(3) ページ 0 にマジックナンバーとカタログヒープの先頭 ID を書く。以上。「DB を作る」という重々しい響きに対して、やることはページ 2 枚分です。</p>
+    <p><code>Load</code>（既存 DB を開く）は芋づるの逆再生です。ページ 0 を読み、まずマジックナンバーを照合。合格ならカタログヒープの場所が分かるので、Step 2 の <code>Scan</code> で全レコードを嘗め、1 件ずつ <code>applyRecord</code>（次のステップで書きます）でメモリのマップに展開します。<strong>カタログの読み込みが「ただのヒープ走査」で済んでいる</strong> — これが自己記述の配当です。専用フォーマットのパーサをひとつも書いていません。</p>
+
+    <div class="box hazard"><div class="box-k">⚠ 落とし穴</div>
+      <p><code>Bootstrap</code> の <code>metaID != MetaPageID</code> 検査は保険ではなく実弾です。もし誤って<strong>既にページがあるファイル</strong>に <code>Bootstrap</code> を呼ぶと、<code>Allocate</code> は 0 番ではなく末尾の新ページを返します。この検査がなければ、既存データの後ろに「偽のメタページ」がぶら下がった壊れたファイルが静かに出来上がるところです。「ありえないはず」の前提（ページ 0 = メタ）は、コードで<strong>検査可能な形</strong>にしておく — 前提が崩れた瞬間に大声で死ぬ方が、静かに壊れるよりずっと安全です。</p>
+    </div>
+
+    <div class="box do"><div class="box-k">▸ 動かして確認 — マジックナンバーを目視する</div>
+      <p>ここで一度、実物のファイルを覗いてみましょう。完成品の REPL（対話シェル）で小さな DB を作ります。</p>
+      <pre class="term"><code><span class="ps">$</span> go run ./cmd/minidb-repl ch04demo.db
+<span class="out">minidb — 単一ファイル組み込み RDBMS（.exit で終了 / .stats で統計）</span>
+<span class="ps">minidb&gt;</span> CREATE TABLE users (id INT, name TEXT, age INT)
+<span class="out">OK（0 行）</span>
+<span class="ps">minidb&gt;</span> INSERT INTO users VALUES (1, 'alice', 30)
+<span class="out">OK（1 行）</span>
+<span class="ps">minidb&gt;</span> .exit</code></pre>
+      <p>できた <code>ch04demo.db</code> の先頭 32 バイトを 16 進ダンプで見ます（PowerShell。macOS / Linux の方は <code>xxd ch04demo.db</code> でも同じものが見えます）。</p>
+      <pre class="term"><code><span class="ps">PS&gt;</span> Format-Hex -Path .\ch04demo.db | Select-Object -First 2
+<span class="out">00000000   4D 49 4E 49 44 42 01 00 01 00 00 00 00 00 00 00  MINIDB..........
+00000010   00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00  ................</span></code></pre>
+      <p>先頭 8 バイト <code>4D 49 4E 49 44 42 01 00</code> = <code>'M' 'I' 'N' 'I' 'D' 'B' 1 0</code>。まさしく <code>var magic</code> に書いた配列そのものです。続く <code>[8:12)</code> の <code>01 00 00 00</code> はリトルエンディアンの 1 — 「カタログヒープはページ 1 から」。芋づるの 1 本目が読めました。</p>
+    </div>
+
+    <!-- ============================================================ -->
+    <h2 class="step" id="step-7"><span class="step-no">Step 7</span>カタログレコード — 表の定義を「行」として書く</h2>
+    <p>カタログヒープに入れる「表定義レコード」の形を決めて、読み書きを実装します。ここで手が止まる人がいるかもしれません。「表の定義を行にするなら、Step 4 の <code>Encode</code> が使えるのでは? カタログにもスキーマを決めて…」— 鋭い発想ですが、そこには<strong>鶏と卵</strong>が待っています。タプルをデコードするにはスキーマが要る。カタログのスキーマはどこにある? カタログの中? では最初のカタログは誰が読む? …と無限に遡ってしまう。</p>
+    <p>本物の DB は「カタログのスキーマだけはコードに直書きする」ことでこの環を断ちます。minidb も同じ思想で、カタログレコードには Step 4 のタプル形式を使わず、<strong>コードが直接知っている専用の素朴な形式</strong>を使います。</p>
+
+    <div class="file-tag">internal/catalog/catalog.go（続き）</div>
+    <pre><code><span class="cm">// ---- カタログレコードのエンコード ----</span>
+<span class="cm">//</span>
+<span class="cm">//	テーブル: [1][名前][列数 u16]{[列名][型 u8]}...[ヒープ先頭 u32]</span>
+<span class="cm">//	索引:     [2][名前][テーブル名][列名][B+Tree メタページ u32]</span>
+<span class="cm">//</span>
+<span class="cm">// 文字列は u16 長さ前置。</span>
+
+<span class="kw">const</span> (
+	recTable = <span class="st">1</span>
+	recIndex = <span class="st">2</span>
+)
+
+<span class="kw">func</span> putStr(b *bytes.Buffer, s <span class="kw">string</span>) {
+	<span class="kw">var</span> l [<span class="st">2</span>]<span class="kw">byte</span>
+	binary.LittleEndian.PutUint16(l[:], <span class="kw">uint16</span>(<span class="kw">len</span>(s)))
+	b.Write(l[:])
+	b.WriteString(s)
+}
+
+<span class="kw">func</span> getStr(r *bytes.Reader) (<span class="kw">string</span>, <span class="kw">error</span>) {
+	<span class="cm">// Read は部分読みでも err=nil を返しうる（io.Reader の契約）。</span>
+	<span class="cm">// 壊れたレコードの静かな誤読を防ぐため ReadFull で全量を要求する</span>
+	<span class="kw">var</span> l [<span class="st">2</span>]<span class="kw">byte</span>
+	<span class="kw">if</span> _, err := io.ReadFull(r, l[:]); err != <span class="kw">nil</span> {
+		<span class="kw">return</span> <span class="st">""</span>, err
+	}
+	buf := <span class="kw">make</span>([]<span class="kw">byte</span>, binary.LittleEndian.Uint16(l[:]))
+	<span class="kw">if</span> _, err := io.ReadFull(r, buf); err != <span class="kw">nil</span> {
+		<span class="kw">return</span> <span class="st">""</span>, err
+	}
+	<span class="kw">return</span> <span class="kw">string</span>(buf), <span class="kw">nil</span>
+}
+
+<span class="kw">func</span> encodeTableRec(t *<span class="ty">Table</span>) []<span class="kw">byte</span> {
+	<span class="kw">var</span> b bytes.Buffer
+	b.WriteByte(recTable)
+	putStr(&amp;b, t.Name)
+	<span class="kw">var</span> n [<span class="st">2</span>]<span class="kw">byte</span>
+	binary.LittleEndian.PutUint16(n[:], <span class="kw">uint16</span>(<span class="kw">len</span>(t.Schema.Cols)))
+	b.Write(n[:])
+	<span class="kw">for</span> _, c := <span class="kw">range</span> t.Schema.Cols {
+		putStr(&amp;b, c.Name)
+		b.WriteByte(<span class="kw">byte</span>(c.Type))
+	}
+	<span class="kw">var</span> h [<span class="st">4</span>]<span class="kw">byte</span>
+	binary.LittleEndian.PutUint32(h[:], <span class="kw">uint32</span>(t.HeapFirst))
+	b.Write(h[:])
+	<span class="kw">return</span> b.Bytes()
+}
+
+<span class="kw">func</span> encodeIndexRec(ix *<span class="ty">Index</span>) []<span class="kw">byte</span> {
+	<span class="kw">var</span> b bytes.Buffer
+	b.WriteByte(recIndex)
+	putStr(&amp;b, ix.Name)
+	putStr(&amp;b, ix.Table)
+	putStr(&amp;b, ix.Col)
+	<span class="kw">var</span> m [<span class="st">4</span>]<span class="kw">byte</span>
+	binary.LittleEndian.PutUint32(m[:], <span class="kw">uint32</span>(ix.Meta))
+	b.Write(m[:])
+	<span class="kw">return</span> b.Bytes()
+}</code></pre>
+
+    <p>形式は先頭 1 バイトの<strong>レコード種別</strong>（1=テーブル定義、2=索引定義）で始まり、あとはフィールドを順に並べるだけ。文字列は「長さ（u16）+ 本体」という<strong>長さ前置</strong>で書きます（<code>putStr</code>）。C 言語のようなゼロ終端ではなく長さ前置にするのは、読み手が「あと何バイト読めばいいか」を先に知れて、境界検査がしやすいからです。</p>
+    <p>読み側の <code>applyRecord</code> は、<code>Load</code> の <code>Scan</code> から 1 レコードずつ渡されて、メモリのマップへ展開する係です。</p>
+
+    <div class="file-tag">internal/catalog/catalog.go（続き）</div>
+    <pre><code><span class="kw">func</span> (c *<span class="ty">Catalog</span>) applyRecord(rec []<span class="kw">byte</span>) <span class="kw">error</span> {
+	<span class="kw">if</span> <span class="kw">len</span>(rec) == <span class="st">0</span> {
+		<span class="kw">return</span> fmt.Errorf(<span class="st">"catalog: 空のカタログレコード"</span>)
+	}
+	r := bytes.NewReader(rec[<span class="st">1</span>:])
+	<span class="kw">switch</span> rec[<span class="st">0</span>] {
+	<span class="kw">case</span> recTable:
+		t := &amp;<span class="ty">Table</span>{}
+		<span class="kw">var</span> err <span class="kw">error</span>
+		<span class="kw">if</span> t.Name, err = getStr(r); err != <span class="kw">nil</span> {
+			<span class="kw">return</span> err
+		}
+		<span class="kw">var</span> n [<span class="st">2</span>]<span class="kw">byte</span>
+		<span class="kw">if</span> _, err := io.ReadFull(r, n[:]); err != <span class="kw">nil</span> {
+			<span class="kw">return</span> err
+		}
+		cols := <span class="kw">int</span>(binary.LittleEndian.Uint16(n[:]))
+		<span class="kw">for</span> i := <span class="st">0</span>; i &lt; cols; i++ {
+			name, err := getStr(r)
+			<span class="kw">if</span> err != <span class="kw">nil</span> {
+				<span class="kw">return</span> err
+			}
+			typ, err := r.ReadByte()
+			<span class="kw">if</span> err != <span class="kw">nil</span> {
+				<span class="kw">return</span> err
+			}
+			t.Schema.Cols = <span class="kw">append</span>(t.Schema.Cols, <span class="ty">Column</span>{Name: name, Type: <span class="ty">ColType</span>(typ)})
+		}
+		<span class="kw">var</span> h [<span class="st">4</span>]<span class="kw">byte</span>
+		<span class="kw">if</span> _, err := io.ReadFull(r, h[:]); err != <span class="kw">nil</span> {
+			<span class="kw">return</span> err
+		}
+		t.HeapFirst = storage.<span class="ty">PageID</span>(binary.LittleEndian.Uint32(h[:]))
+		c.tables[t.Name] = t
+	<span class="kw">case</span> recIndex:
+		ix := &amp;<span class="ty">Index</span>{}
+		<span class="kw">var</span> err <span class="kw">error</span>
+		<span class="kw">if</span> ix.Name, err = getStr(r); err != <span class="kw">nil</span> {
+			<span class="kw">return</span> err
+		}
+		<span class="kw">if</span> ix.Table, err = getStr(r); err != <span class="kw">nil</span> {
+			<span class="kw">return</span> err
+		}
+		<span class="kw">if</span> ix.Col, err = getStr(r); err != <span class="kw">nil</span> {
+			<span class="kw">return</span> err
+		}
+		<span class="kw">var</span> m [<span class="st">4</span>]<span class="kw">byte</span>
+		<span class="kw">if</span> _, err := io.ReadFull(r, m[:]); err != <span class="kw">nil</span> {
+			<span class="kw">return</span> err
+		}
+		ix.Meta = storage.<span class="ty">PageID</span>(binary.LittleEndian.Uint32(m[:]))
+		t, ok := c.tables[ix.Table]
+		<span class="kw">if</span> !ok {
+			<span class="kw">return</span> fmt.Errorf(<span class="st">"catalog: 索引 %s の対象テーブル %s が存在しない"</span>, ix.Name, ix.Table)
+		}
+		ix.ColIdx = t.Schema.ColIndex(ix.Col)
+		<span class="kw">if</span> ix.ColIdx &lt; <span class="st">0</span> {
+			<span class="kw">return</span> fmt.Errorf(<span class="st">"catalog: 索引 %s の対象列 %s が存在しない"</span>, ix.Name, ix.Col)
+		}
+		c.indexes[ix.Table] = <span class="kw">append</span>(c.indexes[ix.Table], ix)
+		c.idxByName[ix.Name] = ix
+	<span class="kw">default</span>:
+		<span class="kw">return</span> fmt.Errorf(<span class="st">"catalog: 未知のレコード種別 %d"</span>, rec[<span class="st">0</span>])
+	}
+	<span class="kw">return</span> <span class="kw">nil</span>
+}</code></pre>
+
+    <p>長いですが、やっていることは <code>encodeTableRec</code> / <code>encodeIndexRec</code> の逆再生を、エラー検査つきで律儀に書いているだけです。索引レコードの処理では、対象テーブルと対象列が実在するかまで検査して、列の位置 <code>ColIdx</code> を解決しています（索引レコードはテーブルレコードより後にヒープへ入るので、カタログヒープが 1 ページに収まる規模では挿入順＝走査順となり、テーブルが先に読まれます。複数ページに渡ると first-fit の空き埋めで順序が崩れうる点には注意）。</p>
+
+    <div class="gonote"><div class="box-k">GO メモ · bytes.Buffer / bytes.Reader / io.ReadFull</div>
+      <p><code>bytes.Buffer</code> は「追記していくと勝手に伸びるバイト列」。<code>WriteByte</code> / <code>Write</code> / <code>WriteString</code> で書き溜めて、最後に <code>b.Bytes()</code> で取り出します。逆の <code>bytes.Reader</code> は「バイト列を先頭から順に読み進めるカーソル」です。そして <code>getStr</code> のコメントが警告している io.Reader の罠 — <code>Read(buf)</code> は <strong>buf を満たしきらずに</strong>（例えば 10 バイト要求して 3 バイトだけ読んで）エラーなしで返ってよい、という契約です。「全部読めるまで待つ、足りなければ必ずエラー」を保証するのが <code>io.ReadFull</code>。バイナリ形式の解析では、原則こちらを使います。</p>
+    </div>
+
+    <div class="box do"><div class="box-k">▸ 動かして確認 — カタログレコードを 16 進で読む</div>
+      <p>Step 6 で作った <code>ch04demo.db</code> のページ 1（カタログヒープ）を覗きます。第01章で学んだとおり、スロット化ページのレコード実体は<strong>ページ末尾から前へ</strong>詰められるので、見るべきはページ 1 の末尾 = ファイルオフセット 0x1FE0 付近。16 バイト行で数えると、0 始まりで数えて 510 行目（= 先頭 510 行を <code>Skip</code> した次の行）です。</p>
+      <pre class="term"><code><span class="ps">PS&gt;</span> Format-Hex -Path .\ch04demo.db | Select-Object -Skip 510 -First 2
+<span class="out">00001FE0   01 05 00 75 73 65 72 73 03 00 02 00 69 64 01 04  ...users....id..
+00001FF0   00 6E 61 6D 65 02 03 00 61 67 65 01 02 00 00 00  .name...age.....</span></code></pre>
+      <p>この 32 バイトを、上の形式コメント <code>[1][名前][列数 u16]{[列名][型 u8]}...[ヒープ先頭 u32]</code> と突き合わせて読んでみてください。</p>
+      <div class="ascii">users の定義レコード — 32 バイトの解読
+
+01              レコード種別 1 = テーブル定義
+05 00           名前の長さ = 5
+75 73 65 72 73  "users"
+03 00           列数 = 3
+02 00 69 64 01        len=2 "id"   型 01 = INT
+04 00 6E 61 6D 65 02  len=4 "name" 型 02 = TEXT
+03 00 61 67 65 01     len=3 "age"  型 01 = INT
+02 00 00 00     ヒープ先頭 = ページ 2  ←芋づるの次のひと結び</div>
+      <p><code>CREATE TABLE users (id INT, name TEXT, age INT)</code> という文が、ディスクの上ではこの 32 バイトになる。そして末尾の 4 バイトが「データ本体はページ 2」と次を指しています。</p>
+    </div>
+
+    <!-- ============================================================ -->
+    <h2 class="step" id="step-8"><span class="step-no">Step 8</span>CREATE TABLE — すべてをつなぐ</h2>
+    <p>仕上げです。カタログへの問い合わせ口と、表・索引を「作る」操作を実装して catalog.go を完成させます。</p>
+
+    <div class="file-tag">internal/catalog/catalog.go（続き・これでファイル完成）</div>
+    <pre><code><span class="cm">// Table はテーブル定義を返す。</span>
+<span class="kw">func</span> (c *<span class="ty">Catalog</span>) Table(name <span class="kw">string</span>) (*<span class="ty">Table</span>, <span class="kw">bool</span>) {
+	t, ok := c.tables[name]
+	<span class="kw">return</span> t, ok
+}
+
+<span class="cm">// Indexes はテーブルに張られた索引一覧を返す。</span>
+<span class="kw">func</span> (c *<span class="ty">Catalog</span>) Indexes(table <span class="kw">string</span>) []*<span class="ty">Index</span> { <span class="kw">return</span> c.indexes[table] }
+
+<span class="cm">// HasIndex は同名の索引が定義済みかを返す。</span>
+<span class="kw">func</span> (c *<span class="ty">Catalog</span>) HasIndex(name <span class="kw">string</span>) <span class="kw">bool</span> {
+	_, ok := c.idxByName[name]
+	<span class="kw">return</span> ok
+}
+
+<span class="cm">// CreateTable はテーブルを定義し、カタログヒープへ永続化する。</span>
+<span class="kw">func</span> (c *<span class="ty">Catalog</span>) CreateTable(st storage.<span class="ty">Store</span>, name <span class="kw">string</span>, cols []<span class="ty">Column</span>) (*<span class="ty">Table</span>, <span class="kw">error</span>) {
+	<span class="kw">if</span> _, ok := c.tables[name]; ok {
+		<span class="kw">return</span> <span class="kw">nil</span>, fmt.Errorf(<span class="st">"catalog: テーブル %s は既に存在する"</span>, name)
+	}
+	<span class="kw">if</span> <span class="kw">len</span>(cols) == <span class="st">0</span> {
+		<span class="kw">return</span> <span class="kw">nil</span>, fmt.Errorf(<span class="st">"catalog: 列が 1 つもない"</span>)
+	}
+	seen := <span class="kw">map</span>[<span class="kw">string</span>]<span class="kw">bool</span>{}
+	<span class="kw">for</span> _, col := <span class="kw">range</span> cols {
+		<span class="kw">if</span> seen[col.Name] {
+			<span class="kw">return</span> <span class="kw">nil</span>, fmt.Errorf(<span class="st">"catalog: 列名 %s が重複している"</span>, col.Name)
+		}
+		seen[col.Name] = <span class="kw">true</span>
+	}
+	heapFirst, err := CreateHeap(st)
+	<span class="kw">if</span> err != <span class="kw">nil</span> {
+		<span class="kw">return</span> <span class="kw">nil</span>, err
+	}
+	t := &amp;<span class="ty">Table</span>{Name: name, Schema: <span class="ty">Schema</span>{Cols: cols}, HeapFirst: heapFirst}
+	<span class="kw">if</span> _, err := OpenHeap(st, c.heapFirst).Insert(encodeTableRec(t)); err != <span class="kw">nil</span> {
+		<span class="kw">return</span> <span class="kw">nil</span>, err
+	}
+	c.tables[name] = t
+	<span class="kw">return</span> t, <span class="kw">nil</span>
+}
+
+<span class="cm">// CreateIndex は索引を定義し、カタログヒープへ永続化する（木の中身の構築は呼び出し側）。</span>
+<span class="kw">func</span> (c *<span class="ty">Catalog</span>) CreateIndex(st storage.<span class="ty">Store</span>, name, table, col <span class="kw">string</span>, meta storage.<span class="ty">PageID</span>) (*<span class="ty">Index</span>, <span class="kw">error</span>) {
+	<span class="kw">if</span> _, ok := c.idxByName[name]; ok {
+		<span class="kw">return</span> <span class="kw">nil</span>, fmt.Errorf(<span class="st">"catalog: 索引 %s は既に存在する"</span>, name)
+	}
+	t, ok := c.tables[table]
+	<span class="kw">if</span> !ok {
+		<span class="kw">return</span> <span class="kw">nil</span>, fmt.Errorf(<span class="st">"catalog: テーブル %s が存在しない"</span>, table)
+	}
+	colIdx := t.Schema.ColIndex(col)
+	<span class="kw">if</span> colIdx &lt; <span class="st">0</span> {
+		<span class="kw">return</span> <span class="kw">nil</span>, fmt.Errorf(<span class="st">"catalog: テーブル %s に列 %s がない"</span>, table, col)
+	}
+	ix := &amp;<span class="ty">Index</span>{Name: name, Table: table, Col: col, ColIdx: colIdx, Meta: meta}
+	<span class="kw">if</span> _, err := OpenHeap(st, c.heapFirst).Insert(encodeIndexRec(ix)); err != <span class="kw">nil</span> {
+		<span class="kw">return</span> <span class="kw">nil</span>, err
+	}
+	c.indexes[table] = <span class="kw">append</span>(c.indexes[table], ix)
+	c.idxByName[name] = ix
+	<span class="kw">return</span> ix, <span class="kw">nil</span>
+}</code></pre>
+
+    <p><code>CreateTable</code> の本体をよく見てください。入力の検査（重複・空・列名重複）を除けば、やっていることは 2 つだけです。</p>
+    <ol>
+      <li><code>CreateHeap</code> — 新しいヒープを 1 本作る（Step 1）。</li>
+      <li><code>Insert(encodeTableRec(t))</code> — カタログヒープに定義レコードを 1 行入れる（Step 2 と 7）。</li>
+    </ol>
+    <p><strong><code>CREATE TABLE</code> は「ヒープ 1 本 + カタログに 1 行」に還元される。</strong>特別な仕組みは、もう何も要りません。ここまで積んだ部品が全部そのまま使われているだけです。旧い層（ページ・ヒープ）が新しい概念（表）を、コードの追加ほぼゼロで支える — 自己記述という設計の配当が、この関数の短さに表れています。</p>
+    <p><code>CreateIndex</code> も同型です（索引レコードを 1 行入れるだけ。B+Tree 本体の作成と中身の構築は第07章の呼び出し側の仕事なので、ここではメタページ ID を預かるだけ）。</p>
+
+    <h3>テストを読む — 「再起動しても覚えている」</h3>
+    <p>M4 マイルストーンの受け入れ基準は「テーブル定義がメタデータとして永続化され、開き直しても読めること」。それを文字どおり書き下したのが <code>TestCatalogPersistAcrossReopen</code> です。</p>
+
+    <div class="file-tag">internal/catalog/catalog_test.go（抜粋）</div>
+    <pre><code><span class="cm">// M4 受け入れ基準: テーブル定義がメタデータとして永続化され、開き直しても読める。</span>
+<span class="kw">func</span> TestCatalogPersistAcrossReopen(t *testing.T) {
+	path := filepath.Join(t.TempDir(), <span class="st">"t.db"</span>)
+	d, err := storage.OpenDiskManager(path)
+	<span class="cm">// …</span>
+	pool := buffer.New(d, <span class="st">64</span>)
+	<span class="kw">if</span> err := Bootstrap(pool); err != <span class="kw">nil</span> {
+		t.Fatal(err)
+	}
+	cat, err := Load(pool)
+	<span class="cm">// …</span>
+	<span class="kw">if</span> _, err := cat.CreateTable(pool, <span class="st">"users"</span>, []<span class="ty">Column</span>{
+		{<span class="st">"id"</span>, IntType}, {<span class="st">"name"</span>, TextType},
+	}); err != <span class="kw">nil</span> {
+		t.Fatal(err)
+	}
+	meta, err := btree.Create(pool)
+	<span class="cm">// …</span>
+	<span class="kw">if</span> _, err := cat.CreateIndex(pool, <span class="st">"idx_users_name"</span>, <span class="st">"users"</span>, <span class="st">"name"</span>, meta); err != <span class="kw">nil</span> {
+		t.Fatal(err)
+	}
+	<span class="kw">if</span> err := pool.FlushAll(); err != <span class="kw">nil</span> {
+		t.Fatal(err)
+	}
+	<span class="kw">if</span> err := d.Close(); err != <span class="kw">nil</span> {
+		t.Fatal(err)
+	}
+
+	<span class="cm">// ---- 再起動 ----</span>
+	pool2 := newStore(t, path)
+	cat2, err := Load(pool2)
+	<span class="cm">// …</span>
+	tab, ok := cat2.Table(<span class="st">"users"</span>)
+	<span class="kw">if</span> !ok {
+		t.Fatal(<span class="st">"再オープン後にテーブル定義が消えた"</span>)
+	}
+	<span class="kw">if</span> <span class="kw">len</span>(tab.Schema.Cols) != <span class="st">2</span> || tab.Schema.Cols[<span class="st">1</span>].Name != <span class="st">"name"</span> || tab.Schema.Cols[<span class="st">1</span>].Type != TextType {
+		t.Fatalf(<span class="st">"スキーマが一致しない: %+v"</span>, tab.Schema)
+	}
+	idxs := cat2.Indexes(<span class="st">"users"</span>)
+	<span class="kw">if</span> <span class="kw">len</span>(idxs) != <span class="st">1</span> || idxs[<span class="st">0</span>].Name != <span class="st">"idx_users_name"</span> || idxs[<span class="st">0</span>].ColIdx != <span class="st">1</span> || idxs[<span class="st">0</span>].Meta != meta {
+		t.Fatalf(<span class="st">"索引定義が一致しない: %+v"</span>, idxs)
+	}
+}</code></pre>
+
+    <p>前半で Bootstrap → CreateTable → CreateIndex を行い、<code>pool.FlushAll()</code>（第02章 — バッファプールに溜まったダーティページを全部ディスクへ書く）してからファイルを閉じます。後半は<strong>完全に別のプールとカタログ</strong>で開き直し、スキーマの中身（列名・型・位置）と索引定義が 1 ビットも欠けずに戻ることを確認します。<code>FlushAll</code> を消すとこのテストは落ちます — 「メモリ上で動く」と「永続化されている」の差を体で覚えるのに良い実験です。もう 1 本の <code>TestCatalogDuplicateTable</code> は、同名テーブルの二重作成がきちんとエラーになることの確認です。</p>
+
+    <div class="box do"><div class="box-k">▸ 動かして確認</div>
+      <pre class="term"><code><span class="ps">$</span> go test ./internal/catalog -run TestCatalog -v
+<span class="out">=== RUN   TestCatalogPersistAcrossReopen
+--- PASS: TestCatalogPersistAcrossReopen (0.02s)
+=== RUN   TestCatalogDuplicateTable
+--- PASS: TestCatalogDuplicateTable (0.00s)
+PASS
+ok  	minidb/internal/catalog	0.804s</span></code></pre>
+    </div>
+
+    <h3>M4 の通し検収 — SQL 越しに、再起動をまたいで</h3>
+    <p><code>src/</code> 直下の <code>e2e_test.go</code> には、マイルストーンごとの通しテストがあります。M4 のものは、本章の全部品を第05章の SQL 層越しに（完成品として）駆動します。</p>
+
+    <div class="file-tag">e2e_test.go（抜粋）</div>
+    <pre><code><span class="cm">// M4 受け入れ基準: CREATE TABLE → INSERT → SELECT * が任意スキーマで動作し、</span>
+<span class="cm">// 定義が永続化される。</span>
+<span class="kw">func</span> TestM4CreateInsertSelectPersist(t *testing.T) {
+	path := filepath.Join(t.TempDir(), <span class="st">"m4.db"</span>)
+	db := open(t, path)
+	mustExec(t, db, <span class="st">"CREATE TABLE users (id INT, name TEXT, age INT)"</span>)
+	mustExec(t, db, <span class="st">"INSERT INTO users VALUES (1, 'alice', 30), (2, 'bob', 25), (3, NULL, NULL)"</span>)
+	res := mustExec(t, db, <span class="st">"SELECT * FROM users"</span>)
+	<span class="kw">if</span> <span class="kw">len</span>(res.Rows) != <span class="st">3</span> {
+		t.Fatalf(<span class="st">"SELECT * が %d 行, want 3"</span>, <span class="kw">len</span>(res.Rows))
+	}
+	<span class="kw">if</span> err := db.Close(); err != <span class="kw">nil</span> {
+		t.Fatal(err)
+	}
+
+	<span class="cm">// ---- 再起動: スキーマもデータも残っている ----</span>
+	db2 := open(t, path)
+	<span class="kw">defer</span> db2.Close()
+	res = mustExec(t, db2, <span class="st">"SELECT name FROM users WHERE id = 2"</span>)
+	<span class="kw">if</span> <span class="kw">len</span>(res.Rows) != <span class="st">1</span> || res.Rows[<span class="st">0</span>][<span class="st">0</span>].Str != <span class="st">"bob"</span> {
+		t.Fatalf(<span class="st">"再起動後の SELECT が不正: %+v"</span>, res.Rows)
+	}
+	<span class="cm">// NULL も往復できている</span>
+	res = mustExec(t, db2, <span class="st">"SELECT name, age FROM users WHERE id = 3"</span>)
+	<span class="kw">if</span> !res.Rows[<span class="st">0</span>][<span class="st">0</span>].Null || !res.Rows[<span class="st">0</span>][<span class="st">1</span>].Null {
+		t.Fatal(<span class="st">"NULL が保存されていない"</span>)
+	}
+}</code></pre>
+
+    <p>検証の勘所は 3 つ。(1) 任意スキーマ（INT と TEXT の混在）で表が作れて 3 行入ること。(2) <strong>閉じて開き直しても</strong>スキーマとデータが残っていること — Step 6〜7 の芋づるが機能している証拠。(3) NULL がディスクを往復して NULL のまま戻ること — Step 4 のビットマップの証拠です。</p>
+
+    <div class="box do"><div class="box-k">▸ 動かして確認</div>
+      <pre class="term"><code><span class="ps">$</span> go test . -run TestM4CreateInsertSelectPersist -v
+<span class="out">=== RUN   TestM4CreateInsertSelectPersist
+--- PASS: TestM4CreateInsertSelectPersist (0.03s)
+PASS
+ok  	minidb	0.808s</span></code></pre>
+      <p>REPL でも「再起動しても覚えている」を体感できます。Step 6 で作った <code>ch04demo.db</code> を開き直すと:</p>
+      <pre class="term"><code><span class="ps">$</span> go run ./cmd/minidb-repl ch04demo.db
+<span class="out">minidb — 単一ファイル組み込み RDBMS（.exit で終了 / .stats で統計）</span>
+<span class="ps">minidb&gt;</span> SELECT * FROM users
+<span class="out">| id | name  | age |
+| -- | ----- | --- |
+| 1  | alice | 30  |
+（1 行 / plan: seqscan(users)）</span>
+<span class="ps">minidb&gt;</span> .exit</code></pre>
+    </div>
+
+    <h3>総仕上げ — 芋づるを最後まで手繰る</h3>
+    <p>最後に、Step 4 の約束を果たします。ページ 2（users のヒープ）の末尾、つまりファイルの最後の 32 バイトを見てください。</p>
+    <pre class="term"><code><span class="ps">PS&gt;</span> Format-Hex -Path .\ch04demo.db | Select-Object -Last 2
+<span class="out">00002FE0   00 00 00 00 00 00 00 01 00 00 00 00 00 00 00 15  ................
+00002FF0   00 05 00 1E 00 00 00 00 00 00 00 61 6C 69 63 65  ...........alice</span></code></pre>
+    <p>オフセット 0x2FE6 から始まる 26 バイト — <code>00 | 01 00 00 00 00 00 00 00 | 15 00 05 00 | 1E 00 00 00 00 00 00 00 | 61 6C 69 63 65</code> — は、Step 4 の図で手組みした <code>(1, 'alice', 30)</code> のバイト列と<strong>一字一句同じ</strong>です（手前の 6 バイトの 00 はまだ使われていない空き領域）。これで芋づるは最後まで手繰れました。ページ 0 のマジックナンバーに始まり、カタログヒープの定義レコードを経て、表の中の 1 行の最後の 1 バイトまで。<strong>この DB ファイルに、あなたに説明できないバイトはもう 1 つもありません。</strong></p>
+
+    <!-- ============================================================ -->
+    <h2>つまずき FAQ</h2>
+
+    <details class="qa"><summary>行に型タグを持たせる（JSON のような自己記述形式にする）のはなぜダメなんですか?</summary>
+      <div class="qa-body"><p>ダメではなく、トレードオフで負けるのです。行ごとの型タグは (1) 100 万行あれば 100 万回同じ情報を繰り返すのでディスクを食い、(2) 「行のタグとカタログの型が食い違ったらどちらが正しいのか」という整合性の問題を生みます。スキーマが 1 箇所（カタログ）にだけあれば、この問いは発生しません。一方、スキーマレスを売りにする DB（MongoDB など）は逆のトレードオフを選んでいて、行ごとに構造が違うことを許す代わりに各行が自己記述します。どちらが正しいかではなく、何を固定して何を自由にするかの選択です。</p></div>
+    </details>
+
+    <details class="qa"><summary>NULL の列にも固定長部の 8 バイトが残るのは、もったいなくないですか?</summary>
+      <div class="qa-body"><p>もったいないです。PostgreSQL は実際、NULL の列の分を詰めて省きます。ただしその代償として「i 番目の列の位置」が計算だけでは決まらなくなり、ビットマップを見ながら先頭から足し算して位置を求めることになります。minidb は「計算だけで届く」単純さを取りました。NULL だらけの巨大テーブルを想定するなら詰める価値がありますが、学習実装ではコードの読みやすさが勝ちます。改造課題としては良い題材です — 詰める形式に変えたとき、<code>Encode</code> と <code>Decode</code> のどこが変わるか考えてみてください。</p></div>
+    </details>
+
+    <details class="qa"><summary>カタログのスキーマはどこにあるんですか? カタログ自身もタプルなら、デコードにスキーマが要るのでは…?</summary>
+      <div class="qa-body"><p>いい質問です — それが Step 7 冒頭の「鶏と卵」です。答え: <strong>カタログレコードの形式だけはコードに直書き</strong>されています（<code>encodeTableRec</code> / <code>applyRecord</code> がその形式の生きた定義）。カタログレコードは Step 4 のタプル形式を使っていない、という点に注意してください。無限の遡りは「最後の 1 段だけはコードが知っている」ことで止まります。PostgreSQL でも、システムカタログの物理配置を知るブートストラップ処理は特別扱いです。</p></div>
+    </details>
+
+    <details class="qa"><summary>Insert が毎回先頭ページから線形に探すのは遅くないですか? 1 万ページある表の末尾に入れるのに 1 万ページ読むのでは…</summary>
+      <div class="qa-body"><p>遅いです。実務の DB はこのために<strong>空き領域マップ</strong>（PostgreSQL の Free Space Map など）という「どのページにどれくらい空きがあるか」の別帳簿を持ち、空きのあるページへ直行します。minidb が線形探索を選んだのは、(1) 帳簿という新しい永続構造を増やさずに済む、(2) 削除跡の再利用（FR-02）が自然に達成される、(3) 学習スコープの規模（数千行）では実害がない、からです。ボトルネックになったら帳簿を足す — 最適化は問題が観測されてから、が本書の姿勢です。</p></div>
+    </details>
+
+    <details class="qa"><summary>タプルはリトルエンディアンなのに、キーはビッグエンディアン。なぜ混在しているんですか?</summary>
+      <div class="qa-body"><p>「そのバイト列は<strong>バイト列のまま比較されるか?</strong>」で決まっています。キーは <code>bytes.Compare</code> で比較されるので、桁の重い方が先に来るビッグエンディアン<strong>でなければならない</strong>（リトルエンディアンだと 256 &lt; 1 になる — Step 5 参照）。一方タプルの中の整数は、必ず <code>Decode</code> で int64 に戻してから比較されるので、並び順はどちらでも正しく動きます。制約のない場所は Go の <code>encoding/binary</code> でどちらを使っても手間が同じなので、ページヘッダ（第01章）と合わせてリトルエンディアンに揃えてあります。「比較されるバイト列だけがビッグエンディアン必須」と覚えてください。</p></div>
+    </details>
+
+    <!-- ============================================================ -->
+    <h2>理解度チェック</h2>
+    <p>次の問いに自分の言葉で答えてから、答えを開いてください。</p>
+
+    <details class="qa"><summary>Q1. スキーマ (id INT, name TEXT, age INT) の行 (2, 'bob', NULL) を Encode すると何バイトの、どんなバイト列になりますか? NULL ビットマップの値から順に、16 進で手組みしてください。</summary>
+      <div class="qa-body">
+        <p>全 24 バイトです。</p>
+        <div class="ascii">[0]      04                        ビットマップ: age は 2 番目（0 始まり）の
+                                   列なので bit2 が立つ → 0b00000100 = 0x04
+[1:9)    02 00 00 00 00 00 00 00   id = 2（リトルエンディアン）
+[9:11)   15 00                     name の offset = 21（bitmap 1 + 固定長部 20 の直後）
+[11:13)  03 00                     name の len = 3
+[13:21)  00 00 00 00 00 00 00 00   age は NULL → 席は残るが 0 埋めのまま
+[21:24)  62 6F 62                  "bob"</div>
+        <p>つまずきどころは 3 つ。(1) ビットマップは <code>1 &lt;&lt; (i % 8)</code> なので 2 列目（i=2）で <code>0x04</code>。(2) NULL でも固定長部の 8 バイトの「席」は消えない。(3) 可変長部が "alice"（5 バイト）から "bob"（3 バイト）になった分だけ全長が縮む（26 → 24）が、offset は 21 のまま — 固定長部のサイズはスキーマだけで決まるからです。</p>
+      </div>
+    </details>
+
+    <details class="qa"><summary>Q2. タプルのバイト列には型情報が一切入っていません。それなのに Decode が正しく値を復元できるのはなぜですか?</summary>
+      <div class="qa-body"><p>解釈の根拠が<strong>スキーマ</strong>として外部（カタログ）に 1 つだけ存在するからです。<code>Decode</code> はスキーマの列を順に見て、「次は INT だから 8 バイト読む」「次は TEXT だから (offset, len) を読んで可変長部へ飛ぶ」と進みます。つまりタプルは「スキーマと組にしたときだけ意味を持つバイト列」です。裏返すと、間違ったスキーマで Decode すれば平気ででたらめな値が返る — だからスキーマの永続化（カタログ）が、データの永続化と同じ真剣さで扱われるのです。</p></div>
+    </details>
+
+    <details class="qa"><summary>Q3. int64 の -1 と 1 を「2 の補数をそのままビッグエンディアンにしたバイト列」で比較すると、どちらが大きくなってしまいますか? EncodeKey はそれをどう直していますか?</summary>
+      <div class="qa-body"><p>-1 は <code>FF FF FF FF FF FF FF FF</code>、1 は <code>00 00 00 00 00 00 00 01</code> なので、バイト列比較では先頭 1 バイト目で <strong>-1 の方が大きい</strong>と誤判定されます（0xFF &gt; 0x00）。<code>EncodeKey</code> は <code>uint64(v.Int) ^ (1 &lt;&lt; 63)</code> で<strong>符号ビットだけを反転</strong>します。すると負数は先頭 0x00〜0x7F、0 以上は 0x80〜0xFF に写り、-1 → <code>7F FF…FF</code>、1 → <code>80 00…01</code> で正しく -1 &lt; 1 になります。同符号内の順序は 2 の補数がもともと保存しているので、反転はこの 1 ビットだけで足ります。</p></div>
+    </details>
+
+    <details class="qa"><summary>Q4. TEXT キーに終端記号 0x00 0x00 がないと、"a" と "a0" の 2 行で何が壊れますか? 「複合キー」という言葉を使って説明してください。</summary>
+      <div class="qa-body"><p>B+Tree に入る実際のキーは「ユーザーキー + TID」の<strong>複合キー</strong>（連結）です。"a" は "a0" の接頭辞なので、連結キーの比較では「"a" 側の TID の先頭バイト」と「"a0" 側の本文 '0'」が比較されてしまい、大小が TID の値次第で転びます。すると木の中の並び順が文字列の辞書順と食い違い、範囲検索が<strong>途中で打ち切られて行を黙って取りこぼす</strong>。終端記号を全キーの末尾に置き、本文中の 0x00 をエスケープしておけば、どのキーも他のキーの接頭辞にならず（prefix-free）、本文どうし・終端どうしが必ず対応する位置で比較されるので、この問題が起きません。</p></div>
+    </details>
+
+    <details class="qa"><summary>Q5. minidb を再起動したとき、DB は「users という表がある」ことをどうやって思い出しますか? ファイルの読み取り経路を、ページ番号を挙げて順に説明してください。</summary>
+      <div class="qa-body"><p>(1) <code>Load</code> がページ 0（メタページ）を読み、先頭 8 バイトをマジックナンバー <code>"MINIDB\x01\x00"</code> と照合する。(2) 続く 4 バイトからカタログヒープの先頭ページ ID（この章の例ではページ 1）を得る。(3) そのヒープを <code>Scan</code> で全走査し、出てきたレコードを 1 件ずつ <code>applyRecord</code> で解釈する。(4) 種別 1（テーブル定義）のレコードから名前 "users"・スキーマ・データヒープの先頭（例ではページ 2）を復元し、メモリのマップ <code>c.tables["users"]</code> に載せる。以後 <code>SELECT</code> はこのマップ経由でページ 2 のヒープへ辿り着きます。コードに直書きされた前提は「ページ 0 がメタページ」だけで、残りはすべてファイル自身が語っています。</p></div>
+    </details>
+
+    <details class="qa"><summary>Q6. CREATE TABLE は内部的には、たった 2 つの操作に還元されます。何と何ですか?</summary>
+      <div class="qa-body"><p>(1) <strong>新しいヒープを 1 本作る</strong>（<code>CreateHeap</code> — 空のスロット化ページを 1 枚割り当てるだけ）。(2) <strong>カタログヒープに定義レコードを 1 行挿入する</strong>（<code>encodeTableRec</code> したバイト列を <code>Insert</code>）。表定義の保存に専用の仕組みを使わず「ただの行の挿入」で済むのが自己記述設計の要点で、第06章で WAL による保護を足すときも、カタログ更新が自動的に同じ保護を受けることになります。</p></div>
+    </details>
+
+    <div class="box done"><div class="box-k">✓ 完了の合図</div>
+      <p>任意のスキーマで表を作って行を入れ、全件取り出せる。プログラムを再起動しても、表の定義とデータが残っている。次の 2 コマンドが全部 PASS すれば、M4 マイルストーン完了です。</p>
+      <pre class="term"><code><span class="ps">$</span> go test ./internal/catalog -v
+<span class="out">=== RUN   TestTupleRoundtrip
+--- PASS: TestTupleRoundtrip (0.00s)
+=== RUN   TestTupleTypeMismatch
+--- PASS: TestTupleTypeMismatch (0.00s)
+=== RUN   TestEncodeKeyPreservesOrder
+--- PASS: TestEncodeKeyPreservesOrder (0.00s)
+=== RUN   TestEncodeKeyTextPrefixSafe
+--- PASS: TestEncodeKeyTextPrefixSafe (0.00s)
+=== RUN   TestHeapInsertScanDelete
+--- PASS: TestHeapInsertScanDelete (0.00s)
+=== RUN   TestCatalogPersistAcrossReopen
+--- PASS: TestCatalogPersistAcrossReopen (0.01s)
+=== RUN   TestCatalogDuplicateTable
+--- PASS: TestCatalogDuplicateTable (0.00s)
+PASS
+ok  	minidb/internal/catalog	0.732s
+</span><span class="ps">$</span> go test . -run TestM4CreateInsertSelectPersist -v
+<span class="out">=== RUN   TestM4CreateInsertSelectPersist
+--- PASS: TestM4CreateInsertSelectPersist (0.03s)
+PASS
+ok  	minidb	0.808s</span></code></pre>
+    </div>
+
+    <h2>まとめ — 次の層へ</h2>
+    <p>この章で、バイト列の世界に「表」「列」「行」という言葉が生まれました。表の実体はページの数珠つなぎ（ヒープ）、行はスキーマと組で意味を持つ素のバイト列、キーは大小がバイト比較に写る memcomparable 形式。そして表の定義そのものも、ただの行としてカタログヒープに眠っている。ページ 0 のマジックナンバーから始めて、DB ファイルの全バイトを自分の言葉で説明できるようになりました。</p>
+    <p>しかし、思い出してください。この章でやった「表を作る」「行を入れる」は、テストコードの中の <code>cat.CreateTable(pool, "users", …)</code> や <code>heap.Insert(rec)</code> — つまり <strong>Go の関数呼び出し</strong>でした。REPL で打った <code>CREATE TABLE users (id INT, name TEXT, age INT)</code> という<strong>文字列</strong>が、いったい誰にどう解釈されてこの関数呼び出しに化けたのか、その部分だけがまだブラックボックスです。</p>
+    <p>次の章では、そこを作ります。文字列を単語に割り（字句解析）、文法に沿って組み立て（構文解析）、この章の部品への呼び出しに翻訳して実行する — データベースに <strong>SQL という言葉</strong>を与えます。積み木は全部そろいました。あとは話せるようにするだけです。</p>
+
+    <div class="chap-foot">
+      <a class="pager" href="03-btree.html"><span class="dir">← 前へ</span>第03章 · B+Tree 索引</a>
+      <a class="pager next" href="05-sql.html"><span class="dir">次へ →</span>第05章 · SQL を実行する</a>
+    </div>
+  </main>
+</div>
+</body>
+</html>

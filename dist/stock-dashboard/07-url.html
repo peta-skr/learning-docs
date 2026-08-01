@@ -1,0 +1,126 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>URLに状態を持たせる — 指数ダッシュボードを作る</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@400;500;600;700&family=Source+Serif+4:opsz,wght@8..60,400;8..60,500;8..60,600&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<div class="shell">
+
+  <aside class="spine">
+    <a class="wordmark" href="index.html">STOCK · from scratch<span class="tick"> ↗</span></a>
+    <div class="book-title">指数ダッシュボードを<br>つくる</div>
+    <div class="book-sub">好きな指数を、好きな期間で</div>
+
+    <div class="legend-rail"><span>読む <b>↓</b></span><span>組む <b>↑</b></span></div>
+
+    <nav aria-label="目次">
+      <ul class="toc">
+        <li><a class="nav-item" href="index.html"><span class="nav-num">序</span><span class="nav-label">はじめに<span class="nav-tag">Intro</span></span></a></li>
+        <li><a class="nav-item" href="00-line.html"><span class="nav-num">00</span><span class="nav-label">一本の線を引く<span class="nav-tag">Line</span></span></a></li>
+        <li><a class="nav-item" href="01-fetch.html"><span class="nav-num">01</span><span class="nav-label">データを取ってくる<span class="nav-tag">Fetch</span></span></a></li>
+        <li><a class="nav-item" href="02-store.html"><span class="nav-num">02</span><span class="nav-label">貯めて、切り出す<span class="nav-tag">Store</span></span></a></li>
+        <li><a class="nav-item" href="03-range.html"><span class="nav-num">03</span><span class="nav-label">期間を自由にする<span class="nav-tag">Range</span></span></a></li>
+        <li><a class="nav-item" href="04-overlay.html"><span class="nav-num">04</span><span class="nav-label">二本目を重ねる<span class="nav-tag">Overlay</span></span></a></li>
+        <li><a class="nav-item" href="05-rebase.html"><span class="nav-num">05</span><span class="nav-label">100にそろえる<span class="nav-tag">Rebase</span></span></a></li>
+        <li><a class="nav-item" href="06-downsample.html"><span class="nav-num">06</span><span class="nav-label">長い期間を軽くする<span class="nav-tag">Sample</span></span></a></li>
+        <li><a class="nav-item current" aria-current="page" href="07-url.html"><span class="nav-num">07</span><span class="nav-label">URLに状態を持たせる<span class="nav-tag">URL</span></span></a></li>
+        <li><a class="nav-item" href="08-finish.html"><span class="nav-num">08</span><span class="nav-label">仕上げと、次の一歩<span class="nav-tag">Finish</span></span></a></li>
+      </ul>
+    </nav>
+
+    <div class="spine-foot">
+      各章は一段の階段。<br>前の章の「できたこと」が<br>次の章の「困りごと」を呼ぶ。
+    </div>
+  </aside>
+
+  <main class="reading">
+    <div class="progress-tag">第07章 / 全9章 · 層: URL · 読了目安 1〜2時間</div>
+    <div class="eyebrow"><span>URL</span><span class="depth">— 状態の正はURL</span></div>
+    <h1>URLに状態を持たせる</h1>
+    <p class="lede">見ている画面を、そのままURLで<strong>共有・再現</strong>できるようにします。</p>
+
+    <div class="box goal"><div class="box-k">◈ この章のゴール</div>
+      <p>指数・期間・表示モードがURLに載り、そのURLを開くと同じ画面が再現される。</p>
+    </div>
+
+    <h2>状態の正をURLに置く</h2>
+    <p>ここまでで、指数を選び、期間を切り、二本を重ね、100にそろえ、点を間引く——という一通りの操作ができるようになりました。ところが、ちょっといい比較ができたときに困ります。「この画面、あとでもう一度見たい」「友達に見せたい」。でもリロードしたら全部初期状態に戻ってしまう。せっかくの設定が、画面の中に閉じ込められているからです。</p>
+
+    <p>この章のポイントは一つだけ。状態の「正」を、画面の内側ではなく<strong>URL</strong>に置くことです。画面が状態を握るのではなく、<strong>URLを見て画面が組み上がる</strong>——という向きにします。</p>
+
+<pre><code>/?symbols=SP500,N225,SOX&amp;from=2024-01-01&amp;to=2024-11-30&amp;mode=rebase</code></pre>
+
+    <p>この向きにすると、うれしいことが自然についてきます。リロードしても消えない。戻る／進むが効く。そのまま送れば同じ画面が再現できる。第03章で作ったプリセットも、ここでは「URLを書き換えるだけ」の操作に変わります。すべてがURLという一つの真実に集約されます。</p>
+
+    <p>ひとつ現実的な注釈を。このダッシュボードは<strong>手元で動かす前提</strong>なので、URLは <code>127.0.0.1</code> で始まります。<strong>他人に送っても相手の手元では開きません</strong>——同じアプリを動かしている自分の別の端末で開くか、公開する場合は第08章の「公開する」を見てください。ここで手に入るのは「<strong>状態を文字列として外に出せる</strong>」という性質そのもので、送り先が他人か自分かは、その応用先の話です。</p>
+
+    <div class="insight"><div class="box-k">◈ 効いてくる設計</div>
+      <p>URLが状態の正だと、pushState で履歴が積まれ、ブラウザの戻る/進むがそのまま「表示の履歴」になります。参考実装は <code>?symbols=&amp;from=&amp;to=&amp;mode=</code> から復元し、変更のたび pushState しています。</p>
+    </div>
+
+    <h2>向きを逆にする、という発想</h2>
+    <p>ふつうに作ると、UIの状態（選択中の指数、選んだ期間、モード）が「本体」で、必要になったらそれを見て描画します。この章でやるのは、その主従を入れ替えることです。本体はURL。UIはURLを書き換えるための入力欄にすぎず、画面はURLから毎回組み上がる。こうすると「今の状態はどこにある？」という問いへの答えがいつでも一つ——アドレスバーに書いてある文字列——になります。</p>
+
+    <p>だから最初にやるべきは、描画をURLパラメータだけから起こせるようにすることです。ページを開いた瞬間、まだ何も操作していない状態でも、URLに <code>?symbols=...</code> が付いていればその画面が再現される。ここが土台です。</p>
+
+    <div class="box do"><div class="box-k">▸ 手を動かす</div>
+      <ol>
+        <li>URLのパラメータだけから初期表示を復元できるようにする。</li>
+        <li>指数・期間・モードを変えるたびに、URLへ反映する。</li>
+        <li>壊れたパラメータ（不正な日付など）が来たときの安全な既定値を決める。</li>
+      </ol>
+    </div>
+
+    <div class="box hazard"><div class="box-k">⚠ つまずきポイント</div>
+      <p>URLは他人が自由に書き換えられる入力です。<code>from</code> が日付になっていない、<code>mode</code> が知らない値、<code>symbols</code> が空——こうした壊れた値が来ても、画面が真っ白になってはいけません。「読めない値は無視して既定値に落とす」を先に決めておいてください。手順3を後回しにすると、共有したURLのタイプミス一つでアプリが死にます。</p>
+      <p>もう一つ、見落としやすいのが<strong>パラメータが何も無いとき</strong>です。トップページを素で開いた読者に真っ白な画面を出さないよう、「何も指定が無ければこれ」という既定を決めておいてください（参考実装は「直近1年・S&amp;P500と日経平均」で立ち上げ、その内容をURLに書き戻してから描いています）。<strong>URLから画面を組む</strong>を徹底すると、素のURLも「一度URLを埋めてから描く」形に自然と落ち着きます。</p>
+    </div>
+
+    <div class="box hazard"><div class="box-k">⚠ 「形が正しい」と「日付として存在する」は別 — 参考実装に残っている穴</div>
+      <p>参考実装の検査は<strong>形だけ</strong>です（<code>/^\d{4}-\d{2}-\d{2}$/</code> にマッチするか）。この検査は次を<strong>通してしまいます</strong>。</p>
+<pre><code>2024-13-99  → 通る（13月99日）
+2024-02-30  → 通る（2月30日は存在しない）
+not-a-date  → 弾く</code></pre>
+      <p>通ってしまった値はサーバに送られ、サーバ側の <code>time.Parse</code> が <strong>400 を返します</strong>。フロントは 400 を受け取るとグラフを消すので、<strong>既定の状態には戻らず、空のグラフになります</strong>。つまり「壊れた値は既定に落とす」という方針が、この経路だけ守れていません。</p>
+      <p>直すなら、形の検査のあとに<strong>実在する日付か</strong>を確かめます（例: <code>new Date(s)</code> に通して、戻ってきた年月日が入力と一致するか）。<strong>正規表現は「形」しか見ない</strong>——日付・メールアドレス・URLの検査で繰り返し出会う落とし穴です。</p>
+    </div>
+
+    <h2>つまずき FAQ</h2>
+    <details class="qa"><summary>状態を更新するとき、pushState と replaceState のどちらを使えばいいですか？</summary>
+      <div class="qa-body"><p>ユーザーが「操作した」結果は pushState で履歴に積みます——指数を足した、期間を変えた、モードを切り替えた。こうしておけば戻るボタンで一つ前の表示に戻れます。一方、ページを開いた直後にURLを正規化する（欠けたパラメータを既定値で埋め直す）ような、ユーザーの操作ではない書き換えは replaceState を使い、履歴を汚さないようにします。「ユーザーの意図＝新しい履歴、内部都合＝置き換え」で仕分けると迷いません。</p></div>
+    </details>
+    <details class="qa"><summary>戻る／進むを押しても画面が変わりません。どこが抜けていますか？</summary>
+      <div class="qa-body"><p>pushState は履歴を積むだけで、戻る/進むのときに勝手に再描画してはくれません。<code>popstate</code> イベントを購読し、そこで「現在のURLを読み直して画面を組み直す」処理を呼ぶ必要があります。初期表示・操作・popstate の3か所すべてが「URLを読んで描く」という同じ一本の道を通るようにすると、挙動がぶれません。描画の入口をURL読み取りに一本化するのがコツです。</p></div>
+    </details>
+
+    <h2>理解度チェック</h2>
+    <p>次の問いに自分の言葉で答えてから、答えを開いてください。</p>
+    <details class="qa"><summary>Q1. 状態の正を画面ではなくURLに置くと、なぜ共有・戻る/進む・リロード耐性が同時に手に入るのか？</summary>
+      <div class="qa-body"><p>三つとも「状態がどこにあるか」という一つの問題の別の顔だからです。状態がURLという外部化された一箇所にあれば——そのURLを渡せば同じアプリを動かしている環境で同じ画面が再現される（共有）、ブラウザがURLの履歴を管理してくれる（戻る/進む）、リロードしてもアドレスバーの文字列は消えない（リロード耐性）。状態を画面の内側（変数）に置くと、この三つはそれぞれ別々に作り込む必要が出ます。正を一箇所に集約したことのご褒美として、三つがまとめてついてくるわけです。</p></div>
+    </details>
+    <details class="qa"><summary>Q2. 壊れたパラメータ（不正な日付など）に安全な既定値を用意しておくことが、なぜ「共有」機能そのものを守ることになるのか？</summary>
+      <div class="qa-body"><p>URLを共有可能にした瞬間、URLは「自分が生成したもの」だけでなく「他人が書いた・コピペ途中で欠けた・古い形式の」文字列としてもやってくるからです。共有とは、信頼できない入力を受け取ることと表裏一体です。壊れた値で画面が落ちれば、共有されたURLの多くが「開けないリンク」になり、共有機能の価値ごと崩れます。読めない値は無視して既定値に落とす、という守りがあって初めて、URLを安心して人に渡せます。</p></div>
+    </details>
+
+    <div class="box done"><div class="box-k">✓ 完了の合図</div>
+      <p>ある画面のURLをコピーして、別のタブで開くと同じ画面が再現される。指数やモードを変えるとアドレスバーが更新され、戻るボタンで一つ前の表示に戻れる。<code>mode=xxx</code> や <code>not-a-date</code> のような明らかに壊れた値を打ち込んでも、画面は白くならず既定の状態で立ち上がる——ここまで来たら、この章は勝ちです。</p>
+      <p>（<code>2024-02-30</code> のような「形は正しいが存在しない日付」は、上の落とし穴のとおり参考実装では空のグラフになります。ここまで塞ぎたい人は、実在チェックを足すのが次の一歩です。）</p>
+    </div>
+
+    <h2>まとめ — 次の層へ</h2>
+    <p>状態の正がURLに移りました。これで、見ている画面はいつでも一本のURLに畳めます——共有でき、履歴に残り、リロードに耐える。データを取り、貯め、切り出し、重ね、そろえ、間引き、そして<strong>共有できる</strong>ところまで積み上がりました。次章は仕上げです。ここまで作ってきたものを一つのアプリとして整え、動かし、そして「次の一歩」——ここから先どこへ広げられるか——を見ていきます。</p>
+
+    <div class="chap-foot">
+      <a class="pager" href="06-downsample.html"><span class="dir">← 前へ</span>第06章 · 長い期間を軽くする</a>
+      <a class="pager next" href="08-finish.html"><span class="dir">次へ →</span>第08章 · 仕上げと、次の一歩</a>
+    </div>
+  </main>
+</div>
+</body>
+</html>

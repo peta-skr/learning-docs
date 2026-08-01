@@ -1,0 +1,537 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>第06章 Set とエンコーディング — Redis をつくる</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500;600&family=Source+Serif+4:opsz,wght@8..60,400;8..60,600;8..60,700&family=Noto+Serif+JP:wght@400;600;700&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<div class="shell">
+
+  <aside class="spine">
+    <a class="wordmark" href="index.html">MINI-REDIS · from scratch</a>
+    <div class="book-title">Redis を<br>つくる</div>
+    <div class="book-sub">Go で RESP から Sorted Set まで</div>
+
+    <div class="legend"><span>読む <b>↓</b></span><span>組む <b>↑</b></span></div>
+
+    <nav aria-label="目次">
+      <ul class="toc">
+        <li><a class="nav-item" href="index.html"><span class="nav-num">序</span><span class="nav-label">はじめに・準備<span class="nav-tag">Setup</span></span></a></li>
+        <li><a class="nav-item" href="00-server.html"><span class="nav-num">00</span><span class="nav-label">返事をするサーバ<span class="nav-tag">RESP</span></span></a></li>
+        <li><a class="nav-item" href="01-keyspace.html"><span class="nav-num">01</span><span class="nav-label">キーと値<span class="nav-tag">Store</span></span></a></li>
+        <li><a class="nav-item" href="02-expire.html"><span class="nav-num">02</span><span class="nav-label">有効期限<span class="nav-tag">Expire</span></span></a></li>
+        <li><a class="nav-item" href="03-string.html"><span class="nav-num">03</span><span class="nav-label">数としての文字列<span class="nav-tag">String</span></span></a></li>
+        <li><a class="nav-item" href="04-list.html"><span class="nav-num">04</span><span class="nav-label">List<span class="nav-tag">List</span></span></a></li>
+        <li><a class="nav-item" href="05-hash.html"><span class="nav-num">05</span><span class="nav-label">Hash<span class="nav-tag">Hash</span></span></a></li>
+        <li><a class="nav-item current" aria-current="page" href="06-set.html"><span class="nav-num">06</span><span class="nav-label">Set とエンコーディング<span class="nav-tag">Set</span></span></a></li>
+        <li><a class="nav-item" href="07-zset.html"><span class="nav-num">07</span><span class="nav-label">Sorted Set と skiplist<span class="nav-tag">ZSet</span></span></a></li>
+        <li><a class="nav-item" href="08-pubsub.html"><span class="nav-num">08</span><span class="nav-label">Pub/Sub<span class="nav-tag">PubSub</span></span></a></li>
+        <li><a class="nav-item" href="09-finish.html"><span class="nav-num">09</span><span class="nav-label">仕上げと設計判断<span class="nav-tag">Finish</span></span></a></li>
+      </ul>
+    </nav>
+
+    <div class="spine-foot">
+      各章は一つのデータ型・機能。<br>下（RESP）から上（Sorted Set）へ<br>積み上げて動かしていく。
+    </div>
+  </aside>
+
+  <main class="reading">
+    <div class="progress-tag">第06章 / 全10章 · 層: SET · 読了目安 2〜3時間</div>
+    <div class="eyebrow"><span>SET</span><span class="depth">— 内部表現の分岐</span></div>
+    <h1>Set とエンコーディング</h1>
+    <p class="lede">ここまでの型は、中身の持ち方が1つでした。List は <code>[]string</code> 1本、Hash は <code>map</code>（本家はどちらも要素数に応じて内部表現を切り替えますが、本書は素朴な1つの持ち方で通しました）。ところが Set は<strong>同じ型なのに、中身が状況で2つの姿を切り替えます</strong> — 要素がすべて整数に見える間は、ソート済みの <code>[]int64</code>（intset）でぎゅっと詰め、整数でない値が来たり大きくなりすぎたら <code>map</code>（hashtable）へ引っ越す。この「エンコーディング遷移」こそ、Redis がメモリ効率を稼ぐ核心の設計思想です。この章で、その仕組みを手で組み上げます。</p>
+
+    <div class="box goal"><div class="box-k">◈ この章のゴール</div>
+      <p>次の 3 つを、自分の目と手で確認できたら達成です。</p>
+      <ol>
+        <li><code>go test -run TestSetCommands -v</code> で、<code>SADD</code>/<code>SMEMBERS</code>/<code>SISMEMBER</code>/<code>SREM</code> が PASS し、intset の間は要素が<strong>ソート順で返る</strong>ことを目視する。</li>
+        <li><code>go test -run TestIntsetConversionAtLimit -v</code> で、512 件までは intset のまま、513 件目で hashtable へ<strong>切り替わる</strong>のを確認する。</li>
+        <li><code>go test -run TestSetOps -v</code> で、<code>SINTER</code>（積集合）・<code>SUNION</code>（和集合）が正しく動くことを確認する。</li>
+      </ol>
+    </div>
+
+    <div class="box map"><div class="box-k">☰ この章のステップ</div>
+      <ol>
+        <li><a href="#step-1">Set 型の二重表現 — intset と hashtable</a></li>
+        <li><a href="#step-2"><code>canonicalInt</code> の罠 — 「007」を intset に入れない</a></li>
+        <li><a href="#step-3"><code>Add</code> — 二分探索での挿入と <code>convert</code> の分岐</a></li>
+        <li><a href="#step-4"><code>Remove</code> と <code>Has</code> — 同じ二分探索を逆向きに</a></li>
+        <li><a href="#step-5"><code>Members</code> と <code>Len</code> — 表現ごとの読み出し</a></li>
+        <li><a href="#step-6">Store 層と <code>SADD</code> ／ 空になったら消す</a></li>
+        <li><a href="#step-7"><code>SINTER</code> — 最小集合を基準に走査する</a></li>
+        <li><a href="#step-8"><code>SUNION</code> — 見た要素を記録して重複を除く</a></li>
+      </ol>
+    </div>
+
+    <h2>なぜ「1つの Set」に2つの中身を持たせるのか</h2>
+    <p>Set は「重複のない要素の集まり」です。素朴に作るなら、Go の <code>map[string]struct{}</code> ひとつで足ります。追加も削除も存在確認も平均 O(1)、実装も数行。ではなぜ本家 Redis は、わざわざ<strong>もう1つの内部表現</strong>を用意しているのでしょうか。答えは<strong>メモリ</strong>です。</p>
+    <p>「ユーザーがフォローしている ID の集合」「オンライン中のセッション番号」——Redis の Set は、こういう<strong>整数だけの小さな集合</strong>として使われることがとても多い。ところが整数を <code>map</code> のキー（文字列）で持つと、1要素あたりハッシュテーブルのバケット・キー文字列・エントリ構造体…と<strong>何十バイト</strong>もかかります。<code>{1, 2, 3}</code> のたった3要素に、数百バイト。これがユーザー数百万人ぶん積み上がると、メモリが溶けていきます。</p>
+    <p>そこで Redis は、要素が<strong>すべて整数の見た目</strong>である間だけ、ハッシュテーブルをやめて<strong>ソート済みの整数配列</strong>で持ちます。これを <strong>intset</strong> と呼びます。<code>{1, 2, 3}</code> は <code>[1, 2, 3]</code> という <code>int64</code> が3つ並んだだけの配列 — バケットもキー文字列もなく、<strong>本書の実装なら1要素8バイト</strong>で済む。数百バイトが数十バイトに縮む。これがこの章の主役です（本家はさらに徹底していて、収まる値なら 16 / 32 ビット幅に切り詰め、大きな値が入ってきたときだけ広げます。本書は <code>[]int64</code> 固定にして、遷移の仕組みそのものに集中します）。</p>
+    <p>もちろん、ただ縮めるだけでは済みません。整数でない値（<code>"apple"</code>）が入ってきたら整数配列には入れられないし、要素が増えすぎると配列の二分探索より <code>map</code> の O(1) が有利になります。そこで Set は<strong>状況に応じて表現を切り替える</strong>。この切り替えが<strong>エンコーディング遷移</strong>で、本家 Redis のほぼ全ての型（List / Hash / Sorted Set …）に共通する根幹の考え方です。<strong>本書がこれを実際に手で組むのは、この Set の章だけ</strong>——だからここでしっかり体験しておきます。まず全体像を絵で掴みます。</p>
+
+    <div class="ascii">Set の内部表現は、状況で intset ↔ hashtable のどちらか
+
+  SADD s 1 2 3
+  ┌─────────────── Set ───────────────┐
+  │ ints = [1, 2, 3]   (ソート済み int64) │   ← intset エンコーディング
+  │ ht   = nil                         │      整数だけ・512件以下
+  └────────────────────────────────────┘
+
+           │ "apple"（整数でない）が来る
+           │  または 513 件目に達する
+           ▼   ── convert（片道・戻れない）──
+
+  ┌─────────────── Set ───────────────┐
+  │ ints = nil                         │   ← hashtable エンコーディング
+  │ ht   = {"1":{}, "2":{}, "3":{},    │      任意の文字列を持てる
+  │         "apple":{}}                │
+  └────────────────────────────────────┘</div>
+
+    <p>この絵の <strong>▼ の矢印は一方通行</strong>です。いちど hashtable になった Set は、あとで整数だけに戻っても intset には帰りません（本家も同じ）。「片道変換」と何度も出てくるので、頭に置いておいてください。この章で作るのは <code>set.go</code> 1ファイル。前半が Set 型そのもの（intset/hashtable の切り替え）、後半が Store 層のコマンド（SADD 〜 SUNION）です。</p>
+
+    <h2 class="step" id="step-1"><span class="step-no">Step 1</span>Set 型の二重表現 — intset と hashtable</h2>
+    <p>まず Set 型そのものを定義します。核心は「2つのフィールドのうち<strong>どちらか一方だけ</strong>が使われている」こと。<code>ht</code> が <code>nil</code> の間は intset、<code>ht</code> に <code>map</code> が入ったら hashtable、という<strong>状態の見分け方</strong>まで含めて設計されています。</p>
+
+    <div class="file-tag">set.go（冒頭・型と閾値）</div>
+    <pre><code><span class="kw">package</span> main
+
+<span class="kw">import</span> (
+	<span class="st">"sort"</span>
+	<span class="st">"strconv"</span>
+)
+
+<span class="cm">// maxIntsetEntries を超えたら intset をやめて hashtable に切り替える。</span>
+<span class="cm">// 本家の set-max-intset-entries と同じ既定値。</span>
+<span class="kw">const</span> maxIntsetEntries = <span class="st">512</span>
+
+<span class="cm">// Set は重複なしの集合。要素がすべて「整数の見た目」の間は、</span>
+<span class="cm">// ソート済み int64 スライス（intset）で持ち、崩れたら map に切り替える。</span>
+<span class="kw">type</span> <span class="ty">Set</span> <span class="kw">struct</span> {
+	ints []<span class="ty">int64</span>             <span class="cm">// intset エンコーディング（ソート済み）</span>
+	ht   <span class="kw">map</span>[<span class="ty">string</span>]<span class="kw">struct</span>{} <span class="cm">// hashtable エンコーディング。nil の間は intset</span>
+}
+
+<span class="kw">func</span> newSet() *<span class="ty">Set</span> { <span class="kw">return</span> &amp;<span class="ty">Set</span>{} }
+
+<span class="kw">func</span> (st *<span class="ty">Set</span>) isIntset() <span class="ty">bool</span> { <span class="kw">return</span> st.ht == <span class="kw">nil</span> }</code></pre>
+
+    <p>上から見ます。<code>maxIntsetEntries = 512</code> が<strong>遷移の閾値</strong>です。intset の要素数がこれを超えたら hashtable へ引っ越す。512 という数字は本家 Redis の設定 <code>set-max-intset-entries</code> の既定値そのままです。小さすぎるとメモリの旨みが出る前に引っ越してしまい、大きすぎると配列の二分探索（O(log n)）が <code>map</code> の O(1) に負け始める — その分岐点を経験的に 512 に置いています。</p>
+    <p><code>Set</code> 型は<strong>2つのフィールド</strong>を持ちますが、これは「2つ同時に使う」のではなく「<strong>どちらか片方だけ</strong>」の意味です。intset のときは <code>ints</code> にソート済み整数が入り <code>ht</code> は <code>nil</code>。hashtable のときは <code>ht</code> に <code>map</code> が入り <code>ints</code> は <code>nil</code>。この<strong>排他</strong>を保つのが、この章のコード全体の約束事です。</p>
+    <p>そして <code>isIntset()</code> が状態判定です。<code>st.ht == nil</code> なら intset — たったこれだけ。わざわざ「現在の表現」を表すフラグ変数を持たず、<code>ht</code> が <code>nil</code> かどうかで判断しているのがミソです。フラグと実データが食い違うバグ（「フラグは intset なのに ht が埋まっている」）が原理的に起きません。<strong>状態を別変数で持たず、データそのものから導く</strong> — 小さいですが堅い設計です。</p>
+
+    <div class="gonote"><div class="box-k">GO メモ · map[string]struct{} という「集合」の表し方</div>
+      <p>Go には集合（Set）型が標準で無いので、<code>map[string]struct{}</code> で代用するのが定番です。<code>struct{}</code> は<strong>フィールドを1つも持たない空の構造体</strong>で、サイズは <strong>0 バイト</strong>。値には意味がなく「キーが存在するか」だけを使いたいので、値の型を <code>bool</code>（1バイト）ではなく <code>struct{}</code>（0バイト）にしてメモリを1バイトも無駄にしない、というイディオムです。追加は <code>m[k] = struct{}{}</code>、存在確認は <code>_, ok := m[k]</code>。この章でも Set の hashtable 表現をこれで持ちます。</p>
+    </div>
+
+    <h2 class="step" id="step-2"><span class="step-no">Step 2</span>canonicalInt の罠 — 「007」を intset に入れない</h2>
+    <p>intset に入れてよいのは「整数の見た目」の文字列だけ… と言いたいところですが、ここに<strong>この章いちばんの罠</strong>があります。<code>"007"</code> や <code>" 7"</code> は <code>strconv.ParseInt</code> に通せば <code>7</code> という整数になります。でもこれを intset に <code>7</code> として入れてしまうと、あとで <code>SMEMBERS</code> したとき <code>"7"</code> として返り、<strong>ユーザーが入れた <code>"007"</code> という文字列が復元できません</strong>。Redis の Set は文字列の集合なので、<code>"007"</code> と <code>"7"</code> は<strong>別の要素</strong>です。この見分けをするのが <code>canonicalInt</code> です。</p>
+
+    <div class="file-tag">set.go（つづき・canonicalInt と convert）</div>
+    <pre><code><span class="cm">// canonicalInt は「Redis が整数として扱える文字列」かを判定する。</span>
+<span class="cm">// "007" や " 7" は整数に見えても intset に入れない（元の文字列が復元できないから）。</span>
+<span class="kw">func</span> canonicalInt(m <span class="ty">string</span>) (<span class="ty">int64</span>, <span class="ty">bool</span>) {
+	n, err := strconv.ParseInt(m, <span class="st">10</span>, <span class="st">64</span>)
+	<span class="kw">if</span> err != <span class="kw">nil</span> || strconv.FormatInt(n, <span class="st">10</span>) != m {
+		<span class="kw">return</span> <span class="st">0</span>, <span class="kw">false</span>
+	}
+	<span class="kw">return</span> n, <span class="kw">true</span>
+}
+
+<span class="cm">// convert は intset を hashtable に変換する（片道）。</span>
+<span class="kw">func</span> (st *<span class="ty">Set</span>) convert() {
+	st.ht = <span class="kw">make</span>(<span class="kw">map</span>[<span class="ty">string</span>]<span class="kw">struct</span>{}, len(st.ints)+<span class="st">1</span>)
+	<span class="kw">for</span> _, n := <span class="kw">range</span> st.ints {
+		st.ht[strconv.FormatInt(n, <span class="st">10</span>)] = <span class="kw">struct</span>{}{}
+	}
+	st.ints = <span class="kw">nil</span>
+}</code></pre>
+
+    <p><code>canonicalInt</code> のキモは<strong>2段構えの判定</strong>です。まず <code>strconv.ParseInt(m, 10, 64)</code> で <code>m</code> を <code>int64</code> にできるか試す。ここまでなら「整数として読めるか」だけの判定で、<code>"007"</code> も <code>" 7"</code> も通ってしまいます。そこで<strong>逆変換して照合します</strong> — 得られた数 <code>n</code> を <code>strconv.FormatInt(n, 10)</code> で文字列に戻し、<strong>それが元の <code>m</code> と一字一句一致するか</strong>を確かめる。</p>
+    <p>この往復チェックで <code>"007"</code> は弾かれます。<code>ParseInt("007")</code> は <code>7</code>、それを <code>FormatInt</code> で戻すと <code>"7"</code>、これは元の <code>"007"</code> と違う → <code>false</code>。つまり「整数に見えるだけで、その整数の<strong>正規（canonical）な表記</strong>ではない」文字列を締め出せる。関数名の <code>canonical</code>（正規の）はこの意味です。<code>"7"</code> や <code>"-42"</code> や <code>"0"</code> は往復しても変わらないので通り、intset に入ります。<code>"07"</code> <code>" 7"</code> <code>"+7"</code> <code>"7 "</code> はすべて弾かれ、hashtable 行きになります。</p>
+    <p>下の <code>convert</code> が<strong>片道の引っ越し</strong>です。<code>ht</code> を <code>make</code> で用意し、いまある <code>ints</code> の各整数を <code>FormatInt</code> で文字列化して <code>ht</code> に移し替え、最後に <code>st.ints = nil</code> で intset 側を捨てる。この <code>ints = nil</code> の瞬間、<code>isIntset()</code>（=<code>ht == nil</code>）は <code>false</code> を返すようになり、以降この Set は永久に hashtable として振る舞います。<code>make</code> の容量ヒント <code>len(st.ints)+1</code> は「これから 1 個足すぶんも見込んだ広さ」で、余計な再確保を1回減らす小さな配慮です。</p>
+
+    <div class="box hazard"><div class="box-k">⚠ 落とし穴 — 「整数に見える」で intset に入れると文字列が壊れる</div>
+      <p>もし <code>canonicalInt</code> を単なる <code>ParseInt</code> だけにしてしまうと、<code>SADD s 007</code> のあと <code>SMEMBERS s</code> が <code>"7"</code> を返します。ユーザーは <code>"007"</code> を入れたのに、<code>"7"</code> が返ってくる — <strong>データの化け</strong>です。さらに <code>SADD s 7</code> を追加すると、intset 上では同じ <code>7</code> なので「すでにある」と判定され、<strong>別要素のはずの <code>"007"</code> と <code>"7"</code> が1つに潰れます</strong>。テスト <code>TestSetCommands</code> はまさにこれを検証していて、<code>SADD pad 007</code> のあと <code>SISMEMBER pad 007</code> は 1、<code>SISMEMBER pad 7</code> は 0 でなければなりません。<strong>「整数として読める」と「その整数の正規表記である」は違う</strong> — 往復照合はこの1点を守るためにあります。</p>
+    </div>
+
+    <div class="box hazard"><div class="box-k">⚠ 落とし穴 — convert は片道。hashtable から intset には戻さない</div>
+      <p><code>convert</code> は intset→hashtable の一方向だけを実装しています。「整数でない要素を <code>SREM</code> で全部消したら、また intset に戻ればメモリが節約できるのでは?」と思うかもしれませんが、本書も本家 Redis も<strong>戻しません</strong>。理由は費用対効果 — 削除のたびに「いま全部整数か?」を調べて戻す処理は、頻繁な追加削除で無駄なコストになり、そのわりに戻る機会は稀だからです。<strong>遷移は上り（縮む→広がる）の一方向だけ</strong>、と割り切るのが Redis の設計判断です。この非対称は Set に限りません。<strong>本家</strong>の Sorted Set も listpack→skiplist という同じ片道の遷移を持ちます（<strong>本書の第07章では遷移は追わず</strong>、最初から辞書＋skiplist の二重管理で作ります。エンコーディング遷移を手で組むのは、この章の intset で一度体験すれば十分だからです）。</p>
+    </div>
+
+    <h2 class="step" id="step-3"><span class="step-no">Step 3</span>Add — 二分探索での挿入と convert の分岐</h2>
+    <p>いよいよこの章の心臓、<code>Add</code> です。1つの要素を集合に加え、<strong>新しく入ったら <code>true</code>、すでにあったら <code>false</code></strong> を返します（<code>SADD</code> の返り値「実際に増えた件数」の元になります）。intset の道と hashtable の道が枝分かれし、途中で <code>convert</code> による遷移も起きる、この章で最も密度の高い関数です。</p>
+
+    <div class="file-tag">set.go（つづき・Add）</div>
+    <pre><code><span class="kw">func</span> (st *<span class="ty">Set</span>) Add(m <span class="ty">string</span>) <span class="ty">bool</span> {
+	<span class="kw">if</span> st.isIntset() {
+		<span class="kw">if</span> n, ok := canonicalInt(m); ok {
+			i := sort.Search(len(st.ints), <span class="kw">func</span>(i <span class="ty">int</span>) <span class="ty">bool</span> { <span class="kw">return</span> st.ints[i] &gt;= n })
+			<span class="kw">if</span> i &lt; len(st.ints) &amp;&amp; st.ints[i] == n {
+				<span class="kw">return</span> <span class="kw">false</span> <span class="cm">// すでにある</span>
+			}
+			<span class="kw">if</span> len(st.ints) &gt;= maxIntsetEntries {
+				st.convert() <span class="cm">// 大きくなりすぎた</span>
+			} <span class="kw">else</span> {
+				st.ints = append(st.ints, <span class="st">0</span>)
+				copy(st.ints[i+<span class="st">1</span>:], st.ints[i:])
+				st.ints[i] = n
+				<span class="kw">return</span> <span class="kw">true</span>
+			}
+		} <span class="kw">else</span> {
+			st.convert() <span class="cm">// 整数でないものが来た</span>
+		}
+	}
+	<span class="kw">if</span> _, ok := st.ht[m]; ok {
+		<span class="kw">return</span> <span class="kw">false</span>
+	}
+	st.ht[m] = <span class="kw">struct</span>{}{}
+	<span class="kw">return</span> <span class="kw">true</span>
+}</code></pre>
+
+    <p>構造をつかむため、まず<strong>大きな2つの箱</strong>で見ます。前半の <code>if st.isIntset() { … }</code> が intset のときの処理。そのあとの <code>if _, ok := st.ht[m]; ok { … }</code> 以降が hashtable のときの処理。ポイントは、<strong>intset の箱の中で <code>convert</code> が呼ばれると、そのまま下の hashtable の箱に落ちてくる</strong>ように書かれていること。<code>convert</code> は <code>ht</code> を埋めるので、後半の <code>st.ht[m]</code> が正しく効きます。1つの関数で「intset のまま追加」「遷移してから追加」「もともと hashtable で追加」の3経路を捌いています。</p>
+    <p>intset の箱を細かく追います。<code>canonicalInt(m)</code> で整数判定。<strong>整数でなければ即 <code>convert()</code></strong>（右下の <code>else</code>）— <code>"apple"</code> が来た瞬間に hashtable へ引っ越し、箱を抜けて下の <code>st.ht["apple"]</code> で追加されます。整数なら、ソート済み <code>ints</code> の中で<strong>入るべき位置を二分探索</strong>します。</p>
+    <pre><code>i := sort.Search(len(st.ints), <span class="kw">func</span>(i <span class="ty">int</span>) <span class="ty">bool</span> { <span class="kw">return</span> st.ints[i] &gt;= n })</code></pre>
+    <p><code>sort.Search</code> は「条件が初めて真になる位置」を O(log n) で返します。ここでは「<code>st.ints[i] &gt;= n</code>（n 以上）が最初に成り立つ添字 <code>i</code>」= <strong>n を入れるべきソート位置</strong>。もし <code>i</code> が範囲内で <code>st.ints[i] == n</code> なら、それは<strong>すでに同じ値がある</strong>ということなので <code>false</code> を返して終わり（集合は重複を許さない）。無ければ、いよいよ挿入です。ただしその前に<strong>件数チェック</strong> — もう 512 件に達しているなら、ここで <code>convert()</code> して hashtable 側で追加します（下の箱へ落ちる）。まだ余裕があるなら、<code>i</code> の位置に割り込ませます。</p>
+    <pre><code>st.ints = append(st.ints, <span class="st">0</span>)     <span class="cm">// ① 末尾を1つ広げる（ダミーの 0）</span>
+copy(st.ints[i+<span class="st">1</span>:], st.ints[i:]) <span class="cm">// ② i 以降を1つ右へずらす</span>
+st.ints[i] = n                <span class="cm">// ③ 空いた i に n を書く</span></code></pre>
+    <p>この3行が<strong>ソート済み配列への挿入</strong>の定石です。絵にするとこうなります。<code>ints = [1, 2, 5, 8]</code> に <code>4</code> を入れる（二分探索で <code>i = 2</code>）:</p>
+
+    <div class="ascii">ints = [1, 2, 5, 8]   に 4 を挿入（i = 2）
+
+  ① append(…, 0)         [1, 2, 5, 8, 0]   ← 末尾に枠を1つ足す
+                                       ↑ 増えた枠
+  ② copy(ints[3:], ints[2:])
+                          [1, 2, 5, 5, 8]   ← i=2 以降を右へ1つずらす
+                                ↑  ↑
+                            ここに 5,8 が来て、元の i=2 が空く（値は 5 のまま）
+  ③ ints[2] = 4          [1, 2, 4, 5, 8]   ← 空いた i=2 に 4 を書く
+
+  → ソート順を保ったまま 4 が入った</div>
+
+    <p>後半の hashtable の箱は素直です。<code>st.ht[m]</code> にすでにキーがあれば <code>false</code>、無ければ <code>st.ht[m] = struct{}{}</code> で追加して <code>true</code>。<code>map</code> なのでソートも二分探索も要りません。intset で払った手間（順序維持・往復照合）は、メモリを稼ぐための代償だった、と対比で見えてきます。</p>
+
+    <div class="gonote"><div class="box-k">GO メモ · sort.Search と copy による挿入</div>
+      <p><code>sort.Search(n, f)</code> は「<code>0..n</code> の範囲で <code>f(i)</code> が<strong>初めて true になる i</strong>」を二分探索で返す関数です。<code>f</code> は「前半 false、後半 true」と<strong>単調</strong>である前提。ソート済みスライスで <code>f(i) = ints[i] &gt;= n</code> とすれば、返る <code>i</code> は「n 以上の最初の位置」= n の挿入点になります。<br>
+      <code>copy(dst, src)</code> は「<strong>重なっていても正しく</strong>」コピーできるのが強みで、<code>copy(ints[i+1:], ints[i:])</code> のように<strong>同じスライスを自分の中でずらす</strong>用途に安心して使えます（内部で重なりを考慮してコピー方向を選ぶため）。「ソート済み配列に O(n) で1個割り込ませる」典型パターンとして覚えておくと、intset に限らず役立ちます。</p>
+    </div>
+
+    <h2 class="step" id="step-4"><span class="step-no">Step 4</span>Remove と Has — 同じ二分探索を逆向きに</h2>
+    <p><code>Add</code> が読めれば、<code>Remove</code>（削除）と <code>Has</code>（存在確認）は同じ道具の使い回しです。どちらも intset なら二分探索、hashtable なら <code>map</code> 参照、という同じ形。まとめて見ます。</p>
+
+    <div class="file-tag">set.go（つづき・Remove と Has）</div>
+    <pre><code><span class="kw">func</span> (st *<span class="ty">Set</span>) Remove(m <span class="ty">string</span>) <span class="ty">bool</span> {
+	<span class="kw">if</span> st.isIntset() {
+		n, ok := canonicalInt(m)
+		<span class="kw">if</span> !ok {
+			<span class="kw">return</span> <span class="kw">false</span> <span class="cm">// 整数でないものは intset には入っていない</span>
+		}
+		i := sort.Search(len(st.ints), <span class="kw">func</span>(i <span class="ty">int</span>) <span class="ty">bool</span> { <span class="kw">return</span> st.ints[i] &gt;= n })
+		<span class="kw">if</span> i &gt;= len(st.ints) || st.ints[i] != n {
+			<span class="kw">return</span> <span class="kw">false</span>
+		}
+		st.ints = append(st.ints[:i], st.ints[i+<span class="st">1</span>:]...)
+		<span class="kw">return</span> <span class="kw">true</span>
+	}
+	<span class="kw">if</span> _, ok := st.ht[m]; !ok {
+		<span class="kw">return</span> <span class="kw">false</span>
+	}
+	delete(st.ht, m)
+	<span class="kw">return</span> <span class="kw">true</span>
+}
+
+<span class="kw">func</span> (st *<span class="ty">Set</span>) Has(m <span class="ty">string</span>) <span class="ty">bool</span> {
+	<span class="kw">if</span> st.isIntset() {
+		n, ok := canonicalInt(m)
+		<span class="kw">if</span> !ok {
+			<span class="kw">return</span> <span class="kw">false</span>
+		}
+		i := sort.Search(len(st.ints), <span class="kw">func</span>(i <span class="ty">int</span>) <span class="ty">bool</span> { <span class="kw">return</span> st.ints[i] &gt;= n })
+		<span class="kw">return</span> i &lt; len(st.ints) &amp;&amp; st.ints[i] == n
+	}
+	_, ok := st.ht[m]
+	<span class="kw">return</span> ok
+}</code></pre>
+
+    <p><code>Remove</code> の intset 側。まず <code>canonicalInt</code> で整数判定しますが、ここで大事なのは<strong>整数でなければ即 <code>false</code></strong> という点。intset には整数しか入っていないのだから、<code>"apple"</code> の削除依頼は「そもそも入っていない」で片付く — <code>convert</code> は不要です（追加と違い、削除は表現を変える理由がない）。整数なら二分探索で位置 <code>i</code> を求め、<strong>そこに本当に <code>n</code> があるか</strong>を <code>st.ints[i] != n</code> で確認。無ければ <code>false</code>、あれば削除します。</p>
+    <pre><code>st.ints = append(st.ints[:i], st.ints[i+<span class="st">1</span>:]...)</code></pre>
+    <p>これがスライスからの<strong>削除の定石</strong>です。「<code>i</code> の手前まで（<code>[:i]</code>）」に「<code>i</code> の次から末尾まで（<code>[i+1:]</code>）」を <code>append</code> で連結する。結果、添字 <code>i</code> の要素が抜け落ち、後ろが1つ詰まります。<code>Add</code> の挿入（右へずらして割り込む）のちょうど逆で、こちらは<strong>左へ詰める</strong>操作です。</p>
+    <p><code>Has</code> はさらに単純で、<code>Remove</code> から「見つけたら消す」を抜いて「見つかったかどうか」だけ返すもの。intset なら二分探索して <code>st.ints[i] == n</code> を返し、hashtable なら <code>_, ok := st.ht[m]</code> の <code>ok</code> を返すだけ。<code>SISMEMBER</code> がこの <code>Has</code> をそのまま使います。3つの関数（Add/Remove/Has）が、<strong>まったく同じ二分探索の骨格</strong>を共有していることに気づくと、intset の実装は一気に見通せます。</p>
+
+    <div class="box do"><div class="box-k">▸ 動かして確認</div>
+      <p>ここまでの Set 型（追加・削除・存在確認）と、この先の <code>Members</code>/Store 層をまとめて検証するのが <code>TestSetCommands</code> です。intset の順序保持、hashtable への遷移後も要素が保たれること、そして <code>"007"</code> の罠まで1本で確かめます。</p>
+      <pre class="term"><code><span class="ps">$</span> go test -run TestSetCommands -v
+<span class="out">=== RUN   TestSetCommands
+--- PASS: TestSetCommands (0.00s)
+PASS</span></code></pre>
+      <p>このテストは <code>SADD s 1 2 3</code> のあと <code>SMEMBERS s</code> が <code>1,2,3</code> と<strong>ソート順で</strong>返ること（intset だから）、続けて <code>SADD s apple</code> で hashtable に遷移しても <code>{1,2,3,apple}</code> の4要素が残ること、そして <code>SADD pad 007</code> のあと <code>007</code> は在って <code>7</code> は無い、を確認しています。</p>
+    </div>
+
+    <h2 class="step" id="step-5"><span class="step-no">Step 5</span>Members と Len — 表現ごとの読み出し</h2>
+    <p>集合の全要素を返す <code>Members</code> と、要素数を返す <code>Len</code>。ここでも「intset か hashtable か」で読み方が分かれますが、<strong>外から見れば同じ「文字列の一覧」</strong>を返す — 内部表現の違いを呼び出し側に見せない、という API 設計が効いてきます。</p>
+
+    <div class="file-tag">set.go（つづき・Len と Members）</div>
+    <pre><code><span class="kw">func</span> (st *<span class="ty">Set</span>) Len() <span class="ty">int</span> {
+	<span class="kw">if</span> st.isIntset() {
+		<span class="kw">return</span> len(st.ints)
+	}
+	<span class="kw">return</span> len(st.ht)
+}
+
+<span class="kw">func</span> (st *<span class="ty">Set</span>) Members() []<span class="ty">string</span> {
+	<span class="kw">if</span> st.isIntset() {
+		out := <span class="kw">make</span>([]<span class="ty">string</span>, len(st.ints))
+		<span class="kw">for</span> i, n := <span class="kw">range</span> st.ints {
+			out[i] = strconv.FormatInt(n, <span class="st">10</span>)
+		}
+		<span class="kw">return</span> out
+	}
+	out := <span class="kw">make</span>([]<span class="ty">string</span>, <span class="st">0</span>, len(st.ht))
+	<span class="kw">for</span> m := <span class="kw">range</span> st.ht {
+		out = append(out, m)
+	}
+	<span class="kw">return</span> out
+}</code></pre>
+
+    <p><code>Len</code> は一目瞭然 — intset なら <code>len(st.ints)</code>、hashtable なら <code>len(st.ht)</code>。<code>SCARD</code>（集合の要素数）がこれを使います。</p>
+    <p><code>Members</code> の intset 側は、<code>ints</code> の各 <code>int64</code> を <code>FormatInt</code> で文字列に戻して並べるだけ。<code>ints</code> は<strong>ソート済み</strong>なので、返る一覧も<strong>昇順</strong>になります。だから <code>TestSetCommands</code> は intset の間 <code>SMEMBERS</code> が <code>1,2,3</code> と決まった順で返ることを期待できます。<strong>ここは intset の「おまけの利点」</strong>です — 整数集合をソート済みで持つ副産物として、列挙が自動的に整列される。</p>
+    <p>対して hashtable 側は、<code>map</code> を <code>range</code> で回して集めます。ここで Go の重要な性質——<strong><code>map</code> の反復順序は不定</strong>。同じ内容でも実行のたびに順番が変わりえます。だから hashtable に遷移した Set の <code>SMEMBERS</code> は順序が保証されません（本家 Redis も hashtable エンコーディングでは順不同）。<code>TestSetCommands</code> が遷移後にわざわざ <code>sort.Strings(ms)</code> で並べ替えてから比較しているのは、この<strong>順不同を吸収する</strong>ためです。<code>make([]string, 0, len(st.ht))</code> と容量を先に確保しているのは、<code>append</code> の再確保を避ける定番の最適化です。</p>
+
+    <h2 class="step" id="step-6"><span class="step-no">Step 6</span>Store 層と SADD ／ 空になったら消す</h2>
+    <p>Set 型そのものは完成しました。ここからは<strong>Store 層</strong> — キースペース（第01章）に Set をぶら下げ、コマンドとして <code>SADD</code> などを提供する部分です。まず、キーから Set を取り出す共通のヘルパーから。</p>
+
+    <div class="file-tag">set.go（Store 側・取得ヘルパーと SADD/SREM）</div>
+    <pre><code><span class="cm">// ---- Store 側 ----</span>
+
+<span class="kw">func</span> (s *<span class="ty">Store</span>) getSetLocked(key <span class="ty">string</span>, create <span class="ty">bool</span>) (*<span class="ty">Set</span>, <span class="ty">error</span>) {
+	v, ok := s.getLocked(key)
+	<span class="kw">if</span> !ok {
+		<span class="kw">if</span> !create {
+			<span class="kw">return</span> <span class="kw">nil</span>, <span class="kw">nil</span>
+		}
+		st := newSet()
+		s.data[key] = st
+		<span class="kw">return</span> st, <span class="kw">nil</span>
+	}
+	st, isSet := v.(*<span class="ty">Set</span>)
+	<span class="kw">if</span> !isSet {
+		<span class="kw">return</span> <span class="kw">nil</span>, errWrongType
+	}
+	<span class="kw">return</span> st, <span class="kw">nil</span>
+}
+
+<span class="kw">func</span> (s *<span class="ty">Store</span>) SAdd(key <span class="ty">string</span>, members ...<span class="ty">string</span>) (<span class="ty">int</span>, <span class="ty">error</span>) {
+	s.mu.Lock()
+	<span class="kw">defer</span> s.mu.Unlock()
+	st, err := s.getSetLocked(key, <span class="kw">true</span>)
+	<span class="kw">if</span> err != <span class="kw">nil</span> {
+		<span class="kw">return</span> <span class="st">0</span>, err
+	}
+	n := <span class="st">0</span>
+	<span class="kw">for</span> _, m := <span class="kw">range</span> members {
+		<span class="kw">if</span> st.Add(m) {
+			n++
+		}
+	}
+	<span class="kw">return</span> n, <span class="kw">nil</span>
+}
+
+<span class="kw">func</span> (s *<span class="ty">Store</span>) SRem(key <span class="ty">string</span>, members ...<span class="ty">string</span>) (<span class="ty">int</span>, <span class="ty">error</span>) {
+	s.mu.Lock()
+	<span class="kw">defer</span> s.mu.Unlock()
+	st, err := s.getSetLocked(key, <span class="kw">false</span>)
+	<span class="kw">if</span> err != <span class="kw">nil</span> || st == <span class="kw">nil</span> {
+		<span class="kw">return</span> <span class="st">0</span>, err
+	}
+	n := <span class="st">0</span>
+	<span class="kw">for</span> _, m := <span class="kw">range</span> members {
+		<span class="kw">if</span> st.Remove(m) {
+			n++
+		}
+	}
+	<span class="kw">if</span> st.Len() == <span class="st">0</span> {
+		s.removeLocked(key)
+	}
+	<span class="kw">return</span> n, <span class="kw">nil</span>
+}</code></pre>
+
+    <p><code>getSetLocked</code> は<strong>この型のすべてのコマンドが通る玄関</strong>です。<code>create</code> フラグで振る舞いが変わり、<code>SADD</code> のように「無ければ作る」なら <code>create=true</code>（新しい <code>Set</code> を <code>s.data[key]</code> に置く）、<code>SREM</code>/<code>SMEMBERS</code> のように「無ければ何もしない」なら <code>create=false</code>（<code>nil, nil</code> を返す）。そして <code>v.(*Set)</code> の<strong>型アサーション</strong>が重要 — そのキーに Set でない値（例えば String）が入っていたら <code>errWrongType</code> を返します。これが Redis の <code>WRONGTYPE</code> エラー（「文字列のキーに <code>SADD</code> するな」）の正体です。</p>
+    <p><code>SAdd</code> は玄関で Set を得て、<code>members</code> を1つずつ <code>st.Add</code> に渡し、<strong><code>true</code> が返った回数</strong>（=実際に新しく入った件数）を数えて返すだけ。<code>SADD s 1 2 2</code> なら、3回 <code>Add</code> して <code>true, true, false</code> なので返り値は 2。この「増えた件数」が <code>SADD</code> の RESP 応答になります。全体を <code>s.mu.Lock()</code> で囲っているのは第01章からの約束 — <code>Store</code> 全体を単一 Mutex で守るモデルです。</p>
+    <p><code>SRem</code> にはこの章で外せない<strong>後始末</strong>があります。削除を終えたあと <code>if st.Len() == 0 { s.removeLocked(key) }</code> — <strong>空になった集合はキーごと消す</strong>。これは Redis の流儀で、<code>SREM</code> で最後の要素を消したら、そのキー自体が存在しなくなります（<code>EXISTS</code> が 0 を返す）。空の集合を殻だけ残すと <code>EXISTS</code> や <code>TYPE</code> の挙動が本家とずれるので、List/Hash/Set/ZSet すべてで「空になったら消す」を徹底しています。</p>
+
+    <div class="box hazard"><div class="box-k">⚠ 落とし穴 — 空になったコレクションは必ずキーごと消す</div>
+      <p>Redis では、コレクション型（List/Hash/Set/ZSet）の最後の要素を消すと、<strong>そのキー自体が消滅します</strong>。「空の Set が残る」状態は存在しません。もし <code>SRem</code> で <code>removeLocked</code> を忘れると、要素ゼロの Set が居座り、<code>EXISTS s</code> が 1、<code>TYPE s</code> が <code>set</code> を返してしまう — 本家と食い違うバグです。この一手は地味ですが、Redis 互換を名乗るなら省けません。逆に <code>SADD</code> で最後の要素を消すことはないので、後始末が要るのは削除系（<code>SREM</code>）だけです。</p>
+    </div>
+
+    <p>残りの読み取り系コマンド（<code>SMembers</code>/<code>SIsMember</code>/<code>SCard</code>）は、玄関 <code>getSetLocked(key, false)</code> で Set を得て、Step 4・5 で作ったメソッドをそのまま呼ぶだけです。</p>
+
+    <div class="file-tag">set.go（つづき・読み取り系コマンド）</div>
+    <pre><code><span class="kw">func</span> (s *<span class="ty">Store</span>) SMembers(key <span class="ty">string</span>) ([]<span class="ty">string</span>, <span class="ty">error</span>) {
+	s.mu.Lock()
+	<span class="kw">defer</span> s.mu.Unlock()
+	st, err := s.getSetLocked(key, <span class="kw">false</span>)
+	<span class="kw">if</span> err != <span class="kw">nil</span> || st == <span class="kw">nil</span> {
+		<span class="kw">return</span> <span class="kw">nil</span>, err
+	}
+	<span class="kw">return</span> st.Members(), <span class="kw">nil</span>
+}
+
+<span class="kw">func</span> (s *<span class="ty">Store</span>) SIsMember(key, member <span class="ty">string</span>) (<span class="ty">bool</span>, <span class="ty">error</span>) {
+	s.mu.Lock()
+	<span class="kw">defer</span> s.mu.Unlock()
+	st, err := s.getSetLocked(key, <span class="kw">false</span>)
+	<span class="kw">if</span> err != <span class="kw">nil</span> || st == <span class="kw">nil</span> {
+		<span class="kw">return</span> <span class="kw">false</span>, err
+	}
+	<span class="kw">return</span> st.Has(member), <span class="kw">nil</span>
+}
+
+<span class="kw">func</span> (s *<span class="ty">Store</span>) SCard(key <span class="ty">string</span>) (<span class="ty">int</span>, <span class="ty">error</span>) {
+	s.mu.Lock()
+	<span class="kw">defer</span> s.mu.Unlock()
+	st, err := s.getSetLocked(key, <span class="kw">false</span>)
+	<span class="kw">if</span> err != <span class="kw">nil</span> || st == <span class="kw">nil</span> {
+		<span class="kw">return</span> <span class="st">0</span>, err
+	}
+	<span class="kw">return</span> st.Len(), <span class="kw">nil</span>
+}</code></pre>
+
+    <p>3つとも同じ型です。玄関で Set を取り、無ければ「空の答え」（<code>nil</code> / <code>false</code> / <code>0</code>）を返し、あれば対応するメソッドを呼ぶ。<code>SIsMember</code> が <code>Has</code>、<code>SCard</code> が <code>Len</code>、<code>SMembers</code> が <code>Members</code> — Step 4・5 の3メソッドが、そのまま3コマンドに1対1で対応します。<strong>内部表現（intset/hashtable）の分岐は Set 型の中に閉じ込めた</strong>ので、Store 層はエンコーディングをまったく意識しません。これが Step 1 で「どちらか片方」の排他を型の中で守った見返りです。</p>
+
+    <h2 class="step" id="step-7"><span class="step-no">Step 7</span>SINTER — 最小集合を基準に走査する</h2>
+    <p>ここからは<strong>集合演算</strong>です。<code>SINTER</code> は複数キーの<strong>積集合</strong>（全部に共通して含まれる要素）を返します。素朴に書くと遅くなりがちな操作ですが、<strong>「いちばん小さい集合を基準にする」</strong>という一工夫で無駄をなくします。</p>
+
+    <div class="file-tag">set.go（つづき・SInter）</div>
+    <pre><code><span class="cm">// SInter は積集合。無いキーは空集合なので、1つでも無ければ結果は空。</span>
+<span class="kw">func</span> (s *<span class="ty">Store</span>) SInter(keys ...<span class="ty">string</span>) ([]<span class="ty">string</span>, <span class="ty">error</span>) {
+	s.mu.Lock()
+	<span class="kw">defer</span> s.mu.Unlock()
+	sets := <span class="kw">make</span>([]*<span class="ty">Set</span>, <span class="st">0</span>, len(keys))
+	<span class="kw">for</span> _, k := <span class="kw">range</span> keys {
+		st, err := s.getSetLocked(k, <span class="kw">false</span>)
+		<span class="kw">if</span> err != <span class="kw">nil</span> {
+			<span class="kw">return</span> <span class="kw">nil</span>, err
+		}
+		<span class="kw">if</span> st == <span class="kw">nil</span> {
+			<span class="kw">return</span> <span class="kw">nil</span>, <span class="kw">nil</span> <span class="cm">// 空集合との積は空</span>
+		}
+		sets = append(sets, st)
+	}
+	<span class="cm">// いちばん小さい集合を基準に走査する</span>
+	base := sets[<span class="st">0</span>]
+	<span class="kw">for</span> _, st := <span class="kw">range</span> sets[<span class="st">1</span>:] {
+		<span class="kw">if</span> st.Len() &lt; base.Len() {
+			base = st
+		}
+	}
+	<span class="kw">var</span> out []<span class="ty">string</span>
+	<span class="kw">for</span> _, m := <span class="kw">range</span> base.Members() {
+		in := <span class="kw">true</span>
+		<span class="kw">for</span> _, st := <span class="kw">range</span> sets {
+			<span class="kw">if</span> st == base {
+				<span class="kw">continue</span>
+			}
+			<span class="kw">if</span> !st.Has(m) {
+				in = <span class="kw">false</span>
+				<span class="kw">break</span>
+			}
+		}
+		<span class="kw">if</span> in {
+			out = append(out, m)
+		}
+	}
+	<span class="kw">return</span> out, <span class="kw">nil</span>
+}</code></pre>
+
+    <p>3段で読みます。<strong>第1段: 集合を集める。</strong> 全キーを <code>getSetLocked(k, false)</code> で引き、<code>sets</code> に貯めます。ここで<strong>早期リターンの妙</strong>——1つでも <code>nil</code>（存在しないキー）があれば、その瞬間 <code>return nil, nil</code>。存在しないキーは空集合であり、<strong>空集合との積は必ず空</strong>だから、残りを見るまでもなく打ち切れます。</p>
+    <p><strong>第2段: 最小集合を選ぶ。</strong> <code>base</code> を最初の集合で仮置きし、<code>Len()</code> がより小さい集合が見つかるたびに <code>base</code> を差し替える。ループを抜けたとき <code>base</code> は<strong>要素数が最小の集合</strong>です。なぜ最小を選ぶのか——積集合の要素は「全集合に共通」なので、<strong>いちばん小さい集合の要素数を超えることは絶対にない</strong>。だから最小集合の要素だけを候補にすれば十分で、大きい集合を端から舐める無駄が省けます。</p>
+    <p><strong>第3段: 候補を絞り込む。</strong> <code>base</code> の各要素 <code>m</code> について、<strong>base 以外のすべての集合</strong>が <code>m</code> を <code>Has</code> するかを確かめます（<code>st == base</code> は自分自身なので <code>continue</code> でスキップ）。1つでも持っていない集合があれば <code>in = false</code> にして <code>break</code>（残りを調べる意味がない）。全集合が持っていれば <code>out</code> に積む。この「最小を基準に、残りで <code>Has</code>」が積集合の効率的な定石です。<code>Has</code> は intset なら O(log n)、hashtable なら O(1) なので、絞り込み全体は速い。</p>
+
+    <div class="gonote"><div class="box-k">GO メモ · なぜ小さい集合を base にすると速いのか</div>
+      <p>積集合の計算量は「基準集合の要素数 × (集合数 × <code>Has</code> のコスト)」で決まります。基準を最大集合にすると候補が多くなり、そのほとんどが「他の集合に無い」で捨てられる — 無駄な <code>Has</code> が増えます。基準を<strong>最小集合</strong>にすれば候補数そのものが最小になり、探索回数が抑えられます。集合 A（100万件）と B（3件）の積を、A を舐めて B に問い合わせる(100万回)のと、B を舐めて A に問い合わせる(3回)のとでは、後者が桁違いに速い。<strong>「小さい方から攻める」</strong>は集合演算の基本戦術で、本家 Redis も同じ最適化をしています。</p>
+    </div>
+
+    <h2 class="step" id="step-8"><span class="step-no">Step 8</span>SUNION — 見た要素を記録して重複を除く</h2>
+    <p>最後は <code>SUNION</code>、複数キーの<strong>和集合</strong>（どれかに含まれる要素を、重複なく全部）です。積集合と対照的に、こちらは<strong>全集合の全要素を1つの <code>map</code> に集めて重複を潰す</strong>だけ。素直ですが、和集合の「重複を除く」をどう実装するかの型が出ます。</p>
+
+    <div class="file-tag">set.go（つづき・SUnion）</div>
+    <pre><code><span class="kw">func</span> (s *<span class="ty">Store</span>) SUnion(keys ...<span class="ty">string</span>) ([]<span class="ty">string</span>, <span class="ty">error</span>) {
+	s.mu.Lock()
+	<span class="kw">defer</span> s.mu.Unlock()
+	seen := <span class="kw">make</span>(<span class="kw">map</span>[<span class="ty">string</span>]<span class="kw">struct</span>{})
+	<span class="kw">var</span> out []<span class="ty">string</span>
+	<span class="kw">for</span> _, k := <span class="kw">range</span> keys {
+		st, err := s.getSetLocked(k, <span class="kw">false</span>)
+		<span class="kw">if</span> err != <span class="kw">nil</span> {
+			<span class="kw">return</span> <span class="kw">nil</span>, err
+		}
+		<span class="kw">if</span> st == <span class="kw">nil</span> {
+			<span class="kw">continue</span>
+		}
+		<span class="kw">for</span> _, m := <span class="kw">range</span> st.Members() {
+			<span class="kw">if</span> _, ok := seen[m]; !ok {
+				seen[m] = <span class="kw">struct</span>{}{}
+				out = append(out, m)
+			}
+		}
+	}
+	<span class="kw">return</span> out, <span class="kw">nil</span>
+}</code></pre>
+
+    <p><code>seen</code> という <code>map[string]struct{}</code> が<strong>「もう出した要素」の記録</strong>です。全キーを順に見て（存在しないキーは <code>continue</code> で飛ばす — 積集合と違い、和集合では無いキーは単に無視すればいい）、各集合の要素 <code>m</code> について「<code>seen</code> にまだ無ければ、<code>seen</code> に印を付けて <code>out</code> に積む」。すでに <code>seen</code> にある要素は重複なので黙ってスキップ。これで、複数集合に跨って重複する要素も<strong>1回だけ</strong>出力されます。</p>
+    <p>ここで <code>out</code> と <code>seen</code> を<strong>両方持つ</strong>のに注目してください。<code>seen</code>（<code>map</code>）だけでも重複判定はできますが、それだと最後に <code>map</code> を <code>range</code> するときに順序が失われます。<code>out</code>（スライス）に<strong>初めて見た順で</strong>積んでおけば、<strong>「入力された集合を辿った順」がそのまま出力順になります</strong>。<br>
+    ただし注意——これは「毎回同じ順序で返る」という意味<strong>ではありません</strong>。<code>out</code> に積む元になる <code>st.Members()</code> 自体が、<strong>intset なら昇順、hashtable なら <code>map</code> の <code>range</code> なので順不同</strong>だからです（Step 5 で見たとおり）。ここでスライスが保証しているのは「<strong>辿った順を崩さない</strong>」ことまでで、その辿る順自体は集合のエンコーディング次第。<code>SUNION</code> の結果順序に意味を持たせてはいけない、というのは本家 Redis も同じです（テストが <code>len</code> しか見ないのはそのため）。「重複判定は <code>map</code>、順序保持はスライス、2つを並走させる」——重複除去の定番パターンです。<code>struct{}{}</code> を値に使うのは Step 1 の GO メモの通り、存在だけ問うので0バイトで足りるからです。</p>
+
+    <p>ここまでで <code>set.go</code> の Store 層は完成です。あとはコマンドハンドラ（<code>cmdSAdd</code> など）が引数をチェックして各メソッドを呼び、応答を組み立てるだけ——第00章の <code>dispatch</code> の <code>switch</code> に <code>SADD</code>〜<code>SUNION</code> の <code>case</code> が加わります。ハンドラは第00〜05章と同じ「引数を数え、Store を呼び、<code>integer</code> か <code>bulkArray</code> で返す」型なので、ここでは省略します（<code>cmdSInterUnion</code> だけは <code>SINTER</code> と <code>SUNION</code> を <code>union bool</code> フラグ1つで共通化している小技があります）。</p>
+
+    <div class="box do"><div class="box-k">▸ 動かして確認</div>
+      <p>集合演算と、遷移の閾値を検証します。2本まとめて走らせます。</p>
+      <pre class="term"><code><span class="ps">$</span> go test -run 'TestSetOps|TestIntsetConversionAtLimit' -v
+<span class="out">=== RUN   TestSetOps
+--- PASS: TestSetOps (0.00s)
+=== RUN   TestIntsetConversionAtLimit
+--- PASS: TestIntsetConversionAtLimit (0.00s)
+PASS</span></code></pre>
+      <p><code>TestSetOps</code> は <code>a={1,2,3}</code> と <code>b={2,3,4}</code> の <code>SINTER</code> が <code>{2,3}</code>、<code>SUNION</code> が4要素、無いキーとの積が空になることを確認します。<code>TestIntsetConversionAtLimit</code> は 512 件までは <code>isIntset()</code> が真、513 件目で偽（hashtable へ遷移）、かつ要素数が正しいことを確認 — <strong>エンコーディング遷移の境界を1件単位で検証</strong>しています。</p>
+    </div>
+
+    <h2>つまずき FAQ</h2>
+    <details class="qa"><summary><code>"007"</code> は intset に入らないなら、どこに入るの? 検索は遅くならない?</summary>
+      <div class="qa-body"><p><code>SADD s 007</code> を実行すると、<code>canonicalInt("007")</code> が <code>false</code> を返すので Set は <code>convert()</code> され、以降 <strong>hashtable</strong> になります。つまり <code>"007"</code> のような非正規な整数文字列が1つ来ただけで、その Set は intset の座を降ります。検索は hashtable の O(1) になるので遅くはなりません。むしろ「文字列として正確に持てる」という正しさを、メモリ効率と引き換えに取り戻したかたちです。整数だけの綺麗な集合を intset に保つための<strong>門番</strong>が <code>canonicalInt</code> だと考えてください。</p></div>
+    </details>
+    <details class="qa"><summary>hashtable に遷移したあと、整数だけになったら intset に戻る?</summary>
+      <div class="qa-body"><p>戻りません。<code>convert</code> は intset→hashtable の<strong>片道</strong>だけを実装しており、本家 Redis も同じです。「非整数を全部 <code>SREM</code> したから戻れるはず」と思っても、削除のたびに全要素をスキャンして戻せるか調べるコストが割に合わないため、戻す実装はしません。エンコーディングは<strong>メモリの少ない方から多い方へ一方通行</strong>、と割り切る設計です。<strong>本家</strong>の Sorted Set（listpack→skiplist）も同じ非対称ですが、<strong>本書の第07章では遷移そのものは実装しません</strong>（最初から辞書＋skiplist の二重管理で作ります）。エンコーディング遷移を自分の手で組むのは、この章が本書で唯一の機会です。</p></div>
+    </details>
+    <details class="qa"><summary>なぜ intset は <code>map</code> より速いこともあるのに、512 件で hashtable に切り替えるの?</summary>
+      <div class="qa-body"><p>intset の検索は二分探索で <strong>O(log n)</strong>、<code>map</code> は平均 <strong>O(1)</strong>。要素が少ないうちは、配列の連続メモリがキャッシュに乗りやすく <code>log n</code> も小さいので intset が有利です（しかもメモリが桁違いに少ない）。しかし要素が増えると <code>log n</code> が効いてきて、さらに<strong>挿入・削除が O(n)</strong>（配列のずらし）なので、大きな集合では <code>map</code> の O(1) が勝ちます。512 はその<strong>損益分岐点</strong>を経験的に置いた値で、本家の <code>set-max-intset-entries</code> 既定値と同じです。「小さい間はメモリと速度の両取り、大きくなったら速度優先で <code>map</code>」という切り替えです。</p></div>
+    </details>
+
+    <h2>理解度チェック</h2>
+    <p>次の問いに<strong>自分の言葉で</strong>答えられたら、この章は卒業です。</p>
+    <details class="qa"><summary>1. Set が intset と hashtable の2表現を持つのはなぜか。それぞれいつ使われるか。</summary>
+      <div class="qa-body"><p><strong>メモリ効率</strong>のため。整数だけの小さな集合を <code>map</code> で持つと1要素あたり数十バイト掛かるが、intset（ソート済み <code>[]int64</code>）なら1要素8バイトで済む。だから<strong>要素がすべて整数の正規表記で、かつ 512 件以下</strong>の間は intset を使う。整数でない要素が来る、または 512 件を超えると <code>convert</code> で hashtable へ<strong>片道</strong>遷移し、以降は任意の文字列を O(1) で扱う。</p></div>
+    </details>
+    <details class="qa"><summary>2. <code>canonicalInt</code> はなぜ <code>ParseInt</code> だけでなく <code>FormatInt</code> で往復照合するのか。</summary>
+      <div class="qa-body"><p><code>"007"</code> や <code>" 7"</code> は <code>ParseInt</code> だけなら <code>7</code> として通ってしまうが、intset に <code>7</code> として入れると <code>SMEMBERS</code> で <code>"7"</code> として返り、<strong>元の文字列 <code>"007"</code> が復元できない</strong>。Redis の Set は文字列の集合で <code>"007"</code> と <code>"7"</code> は別要素なので、これは許されない。そこで <code>FormatInt(ParseInt(m))</code> が元の <code>m</code> と<strong>一字一句一致するか</strong>を確かめ、正規表記の整数だけを intset に入れる。一致しないものは hashtable 行き。</p></div>
+    </details>
+    <details class="qa"><summary>3. <code>SINTER</code> で「最小の集合を基準に走査する」のはなぜ効率的か。</summary>
+      <div class="qa-body"><p>積集合の要素は全集合に共通するので、<strong>いちばん小さい集合の要素数を超えることはない</strong>。だから最小集合の要素だけを候補にし、それぞれを他の集合で <code>Has</code> すれば十分。基準を大きい集合にすると候補が無駄に多くなり、そのほとんどが「他に無い」で捨てられて <code>Has</code> の回数が増える。最小を基準にすれば候補数＝探索回数が最小になり、大きい集合を端から舐める無駄が消える。</p></div>
+    </details>
+
+    <h2>まとめ — 次の層へ</h2>
+    <p>この章で、Redis の<strong>エンコーディング遷移</strong>という核心に踏み込みました。同じ Set 型が、整数だけの小さな集合では intset（ソート済み <code>[]int64</code>・二分探索）としてメモリをぎゅっと詰め、非整数が来るか大きくなると hashtable へ<strong>片道で引っ越す</strong>。<code>canonicalInt</code> の往復照合で <code>"007"</code> の化けを防ぎ、<code>SINTER</code> では最小集合を基準に無駄を削る。「同じ型でも、状況に応じて中身の持ち方を変える」——この発想が、Redis がメモリと速度を両立させる秘密でした。</p>
+    <p>次の第07章 <strong>Sorted Set と skiplist</strong> では、この「1つの構造では足りない」がさらに先鋭化します。スコア順に並んだ集合を、<strong>順序つきの高速検索</strong>で引くには、二分探索できる配列でも <code>map</code> でも足りません。本家 Redis は <strong>dict（ハッシュ表）と skiplist（スキップリスト）を二重に持つ</strong>という大技でこれを解きます。intset で見た「表現を使い分ける」思想が、いよいよ2つの構造を<strong>同時に</strong>走らせる段階へ進みます。</p>
+
+    <div class="chap-foot">
+      <a class="pager" href="05-hash.html"><span class="dir">← 前へ</span>第05章 · Hash</a>
+      <a class="pager next" href="07-zset.html"><span class="dir">次へ →</span>第07章 · Sorted Set と skiplist</a>
+    </div>
+  </main>
+</div>
+</body>
+</html>

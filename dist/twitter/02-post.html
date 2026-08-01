@@ -1,0 +1,713 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>第02章 投稿する — Twitter をつくる</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500;600&family=Source+Serif+4:opsz,wght@8..60,400;8..60,600;8..60,700&family=Noto+Serif+JP:wght@400;600;700&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<div class="shell">
+
+  <aside class="spine">
+    <a class="wordmark" href="index.html">CHIRP · from scratch</a>
+    <div class="book-title">Twitter を<br>つくる</div>
+    <div class="book-sub">Go + PostgreSQL + React で認証からタイムラインまで</div>
+
+    <div class="legend"><span>読む <b>↓</b></span><span>組む <b>↑</b></span></div>
+
+    <nav aria-label="目次">
+      <ul class="toc">
+        <li><a class="nav-item" href="index.html"><span class="nav-num">序</span><span class="nav-label">はじめに・準備<span class="nav-tag">Setup</span></span></a></li>
+        <li><a class="nav-item" href="00-setup.html"><span class="nav-num">00</span><span class="nav-label">土台をつくる<span class="nav-tag">Setup</span></span></a></li>
+        <li><a class="nav-item" href="01-auth.html"><span class="nav-num">01</span><span class="nav-label">ユーザーという存在（認証）<span class="nav-tag">Auth</span></span></a></li>
+        <li><a class="nav-item current" aria-current="page" href="02-post.html"><span class="nav-num">02</span><span class="nav-label">投稿する<span class="nav-tag">Post</span></span></a></li>
+        <li><a class="nav-item" href="03-follow.html"><span class="nav-num">03</span><span class="nav-label">つながる（フォロー）<span class="nav-tag">Follow</span></span></a></li>
+        <li><a class="nav-item" href="04-timeline.html"><span class="nav-num">04</span><span class="nav-label">タイムラインという難問<span class="nav-tag">Timeline</span></span></a></li>
+        <li><a class="nav-item" href="05-reply.html"><span class="nav-num">05</span><span class="nav-label">会話する（リプライ）<span class="nav-tag">Reply</span></span></a></li>
+        <li><a class="nav-item" href="06-like.html"><span class="nav-num">06</span><span class="nav-label">反応する（いいね）<span class="nav-tag">Like</span></span></a></li>
+        <li><a class="nav-item" href="07-perf.html"><span class="nav-num">07</span><span class="nav-label">速くする（N+1と索引）<span class="nav-tag">Perf</span></span></a></li>
+        <li><a class="nav-item" href="08-web.html"><span class="nav-num">08</span><span class="nav-label">画面をつける（React）<span class="nav-tag">Web</span></span></a></li>
+        <li><a class="nav-item" href="09-beyond.html"><span class="nav-num">09</span><span class="nav-label">さらに先へ（発展）<span class="nav-tag">Beyond</span></span></a></li>
+      </ul>
+    </nav>
+
+    <div class="spine-foot">
+      各章は SNS の一つの機能。<br>下（土台）から上（画面）へ<br>積み上げて動かしていく。
+    </div>
+  </aside>
+
+  <main class="reading">
+    <div class="progress-tag">第02章 / 全10章 · 層: Post · 読了目安 2〜3時間</div>
+    <div class="eyebrow"><span>Post</span><span class="depth">— データモデリングの基礎</span></div>
+    <h1>投稿する</h1>
+    <p class="lede">第01章で、Chirp は「あなた」を認識できるようになりました。この章では、その認識できるユーザーに<strong>声</strong>を与えます。ログイン中の人が本文を書き、それを <code>posts</code> テーブルに保存し、取り出し、消す。たったこれだけですが、ここには個人開発で何度も繰り返す<strong>一気通貫の型</strong>が詰まっています——<strong>Go の構造体（データの形）→ SQL（しまう・取り出す）→ JSON（外へ返す形）</strong>。加えて、ユーザーが打ち込んだ文字列を<strong>1つの入口に頼らず多層で守る</strong>という、あらゆる入力処理の背骨になる考え方を身につけます。終えたとき、あなたのサーバは投稿を作り（<code>201</code>）、引き（<code>200</code>）、消し（<code>204</code>）、空投稿も281文字の投稿も門前払いできるようになります。</p>
+
+    <div class="box goal"><div class="box-k">◈ この章のゴール</div>
+      <p>次の 2 つを、自分の目と手で確認できたら達成です。</p>
+      <ol>
+        <li><code>curl</code> で <strong>投稿作成 → 取得 → 削除</strong>の流れが通る（作成は <code>201</code>、取得は <code>200</code>、削除は <code>204</code>）。そして<strong>空の本文</strong>と<strong>281文字の本文</strong>が <code>400 invalid_body</code> で弾かれ、他人の投稿の削除が <code>403 forbidden</code> になる。</li>
+        <li><code>cd src/backend &amp;&amp; go test ./internal/api -run TestValidatePostBody -v</code> が PASS する。とくに「280文字ちょうどは通る／281文字は超過／絵文字も文字数で数える」を目で確かめる。</li>
+      </ol>
+    </div>
+
+    <div class="box map"><div class="box-k">☰ この章のステップ</div>
+      <ol>
+        <li><a href="#step-1">なぜ「投稿」がデータモデリングの基礎なのか</a></li>
+        <li><a href="#step-2">投稿とは何を持つデータか — <code>models.go</code></a></li>
+        <li><a href="#step-3">DB に書く・読む・消す — <code>posts.go</code></a></li>
+        <li><a href="#step-4">入力を検証する — <code>validate.go</code></a></li>
+        <li><a href="#step-5">公開する形に整える — <code>dto.go</code></a></li>
+        <li><a href="#step-6">応答の土台をつくる — <code>respond.go</code></a></li>
+        <li><a href="#step-7">ハンドラを組んで動かす — <code>post_handlers.go</code> と curl</a></li>
+      </ol>
+    </div>
+
+    <h2 class="step" id="step-1"><span class="step-no">Step 1</span>なぜ「投稿」がデータモデリングの基礎なのか</h2>
+    <p>SNS の「投稿」は、見た目は短い文字列ひとつです。しかしその一往復には、Web アプリのデータ処理で<strong>何度も繰り返す型</strong>がまるごと入っています。ユーザーが JSON を送る → サーバが<strong>検証</strong>し → <strong>ドメインの形（Go 構造体）</strong>にして → <strong>SQL</strong> で DB にしまい → 読み出して → <strong>公開してよい形（JSON）</strong>に整えて返す。この一連の流れを、投稿という一番小さな題材で通しで組むのがこの章です。ここで型を掴んでおくと、以降のフォロー・リプライ・いいねは「同じ型の繰り返し」に見えてきます。</p>
+    <p>とくに大事なのが、データが<strong>3つの姿</strong>を通り抜けることです。</p>
+    <div class="ascii">  JSON (外の世界)          Go 構造体 (ドメイン)        SQL / テーブル (永続化)
+  ─────────────           ──────────────────         ────────────────────
+  createPostRequest   →   validate → store.Post  →   INSERT INTO posts ...
+  { "body": "..." }        { Body: "..." }             body TEXT CHECK(1..280)
+                                  ↑                            │
+  PostJSON            ←    toPostJSONs        ←        SELECT ... FROM posts
+  { "id":1, ... }         (集計値を付与)                 JOIN users</div>
+    <p>同じ「投稿」でも、外向き（JSON）と内部（構造体）と保存形（テーブル行）で<strong>形が違う</strong>。この境界を意識して分けることが、後々の見通しを大きく変えます。とくに JSON は「外に見せてよい情報だけ」に絞る——email やパスワードハッシュを絶対に混ぜない——のが鉄則で、そのための専用の層（DTO）を Step 5 で作ります。</p>
+    <p>もう一つの主題が<strong>入力を守る多層防御</strong>です。ユーザーが打ち込む本文は、長すぎたり空だったりする。これを「フロントの入力欄」「サーバの検証関数」「DB の <code>CHECK</code> 制約」の<strong>3か所</strong>で重ねて守ります。入口を一つに頼らないのが、堅いアプリの作り方です。</p>
+
+    <div class="box map"><div class="box-k">☰ この章のファイルと役割</div>
+      <ul>
+        <li><code>src/backend/internal/store/models.go</code> — 投稿のドメインの形（<code>Post</code> / <code>PostMeta</code>）（Step 2）</li>
+        <li><code>src/backend/internal/store/posts.go</code> — <code>posts</code> テーブルへの書き込み・読み出し・削除（Step 3）</li>
+        <li><code>src/backend/internal/api/validate.go</code> — 入力検証（本文は rune で数える）（Step 4）</li>
+        <li><code>src/backend/internal/api/dto.go</code> — 公開用 JSON への変換（Step 5）</li>
+        <li><code>src/backend/internal/api/respond.go</code> — 全ハンドラ共通の応答・エラー変換の土台（Step 6）</li>
+        <li><code>src/backend/internal/api/post_handlers.go</code> — 作成・取得・削除のハンドラ（Step 7）</li>
+      </ul>
+    </div>
+
+    <h2 class="step" id="step-2"><span class="step-no">Step 2</span>投稿とは何を持つデータか — models.go</h2>
+    <p>まず「投稿というデータは、何を持っているのか」を Go の構造体で言い表します。テーブルの列（第00章の <code>posts</code>）と近い形ですが、少し違います。<code>models.go</code> は <code>store</code> パッケージの<strong>ドメインモデル</strong>置き場で、この章で使うのは <code>Post</code> と <code>PostMeta</code> の2つです（同じファイルにある <code>User</code> は第01章、<code>UserStats</code> / <code>FollowEdge</code> は第03章で扱います）。</p>
+
+    <div class="file-tag">src/backend/internal/store/models.go</div>
+    <pre><code><span class="cm">// Post は作者情報を JOIN 済みで持つ（一覧表示で作者を毎回引き直さないため）。</span>
+<span class="kw">type</span> <span class="ty">Post</span> <span class="kw">struct</span> {
+	ID          <span class="ty">int64</span>
+	UserID      <span class="ty">int64</span>
+	Username    <span class="ty">string</span>
+	DisplayName <span class="ty">string</span>
+	Body        <span class="ty">string</span>
+	ReplyToID   *<span class="ty">int64</span>
+	CreatedAt   time.<span class="ty">Time</span>
+}
+
+<span class="cm">// PostMeta は一覧表示に必要な集計値。投稿IDの集合に対してバッチで引く（N+1回避）。</span>
+<span class="kw">type</span> <span class="ty">PostMeta</span> <span class="kw">struct</span> {
+	LikeCount  <span class="ty">int</span>
+	LikedByMe  <span class="ty">bool</span>
+	ReplyCount <span class="ty">int</span>
+}</code></pre>
+
+    <p><code>Post</code> から読みます。<code>ID</code>（投稿の一意な番号）、<code>UserID</code>（誰が書いたか）、<code>Body</code>（本文）、<code>CreatedAt</code>（投稿日時）——ここまでは第00章の <code>posts</code> テーブルの列とそのまま対応します。注目してほしいのは、テーブルには無い <code>Username</code> と <code>DisplayName</code> が入っていることです。コメントの通り、<strong>作者情報を JOIN 済みで持つ</strong>ためです。投稿を一覧表示するとき「この投稿の作者名は?」を投稿ごとに <code>users</code> へ引き直すと非効率なので、投稿を読むと同時に作者名も一緒に持ってきて、この構造体に詰めます（Step 3 の <code>postSelect</code> がその JOIN です）。<strong>テーブルの形と、アプリで扱いたいドメインの形は、必ずしも一致しない</strong>——ここが最初の学びです。</p>
+
+    <div class="gonote"><div class="box-k">GO メモ · <code>ReplyToID *int64</code> — なぜポインタなのか</div>
+      <p><code>ReplyToID</code> だけ <code>*int64</code>（<code>int64</code> への<strong>ポインタ</strong>）になっているのに気づいたでしょうか。これは<strong>「値が無いかもしれない」を型で表す</strong>ためです。通常の投稿はリプライではないので <code>reply_to_id</code> は <code>NULL</code>（第00章のスキーマで <code>NOT NULL</code> を付けなかった列）。もし <code>int64</code> にすると、<code>NULL</code> と「本当に 0 番への返信」を区別できません。ポインタなら、値が無いときは <code>nil</code>、有るときはその <code>int64</code> を指す、と<strong>「有る/無い」を <code>nil</code> かどうかで表現</strong>できます。SQL の <code>NULL</code> を Go で受けるときの定番が、この「ポインタにする」です。リプライの中身は第05章で扱います。</p>
+    </div>
+
+    <p><code>PostMeta</code> は、投稿そのものではなく<strong>投稿にまつわる集計値</strong>——いいね数（<code>LikeCount</code>）、自分がいいね済みか（<code>LikedByMe</code>）、リプライ数（<code>ReplyCount</code>）——をまとめた構造体です。なぜ <code>Post</code> と分けるのか。投稿本文は <code>posts</code> テーブルを1回引けば取れますが、いいね数は <code>likes</code> テーブルを数え、リプライ数は <code>posts</code> を数える、と<strong>別の集計</strong>が要ります。これを投稿1件ずつやると「N件の投稿にN回の集計クエリ」という <strong>N+1 問題</strong>に陥る。そこで集計だけを <code>PostMeta</code> に切り出し、投稿IDの集合に対して<strong>まとめて（バッチで）</strong>引けるようにしています。この章では「投稿本文（<code>Post</code>）と集計（<code>PostMeta</code>）は別物で、後者はまとめて引く」とだけ掴んでおけば十分です。バッチ化の実装（<code>GetPostMeta</code>）は<strong>第07章</strong>で深掘りします。</p>
+
+    <h2 class="step" id="step-3"><span class="step-no">Step 3</span>DB に書く・読む・消す — posts.go</h2>
+    <p>投稿の形（<code>Post</code>）が決まりました。次は、その形を <code>posts</code> テーブルに<strong>しまう・取り出す・消す</strong>操作です。DB アクセスはすべて <code>store</code> パッケージに閉じ込める方針（第00章）なので、<code>posts.go</code> に投稿まわりの関数を足していきます。この章で見るのは冒頭の <code>postSelect</code> 定数と、<code>scanPosts</code> / <code>CreatePost</code> / <code>GetPost</code> / <code>DeletePost</code> の4つです。まず土台となる2つ——共通の <code>SELECT</code> 文と、行を構造体に写す補助——から。</p>
+
+    <div class="file-tag">src/backend/internal/store/posts.go（冒頭）</div>
+    <pre><code><span class="kw">package</span> store
+
+<span class="kw">import</span> (
+	<span class="st">"context"</span>
+	<span class="st">"errors"</span>
+
+	<span class="st">"github.com/jackc/pgx/v5"</span>
+	<span class="st">"github.com/jackc/pgx/v5/pgconn"</span>
+)
+
+<span class="cm">// 投稿は常に作者情報を JOIN して返す</span>
+<span class="kw">const</span> postSelect = <span class="st">`
+	SELECT p.id, p.user_id, u.username, u.display_name, p.body, p.reply_to_id, p.created_at
+	FROM posts p
+	JOIN users u ON u.id = p.user_id`</span>
+
+<span class="kw">func</span> scanPosts(rows pgx.<span class="ty">Rows</span>) ([]<span class="ty">Post</span>, <span class="ty">error</span>) {
+	<span class="kw">defer</span> rows.Close()
+	posts := []<span class="ty">Post</span>{}
+	<span class="kw">for</span> rows.Next() {
+		<span class="kw">var</span> p <span class="ty">Post</span>
+		<span class="kw">if</span> err := rows.Scan(&amp;p.ID, &amp;p.UserID, &amp;p.Username, &amp;p.DisplayName, &amp;p.Body, &amp;p.ReplyToID, &amp;p.CreatedAt); err != <span class="kw">nil</span> {
+			<span class="kw">return</span> <span class="kw">nil</span>, err
+		}
+		posts = append(posts, p)
+	}
+	<span class="kw">return</span> posts, rows.Err()
+}</code></pre>
+
+    <p><code>postSelect</code> は、投稿を引くときに<strong>毎回使い回す SELECT 文</strong>です。ポイントは <code>JOIN users u ON u.id = p.user_id</code> ——投稿を取るとき、同時に <code>users</code> を突き合わせて作者の <code>username</code> と <code>display_name</code> も一緒に持ってきます。Step 2 の <code>Post</code> 構造体が作者名を持てるのは、この JOIN があるからです。SQL 文を定数に切り出しておくと、<code>WHERE</code> 句だけ足して <code>GetPost</code>（1件）にも一覧取得（複数件）にも使い回せます（<code>GetPost</code> では <code>postSelect + " WHERE p.id = $1"</code> のように継ぎ足します）。</p>
+    <p><code>scanPosts</code> は、DB から返ってきた行の集まり（<code>pgx.Rows</code>）を <code>[]Post</code> に<strong>写し取る</strong>補助関数です。<code>for rows.Next()</code> で1行ずつ進め、<code>rows.Scan(&amp;p.ID, ...)</code> で各列を <code>Post</code> のフィールドへ順に流し込みます。<strong><code>Scan</code> に渡す順番が、<code>postSelect</code> の <code>SELECT</code> の列の順番と一致していなければならない</strong>——ここがズレると値が入れ違うので、SELECT とScanは必ずセットで見ます。最後の <code>rows.Err()</code> は「ループ中に読み取りエラーが起きていなかったか」の確認で、忘れると途中で切れたデータを見逃します。</p>
+
+    <div class="gonote"><div class="box-k">GO メモ · <code>defer rows.Close()</code> と空スライス <code>[]Post{}</code></div>
+      <p>2つの作法があります。<strong>(1) <code>defer rows.Close()</code></strong> — <code>rows</code> は DB との読み取り中の接続を握っています。関数を抜けるときに必ず閉じないと接続が返らず漏れるので、<code>defer</code>（関数終了時に実行）で確実に閉じます。<strong>(2) <code>posts := []Post{}</code>（<code>var posts []Post</code> ではなく）</strong> — こうすると、1件も無かったときに <code>nil</code> ではなく<strong>空スライス</strong>が返ります。これが後で JSON にすると <code>[]</code>（空配列）になり、<code>nil</code> 由来の <code>null</code> を避けられます。フロントが「常に配列が来る」前提で書けるので、地味ですが親切な初期化です。</p>
+    </div>
+
+    <p>土台ができたので、<strong>書く</strong>——投稿の作成です。</p>
+
+    <div class="file-tag">src/backend/internal/store/posts.go（CreatePost）</div>
+    <pre><code><span class="cm">// CreatePost は投稿を作成する。replyToID が指す投稿が存在しない場合は ErrNotFound。</span>
+<span class="kw">func</span> (s *<span class="ty">Store</span>) CreatePost(ctx context.<span class="ty">Context</span>, userID <span class="ty">int64</span>, body <span class="ty">string</span>, replyToID *<span class="ty">int64</span>) (*<span class="ty">Post</span>, <span class="ty">error</span>) {
+	<span class="kw">var</span> id <span class="ty">int64</span>
+	err := s.pool.QueryRow(ctx, <span class="st">`
+		INSERT INTO posts (user_id, body, reply_to_id) VALUES ($1, $2, $3) RETURNING id`</span>,
+		userID, body, replyToID).Scan(&amp;id)
+	<span class="kw">if</span> err != <span class="kw">nil</span> {
+		<span class="kw">var</span> pgErr *pgconn.<span class="ty">PgError</span>
+		<span class="kw">if</span> errors.As(err, &amp;pgErr) &amp;&amp; pgErr.Code == <span class="st">"23503"</span> { <span class="cm">// foreign_key_violation</span>
+			<span class="kw">return</span> <span class="kw">nil</span>, ErrNotFound
+		}
+		<span class="kw">return</span> <span class="kw">nil</span>, err
+	}
+	<span class="kw">return</span> s.GetPost(ctx, id)
+}</code></pre>
+
+    <p><code>CreatePost</code> は <code>userID</code>（誰が）・<code>body</code>（何を）・<code>replyToID</code>（何への返信か。通常は <code>nil</code>）を受け取り、<code>INSERT INTO posts ... RETURNING id</code> で行を1つ挿入します。<code>RETURNING id</code> は PostgreSQL の便利機能で、<strong>挿入した行の自動採番された <code>id</code> をその場で返してもらう</strong>指定です。それを <code>.Scan(&amp;id)</code> で受け取り、最後に <code>s.GetPost(ctx, id)</code> で<strong>今作った投稿を作者情報つきで引き直して</strong>返します。「作ったあと、JOIN 済みの完全な形で返す」ことで、呼び出し側は作成直後の投稿をそのまま JSON にできます。</p>
+    <p>値の渡し方に注目です。SQL 文の中に <code>$1, $2, $3</code> という<strong>プレースホルダ</strong>を置き、実際の値（<code>userID, body, replyToID</code>）は<strong>引数として別に渡して</strong>います。本文を <code>"INSERT ... VALUES ('" + body + "')"</code> のように<strong>文字列連結しない</strong>のが肝心です。</p>
+
+    <div class="box hazard"><div class="box-k">⚠ なぜ本文を文字列連結せず <code>$1</code> で渡すのか — SQL インジェクション</div>
+      <p>もし本文を SQL 文に直接連結すると、ユーザーが本文に <code>'); DROP TABLE posts;--</code> のような文字列を仕込んだとき、それが<strong>SQL の一部として実行されて</strong>しまいます。これが <strong>SQL インジェクション</strong>——ユーザー入力が命令に化ける、古典にして最悪の脆弱性です。<code>$1, $2, $3</code> の<strong>プレースホルダ（パラメータ化クエリ）</strong>を使うと、渡した値は<strong>あくまで「値」として扱われ、SQL 文としては解釈されません</strong>。本文に何を書かれても、それは280文字以内の「ただの文字列」でしかない。<strong>ユーザー入力は絶対に SQL 文へ連結せず、必ずプレースホルダで渡す</strong>——Chirp のすべてのクエリがこの規律を守っています（第01章の <code>CreateUser</code> でも同じでした）。</p>
+    </div>
+
+    <p>エラー処理も読みます。<code>reply_to_id</code> に「存在しない投稿ID」を指定すると、DB は第00章で張った<strong>外部キー制約</strong>に違反し、PostgreSQL がエラーコード <code>23503</code>（foreign_key_violation）を返します。それを <code>errors.As(err, &amp;pgErr)</code> で <code>*pgconn.PgError</code> として捕まえ、コードが <code>23503</code> なら<strong>ドメインエラー <code>ErrNotFound</code> に翻訳</strong>して返します。こうしておくと、上の API 層は「DB 固有のコード」ではなく「見つからない」という<strong>意味</strong>で判断でき、Step 6 の <code>writeStoreError</code> がそれを <code>404</code> に変換できます。DB のエラーを、アプリの語彙に翻訳する層——それが <code>store</code> の役目です。</p>
+
+    <p>次は<strong>読む</strong>と<strong>消す</strong>です。</p>
+
+    <div class="file-tag">src/backend/internal/store/posts.go（GetPost / DeletePost）</div>
+    <pre><code><span class="kw">func</span> (s *<span class="ty">Store</span>) GetPost(ctx context.<span class="ty">Context</span>, id <span class="ty">int64</span>) (*<span class="ty">Post</span>, <span class="ty">error</span>) {
+	rows, err := s.pool.Query(ctx, postSelect+<span class="st">` WHERE p.id = $1`</span>, id)
+	<span class="kw">if</span> err != <span class="kw">nil</span> {
+		<span class="kw">return</span> <span class="kw">nil</span>, err
+	}
+	posts, err := scanPosts(rows)
+	<span class="kw">if</span> err != <span class="kw">nil</span> {
+		<span class="kw">return</span> <span class="kw">nil</span>, err
+	}
+	<span class="kw">if</span> len(posts) == <span class="st">0</span> {
+		<span class="kw">return</span> <span class="kw">nil</span>, ErrNotFound
+	}
+	<span class="kw">return</span> &amp;posts[<span class="st">0</span>], <span class="kw">nil</span>
+}
+
+<span class="cm">// DeletePost は本人の投稿のみ削除できる。</span>
+<span class="kw">func</span> (s *<span class="ty">Store</span>) DeletePost(ctx context.<span class="ty">Context</span>, id, userID <span class="ty">int64</span>) <span class="ty">error</span> {
+	<span class="kw">var</span> ownerID <span class="ty">int64</span>
+	err := s.pool.QueryRow(ctx, <span class="st">`SELECT user_id FROM posts WHERE id = $1`</span>, id).Scan(&amp;ownerID)
+	<span class="kw">if</span> errors.Is(err, pgx.ErrNoRows) {
+		<span class="kw">return</span> ErrNotFound
+	}
+	<span class="kw">if</span> err != <span class="kw">nil</span> {
+		<span class="kw">return</span> err
+	}
+	<span class="kw">if</span> ownerID != userID {
+		<span class="kw">return</span> ErrForbidden
+	}
+	_, err = s.pool.Exec(ctx, <span class="st">`DELETE FROM posts WHERE id = $1`</span>, id)
+	<span class="kw">return</span> err
+}</code></pre>
+
+    <p><code>GetPost</code> は、<code>postSelect</code> に <code>WHERE p.id = $1</code> を継ぎ足して1件を引きます。JOIN 済みの共通 SELECT を使い回せるのがここで効いています。<code>scanPosts</code> で <code>[]Post</code> に写し、<strong><code>len(posts) == 0</code> なら <code>ErrNotFound</code></strong>——見つからなければ「無い」というドメインエラーを返します。存在すれば先頭の <code>&amp;posts[0]</code> を返す。「見つからない」を <code>nil, nil</code> ではなく <code>nil, ErrNotFound</code> と<strong>明示のエラー</strong>で返すことで、呼び出し側が「無かった」を確実に検知でき、Step 6 で <code>404</code> に変換できます。</p>
+    <p><code>DeletePost</code> には<strong>認可</strong>——「その操作を許すか」の判断——が入っています。処理は3段です。まず <code>SELECT user_id FROM posts WHERE id = $1</code> で、その投稿の<strong>持ち主（<code>ownerID</code>）</strong>を引く。ここで <code>errors.Is(err, pgx.ErrNoRows)</code>（＝該当行なし）なら、そもそも投稿が存在しないので <code>ErrNotFound</code>。次に <code>ownerID != userID</code>、つまり<strong>削除しようとしている人が持ち主でない</strong>なら <code>ErrForbidden</code>。両方を通り抜けて初めて <code>DELETE FROM posts WHERE id = $1</code> を実行します。<strong>「本人の投稿だけ消せる」を、DB に触る手前で確かめる</strong>——これが認可のいちばん素朴な形です。</p>
+
+    <div class="box hazard"><div class="box-k">⚠ なぜ「見つからない(404)」と「権限がない(403)」を区別するのか</div>
+      <p><code>DeletePost</code> は「投稿が無い」を <code>ErrNotFound</code>（→ <code>404</code>）、「他人の投稿」を <code>ErrForbidden</code>（→ <code>403</code>）と<strong>別々のエラー</strong>で返します。この区別は、Chirp のように<strong>投稿が公開されている</strong>SNS では自然です——投稿は誰でも読めるので、その存在自体は秘密ではなく、「消せるのは本人だけ」という認可を <code>403</code> で正直に伝える方が、利用者にとって分かりやすい。<br>
+      ただし文脈によっては、この区別が<strong>情報漏洩になる</strong>こともあります。たとえば「他人には存在すら隠したい非公開リソース」では、他人のものを触ったときに <code>403</code>（＝「それは存在するが、あなたのものではない」）を返すと、<strong>リソースの存在を教えてしまう</strong>。その場合はあえて <code>404</code> に寄せて「有る/無い」を隠すこともあります。<strong>403 と 404 の使い分けは、そのリソースの存在を秘密にすべきかで決まる</strong>——公開投稿の Chirp は素直に区別する、という判断です。（第01章のログイン失敗で「ユーザーの存在を隠す」ために情報を与えなかったのと、同じ「どこまで正直に返すか」の設計判断です。）</p>
+    </div>
+
+    <div class="gonote"><div class="box-k">GO メモ · <code>ON DELETE CASCADE</code> — 投稿を消すと、ぶら下がるものも消える</div>
+      <p><code>DeletePost</code> の SQL は <code>DELETE FROM posts WHERE id = $1</code> の一行だけ。でも、その投稿への<strong>いいね</strong>や<strong>リプライ</strong>はどうなるのでしょう。答えは第00章のスキーマにあります。<code>likes</code> の <code>post_id</code> と <code>posts</code> の <code>reply_to_id</code> は、どちらも <code>REFERENCES posts(id) <strong>ON DELETE CASCADE</strong></code> で張られています。この <code>ON DELETE CASCADE</code> のおかげで、<strong>投稿が消えると、それに紐づくいいね行とリプライも DB が自動で連鎖削除</strong>してくれます。アプリ側で「まずいいねを消し、次にリプライを消し…」と手で辿る必要がない。<strong>「消えたら一緒に消えるべきもの」は、スキーマの外部キーに <code>ON DELETE CASCADE</code> を書いて DB に任せる</strong>——データの整合性を、アプリのコードではなく DB の制約で守る好例です。</p>
+    </div>
+
+    <p>この4つで、投稿の「書く・読む・消す」が揃いました。同じ <code>posts.go</code> には一覧系の関数もありますが、それらは各機能の章に譲ります——<code>ListUserPosts</code> は<strong>第03章</strong>（プロフィールの投稿一覧）、<code>ListTimeline</code> は<strong>第04章</strong>（ホームタイムライン）、<code>ListReplies</code> は<strong>第05章</strong>（会話）、集計の <code>GetPostMeta</code> は<strong>第07章</strong>（N+1 と索引）で扱います。</p>
+    <pre><code><span class="kw">func</span> (s *<span class="ty">Store</span>) ListUserPosts(...) { <span class="cm">// …（第03章で）</span> }
+<span class="kw">func</span> (s *<span class="ty">Store</span>) ListReplies(...)   { <span class="cm">// …（第05章で）</span> }
+<span class="kw">func</span> (s *<span class="ty">Store</span>) ListTimeline(...)  { <span class="cm">// …（第04章で）</span> }
+<span class="kw">func</span> (s *<span class="ty">Store</span>) GetPostMeta(...)  { <span class="cm">// …（第07章で）</span> }</code></pre>
+
+    <h2 class="step" id="step-4"><span class="step-no">Step 4</span>入力を検証する — validate.go</h2>
+    <p>DB に書けるようになりました。しかし、ユーザーが送ってくる本文をそのまま <code>CreatePost</code> に渡してはいけません。空文字かもしれないし、10万文字かもしれない。<strong>DB に触る前に、入力が妥当かをサーバ側で必ず確かめる</strong>——これが検証（バリデーション）です。<code>validate.go</code> は、この章の投稿検証だけでなく、第01章のサインアップで使った各種検証もまとめた<strong>入力ルールの一元置き場</strong>です。全文を見ます。</p>
+
+    <div class="file-tag">src/backend/internal/api/validate.go</div>
+    <pre><code><span class="kw">package</span> api
+
+<span class="kw">import</span> (
+	<span class="st">"regexp"</span>
+	<span class="st">"strings"</span>
+	<span class="st">"unicode/utf8"</span>
+)
+
+<span class="cm">// 入力ルールはサーバ側でも必ず守らせる（教材 Chapter 3「入口を一つに頼らない」）。</span>
+
+<span class="kw">var</span> usernameRe = regexp.MustCompile(<span class="st">`^[a-z0-9_]{3,20}$`</span>)
+<span class="kw">var</span> emailRe = regexp.MustCompile(<span class="st">`^[^\s@]+@[^\s@]+\.[^\s@]+$`</span>)
+
+<span class="kw">const</span> (
+	maxBodyLen        = <span class="st">280</span>
+	maxDisplayNameLen = <span class="st">50</span>
+	maxBioLen         = <span class="st">160</span>
+	minPasswordLen    = <span class="st">8</span>
+)
+
+<span class="cm">// validateUsername は正規化済みユーザー名の妥当性を返す。</span>
+<span class="kw">func</span> validateUsername(username <span class="ty">string</span>) (<span class="ty">string</span>, <span class="ty">bool</span>) {
+	u := strings.ToLower(strings.TrimSpace(username))
+	<span class="kw">return</span> u, usernameRe.MatchString(u)
+}
+
+<span class="kw">func</span> validateEmail(email <span class="ty">string</span>) (<span class="ty">string</span>, <span class="ty">bool</span>) {
+	e := strings.ToLower(strings.TrimSpace(email))
+	<span class="kw">return</span> e, emailRe.MatchString(e) &amp;&amp; utf8.RuneCountInString(e) &lt;= <span class="st">254</span>
+}
+
+<span class="kw">func</span> validateDisplayName(name <span class="ty">string</span>) (<span class="ty">string</span>, <span class="ty">bool</span>) {
+	n := strings.TrimSpace(name)
+	c := utf8.RuneCountInString(n)
+	<span class="kw">return</span> n, c &gt;= <span class="st">1</span> &amp;&amp; c &lt;= maxDisplayNameLen
+}
+
+<span class="kw">func</span> validatePassword(password <span class="ty">string</span>) <span class="ty">bool</span> {
+	<span class="kw">return</span> utf8.RuneCountInString(password) &gt;= minPasswordLen
+}
+
+<span class="kw">func</span> validateBio(bio <span class="ty">string</span>) (<span class="ty">string</span>, <span class="ty">bool</span>) {
+	b := strings.TrimSpace(bio)
+	<span class="kw">return</span> b, utf8.RuneCountInString(b) &lt;= maxBioLen
+}
+
+<span class="cm">// validatePostBody は投稿本文（1〜280文字）を検証する。文字数は rune で数える。</span>
+<span class="kw">func</span> validatePostBody(body <span class="ty">string</span>) (<span class="ty">string</span>, <span class="ty">bool</span>) {
+	b := strings.TrimSpace(body)
+	c := utf8.RuneCountInString(b)
+	<span class="kw">return</span> b, c &gt;= <span class="st">1</span> &amp;&amp; c &lt;= maxBodyLen
+}</code></pre>
+
+    <p>ファイル冒頭のコメント<strong>「入口を一つに頼らない」</strong>が、この章の背骨です。各関数は同じ形をしています——<strong>正規化した値と、妥当かどうかの <code>bool</code> を返す</strong>。呼び出し側は <code>body, ok := validatePostBody(...)</code> と受けて、<code>ok</code> が <code>false</code> なら弾く。値も返すのは、<code>TrimSpace</code> で前後の空白を落とした<strong>正規化後の本文</strong>をそのまま保存に使うためです。</p>
+    <p>この章の主役 <code>validatePostBody</code> を読みます。<code>strings.TrimSpace(body)</code> で前後の空白・改行を除き、<code>utf8.RuneCountInString(b)</code> で<strong>文字数</strong>を数え、<code>c &gt;= 1 &amp;&amp; c &lt;= maxBodyLen</code>（1以上280以下）を判定します。空白だけの投稿は <code>TrimSpace</code> で空になり <code>c == 0</code> で弾かれ、281文字も弾かれる。第00章の <code>posts.body</code> の <code>CHECK (char_length(body) BETWEEN 1 AND 280)</code> と<strong>同じ条件</strong>を、アプリ側にも置いていることに注目してください。</p>
+
+    <div class="gonote"><div class="box-k">GO メモ · なぜ <code>len(body)</code> ではなく <code>utf8.RuneCountInString</code> なのか</div>
+      <p>Go の文字列は<strong>バイト列</strong>で、<code>len(body)</code> は<strong>バイト数</strong>を返します。ASCII（英数字）なら1文字＝1バイトなので一致しますが、<strong>日本語や絵文字は1文字が複数バイト</strong>です。「あ」は UTF-8 で3バイト、「🎉」は4バイト。もし <code>len(body)</code> で「280まで」を判定すると、日本語なら実質<strong>約93文字</strong>で、絵文字なら<strong>70文字</strong>で上限に達してしまう——Twitter の「280文字」の感覚と全く合いません。<code>utf8.RuneCountInString</code> は<strong>rune（コードポイント＝おおよそ人間が数える1文字）の数</strong>を返すので、「あ」も「🎉」も「a」も等しく1文字と数えます。<strong>ユーザーが打った文字数で数えたいなら、バイト数ではなく rune 数</strong>——多言語・絵文字を扱う SNS では必須の作法です。<code>validatePassword</code> や <code>validateEmail</code> でも一貫して <code>RuneCountInString</code> を使っています。</p>
+    </div>
+
+    <p>残りの関数は第01章のサインアップで使ったものです。一言ずつ添えます。<code>validateUsername</code> は <code>ToLower</code> で小文字化・<code>TrimSpace</code>して、正規表現 <code>^[a-z0-9_]{3,20}$</code>（英小文字・数字・アンダースコアで3〜20文字）に一致するか。<code>validateEmail</code> は形式チェック＋254文字以内。<code>validateDisplayName</code> は1〜50文字。<code>validatePassword</code> は8文字以上（<code>bool</code> だけ返す。中身の値を正規化しないので）。<code>validateBio</code>（自己紹介・160文字以内）は<strong>第03章</strong>のプロフィール編集で使います。すべてが<strong>1つのファイルに、同じ「正規化＋判定」の形で</strong>並んでいるのが、入力ルールを見失わないコツです。</p>
+
+    <div class="box hazard"><div class="box-k">⚠ 多層防御 — フロントの検証を「信用しない」</div>
+      <p>「入口を一つに頼らない」とは、<strong>本文の長さチェックを3か所に重ねる</strong>ことです。<strong>(1) フロント</strong>（React の入力欄。第08章。文字数カウンタで親切に）、<strong>(2) サーバ</strong>（この <code>validatePostBody</code>）、<strong>(3) DB</strong>（<code>posts.body</code> の <code>CHECK</code> 制約）。フロントの検証は<strong>UX のためであって、防御ではありません</strong>——攻撃者は React の画面を通さず、<code>curl</code> で直接サーバのエンドポイントを叩けます（Step 7 でまさにそうします）。だからフロントを通り抜けても、サーバの検証が空投稿・超過を弾く。さらに、万一サーバの検証にバグがあっても、DB の <code>CHECK</code> が最後の砦になる。<strong>それぞれの層は独立して守る</strong>——1枚が破れても次が止める、この重ね方が堅いアプリの作り方です。フロントの入力チェックは絶対に信用しない、が鉄則です。</p>
+    </div>
+
+    <h2 class="step" id="step-5"><span class="step-no">Step 5</span>公開する形に整える — dto.go</h2>
+    <p>DB から取り出した投稿（<code>store.Post</code>）を、そのままクライアントに返してよいでしょうか。答えは<strong>いいえ</strong>です。ドメインモデルには「外に見せたくない情報」が混じりうるし、外向きには「集計値（いいね数など）を足したい」。そこで、<strong>公開してよい形だけを持つ専用の型</strong>——<strong>DTO（Data Transfer Object）</strong>——を用意し、ドメインモデルから変換します。それが <code>dto.go</code> です。全文を見ます。</p>
+
+    <div class="file-tag">src/backend/internal/api/dto.go</div>
+    <pre><code><span class="kw">package</span> api
+
+<span class="kw">import</span> (
+	<span class="st">"context"</span>
+	<span class="st">"time"</span>
+
+	<span class="st">"twitter-sns/internal/store"</span>
+)
+
+<span class="cm">// UserJSON は公開してよいユーザー情報のみを持つ（email や hash は返さない）。</span>
+<span class="kw">type</span> <span class="ty">UserJSON</span> <span class="kw">struct</span> {
+	ID          <span class="ty">int64</span>     <span class="st">`json:"id"`</span>
+	Username    <span class="ty">string</span>    <span class="st">`json:"username"`</span>
+	DisplayName <span class="ty">string</span>    <span class="st">`json:"display_name"`</span>
+	Bio         <span class="ty">string</span>    <span class="st">`json:"bio"`</span>
+	CreatedAt   time.<span class="ty">Time</span> <span class="st">`json:"created_at"`</span>
+}
+
+<span class="kw">func</span> toUserJSON(u *store.<span class="ty">User</span>) <span class="ty">UserJSON</span> {
+	<span class="kw">return</span> <span class="ty">UserJSON</span>{
+		ID:          u.ID,
+		Username:    u.Username,
+		DisplayName: u.DisplayName,
+		Bio:         u.Bio,
+		CreatedAt:   u.CreatedAt,
+	}
+}
+
+<span class="kw">type</span> <span class="ty">PostJSON</span> <span class="kw">struct</span> {
+	ID         <span class="ty">int64</span>     <span class="st">`json:"id"`</span>
+	Body       <span class="ty">string</span>    <span class="st">`json:"body"`</span>
+	ReplyToID  *<span class="ty">int64</span>    <span class="st">`json:"reply_to_id,omitempty"`</span>
+	CreatedAt  time.<span class="ty">Time</span> <span class="st">`json:"created_at"`</span>
+	Author     <span class="ty">UserJSON</span>  <span class="st">`json:"author"`</span>
+	LikeCount  <span class="ty">int</span>       <span class="st">`json:"like_count"`</span>
+	LikedByMe  <span class="ty">bool</span>      <span class="st">`json:"liked_by_me"`</span>
+	ReplyCount <span class="ty">int</span>       <span class="st">`json:"reply_count"`</span>
+}
+
+<span class="kw">type</span> <span class="ty">postListJSON</span> <span class="kw">struct</span> {
+	Posts      []<span class="ty">PostJSON</span> <span class="st">`json:"posts"`</span>
+	NextCursor *<span class="ty">int64</span>     <span class="st">`json:"next_cursor,omitempty"`</span>
+}
+
+<span class="cm">// toPostJSONs は投稿一覧に集計値（いいね数など）をバッチで付与する。</span>
+<span class="kw">func</span> (s *<span class="ty">Server</span>) toPostJSONs(ctx context.<span class="ty">Context</span>, posts []store.<span class="ty">Post</span>, viewerID <span class="ty">int64</span>) ([]<span class="ty">PostJSON</span>, <span class="ty">error</span>) {
+	ids := make([]<span class="ty">int64</span>, len(posts))
+	<span class="kw">for</span> i, p := <span class="kw">range</span> posts {
+		ids[i] = p.ID
+	}
+	meta, err := s.store.GetPostMeta(ctx, ids, viewerID)
+	<span class="kw">if</span> err != <span class="kw">nil</span> {
+		<span class="kw">return</span> <span class="kw">nil</span>, err
+	}
+	out := make([]<span class="ty">PostJSON</span>, len(posts))
+	<span class="kw">for</span> i, p := <span class="kw">range</span> posts {
+		m := meta[p.ID]
+		out[i] = <span class="ty">PostJSON</span>{
+			ID:        p.ID,
+			Body:      p.Body,
+			ReplyToID: p.ReplyToID,
+			CreatedAt: p.CreatedAt,
+			Author: <span class="ty">UserJSON</span>{
+				ID:          p.UserID,
+				Username:    p.Username,
+				DisplayName: p.DisplayName,
+			},
+			LikeCount:  m.LikeCount,
+			LikedByMe:  m.LikedByMe,
+			ReplyCount: m.ReplyCount,
+		}
+	}
+	<span class="kw">return</span> out, <span class="kw">nil</span>
+}</code></pre>
+
+    <p>まず <code>UserJSON</code> です。第01章でも登場しました。フィールドは <code>ID / Username / DisplayName / Bio / CreatedAt</code> の5つ——コメントの通り<strong><code>email</code> や <code>password_hash</code> を持ちません</strong>。ドメインの <code>store.User</code>（第01章）はこれらを持っていますが、<code>toUserJSON</code> が<strong>公開してよいフィールドだけをコピー</strong>することで、外に出る JSON からは email もハッシュも構造的に消えます。各フィールドの <code>`json:"id"`</code> はタグで、「JSON にするときのキー名」を指定します（Go の <code>ID</code> は JSON の <code>id</code> に、<code>DisplayName</code> は <code>display_name</code> に）。</p>
+
+    <div class="box hazard"><div class="box-k">⚠ DTO の意義 — 「返さない」を型で保証する</div>
+      <p>もし DTO を挟まず <code>store.User</code> をそのまま JSON にすると、<strong><code>Email</code> や <code>PasswordHash</code> フィールドまで JSON に出てしまいます</strong>。ハッシュとはいえパスワード由来の情報が外に漏れるのは論外だし、メールアドレスの流出もプライバシー事故です。「うっかり <code>json:"-"</code> を付け忘れた」だけで漏れる、という危うさがある。<br>
+      <code>UserJSON</code> という<strong>公開専用の型</strong>を別に定義し、<code>toUserJSON</code> で<strong>明示的に選んだフィールドだけ詰め替える</strong>と、漏らしたい情報は<strong>そもそも型に存在しない</strong>ので、うっかり漏れる余地がなくなります。「出してよいものだけを持つ型を用意し、ドメインからそこへ変換する」——<strong>DTO は、公開情報を型で保証する防波堤</strong>です。Step 6 の <code>writeJSON</code> に渡すのは常にこの DTO であって、ドメインモデルを直接渡さない、が Chirp の規律です。</p>
+    </div>
+
+    <p><code>PostJSON</code> が投稿の公開形です。ドメインの <code>Post</code> と見比べると、<strong>形が変わっている</strong>のが分かります。<code>Post</code> は作者情報を <code>Username</code> / <code>DisplayName</code> と<strong>平らに</strong>持っていましたが、<code>PostJSON</code> では <code>Author UserJSON</code> という<strong>入れ子</strong>にまとめ直しています（JSON で <code>"author": { "id":..., "username":... }</code> という構造になる）。さらに <code>Post</code> には無かった <code>LikeCount</code> / <code>LikedByMe</code> / <code>ReplyCount</code> という<strong>集計値</strong>が足されています。<code>ReplyToID</code> のタグには <code>omitempty</code> が付いていて、これは「<strong>値が空（<code>nil</code>）ならこのキーごと JSON から省く</strong>」指定です。通常の投稿はリプライではないので、<code>reply_to_id</code> キー自体が出力に現れません。</p>
+    <p>変換を担うのが <code>toPostJSONs</code> です。名前が複数形なのは、<strong>投稿の集合をまとめて変換する</strong>から。中身は2段です。<strong>前半</strong>で全投稿の <code>ID</code> を <code>ids</code> スライスに集め、<code>s.store.GetPostMeta(ctx, ids, viewerID)</code> で<strong>集計値をまとめて1回で引きます</strong>。<strong>後半</strong>で各投稿を <code>PostJSON</code> に詰め替え、対応する集計値 <code>meta[p.ID]</code> を <code>LikeCount</code> などに載せる。これが<strong>「集計を付けて JSON にする入口」</strong>です。</p>
+
+    <div class="gonote"><div class="box-k">GO メモ · <code>GetPostMeta</code> のバッチ化 = N+1 回避（中身は第07章）</div>
+      <p><code>toPostJSONs</code> が最初に全投稿の <code>ID</code> を集めて <code>GetPostMeta(ctx, ids, ...)</code> を<strong>1回だけ</strong>呼んでいるのが肝です。もし投稿ごとに「この投稿のいいね数は?」を <code>for</code> の中で1件ずつ引くと、20件の投稿に対していいね集計だけで20回のクエリが飛ぶ——投稿一覧(1) + 各投稿の集計(N) で <strong>N+1 問題</strong>です。<code>GetPostMeta</code> は投稿ID<strong>の集合</strong>を受け取り、<code>WHERE post_id = ANY($1)</code> で<strong>まとめて集計</strong>することでクエリ数を一定に抑えます。この章では「<code>toPostJSONs</code> が集計をバッチで付ける入口である」ことだけ掴めば十分です。<strong><code>GetPostMeta</code> の実装（なぜ3クエリで済むか、索引がどう効くか）は第07章</strong>で正面から扱います。</p>
+    </div>
+
+    <p><code>postListJSON</code> は一覧のレスポンス（投稿の配列 ＋ 次ページの目印 <code>NextCursor</code>）で、これは一覧を返す<strong>第03〜05章</strong>で使います。この章の作成・取得・削除では、単一の <code>PostJSON</code>（<code>out[0]</code>）を返すだけです。</p>
+
+    <h2 class="step" id="step-6"><span class="step-no">Step 6</span>応答の土台をつくる — respond.go</h2>
+    <p>データの形（<code>PostJSON</code>）は整いました。あとは、それを<strong>HTTP レスポンスとして書き出す</strong>共通の道具が要ります。「成功なら JSON を返す」「エラーなら適切なステータスと日本語メッセージを返す」——これを全ハンドラでバラバラに書くと不揃いになるので、<code>respond.go</code> に<strong>応答の土台</strong>をまとめます。全文です。</p>
+
+    <div class="file-tag">src/backend/internal/api/respond.go</div>
+    <pre><code><span class="cm">// Package api はHTTPハンドラとルーティングを担う。</span>
+<span class="kw">package</span> api
+
+<span class="kw">import</span> (
+	<span class="st">"encoding/json"</span>
+	<span class="st">"errors"</span>
+	<span class="st">"log/slog"</span>
+	<span class="st">"net/http"</span>
+
+	<span class="st">"twitter-sns/internal/store"</span>
+)
+
+<span class="kw">type</span> <span class="ty">errorBody</span> <span class="kw">struct</span> {
+	Error <span class="ty">apiError</span> <span class="st">`json:"error"`</span>
+}
+
+<span class="kw">type</span> <span class="ty">apiError</span> <span class="kw">struct</span> {
+	Code    <span class="ty">string</span> <span class="st">`json:"code"`</span>
+	Message <span class="ty">string</span> <span class="st">`json:"message"`</span>
+}
+
+<span class="kw">func</span> writeJSON(w http.<span class="ty">ResponseWriter</span>, status <span class="ty">int</span>, v <span class="ty">any</span>) {
+	w.Header().Set(<span class="st">"Content-Type"</span>, <span class="st">"application/json; charset=utf-8"</span>)
+	w.WriteHeader(status)
+	<span class="kw">if</span> v != <span class="kw">nil</span> {
+		_ = json.NewEncoder(w).Encode(v)
+	}
+}
+
+<span class="cm">// writeError は利用者が次にとるべき行動が分かるメッセージを返す（非機能要件）。</span>
+<span class="kw">func</span> writeError(w http.<span class="ty">ResponseWriter</span>, status <span class="ty">int</span>, code, message <span class="ty">string</span>) {
+	writeJSON(w, status, <span class="ty">errorBody</span>{Error: <span class="ty">apiError</span>{Code: code, Message: message}})
+}
+
+<span class="cm">// writeStoreError はストア層のドメインエラーをHTTPステータスへ変換する。</span>
+<span class="kw">func</span> writeStoreError(w http.<span class="ty">ResponseWriter</span>, err <span class="ty">error</span>) {
+	<span class="kw">switch</span> {
+	<span class="kw">case</span> errors.Is(err, store.ErrNotFound):
+		writeError(w, http.<span class="ty">StatusNotFound</span>, <span class="st">"not_found"</span>, <span class="st">"対象が見つかりません。削除された可能性があります。"</span>)
+	<span class="kw">case</span> errors.Is(err, store.ErrForbidden):
+		writeError(w, http.<span class="ty">StatusForbidden</span>, <span class="st">"forbidden"</span>, <span class="st">"この操作を行う権限がありません。"</span>)
+	<span class="kw">case</span> errors.Is(err, store.ErrSelfFollow):
+		writeError(w, http.<span class="ty">StatusBadRequest</span>, <span class="st">"self_follow"</span>, <span class="st">"自分自身はフォローできません。"</span>)
+	<span class="kw">case</span> errors.Is(err, store.ErrUsernameTaken):
+		writeError(w, http.<span class="ty">StatusConflict</span>, <span class="st">"username_taken"</span>, <span class="st">"このユーザー名は既に使われています。別の名前を選んでください。"</span>)
+	<span class="kw">case</span> errors.Is(err, store.ErrEmailTaken):
+		writeError(w, http.<span class="ty">StatusConflict</span>, <span class="st">"email_taken"</span>, <span class="st">"このメールアドレスは既に登録されています。ログインをお試しください。"</span>)
+	<span class="kw">default</span>:
+		slog.Error(<span class="st">"internal error"</span>, <span class="st">"err"</span>, err)
+		writeError(w, http.<span class="ty">StatusInternalServerError</span>, <span class="st">"internal"</span>, <span class="st">"サーバ内部でエラーが発生しました。時間をおいて再度お試しください。"</span>)
+	}
+}
+
+<span class="cm">// decodeBody はJSONボディを読み取る。失敗時はエラーレスポンスまで書いて false を返す。</span>
+<span class="kw">func</span> decodeBody(w http.<span class="ty">ResponseWriter</span>, r *http.<span class="ty">Request</span>, v <span class="ty">any</span>) <span class="ty">bool</span> {
+	<span class="kw">if</span> err := json.NewDecoder(http.MaxBytesReader(w, r.Body, <span class="st">1</span>&lt;&lt;<span class="st">20</span>)).Decode(v); err != <span class="kw">nil</span> {
+		writeError(w, http.<span class="ty">StatusBadRequest</span>, <span class="st">"bad_request"</span>, <span class="st">"リクエストの形式が正しくありません。"</span>)
+		<span class="kw">return</span> <span class="kw">false</span>
+	}
+	<span class="kw">return</span> <span class="kw">true</span>
+}</code></pre>
+
+    <p>4つの道具が入っています。<code>writeJSON</code> は成功応答の基本形——<code>Content-Type: application/json</code> ヘッダを付け、ステータスコードを書き、渡された値 <code>v</code> を JSON に符号化して返します。第1引数の <code>status</code> でコードを指定するので、作成なら <code>201</code>、取得なら <code>200</code> と使い分けられます。<code>v</code> が <code>nil</code> なら本文を書かない（<code>204</code> のような本文なし応答用）。</p>
+    <p><code>errorBody</code> / <code>apiError</code> は<strong>エラーレスポンスの形</strong>で、<code>{"error": {"code": "...", "message": "..."}}</code> という JSON になります。<code>writeError</code> はそれを組み立てて返す薄いラッパー。コメントの「<strong>利用者が次にとるべき行動が分かるメッセージ</strong>」が方針で、<code>code</code>（機械が分岐するための短い識別子）と <code>message</code>（人間が読む日本語）の<strong>両方</strong>を返すのがポイントです。フロントは <code>code</code> で処理を分け、ユーザーには <code>message</code> をそのまま見せられます。</p>
+
+    <p>この章で最も重要なのが <code>writeStoreError</code> です。<strong><code>store</code> 層のドメインエラーを、対応する HTTP ステータスへ翻訳する対応表</strong>になっています。Step 3 で <code>store</code> が <code>ErrNotFound</code> や <code>ErrForbidden</code> を返したのは、まさにここで受けるためです。</p>
+
+    <table>
+      <thead><tr><th>ドメインエラー（store）</th><th>HTTP ステータス</th><th>code</th></tr></thead>
+      <tbody>
+        <tr><td><code>ErrNotFound</code></td><td>404 Not Found</td><td><code>not_found</code></td></tr>
+        <tr><td><code>ErrForbidden</code></td><td>403 Forbidden</td><td><code>forbidden</code></td></tr>
+        <tr><td><code>ErrSelfFollow</code></td><td>400 Bad Request</td><td><code>self_follow</code></td></tr>
+        <tr><td><code>ErrUsernameTaken</code></td><td>409 Conflict</td><td><code>username_taken</code></td></tr>
+        <tr><td><code>ErrEmailTaken</code></td><td>409 Conflict</td><td><code>email_taken</code></td></tr>
+        <tr><td>（それ以外）</td><td>500 Internal Server Error</td><td><code>internal</code></td></tr>
+      </tbody>
+    </table>
+
+    <p><code>errors.Is(err, store.ErrNotFound)</code> は、<strong>返ってきたエラーが目的の番兵エラーか</strong>を確かめる Go の標準的な照合です（第00章 <code>store.go</code> で定義した <code>Err</code> 群を、ここで一致判定しています）。投稿削除で他人の投稿を触れば <code>ErrForbidden</code> → <code>403</code>、無い投稿なら <code>ErrNotFound</code> → <code>404</code>、というのがこの表の通りに実現します。<code>ErrSelfFollow</code> は第03章、<code>ErrUsernameTaken</code> / <code>ErrEmailTaken</code>（<code>409 Conflict</code>）は第01章のサインアップで効きます。</p>
+    <p>最後の <code>default</code> が肝心です。<strong>想定していないエラー</strong>——DB の接続断など——が来たら、<code>slog.Error</code> で<strong>サーバのログには詳細を残しつつ</strong>、クライアントには <code>500</code> と当たり障りのない「サーバ内部でエラーが発生しました」だけを返します。内部のエラー詳細を外に出さないのは、実装の手掛かりを攻撃者に与えないためです。<strong>詳細はログへ、外には汎用メッセージを</strong>、という分離です。</p>
+
+    <p>4つ目の <code>decodeBody</code> は、リクエストの JSON ボディを Go の構造体に読み込む道具です。第01章のサインアップでも <code>if !decodeBody(w, r, &amp;req) { return }</code> と使いました。JSON の書式が壊れていれば、中で <code>400</code> エラーまで書いて <code>false</code> を返すので、呼び出し側は <code>false</code> なら黙って <code>return</code> するだけで済みます。ここに一つ、地味に重要な防御が仕込まれています。</p>
+
+    <div class="box hazard"><div class="box-k">⚠ 落とし穴 — <code>http.MaxBytesReader</code> でボディの上限を必ず設ける</div>
+      <p><code>decodeBody</code> は素の <code>r.Body</code> を読まず、<code>http.MaxBytesReader(w, r.Body, 1&lt;&lt;20)</code> で<strong>包んで</strong>から読んでいます。<code>1&lt;&lt;20</code> は <code>1 << 20</code> = <strong>1MiB（約100万バイト）</strong>。これは「リクエストボディを最大1MiBまでしか読まない」という上限です。<br>
+      もし上限を設けないと、攻撃者が<strong>数GBの巨大なボディ</strong>を送りつけてきたとき、サーバがそれを全部メモリに読み込もうとして<strong>メモリを食い尽くし、サービスが停止</strong>しかねません（DoS 攻撃の一種）。<code>MaxBytesReader</code> は上限を超えた時点で読み取りをエラーにするので、巨大ボディは <code>decodeBody</code> の中で弾かれ <code>400</code> になります。投稿本文はたかだか280文字、それを JSON で包んでも数KB——1MiB もあれば十分すぎる。<strong>外から受け取るボディには、必ず読み取り上限を掛ける</strong>のが、公開サーバの基本作法です。</p>
+    </div>
+
+    <h2 class="step" id="step-7"><span class="step-no">Step 7</span>ハンドラを組んで動かす — post_handlers.go と curl</h2>
+    <p>部品が出揃いました——検証（<code>validate.go</code>）・保存（<code>posts.go</code>）・公開形（<code>dto.go</code>）・応答（<code>respond.go</code>）。最後に、それらを HTTP の入口で束ねる<strong>ハンドラ</strong>を組みます。<code>post_handlers.go</code> のうち、この章で見るのは <code>parsePostID</code> と、作成・取得・削除の3ハンドラです。まず作成から。</p>
+
+    <div class="file-tag">src/backend/internal/api/post_handlers.go（作成）</div>
+    <pre><code><span class="kw">type</span> <span class="ty">createPostRequest</span> <span class="kw">struct</span> {
+	Body      <span class="ty">string</span> <span class="st">`json:"body"`</span>
+	ReplyToID *<span class="ty">int64</span> <span class="st">`json:"reply_to_id"`</span>
+}
+
+<span class="cm">// POST /api/posts — 投稿作成（FR-5）・リプライ作成（FR-11）</span>
+<span class="kw">func</span> (s *<span class="ty">Server</span>) handleCreatePost(w http.<span class="ty">ResponseWriter</span>, r *http.<span class="ty">Request</span>) {
+	<span class="kw">var</span> req createPostRequest
+	<span class="kw">if</span> !decodeBody(w, r, &amp;req) {
+		<span class="kw">return</span>
+	}
+	body, ok := validatePostBody(req.Body)
+	<span class="kw">if</span> !ok {
+		writeError(w, http.<span class="ty">StatusBadRequest</span>, <span class="st">"invalid_body"</span>, <span class="st">"本文は1〜280文字で入力してください。"</span>)
+		<span class="kw">return</span>
+	}
+	<span class="cm">// リプライは1階層のみ（FR-11）：リプライへのリプライは弾く</span>
+	<span class="kw">if</span> req.ReplyToID != <span class="kw">nil</span> {
+		parent, err := s.store.GetPost(r.Context(), *req.ReplyToID)
+		<span class="kw">if</span> err != <span class="kw">nil</span> {
+			writeStoreError(w, err)
+			<span class="kw">return</span>
+		}
+		<span class="kw">if</span> parent.ReplyToID != <span class="kw">nil</span> {
+			writeError(w, http.<span class="ty">StatusBadRequest</span>, <span class="st">"nested_reply"</span>, <span class="st">"リプライへのリプライはできません。元の投稿に返信してください。"</span>)
+			<span class="kw">return</span>
+		}
+	}
+	p, err := s.store.CreatePost(r.Context(), currentUserID(r), body, req.ReplyToID)
+	<span class="kw">if</span> err != <span class="kw">nil</span> {
+		writeStoreError(w, err)
+		<span class="kw">return</span>
+	}
+	out, err := s.toPostJSONs(r.Context(), []store.<span class="ty">Post</span>{*p}, currentUserID(r))
+	<span class="kw">if</span> err != <span class="kw">nil</span> {
+		writeStoreError(w, err)
+		<span class="kw">return</span>
+	}
+	writeJSON(w, http.<span class="ty">StatusCreated</span>, out[<span class="st">0</span>])
+}</code></pre>
+
+    <p><code>handleCreatePost</code> は、この章のすべての部品が合流する場所です。流れは<strong>「読む → 検証 → 保存 → 公開形にして返す」</strong>。<code>decodeBody</code> でボディを <code>createPostRequest</code> に読み込み、<code>validatePostBody</code> で本文を検証（外れたら <code>400 invalid_body</code>）。検証を抜けたら <code>s.store.CreatePost(r.Context(), currentUserID(r), body, req.ReplyToID)</code> で保存します。ここで<strong>作者は <code>currentUserID(r)</code></strong>——第01章のミドルウェア <code>requireAuth</code> が <code>context</code> に載せた「ログイン中のユーザーID」です。クライアントが送ってきた値ではなく、<strong>サーバが認証から得た本人のID</strong>を使うので、「他人になりすまして投稿する」ことができません。最後に <code>toPostJSONs</code> で公開形（<code>PostJSON</code>）にして、<code>writeJSON(w, http.StatusCreated, out[0])</code> で <strong><code>201 Created</code></strong> を返す。作成成功は <code>200</code> ではなく <code>201</code>（新しいリソースを作った）を使うのが HTTP の作法です。</p>
+    <p>途中の <code>if req.ReplyToID != nil { ... }</code> は<strong>リプライ（返信）</strong>の分岐です。<code>reply_to_id</code> が指定されていたら、その親投稿を引き、<strong>親がすでにリプライなら（<code>parent.ReplyToID != nil</code>）</strong>「リプライへのリプライ」を <code>400 nested_reply</code> で弾く——Chirp はリプライを<strong>1階層</strong>に限る設計です。この分岐は本章では軽く触れるにとどめ、<strong>リプライの全体像は第05章</strong>で扱います。この章では「通常の投稿は <code>reply_to_id</code> が <code>nil</code> なので、この <code>if</code> を素通りする」と見ておけば十分です。</p>
+
+    <p>次に、ID をパスから取り出す小道具と、取得・削除です。</p>
+
+    <div class="file-tag">src/backend/internal/api/post_handlers.go（parsePostID / 取得 / 削除）</div>
+    <pre><code><span class="cm">// parsePostID はパスの {id} を読み取る。</span>
+<span class="kw">func</span> parsePostID(w http.<span class="ty">ResponseWriter</span>, r *http.<span class="ty">Request</span>) (<span class="ty">int64</span>, <span class="ty">bool</span>) {
+	id, err := strconv.ParseInt(r.PathValue(<span class="st">"id"</span>), <span class="st">10</span>, <span class="st">64</span>)
+	<span class="kw">if</span> err != <span class="kw">nil</span> || id &lt;= <span class="st">0</span> {
+		writeError(w, http.<span class="ty">StatusNotFound</span>, <span class="st">"not_found"</span>, <span class="st">"投稿が見つかりません。"</span>)
+		<span class="kw">return</span> <span class="st">0</span>, <span class="kw">false</span>
+	}
+	<span class="kw">return</span> id, <span class="kw">true</span>
+}
+
+<span class="cm">// GET /api/posts/{id}</span>
+<span class="kw">func</span> (s *<span class="ty">Server</span>) handleGetPost(w http.<span class="ty">ResponseWriter</span>, r *http.<span class="ty">Request</span>) {
+	id, ok := parsePostID(w, r)
+	<span class="kw">if</span> !ok {
+		<span class="kw">return</span>
+	}
+	p, err := s.store.GetPost(r.Context(), id)
+	<span class="kw">if</span> err != <span class="kw">nil</span> {
+		writeStoreError(w, err)
+		<span class="kw">return</span>
+	}
+	out, err := s.toPostJSONs(r.Context(), []store.<span class="ty">Post</span>{*p}, s.optionalUserID(r))
+	<span class="kw">if</span> err != <span class="kw">nil</span> {
+		writeStoreError(w, err)
+		<span class="kw">return</span>
+	}
+	writeJSON(w, http.<span class="ty">StatusOK</span>, out[<span class="st">0</span>])
+}
+
+<span class="cm">// DELETE /api/posts/{id} — 自分の投稿のみ（FR-6）</span>
+<span class="kw">func</span> (s *<span class="ty">Server</span>) handleDeletePost(w http.<span class="ty">ResponseWriter</span>, r *http.<span class="ty">Request</span>) {
+	id, ok := parsePostID(w, r)
+	<span class="kw">if</span> !ok {
+		<span class="kw">return</span>
+	}
+	<span class="kw">if</span> err := s.store.DeletePost(r.Context(), id, currentUserID(r)); err != <span class="kw">nil</span> {
+		writeStoreError(w, err)
+		<span class="kw">return</span>
+	}
+	w.WriteHeader(http.<span class="ty">StatusNoContent</span>)
+}</code></pre>
+
+    <p><code>parsePostID</code> は、URL の <code>/api/posts/<strong>42</strong></code> の <code>42</code> を取り出す小道具です。<code>r.PathValue("id")</code> でパスの <code>{id}</code> 部分（文字列）を得て、<code>strconv.ParseInt(..., 10, 64)</code> で <code>int64</code> に変換。数値でない・0以下なら <code>404</code> を返して <code>false</code>。3つのハンドラが冒頭で <code>id, ok := parsePostID(w, r); if !ok { return }</code> と使い回します。</p>
+    <p><code>handleGetPost</code> は取得です。<code>parsePostID</code> → <code>s.store.GetPost</code> → <code>toPostJSONs</code> → <code>writeJSON(..., http.StatusOK, ...)</code> で <strong><code>200 OK</code></strong>。ここで注目は集計に渡す第3引数が <code>s.optionalUserID(r)</code> であることです。投稿の取得は<strong>ログインしていなくても見られる</strong>（公開）ので、第01章の <code>optionalUserID</code>——未ログインなら <code>0</code> を返す——を使います。ログイン中なら「自分がいいね済みか（<code>LikedByMe</code>）」も付き、未ログインなら <code>0</code> なので常に <code>false</code>。認証を<strong>必須にしない</strong>のがポイントで、対して <code>handleCreatePost</code> / <code>handleDeletePost</code> は <code>currentUserID(r)</code>（＝ <code>requireAuth</code> で認証必須）を使います。この非対称が、ルーティング（<code>server.go</code>）にも表れています。</p>
+    <pre><code>	m.HandleFunc(<span class="st">"POST /api/posts"</span>, s.requireAuth(s.handleCreatePost))
+	m.HandleFunc(<span class="st">"GET /api/posts/{id}"</span>, s.handleGetPost)
+	m.HandleFunc(<span class="st">"DELETE /api/posts/{id}"</span>, s.requireAuth(s.handleDeletePost))</code></pre>
+    <p>作成と削除は <code>s.requireAuth(...)</code> で包まれて<strong>ログイン必須</strong>、取得は包まれず<strong>誰でも可</strong>。第01章で作った関門が、ここで機能ごとに掛け分けられています。</p>
+    <p><code>handleDeletePost</code> は削除です。<code>parsePostID</code> で ID を取り、<code>s.store.DeletePost(r.Context(), id, currentUserID(r))</code> を呼ぶだけ。<strong>「本人の投稿のみ」の判定は Step 3 の <code>DeletePost</code> に任せて</strong>いるので、ハンドラは <code>ownerID</code> の照合を書きません（他人の投稿なら <code>ErrForbidden</code> が返り、<code>writeStoreError</code> が <code>403</code> に変換）。成功したら本文を返す必要がないので <code>w.WriteHeader(http.StatusNoContent)</code> で <strong><code>204 No Content</code></strong>。取得系の<code>parsePostID</code>/<code>parsePageParams</code>やタイムライン等の他ハンドラ——<code>handleTimeline</code>（第04章）、<code>handleListReplies</code>（第05章）、<code>handleLike</code> / <code>handleUnlike</code>（第06章）——は、それぞれの章で扱います。</p>
+
+    <div class="box do"><div class="box-k">▸ 動かして確認 — 投稿を作る → 取る → 消す</div>
+      <p>第01章の手順でログイン済みの Cookie（<code>cookies.txt</code>）を用意しておきます。日本語の本文は、必ず <code>-d @-</code> で<strong>標準入力から</strong>流し込みます（このプロジェクト固有の注意。後述）。</p>
+      <pre class="term"><code><span class="cm"># 1. 投稿を作成（201 Created・要ログイン Cookie）</span>
+<span class="ps">$</span> curl -sS -b cookies.txt -X POST http://localhost:8080/api/posts \
+    -H <span class="st">"Content-Type: application/json"</span> -d @- &lt;&lt;'JSON'
+{"body":"はじめての投稿です"}
+JSON
+<span class="out">{"id":1,"body":"はじめての投稿です","created_at":"2026-07-14T10:00:00Z","author":{"id":1,"username":"alice","display_name":"Alice","bio":"","created_at":"0001-01-01T00:00:00Z"},"like_count":0,"liked_by_me":false,"reply_count":0}</span>
+
+<span class="cm"># 2. 取得（200 OK・ログイン不要）</span>
+<span class="ps">$</span> curl -sS http://localhost:8080/api/posts/1
+<span class="out">{"id":1,"body":"はじめての投稿です","created_at":"2026-07-14T10:00:00Z","author":{"id":1,"username":"alice","display_name":"Alice","bio":"","created_at":"0001-01-01T00:00:00Z"},"like_count":0,"liked_by_me":false,"reply_count":0}</span>
+
+<span class="cm"># 3. 削除（204 No Content・本人のみ）</span>
+<span class="ps">$</span> curl -sS -b cookies.txt -X DELETE -o /dev/null -w <span class="st">"%{http_code}\n"</span> http://localhost:8080/api/posts/1
+<span class="out">204</span></code></pre>
+      <p>作成で <code>201</code> のボディ（<code>reply_to_id</code> が<strong>無い</strong>ことに注目——<code>omitempty</code> が効いています）、取得で同じ投稿、削除で <code>204</code> が返れば、投稿の一往復が通っています。返る JSON に <code>email</code> も <code>password_hash</code> も無いのも確認してください（<code>toUserJSON</code> / <code>PostJSON</code> が公開用に絞っています）。</p>
+    </div>
+
+    <div class="box do"><div class="box-k">▸ 動かして確認 — 検証と認可が効くか（異常系）</div>
+      <p>空・超過・他人の投稿を叩いて、正しく弾かれることを確かめます。</p>
+      <pre class="term"><code><span class="cm"># 空の本文 → 400 invalid_body（validatePostBody が弾く）</span>
+<span class="ps">$</span> curl -sS -b cookies.txt -X POST http://localhost:8080/api/posts \
+    -H <span class="st">"Content-Type: application/json"</span> -d <span class="st">'{"body":"   "}'</span>
+<span class="out">{"error":{"code":"invalid_body","message":"本文は1〜280文字で入力してください。"}}</span>
+
+<span class="cm"># 281文字 → 400 invalid_body</span>
+<span class="ps">$</span> python -c <span class="st">"print('{\"body\":\"' + 'a'*281 + '\"}')"</span> | \
+    curl -sS -b cookies.txt -X POST http://localhost:8080/api/posts \
+    -H <span class="st">"Content-Type: application/json"</span> -d @-
+<span class="out">{"error":{"code":"invalid_body","message":"本文は1〜280文字で入力してください。"}}</span>
+
+<span class="cm"># 他人の投稿を削除 → 403 forbidden（DeletePost の ownerID 照合）</span>
+<span class="cm"># 前のボックスで id=1 は消したので、まず alice が「消される役」を1本作り直す</span>
+<span class="ps">$</span> curl -sS -b cookies.txt -X POST http://localhost:8080/api/posts \
+    -H <span class="st">"Content-Type: application/json"</span> -d @- &lt;&lt;<span class="st">'JSON'</span>
+{"body":"消されない投稿"}
+JSON
+<span class="out">{"id":2,"body":"消されない投稿",...,"author":{"id":1,"username":"alice",...},...}</span>
+
+<span class="cm"># 次に「別人」が要る。bob を作り、Cookie を別ファイルに保存する</span>
+<span class="ps">$</span> curl -sS -c bob_cookies.txt -X POST http://localhost:8080/api/auth/signup \
+    -H <span class="st">"Content-Type: application/json"</span> -d @- &lt;&lt;<span class="st">'JSON'</span>
+{"username":"bob","display_name":"Bob","email":"bob@example.com","password":"correct horse battery staple"}
+JSON
+<span class="out">{"id":2,"username":"bob","display_name":"Bob","bio":"","created_at":"..."}</span>
+
+<span class="cm"># bob が alice の投稿(id=2)を消そうとする → 拒まれる</span>
+<span class="ps">$</span> curl -sS -b bob_cookies.txt -X DELETE http://localhost:8080/api/posts/2
+<span class="out">{"error":{"code":"forbidden","message":"この操作を行う権限がありません。"}}</span>
+
+<span class="cm"># 存在しない投稿 → 404 not_found</span>
+<span class="ps">$</span> curl -sS http://localhost:8080/api/posts/99999
+<span class="out">{"error":{"code":"not_found","message":"対象が見つかりません。削除された可能性があります。"}}</span></code></pre>
+      <p>空・超過は <code>400</code>、他人の削除は <code>403</code>、無い投稿は <code>404</code>。Step 3〜6 で仕込んだ検証・認可・エラー変換が、狙い通り機能しています。</p>
+      <div class="box hazard"><div class="box-k">⚠ 落とし穴 — <code>403</code>（権限がない）と <code>404</code>（存在しない）は、順番を間違えると入れ替わる</div>
+        <p>上で <strong>わざわざ投稿を作り直した</strong>のには理由があります。前のボックスの手順3で <code>id=1</code> を<strong>削除済み</strong>なので、そのまま <code>bob</code> に <code>id=1</code> を消させると、返るのは <code>403</code> ではなく <strong><code>404</code></strong> です。<code>DeletePost</code>（Step 3）は<strong>まず投稿を探し、無ければ <code>ErrNotFound</code> で即座に戻る</strong>——持ち主の照合はその後だからです。</p>
+        <p>つまり「他人のものだから拒まれた」のか「そもそも無いから拒まれた」のかで、返るコードが違う。<strong>認可の検証をするときは、対象が確かに存在していることを先に用意する</strong>——さもないと、通ったつもりで別のものを試していることになります。あなたの環境で <code>id</code> が違う場合は、作成時に返った <code>id</code> に読み替えてください。</p>
+      </div>
+    </div>
+
+    <div class="box hazard"><div class="box-k">⚠ 落とし穴（このプロジェクト固有）— 日本語ボディは必ず <code>-d @-</code> で stdin から渡す</div>
+      <p>上の作成 <code>curl</code> で、本文を <code>-d '{"body":"はじめての投稿です"}'</code> と<strong>引数に直接書かず</strong>、<code>-d @-</code> と<strong>ヒアドキュメント（stdin）</strong>で渡しているのには理由があります。この環境（Windows の git-bash からネイティブの <code>curl.exe</code> を呼ぶ）では、<strong>日本語を含むボディを引数で渡すと cp932 に化けて</strong>サーバに壊れた JSON が届き、<code>400 bad_request</code>（<code>decodeBody</code> の失敗）になります。本文に日本語を入れて試すときは、必ず <code>-d @-</code> で標準入力から流し込んでください。英数字だけなら引数（例の「空の本文」テスト）でも通りますが、<strong>癖として常に <code>-d @-</code></strong> にしておくのが安全です（Python から叩くなら <code>PYTHONUTF8=1</code> を立てる）。</p>
+    </div>
+
+    <div class="box do"><div class="box-k">▸ 動かして確認 — 本文検証のテストを通す</div>
+      <p>この章の受け入れ基準（280文字ちょうどは通る・281文字は超過・絵文字も文字数で数える）は、<code>validate_test.go</code> の <code>TestValidatePostBody</code> が機械で確かめます。</p>
+      <pre class="term"><code><span class="ps">$</span> cd src/backend
+<span class="ps">$</span> go test ./internal/api -run TestValidatePostBody -v
+<span class="out">=== RUN   TestValidatePostBody
+--- PASS: TestValidatePostBody (0.00s)
+PASS
+ok      twitter-sns/internal/api      0.312s</span></code></pre>
+      <p>このテストは6ケースを回します——「通常の投稿」「280文字ちょうど（通る）」「281文字（超過で弾く）」「空文字（弾く）」「空白のみ（<code>TrimSpace</code> で空になり弾く）」「絵文字🎉を280個（<strong>rune で数えるので通る</strong>）」。とくに最後のケースが、Step 4 の <code>utf8.RuneCountInString</code> が効いている証拠です。同じファイルの <code>TestValidateUsername</code> / <code>TestValidateEmail</code> / <code>TestValidatePassword</code>（第01章のサインアップ検証）も、<code>-run</code> を外して <code>go test ./internal/api -v</code> とすれば一緒に走ります。</p>
+    </div>
+
+    <h2>つまずき FAQ</h2>
+    <details class="qa"><summary>なぜ文字数を <code>len(body)</code> でなく <code>utf8.RuneCountInString</code> で数えるの?</summary>
+      <div class="qa-body"><p>Go の文字列は<strong>バイト列</strong>で、<code>len(body)</code> は<strong>バイト数</strong>を返すからです。ASCII なら1文字＝1バイトで一致しますが、日本語は1文字3バイト、絵文字は4バイトが普通。<code>len</code> で「280まで」を判定すると、日本語なら約93文字、絵文字なら70文字で上限に達してしまい、Twitter の「280文字」の感覚と合いません。<code>utf8.RuneCountInString</code> は <strong>rune（おおよそ人間が数える1文字）の数</strong>を返すので、「あ」も「🎉」も「a」も等しく1文字。<code>TestValidatePostBody</code> の「🎉を280個は通る」ケースが、この違いをそのまま検証しています。多言語・絵文字を扱う SNS では rune で数えるのが必須です。</p></div>
+    </details>
+    <details class="qa"><summary>投稿削除で、無い投稿は <code>404</code>・他人の投稿は <code>403</code> と区別しているけど、どう使い分ける?</summary>
+      <div class="qa-body"><p>そのリソースの<strong>存在を秘密にすべきか</strong>で決まります。Chirp の投稿は<strong>公開</strong>されていて誰でも読めるので、存在自体は秘密ではありません。だから「投稿は有るが、消せるのは本人だけ」を <code>403 forbidden</code> で正直に伝える方が、利用者に分かりやすい。<code>DeletePost</code> は <code>SELECT user_id</code> で持ち主を引き、行が無ければ <code>ErrNotFound</code>（→404）、持ち主が違えば <code>ErrForbidden</code>（→403）と返し分けています。<br>一方、<strong>他人に存在すら隠したい非公開リソース</strong>（下書き・非公開メモ等）では、他人が触ったときに <code>403</code> を返すと「それは存在する」と教えてしまう。そういう文脈ではあえて <code>404</code> に寄せて存在を隠します。公開投稿の Chirp は素直に区別する、という判断です。</p></div>
+    </details>
+    <details class="qa"><summary>XSS（投稿に <code>&lt;script&gt;</code> を仕込む攻撃）は、どこで防いでいるの? サーバでエスケープしていないけど大丈夫?</summary>
+      <div class="qa-body"><p>大丈夫です。Chirp は<strong>サーバでは本文を一切加工せず、そのまま保存・返却</strong>します（<code>CreatePost</code> はプレースホルダで安全に <code>INSERT</code> するだけ、<code>PostJSON</code> も <code>Body</code> をそのまま載せるだけ）。では <code>&lt;script&gt;alert(1)&lt;/script&gt;</code> という本文を投稿されたら? ——防御は<strong>描画するフロント側</strong>にあります。第08章で使う <strong>React は、<code>{post.body}</code> のように値を埋め込むとき、必ず HTML として<strong>エスケープ</strong>してからテキストとして描画</strong>します。つまり <code>&lt;script&gt;</code> は「<code>&amp;lt;script&amp;gt;</code>」という<strong>ただの文字列として画面に表示</strong>され、スクリプトとして実行されることはありません。<br>ポイントは<strong>「サーバは素通しで保存し、出力する瞬間に文脈に応じてエスケープする」</strong>という役割分担です。保存時にエスケープしてしまうと、本文を別の場所（メール・API・CSV 等）で使うとき二重エスケープで壊れる。<strong>「エスケープは、出力する場所（HTML なら React）が、その文脈に合わせて行う」</strong>のが正しい設計で、Chirp はそれに従っています（ただし React で意図的に <code>dangerouslySetInnerHTML</code> を使うと、この自動エスケープが無効になるので使わない、が鉄則です）。</p></div>
+    </details>
+
+    <h2>理解度チェック</h2>
+    <p>次の問いに<strong>自分の言葉で</strong>答えられたら、この章は卒業です。</p>
+    <details class="qa"><summary>1. 「投稿」というデータが通り抜ける3つの姿（構造体・テーブル・JSON）を、Chirp のどの型が担うか説明せよ。</summary>
+      <div class="qa-body"><p><strong>ドメインの形（Go 構造体）</strong>は <code>store.Post</code>——テーブルの列に加え、JOIN で持ってきた作者名（<code>Username</code> / <code>DisplayName</code>）も持つ。<strong>永続化の形（テーブル行）</strong>は <code>posts</code> テーブルで、<code>postSelect</code> の <code>SELECT ... JOIN users</code> と <code>scanPosts</code> が行↔構造体を橋渡しする。<strong>外向きの形（JSON）</strong>は <code>PostJSON</code>——作者を <code>Author</code> に入れ子化し、集計値（<code>LikeCount</code> 等）を足し、<code>email</code> やハッシュは持たない。この変換を <code>toPostJSONs</code> が担う。テーブル・ドメイン・公開形は<strong>形が違う</strong>ので、境界ごとに専用の型を置いて詰め替えるのが要点。</p></div>
+    </details>
+    <details class="qa"><summary>2. 本文の長さ制限を「3か所」に重ねる多層防御とは、具体的にどこか。なぜ1か所ではダメか。</summary>
+      <div class="qa-body"><p><strong>(1) フロント</strong>（React の文字数カウンタ、第08章）、<strong>(2) サーバ</strong>（<code>validatePostBody</code> の <code>1〜280</code> 判定）、<strong>(3) DB</strong>（<code>posts.body</code> の <code>CHECK (char_length BETWEEN 1 AND 280)</code>、第00章）の3か所。フロントの検証は<strong>UX のためで防御ではない</strong>——攻撃者は React を通さず <code>curl</code> で直接サーバを叩ける（実際 Step 7 でそうした）。だからサーバで必ず再検証し、万一サーバにバグがあっても DB の <code>CHECK</code> が最後の砦になる。「入口を一つに頼らない」＝各層が独立して守るので、1枚破れても次が止める。フロントの入力チェックは絶対に信用しない。</p></div>
+    </details>
+    <details class="qa"><summary>3. 投稿作成で、作者IDにクライアントの送信値ではなく <code>currentUserID(r)</code> を使うのはなぜか。SQL の <code>$1, $2</code> を使うのはなぜか。</summary>
+      <div class="qa-body"><p><strong>作者ID</strong>: <code>currentUserID(r)</code> は第01章のミドルウェア <code>requireAuth</code> が JWT の検証を通して <code>context</code> に載せた「認証済み本人のID」。もしクライアントが送る値を信じて作者にすると、<strong>他人になりすまして投稿できて</strong>しまう。だからサーバが認証から得たIDだけを使う。<br><strong><code>$1, $2</code>（プレースホルダ）</strong>: 値を SQL 文に文字列連結すると、本文に <code>'); DROP TABLE posts;--</code> のような文字列を仕込まれたとき SQL の一部として実行される（<strong>SQL インジェクション</strong>）。プレースホルダで渡すと値は「値」としてのみ扱われ、SQL としては解釈されない。ユーザー入力は絶対に連結せず、必ず <code>$n</code> で渡す。</p></div>
+    </details>
+
+    <h2>まとめ — 次の層へ</h2>
+    <p>この章で、Chirp は初めて「つぶやき」で満たされ始めました。投稿は <code>store.Post</code> という<strong>作者名まで持つドメインの形</strong>になり、<code>posts.go</code> の <code>CreatePost</code> / <code>GetPost</code> / <code>DeletePost</code> が<strong>プレースホルダで安全に</strong>書き・読み・消す（他人の投稿は <code>ErrForbidden</code> で門前払い、消えた投稿にぶら下がるものは <code>ON DELETE CASCADE</code> が連鎖削除）。本文は <code>validatePostBody</code> が <strong>rune で数えて</strong>1〜280文字に絞り、フロント・サーバ・DB の<strong>3層</strong>で重ねて守る。外へ返すときは <code>PostJSON</code> という<strong>公開専用の形</strong>に詰め替えて email もハッシュも出さず、集計は <code>toPostJSONs</code> がバッチで付ける。応答の土台 <code>respond.go</code> が、<code>store</code> のドメインエラーを <code>404</code> / <code>403</code> / <code>409</code> へ翻訳する。<strong>構造体 → SQL → JSON の一気通貫</strong>と<strong>多層防御</strong>——この2つの型は、以降のすべての機能で繰り返し使う背骨です。</p>
+    <p>次の第03章では、単独で存在していたユーザーたちを<strong>線でつなぎます</strong>。「誰が誰をフォローしているか」を <code>follows</code> テーブルに刻み（第00章で見た「自分自身はフォローできない」<code>CHECK</code> と2列主キーがここで効きます）、フォロー・アンフォロー、フォロワー／フォロイー一覧を組む。この「つながり」が、第04章の<strong>タイムライン</strong>——「フォローしている人の投稿だけが流れてくる」——の土台になります。孤立していた点が、ネットワークになり始める章です。</p>
+
+    <div class="chap-foot">
+      <a class="pager" href="01-auth.html"><span class="dir">← 前へ</span>第01章 · ユーザーという存在（認証）</a>
+      <a class="pager next" href="03-follow.html"><span class="dir">次へ →</span>第03章 · つながる（フォロー）</a>
+    </div>
+  </main>
+</div>
+</body>
+</html>

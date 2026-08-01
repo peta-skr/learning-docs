@@ -1,0 +1,456 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>第09章 仕上げと次の一歩 — 動画サービスをつくる</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500;600&family=Source+Serif+4:opsz,wght@8..60,400;8..60,600;8..60,700&family=Noto+Serif+JP:wght@400;600;700&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<div class="shell">
+
+  <aside class="spine">
+    <a class="wordmark" href="index.html">VIDEO-STREAM · from scratch</a>
+    <div class="book-title">動画サービスを<br>つくる</div>
+    <div class="book-sub">Go と ffmpeg で presigned から HLS 配信まで</div>
+
+    <div class="legend"><span>受け取る <b>↓</b></span><span>届ける <b>↑</b></span></div>
+
+    <nav aria-label="目次">
+      <ul class="toc">
+        <li><a class="nav-item" href="index.html"><span class="nav-num">序</span><span class="nav-label">はじめに・準備<span class="nav-tag">Setup</span></span></a></li>
+        <li><a class="nav-item" href="00-setup.html"><span class="nav-num">00</span><span class="nav-label">土台をつくる<span class="nav-tag">Setup</span></span></a></li>
+        <li><a class="nav-item" href="01-auth.html"><span class="nav-num">01</span><span class="nav-label">人を扱う<span class="nav-tag">Auth</span></span></a></li>
+        <li><a class="nav-item" href="02-upload.html"><span class="nav-num">02</span><span class="nav-label">動画を受け取る<span class="nav-tag">Upload</span></span></a></li>
+        <li><a class="nav-item" href="03-transcode.html"><span class="nav-num">03</span><span class="nav-label">動画を変換する<span class="nav-tag">Transcode</span></span></a></li>
+        <li><a class="nav-item" href="04-deliver.html"><span class="nav-num">04</span><span class="nav-label">動画を届ける<span class="nav-tag">Deliver</span></span></a></li>
+        <li><a class="nav-item" href="05-social.html"><span class="nav-num">05</span><span class="nav-label">反応をつくる<span class="nav-tag">Social</span></span></a></li>
+        <li><a class="nav-item" href="06-discover.html"><span class="nav-num">06</span><span class="nav-label">見つけてもらう<span class="nav-tag">Discover</span></span></a></li>
+        <li><a class="nav-item" href="07-notify.html"><span class="nav-num">07</span><span class="nav-label">つながりを届ける<span class="nav-tag">Notify</span></span></a></li>
+        <li><a class="nav-item" href="08-web.html"><span class="nav-num">08</span><span class="nav-label">画面をつける<span class="nav-tag">Web</span></span></a></li>
+        <li><a class="nav-item current" aria-current="page" href="09-beyond.html"><span class="nav-num">09</span><span class="nav-label">仕上げと次の一歩<span class="nav-tag">Beyond</span></span></a></li>
+      </ul>
+    </nav>
+
+    <div class="spine-foot">
+      各章は動画が通る道の一区間。<br>受け取る（下）から届ける（上）へ、<br>1本の動画を最後まで運びきる。
+    </div>
+  </aside>
+
+  <main class="reading">
+    <div class="progress-tag">第09章 / 全10章 · 層: Beyond · 読了目安 2〜3時間</div>
+    <div class="eyebrow"><span>Beyond</span><span class="depth">— 最上層・総仕上げ</span></div>
+    <h1>仕上げと次の一歩</h1>
+    <p class="lede">動画サービスは、もう手の中で動いています。ブラウザから 1 本の動画を上げると、それは <code>uploading</code> として生まれ、保管庫へ直接運ばれ、注文箱を経て職人に拾われ、ffmpeg で複数画質の HLS に変わり、<code>ready</code> を宣言した瞬間に視聴者へ届き、登録者へ新着通知が飛ぶ。この最終章では、まずその<strong>全行程を 1 本の動画の目線で通しで振り返り</strong>、00〜08 章で作った部品がどこでどう噛み合っているかを 1 枚の絵にまとめます。とりわけ「<strong>守りの設計</strong>」——状態遷移・fencing token・一意プレフィックス・fanout 一本化——が、分散した職人と at-least-once なキューの世界でどこで効いているかを追い直します。そして後半、この学習用サービスを<strong>本物の YouTube に近づける境界設計</strong>——CDN・クラウド移行・意図的にやらなかったこと——を「次の一歩」として提示し、最後に <strong>46 項目の E2E スモークテスト</strong>で全体を一息に検証します。</p>
+
+    <div class="box goal"><div class="box-k">◈ この章のゴール</div>
+      <p>次の 3 つを、自分の言葉で説明・確認できたら、この本は完成です。</p>
+      <ol>
+        <li>1 本の動画が <code>uploading → uploaded → processing → ready</code> を経て視聴者に届くまでの全行程を、担当した章の部品名（<code>storage.go</code> / <code>queue.go</code> / <code>transcode.go</code> / <code>media.go</code> / <code>notify.go</code>）で辿り直せる。</li>
+        <li>「守りの設計」4 本柱——状態遷移を条件つき UPDATE で回す・<code>job_generation</code> で世代を柵囲いする・成果物を実行ごと一意なプレフィックスに書く・新着通知を <code>MaybeFanoutNewVideo</code> に一本化する——が、それぞれ<strong>どの競合を防いでいるか</strong>を言える。</li>
+        <li>本物に近づける 3 つの境界——CDN でセグメントを逃がす境界（<code>media.go</code> の <code>Cache-Control</code>）・MinIO→S3 / Redis→SQS のストレージ/キュー差し替え境界・やらなかったこと（DRM・ライブ配信・レコメンド ML）——を地図として描ける。</li>
+      </ol>
+    </div>
+
+    <div class="box map"><div class="box-k">☰ この章のステップ</div>
+      <ol>
+        <li><a href="#step-1">1 本の動画の一生を通しで辿る — 全行程の再構成</a></li>
+        <li><a href="#step-2">守りの設計・4 本柱 — どの競合を、どこで防いだか</a></li>
+        <li><a href="#step-3">章 × ファイル対応表 — 部品がどこで噛み合うか</a></li>
+        <li><a href="#step-4">本物に近づける境界 (1) — キャッシュ / CDN</a></li>
+        <li><a href="#step-5">本物に近づける境界 (2) — クラウド移行（S3 / SQS / オートスケール）</a></li>
+        <li><a href="#step-6">やらなかったこと — DRM・ライブ配信・レコメンド ML</a></li>
+        <li><a href="#step-7">通しで確かめる — 46 項目の E2E スモークテスト</a></li>
+        <li><a href="#step-8">落とし穴総覧と、次の一歩</a></li>
+      </ol>
+    </div>
+
+    <h2>なぜ最後に「振り返り」と「境界」を並べるのか</h2>
+    <p>ここまでの 9 章で、部品は出そろいました。認証（第01章）・アップロード（第02章）・変換（第03章）・配信（第04章）・反応（第05章）・発見（第06章）・通知（第07章）・画面（第08章）。それぞれの章では「その部品を作ること」に集中してきたので、部品同士が<strong>どう連なって 1 本の動画を運びきるか</strong>という全体像は、まだ 1 枚の絵にはなっていません。この章の前半は、その全体像を組み直します。</p>
+    <p>そして後半は、視点を反対向きにします。前半までが「作ったものを内側から見る」なら、後半は「作らなかったものを外側から見る」——この学習用サービスと、本物の YouTube の間に横たわる谷を測ります。ただし闇雲に「あれも足りない、これも足りない」と数えるのではありません。<strong>境界がどこに引いてあるか</strong>を確かめ、その境界を跨ぐと何が置き換わるかを具体的に示します。<code>storage.go</code> を差し替えれば S3 になり、<code>queue.go</code> を差し替えれば SQS になり、<code>media.go</code> の <code>Cache-Control</code> はそのまま CloudFront に効く——「境界が切ってあるから、置き換え対象は少ない」ことを、コードで確かめます。作る前に読んでも実感の湧かない議論が、8 章ぶん手を動かした今なら「たしかにここが境界だ」と読める。それがこの最終章の狙いです。</p>
+
+    <h2 class="step" id="step-1"><span class="step-no">Step 1</span>1 本の動画の一生を通しで辿る — 全行程の再構成</h2>
+    <p>まず、1 本の動画がアップロードされてから視聴者に届くまでの全行程を、通しで辿ります。序章と第00章で「動画が通る道」の骨格を描きましたが、今なら各区間を<strong>実際のコードとテーブル列</strong>で埋められます。下の図が、この本の全景です。</p>
+
+    <div class="ascii">1 本の動画の一生 — 00〜08 章の部品が繋がる全行程
+
+  ┌─ ブラウザ (第08章 Upload.tsx) ─────────────────────────────────┐
+  │                                                                │
+  │ ①申請  POST /api/uploads ──────────▶ 受付 api (videos.go)      │
+  │                                        ├ videos 行を作る       │
+  │                                        │   status=uploading    │
+  │                                        └ storage.go PresignPut │
+  │        ◀── 合鍵(presigned PUT URL) ──────┘  （第02章）          │
+  │                                                                │
+  │ ②直PUT  PUT <合鍵> ─────────────────▶ 保管庫 MinIO             │
+  │         （動画本体は受付を通らない）    original_key に置かれる  │
+  │                                                                │
+  │ ③完了  POST /videos/{id}/complete ─▶ 受付 api (videos.go)      │
+  │                                        ├ 実物の存在を確認       │
+  │                                        ├ status→uploaded       │
+  │                                        │  job_generation+1     │
+  │                                        └ queue.go Enqueue      │
+  │        ◀── 200（投稿操作は即完了）───────┘  （第02章 NFR-2）     │
+  └────────────────────────────────────────────────────────────────┘
+                                             │ 注文箱 Redis(list)
+                                             ▼
+  ┌─ 職人 worker (cmd/worker + transcode.go) ─────────────────────┐
+  │ ④claim  Dequeue ──▶ status→processing（世代一致のときだけ）    │
+  │ ⑤変換   ffmpeg で 360p/720p/1080p の HLS ＋サムネイル          │
+  │         成果物を hls/&lt;id&gt;/g&lt;世代&gt;-&lt;乱数hex&gt;/ へ書く             │
+  │ ⑥宣言   status→ready ＋ media_prefix を確定（1文のUPDATE）     │
+  │ ⑦通知   notify.MaybeFanoutNewVideo（ready かつ public の初回） │
+  └────────────────────────────────────────────────────────────────┘
+                                             │
+  ┌─ 視聴者 (第08章 Watch.tsx + Player.tsx) ──────────────────────┐
+  │ ⑧再生  GET /videos/{id}/media/master.m3u8 ─▶ media.go         │
+  │         権限チェック → media_prefix 配下から配信（第04章）      │
+  │         hls.js が回線に応じて画質を自動選択                     │
+  │ ⑨通知  登録者の通知ベルに SSE で届く（第07章 Header.tsx）      │
+  └────────────────────────────────────────────────────────────────┘
+
+  ★ 全行程を貫く唯一の真実 = videos.status（DBの1列）</div>
+
+    <p>この図の 9 つの矢印を、担当章の言葉で読み直します。ここが本書の<strong>目次そのもの</strong>だと気づくはずです。</p>
+    <ul>
+      <li><strong>①申請（第02章）</strong> — ブラウザが <code>POST /api/uploads</code> を叩くと、受付（<code>videos.go</code>）は <code>videos</code> テーブルに <code>status = 'uploading'</code> の行を 1 つ作り、<code>storage.go</code> の <code>PresignPut</code> で「保管庫への期限つき合鍵（presigned PUT URL）」を発行して返します。<strong>動画本体はまだ 1 バイトも受付を通っていません</strong>。</li>
+      <li><strong>②直 PUT（第02章）</strong> — ブラウザはその合鍵の URL へ動画を直接 <code>PUT</code> します。宛先は保管庫（MinIO）で、受付は経由しません。これが「大容量ファイルを API サーバに通さない」という本書最初の山場の答えでした。</li>
+      <li><strong>③完了（第02章）</strong> — ブラウザが <code>POST /api/videos/{id}/complete</code> を叩くと、受付は保管庫に実物が本当に置かれたかを確認し、<code>status</code> を <code>uploaded</code> へ進め、<code>job_generation</code> を +1 して、<code>queue.go</code> で注文箱（Redis）に変換ジョブを積む<strong>だけ</strong>。ここで即座に応答が返るので、投稿操作は一瞬で完了します（NFR-2）。</li>
+      <li><strong>④claim（第03章）</strong> — 職人（<code>cmd/worker</code>）は注文箱を覗き続け、ジョブを取り出すと <code>status</code> を <code>processing</code> へ進めます。ただしこの UPDATE には <code>AND job_generation = $N</code> が付いていて、<strong>自分の世代が現在の世代と一致するときだけ</strong>成功します。</li>
+      <li><strong>⑤変換（第03章）</strong> — <code>transcode.go</code> が ffmpeg を呼び、360p/720p/1080p の HLS（4 秒セグメント＋画質別プレイリスト）とサムネイルを生成し、<strong>実行ごとに一意な</strong> <code>hls/&lt;id&gt;/g&lt;世代&gt;-&lt;乱数hex&gt;/</code> へ書き出します。マスタープレイリストは ffmpeg 任せにせず Go の <code>writeMaster</code> が生成します。</li>
+      <li><strong>⑥宣言（第03章）</strong> — 変換が成功したら、<code>status</code> を <code>ready</code> にし、同じ 1 文の UPDATE で <code>media_prefix</code> に「配信してよい成果物の置き場」を確定させます。「どの実行の成果物を配信するか」が、ここで一意に決まります。</li>
+      <li><strong>⑦通知（第07章）</strong> — <code>ready</code> かつ <code>public</code> が初めて揃った瞬間、<code>notify.MaybeFanoutNewVideo</code> が登録者への新着通知を一度だけ配ります。</li>
+      <li><strong>⑧再生（第04章）</strong> — 視聴者が動画を開くと、ブラウザは <code>GET /api/videos/{id}/media/master.m3u8</code> を叩きます。<code>media.go</code> は権限を確認し、<code>media_prefix</code> 配下からのみ配信します。<code>hls.js</code> が回線に応じて画質を自動で切り替えます。</li>
+      <li><strong>⑨通知の受信（第07章）</strong> — 登録者の画面では、通知ベルが Redis Pub/Sub → SSE の経路でリアルタイムに更新されます（<code>Header.tsx</code>）。</li>
+    </ul>
+
+    <div class="gonote"><div class="box-k">実装メモ · 「動画本体は受付を通らない」が全体を軽くする</div>
+      <p>この全行程で最も効いている設計は、<strong>動画の実体（元動画・変換後の HLS セグメント）が一度も受付（api）を経由しない</strong>ことです。アップロードはブラウザ→保管庫の直 PUT（②）、変換は職人→保管庫の直接読み書き（⑤）、配信は保管庫→視聴者（⑧、後述の CDN 化でさらに受付から剥がせる）。受付が扱うのは「合鍵の発行」「注文票を積む」「権限チェック」といった<strong>軽い意思決定</strong>だけで、重いバイト列は常に脇を流れます。だから受付は身軽なまま、大量の同時リクエストを捌けます。第00章で「API とワーカーを分ける」と決めたのと同じ思想が、ストレージの経路にも一貫して貫かれているのです。</p>
+    </div>
+
+    <h2 class="step" id="step-2"><span class="step-no">Step 2</span>守りの設計・4 本柱 — どの競合を、どこで防いだか</h2>
+    <p>Step 1 の全行程は、平和なときは 1 本道です。しかし現実には、<strong>職人はクラッシュし、注文は二重に配送され、持ち主はやり直しボタンを連打する</strong>。この本が「学習用」でありながら本気で作り込んだのは、まさにこの<strong>異常系での守り</strong>でした。<code>CLAUDE.md</code> に記録された設計判断の核心を、4 本の柱として振り返ります。それぞれが「どの競合を、どの列・どの一文で防いだか」を対で覚えると、丸ごと腑に落ちます。</p>
+
+    <h3>柱 1 — 状態遷移は「条件つき UPDATE 1 文」で回す</h3>
+    <p>動画の状態を進めるとき、素朴には「① いま <code>status</code> を読む → ② コードで判定する → ③ 新しい <code>status</code> を書く」と 3 段階でやりたくなります。<strong>これが罠でした。</strong>①と③の間に別の職人が変換を完了させて <code>ready</code> にすると、こちらの③が古い判断のまま <code>ready</code> を未完成の状態へ引き戻してしまう。読み取りと更新の隙間に、他者が割り込むのです。</p>
+    <p>本書の答えは、<strong>遷移条件を <code>WHERE</code> に畳み込んだ 1 文の条件つき UPDATE で、成否は <code>RowsAffected</code> で判定する</strong>こと。職人が「変換中」を宣言する場面（claim）は、第03章 Step 5 で読んだこの 1 文でした。</p>
+
+    <div class="file-tag">src/backend/internal/transcode/transcode.go（claim の条件つき UPDATE・第03章 Step 5 の再掲）</div>
+    <pre><code><span class="cm">-- 「読んでから判定して書く」ではなく、条件を WHERE に畳み込む</span>
+<span class="kw">UPDATE</span> videos
+   <span class="kw">SET</span> status = <span class="st">'processing'</span>, status_changed_at = now()
+ <span class="kw">WHERE</span> id = $1
+   <span class="kw">AND</span> job_generation = $2      <span class="cm">-- ← 世代が条件（柱2）</span>
+   <span class="kw">AND</span> status &lt;&gt; <span class="st">'ready'</span>       <span class="cm">-- ← 「まだ ready でない」が条件（&lt;&gt; は「等しくない」）</span></code></pre>
+
+    <p>この 1 文が成功して 1 行更新されれば claim 成功、0 行なら「誰かが先に進めた／世代が古い」ので、この職人は黙って引き下がります。<strong>読み取りと更新が原子的に一体化</strong>しているので、隙間はありません。そして必ず <code>status_changed_at = now()</code> を同時に更新する——この時刻が、柱 4 の直前で触れる「停滞救済」の根拠になります。</p>
+
+    <div class="box hazard"><div class="box-k">⚠ 落とし穴 — 条件は「<code>= 'uploaded'</code>」ではなく「<code>&lt;&gt; 'ready'</code>」</div>
+      <p>ここは素朴に書くなら <code>AND status = 'uploaded'</code>（＝「<code>uploaded</code> のときだけ <code>processing</code> にする」）としたくなるところです。遷移図どおりで、いかにも正しく見える。<strong>しかし実装は否定形の <code>&lt;&gt; 'ready'</code> を選んでいます。</strong></p>
+      <p>理由は、この条件で守りたいものが<strong>たった一つ</strong>だから——「<strong>完成した動画（<code>ready</code>）を、未完成へ引き戻さない</strong>」。それだけです。肯定形で「<code>uploaded</code> のときだけ」と書くと、守りたい一点に加えて<strong>「入口の状態はこれ」という別の縛りまで一緒に課してしまう</strong>。そして、その縛りが実際に邪魔をする経路が本書の実装にあります。</p>
+      <p><strong>自動リトライです。</strong>第03章 Step 4 で見たとおり、変換が失敗すると職人は <code>attempts</code> を1つ進めて<strong>同じ世代のまま注文箱へ積み直します</strong>（世代が進むのは持ち主の retry だけ）。このとき動画の <code>status</code> は <code>processing</code> のまま。積み直された注文を拾った職人は、もう一度 claim を試みます——ここで条件が <code>= 'uploaded'</code> だったら、<strong>正当なリトライが自分自身の <code>processing</code> に弾かれて、二度と変換が始まりません</strong>。<code>&lt;&gt; 'ready'</code> なら通ります。二重配送で2人目が拾った場合も同じで、まだ誰も完成させていないなら宣言し直してよい。</p>
+      <p><strong>条件つき UPDATE の <code>WHERE</code> には、本当に守りたいことだけを書く。</strong>「あってほしい状態」を並べるのではなく、「<strong>絶対に起こしてはいけないこと</strong>」を否定形で1つ書く——このほうが、状態や経路が増えても壊れません。世代の柵（<code>job_generation</code>）が「<strong>誰の注文か</strong>」を担当し、この否定条件が「<strong>後戻りさせない</strong>」を担当する、という<strong>役割分担</strong>になっています。</p>
+    </div>
+    <div class="box hazard"><div class="box-k">⚠ 落とし穴 — retry で実際に踏んだ「ready を引き戻す」競合</div>
+      <p>この「1 文の条件つき UPDATE」は最初からこうだったわけではなく、<strong>retry（やり直し）機能を作ったときに実際にバグを踏んで</strong>この形に矯正されました。持ち主が「変換中のまま止まった」動画をやり直そうとした瞬間、生き返った古い職人が <code>ready</code> を書き、retry 側が <code>processing</code> へ引き戻す——「読んで判定して書く」だと防げなかったこの競合を、条件を <code>WHERE</code> に入れることで消しました。DB の状態を進めるコードを書くときは、<strong>「今こうなら、こうする」を SQL の <code>WHERE</code> ひとつに閉じ込める</strong>——これが本書のいちばん実用的な教訓です。</p>
+    </div>
+
+    <h3>柱 2 — <code>job_generation</code>（fencing token）で世代を柵囲いする</h3>
+    <p>状態の条件（柱 1）だけでは、まだ足りません。「<code>processing</code> のときだけ書き込む」という条件は、<strong>停滞リトライで生き返った古い職人（ゾンビ）</strong>と<strong>新しい世代の職人</strong>を区別できないからです。両方とも「今は <code>processing</code> だ」と正しく認識してしまい、ゾンビが新世代の成果を <code>failed</code> に塗り替えてしまう。</p>
+    <p>そこで <code>job_generation</code> という整数列を用意し、注文を投入するたび（complete / retry）に +1 して<strong>注文票そのものにも世代番号を載せます</strong>。職人の<strong>全書き込み</strong>——<code>processing</code> 宣言・<code>attempts</code> 加算・<code>failed</code> 記録・<code>ready</code> 宣言——は例外なく <code>AND job_generation = $N</code> で柵囲いされる。古い世代の職人は、どの書き込みも 0 行更新となり、何もできずに退場します。これが <strong>fencing token</strong>（柵の杭）の考え方です。</p>
+    <div class="gonote"><div class="box-k">実装メモ · fencing token は分散システムの普遍的な守り</div>
+      <p>「一度死んだと思われたプロセスが生き返って、古い前提のまま書き込む」問題は、動画変換に限らず<strong>あらゆる分散ロック・リース</strong>で起きます。定石は、リースを取り直すたびに単調増加する番号（fencing token）を発行し、下流（ここでは DB）が「今の番号より古い書き込みは拒否する」こと。本書の <code>job_generation</code> は、この定石を最小構成で実装したものです。この番号は <strong>Codex のクロスレビューで「状態条件だけでは足りない」と指摘され</strong>て足されました——手を動かして初めて見える種類のバグで、まさに本書が体験的に学ばせたかった落とし穴です。</p>
+    </div>
+
+    <h3>柱 3 — 成果物は「実行ごとに一意なプレフィックス」に書く</h3>
+    <p>柱 1・2 は<strong>DB の書き込み</strong>を守りますが、<strong>ストレージへの書き込み</strong>は守れません。DB の条件つき UPDATE がいくら厳密でも、その前に職人がストレージへファイルを書く段階では止められない。世代だけで場所を分けても（<code>hls/&lt;id&gt;/g&lt;世代&gt;/</code>）、<strong>同一世代のジョブが二重配送</strong>されれば——at-least-once なキューでは普通に起きる——同じ場所へ 2 つの実行が書き込んで衝突します。</p>
+    <p>だから成果物は <code>hls/&lt;id&gt;/g&lt;世代&gt;-&lt;128bit 乱数 hex&gt;/</code> という<strong>実行ごとに一意な</strong>プレフィックスへ書きます。乱数が入るので、どの実行も誰とも衝突しません。そして「どの実行の成果物を配信するか」は、<code>ready</code> 宣言と同じ 1 文の UPDATE で <code>media_prefix</code> に確定する。負けた実行のファイルはゴミとして残りますが、<code>media.go</code> は <code>media_prefix</code> が指す場所からしか配信しないので、ゾンビや二重配送された注文が<strong>どこへ何を書こうと、視聴には一切影響しません</strong>。これが<strong>ストレージ側の fencing</strong> です。ゴミは動画削除時に <code>hls/&lt;id&gt;/</code> ごと <code>RemovePrefix</code> で掃除されます。</p>
+    <div class="ascii">柱 2（DB fencing）と柱 3（ストレージ fencing）の役割分担
+
+  DB 側 : job_generation 条件つき UPDATE
+          → 「誰が status/media_prefix を書けるか」を守る
+          （ゾンビは 0 行更新で何も書けない）
+
+  Store側 : hls/&lt;id&gt;/g&lt;世代&gt;-&lt;乱数hex&gt;/ の一意プレフィックス
+          → 「書き込み同士がぶつからない」を守る
+          （二重配送でも別ディレクトリなので衝突しない）
+
+  配信   : media.go は media_prefix の指す場所だけを読む
+          → 負けた実行のゴミは "存在しないも同然"</div>
+
+    <h3>柱 4 — 新着通知の fanout は <code>MaybeFanoutNewVideo</code> に一本化する</h3>
+    <p>最後の柱は通知です。「動画が公開されたら登録者に知らせる」——これは 2 つの経路から起こり得ます。<strong>変換完了（職人）</strong>で <code>ready</code> になったときと、<strong>公開範囲変更（PATCH）</strong>で <code>private</code> だった動画が <code>public</code> になったとき。どちらでも「<code>ready</code> かつ <code>public</code>」が成立し得るので、素朴に両方から通知を配ると<strong>二重配布</strong>が起きます。</p>
+    <p>本書は、この判定と配布を <code>notify.MaybeFanoutNewVideo</code> という<strong>1 つの関数に一本化</strong>しました。両経路（<code>transcode.go</code> の変換完了後と <code>videos.go</code> の PATCH 後）は、どちらもこの同じ関数を呼びます。関数の中では <code>notified_at</code> 列の<strong>原子的な UPDATE</strong>で「まだ配っていないなら、今の時刻を刻んで配る」を実現し、二重配布を防ぎます。</p>
+
+    <div class="file-tag">internal/notify/notify.go（MaybeFanoutNewVideo の宣言・抜粋）</div>
+    <pre><code><span class="cm">// MaybeFanoutNewVideo は、動画が「視聴可能かつ公開」になった最初の一度だけ、</span>
+<span class="cm">// … 登録者へ新着通知を配る（notified_at の原子的 UPDATE で二重配布を防ぐ）</span>
+<span class="kw">func</span> MaybeFanoutNewVideo(ctx context.<span class="ty">Context</span>, pool *pgxpool.<span class="ty">Pool</span>, q *queue.<span class="ty">Queue</span>, videoID <span class="ty">string</span>) <span class="ty">error</span> {
+	<span class="cm">// … ready かつ public かつ notified_at IS NULL のときだけ、</span>
+	<span class="cm">//     notified_at = now() を条件つき UPDATE し、更新できた 1 回だけ配布する …</span>
+}</code></pre>
+
+    <p>呼び出し側は 2 か所ありますが、どちらもこう書くだけです。判定ロジックは関数の中に閉じているので、<strong>呼ぶ側は「かもしれない（Maybe）」の名の通り、気軽に何度呼んでもよい</strong>。</p>
+    <div class="file-tag">internal/transcode/transcode.go（変換完了後の呼び出し・抜粋）</div>
+    <pre><code>	<span class="cm">// 判定は MaybeFanoutNewVideo 側に集約されている（PATCH時にも同じ関数が呼ばれる）</span>
+	<span class="kw">if</span> err := notify.MaybeFanoutNewVideo(ctx, d.DB, d.Q, videoID); err != <span class="kw">nil</span> {
+		<span class="cm">// … ログに残して続行（通知の失敗で変換完了を巻き戻さない）…</span>
+	}</code></pre>
+
+    <div class="gonote"><div class="box-k">実装メモ · 「一本化」は落とし穴を 1 か所に閉じ込める設計</div>
+      <p>柱 4 が教えるのは、<strong>同じ判断が複数の入口から起こり得るなら、判断そのものを 1 つの関数に集約する</strong>という原則です。もし「二重配布を防ぐ」ロジックを変換側と PATCH 側の両方に書いたら、片方だけ直し忘れる日が必ず来ます。1 か所に閉じ込め、原子的 UPDATE で冪等（何度呼んでも高々 1 回配る）にしておけば、呼び出し側は判定を気にせず「起こったかもしれないから呼んでおく」で済む。柱 1〜3 が「競合を防ぐ」守りなら、柱 4 は「重複を防ぐ」守り——どちらも「<strong>正しさを 1 か所（DB の 1 文）に集約する</strong>」という同じ美学に立っています。</p>
+    </div>
+
+    <h2 class="step" id="step-3"><span class="step-no">Step 3</span>章 × ファイル対応表 — 部品がどこで噛み合うか</h2>
+    <p>4 本柱を確認したところで、本書全体を「章」「担当ファイル」「その章が上の層に約束すること」「守りの設計との関係」で 1 枚の表にまとめます。この表が、あなたが後で「あの処理はどこだったか」を引くときの索引になります。</p>
+
+    <table>
+      <tr><th>章</th><th>層</th><th>主な src</th><th>この層が約束すること</th></tr>
+      <tr><td>00 土台</td><td>Setup</td><td><code>docker-compose.yml</code> / <code>cmd/api</code> / <code>cmd/worker</code> / <code>config</code> / <code>db</code> / <code>schema.sql</code></td><td>6 人が正しい順に起動し、受付と職人が別プロセスに分かれ、DB に状態遷移の背骨が刻まれる</td></tr>
+      <tr><td>01 認証</td><td>Auth</td><td><code>auth/auth.go</code> / <code>httpapi/auth.go</code> / <code>httpapi/channels.go</code></td><td>bcrypt でパスワードを守り、JWT で「誰の依頼か」を通せる。チャンネル＝投稿者の単位</td></tr>
+      <tr><td>02 受け取る</td><td>Upload</td><td><code>storage/storage.go</code> / <code>httpapi/videos.go</code></td><td>大容量動画を受付に通さず、presigned 直 PUT で受け取る。<code>uploading→uploaded</code></td></tr>
+      <tr><td>03 変換</td><td>Transcode</td><td><code>queue/queue.go</code> / <code>transcode/transcode.go</code> / <code>cmd/worker</code></td><td>非同期に複数画質 HLS へ変換。<code>processing→ready/failed</code>。<strong>守りの設計の白眉</strong></td></tr>
+      <tr><td>04 届ける</td><td>Deliver</td><td><code>httpapi/media.go</code> / <code>frontend Player.tsx</code></td><td><code>ready</code> の動画だけを権限チェックして配信。hls.js が回線適応再生</td></tr>
+      <tr><td>05 反応</td><td>Social</td><td><code>httpapi/social.go</code> / <code>frontend Comments.tsx</code></td><td>コメント（木構造）・いいね（1 人 1 回）・登録。反応がまた通知を生む</td></tr>
+      <tr><td>06 発見</td><td>Discover</td><td><code>httpapi/discover.go</code></td><td>検索（pg_trgm）・トレンド（時間減衰）・関連・おすすめで動画を見つけてもらう</td></tr>
+      <tr><td>07 通知</td><td>Notify</td><td><code>notify/notify.go</code> / <code>httpapi/notifications.go</code> / <code>frontend Header.tsx</code></td><td>新着・コメント・返信を SSE でリアルタイム配信。<strong>fanout 一本化</strong></td></tr>
+      <tr><td>08 画面</td><td>Web</td><td><code>frontend/src</code>（App / api / Upload / Watch / Channel / Studio）</td><td>ここまでの API を React でひとつの体験に束ねる</td></tr>
+      <tr><td>09 仕上げ</td><td>Beyond</td><td>本章（総括＋境界設計）</td><td>全行程を振り返り、本物へ近づける境界を地図にする</td></tr>
+    </table>
+
+    <p>この表を縦に読むと「動画が受け取られてから届くまでの旅」に、横に読むと「各層が下から上へ何を積み上げているか」になります。とりわけ第03章（変換）が<strong>守りの設計の集中する層</strong>であることに注目してください。4 本柱のうち柱 1〜3 はすべて第03章の中で発生し、柱 4 は第03章と第07章にまたがる。動画サービスの難所が「大きく、時間がかかり、失敗し得るファイルの非同期処理」に集中していることの、素直な現れです。</p>
+
+    <h2 class="step" id="step-4"><span class="step-no">Step 4</span>本物に近づける境界 (1) — キャッシュ / CDN</h2>
+    <p>ここから視点を反対向きにします。この学習用サービスと本物の YouTube の間の谷を、3 つの境界で測ります。1 つ目は<strong>配信のスケール</strong>——世界中の視聴者に、遅延なく大量のセグメントを届けるための CDN です。</p>
+    <p>驚くべきことに、この境界を跨ぐための下ごしらえは<strong>すでに済んでいます</strong>。第04章で書いた <code>media.go</code> の配信ハンドラを、もう一度、<strong>CDN の目線で</strong>読み直してみましょう。</p>
+
+    <div class="file-tag">internal/httpapi/media.go（Content-Type と Cache-Control の分岐・再掲）</div>
+    <pre><code>	ct := info.ContentType
+	<span class="kw">switch</span> path.Ext(key) {
+	<span class="kw">case</span> <span class="st">".m3u8"</span>:
+		ct = <span class="st">"application/vnd.apple.mpegurl"</span>
+		w.Header().Set(<span class="st">"Cache-Control"</span>, <span class="st">"no-cache"</span>)
+	<span class="kw">case</span> <span class="st">".ts"</span>:
+		ct = <span class="st">"video/mp2t"</span>
+		<span class="cm">// 断片は不変。ここが「近くに置いた写しから返す」（CDN/キャッシュ）の効きどころ</span>
+		w.Header().Set(<span class="st">"Cache-Control"</span>, <span class="st">"public, max-age=31536000, immutable"</span>)
+	<span class="kw">default</span>:
+		w.Header().Set(<span class="st">"Cache-Control"</span>, <span class="st">"public, max-age=300"</span>)
+	}
+	w.Header().Set(<span class="st">"Content-Type"</span>, ct)
+	w.Header().Set(<span class="st">"Content-Length"</span>, strconv.FormatInt(info.Size, <span class="st">10</span>))
+	io.Copy(w, obj)</code></pre>
+
+    <p>この <code>switch</code> の 3 分岐が、<strong>CDN との境界そのもの</strong>です。ファイルの種類ごとに「どれだけキャッシュしてよいか」を宣言しています。</p>
+    <ul>
+      <li><strong><code>.ts</code>（セグメント）は <code>public, max-age=31536000, immutable</code></strong> — 「これは 1 年間キャッシュしてよい、しかも二度と変わらない（immutable）」という宣言です。なぜ言い切れるか——柱 3 を思い出してください。セグメントは <code>hls/&lt;id&gt;/g&lt;世代&gt;-&lt;乱数hex&gt;/</code> という<strong>実行ごとに一意なパス</strong>に書かれ、一度 <code>media_prefix</code> に確定したら二度と中身が変わりません。だから<strong>永久にキャッシュして安全</strong>。CDN（CloudFront など）を <code>media.go</code> の前に置けば、一度取得したセグメントは世界中のエッジに写しが残り、以降の視聴者は<strong>受付にもオリジンにも触れず</strong>、いちばん近いエッジから即座に受け取れます。動画配信のトラフィックの 99% はこのセグメントなので、ここを CDN に逃がすだけで、オリジンの負荷は劇的に下がります。</li>
+      <li><strong><code>.m3u8</code>（プレイリスト）は <code>no-cache</code></strong> — プレイリストは「どのセグメントがあるか」の目次で、動画によっては後から変わり得る（ライブや再変換）ので、キャッシュせず毎回確かめさせます。<strong>目次はキャッシュせず、中身（不変の断片）を長くキャッシュする</strong>——この非対称が HLS 配信の勘所です。</li>
+      <li><strong>その他（サムネイル等）は <code>public, max-age=300</code></strong> — 5 分程度の穏当なキャッシュ。差し替えられ得るが、頻繁ではないものの折衷です。</li>
+    </ul>
+
+    <div class="ascii">CDN を差し込む境界 — media.go はそのまま「オリジン」になる
+
+  【今（学習用）】
+    視聴者 ──▶ api (media.go) ──▶ MinIO
+              権限チェック＋配信      毎回オリジンから読む
+
+  【本物へ】CloudFront を前に置くだけ
+    視聴者 ──▶ CloudFront(エッジ) ──▶ api (media.go) ──▶ S3
+              │  .ts はエッジの写しから即返す（immutable が効く）
+              │  .m3u8 は no-cache なのでオリジンへ確認しに行く
+              └ 権限チェックが要る動画は署名付きCookieやOAC等で保護
+
+  ★ media.go のコードは 1 行も変えずにオリジンになれる
+    ——Cache-Control が既に「正しい約束」を宣言しているから</div>
+
+    <div class="box hazard"><div class="box-k">⚠ 落とし穴 — 権限チェックと CDN キャッシュの両立</div>
+      <p>ここで 1 つ緊張があります。本書の <code>media.go</code> は<strong>権限チェックしてから配信</strong>します（非公開・限定公開を守るため。NFR-6）。ところが CDN は「一度取得した写しを、権限に関係なく誰にでも返す」のが仕事です。両者は素朴には両立しません。実務での定石は、(1) <strong>公開動画のセグメントだけ CDN にキャッシュさせ、非公開は常にオリジンで権限チェック</strong>する、(2) <strong>署名付き URL / 署名付き Cookie</strong>（CloudFront の signed cookie など）で「この視聴者はこの動画のエッジ配信を受けてよい」を CDN 自身に検証させる、のいずれか。本書はこの分岐を<strong>やっていません</strong>——学習用なので全セグメントを <code>media.go</code> の権限チェック経由で配信し、CDN 化は「境界がここにある」と示すに留めています。実際に CloudFront を差すときは、この「権限とキャッシュの両立」が最初の設計判断になります。</p>
+    </div>
+
+    <div class="gonote"><div class="box-k">実装メモ · なぜ「境界の下ごしらえ」が最終章の主役なのか</div>
+      <p><code>Cache-Control</code> を正しく宣言しておくことは、第04章の時点では「なくても動く」細部でした。<code>no-cache</code> でも動画は再生できます。にもかかわらず本書が最初から <code>.ts</code> を <code>immutable</code> と宣言していたのは、<strong>将来 CDN を差し込む境界を、コードの側から準備しておく</strong>ためです。境界設計とは、大掛かりな抽象化レイヤを足すことではなく、<strong>「ここに CDN が来るかもしれない」という前提で、今のコードを正しく振る舞わせておく</strong>こと。柱 3 の一意プレフィックス（＝セグメントが不変である保証）と、この <code>Cache-Control</code> 宣言が噛み合って初めて、「1 行も変えずにオリジンになれる」が成立します。守りの設計が、そのまま拡張の下ごしらえになっている——これが本書のいちばん伝えたい設計美です。</p>
+    </div>
+
+    <h2 class="step" id="step-5"><span class="step-no">Step 5</span>本物に近づける境界 (2) — クラウド移行（S3 / SQS / オートスケール）</h2>
+    <p>2 つ目の境界は<strong>インフラのクラウド移行</strong>です。ローカルの Docker Compose（MinIO・Redis・単一 worker）を、AWS のマネージドサービスへ載せ替える。ここでも「境界が切ってあるから、置き換え対象は少ない」ことを、実際の <code>storage.go</code> の構造で確かめます。</p>
+
+    <h3>保管庫: MinIO → S3</h3>
+    <p>本書は最初から MinIO を<strong>S3 互換</strong>として、<code>minio-go</code> クライアント越しに使ってきました。<code>storage.go</code> は「保管庫の境界」を 1 ファイルに閉じ込めた層で、上位のコード（<code>videos.go</code> / <code>media.go</code> / <code>transcode.go</code>）は <code>PresignPut</code> / <code>Get</code> / <code>Put</code> / <code>RemovePrefix</code> といった<strong>メソッド名でしか保管庫を触りません</strong>。だから MinIO を本物の S3 に替えるのは、実質<strong>エンドポイントと認証情報の差し替え</strong>だけで済みます。</p>
+
+    <div class="file-tag">internal/storage/storage.go（2 クライアント構成と Region 明示・抜粋）</div>
+    <pre><code>	<span class="cm">// Region を明示すると、署名前のリージョン問い合わせ（ネットワークアクセス）が要らなくなる。</span>
+	in, err := minio.New(cfg.S3Endpoint, &amp;minio.<span class="ty">Options</span>{Creds: creds, Secure: <span class="kw">false</span>, Region: <span class="st">"us-east-1"</span>})
+	<span class="cm">// … （internal クライアント）…</span>
+	pub, err := minio.New(cfg.S3PublicEndpoint, &amp;minio.<span class="ty">Options</span>{Creds: creds, Secure: <span class="kw">false</span>, Region: <span class="st">"us-east-1"</span>})
+	<span class="cm">// … （public クライアント — presigned URL 発行用）…</span></code></pre>
+
+    <p>ここに、第02章で厚く扱った <strong>presigned URL の 2 クライアント構成</strong>が現れています。コンテナ内から保管庫を読み書きする <code>in</code>（<code>S3_ENDPOINT</code>）と、ブラウザに渡す合鍵を発行する <code>pub</code>（<code>S3_PUBLIC_ENDPOINT</code>）が別。S3 へ移るときは、この 2 つのエンドポイントを実際の S3 のもの（VPC エンドポイントとパブリックエンドポイント）に替え、<code>Secure: false</code> を <code>true</code> にし、<code>Region</code> を実リージョンにするだけ。<strong>presigned という発想は S3 でもそのまま通用します</strong>（そもそも S3 が元祖）。<code>Region</code> を明示する理由も本物で効きます——省略すると署名前にリージョン問い合わせが走り、余計な往復が増える（本書はこれをコンテナ内で踏んで 500 になった）。</p>
+
+    <h3>注文箱と通知: Redis → SQS / SNS</h3>
+    <p><code>queue.go</code> も同じく境界です。本書は Redis のリストを変換ジョブのキューに、Pub/Sub を通知の押し出しに使いました。クラウドでは:</p>
+    <ul>
+      <li><strong>変換ジョブのキュー</strong> → <strong>SQS</strong>。ここで柱 2・3 の価値が本領を発揮します。SQS は <strong>at-least-once</strong>（同じメッセージが 2 回配送され得る）が仕様なので、二重配送は「起こるかもしれない異常」ではなく「<strong>設計上の前提</strong>」になる。本書は最初から <code>job_generation</code> の柵と一意プレフィックスで二重配送に耐える設計にしてあるので、<strong>SQS へ移っても守りはそのまま効きます</strong>。「学習用の単純な Redis リストで踏んだ競合を潰しておいたら、本物のキューでもそのまま通用した」——これが境界設計の配当です。</li>
+      <li><strong>通知の押し出し</strong> → <strong>SNS + WebSocket API</strong>、あるいはマネージドな Pub/Sub。SSE で受ける第07章のフロントは、押し出しの源が Redis Pub/Sub でも SNS でも変わりません。</li>
+      <li><strong>視聴数バッファ・レート制限</strong> → ElastiCache（マネージド Redis）へそのまま。</li>
+    </ul>
+
+    <h3>職人: 単一 worker → オートスケール</h3>
+    <p>第00章で「職人だけを増やせる」（<code>docker compose up --scale worker=2</code>）と触れました。これがクラウドでは<strong>オートスケール</strong>になります。SQS のキュー長（＝溜まった変換注文の数）をメトリクスにして、注文が増えたら職人（ECS タスクや Lambda、あるいは AWS Elemental MediaConvert のようなマネージド変換）を自動で増やし、捌け切ったら減らす。<strong>受付（api）は増やさず、変換能力だけを需要に応じて伸縮させる</strong>——受付と職人を別プロセス・別スケール単位に分けた第00章の設計判断が、ここで最大の配当を生みます。</p>
+
+    <div class="ascii">クラウド移行 — 置き換えるのは「境界の中身」だけ
+
+  境界(コードの層)         今（学習用）          本物（AWS）
+  ─────────────────────────────────────────────────────
+  storage.go        →     MinIO           →    S3
+  queue.go (job)    →     Redis list      →    SQS
+  queue.go (notify) →     Redis Pub/Sub   →    SNS / WebSocket API
+  queue.go (buffer) →     Redis           →    ElastiCache
+  cmd/worker        →     単一プロセス     →    ECS/Lambda オートスケール
+  media.go の前     →     （なし）         →    CloudFront（Step 4）
+  db                →     PostgreSQL(コンテナ)→ RDS / Aurora
+
+  ★ 上位ロジック（videos.go / transcode.go / media.go の中身）は
+    ほぼ触らない。触るのは「境界の実装」だけ</div>
+
+    <div class="gonote"><div class="box-k">実装メモ · 「境界を切る」とは、差し替え点を 1 ファイルに集めること</div>
+      <p><code>src/README.md</code> は「境界が切ってあるので、置き換え対象は少ない」と書いています。その正体は、<strong>外部依存（保管庫・キュー・DB）を触るコードを、専用のパッケージ（<code>storage</code> / <code>queue</code> / <code>db</code>）に閉じ込め、上位はメソッド名でしか呼ばない</strong>という規律です。これはヘキサゴナルアーキテクチャやポート＆アダプタと呼ばれる考え方の最小実装。大掛かりなインターフェース地獄を作る必要はなく、「MinIO のことを知っているのは <code>storage.go</code> だけ」「Redis のことを知っているのは <code>queue.go</code> だけ」を守るだけで、移行コストは「境界ファイルの中身」に局所化されます。<strong>移行しやすさは、抽象化の量ではなく、依存の局所化で決まる</strong>——本書のコードがそれを体現しています。</p>
+    </div>
+
+    <h2 class="step" id="step-6"><span class="step-no">Step 6</span>やらなかったこと — DRM・ライブ配信・レコメンド ML</h2>
+    <p>境界の 3 つ目は、<strong>意図的にスコープ外にした大陸</strong>です。本書は「動画サービス特有の難所（大容量・時間のかかる変換・回線適応再生）を実際に作って学ぶ」ことに焦点を絞り、以下は<strong>あえて作りませんでした</strong>。ここを「次の一歩」として、何が待っているかだけ地図にしておきます。</p>
+
+    <table>
+      <tr><th>テーマ</th><th>何をするものか</th><th>本書が跨がなかった理由 / 次の一歩</th></tr>
+      <tr><td><strong>DRM・コンテンツ保護</strong></td><td>暗号化（AES-128 / SAMPLE-AES）や Widevine / FairPlay で、正規の視聴者以外がセグメントを再生・保存できないようにする</td><td>本書は権限チェック（<code>media.go</code>）で「配信するか否か」までは守るが、配信後のバイト列は保護しない。次の一歩は HLS の <code>#EXT-X-KEY</code> による暗号化と鍵配布。CDN との権限両立（Step 4 の落とし穴）と地続き</td></tr>
+      <tr><td><strong>ライブ配信</strong></td><td>撮影しながらリアルタイムに配信する。録画済み動画の変換とは根本的に別物</td><td>本書は「アップロード済みファイルの変換」に特化。ライブは RTMP/SRT の取り込み → リアルタイム HLS/LL-HLS 生成 → 低遅延配信が要り、状態遷移も <code>uploading→ready</code> ではなく「配信中」を持つ別モデルになる。プレイリストを <code>no-cache</code> にした Step 4 の判断が、ここで本領を発揮する</td></tr>
+      <tr><td><strong>レコメンド ML</strong></td><td>視聴履歴・傾向から機械学習で「次に見たい動画」を予測する</td><td>本書の <code>discover.go</code> は、トレンド（時間減衰スコア）・関連（同一チャンネル/共起）・単純なおすすめ止まり。次の一歩は視聴ログ（<code>view_events</code> テーブルは既に土台）を特徴量にした協調フィルタリングや埋め込みベースの推薦。まず「何を集めておくか」が肝で、本書は <code>view_events</code> でその素地だけ作ってある</td></tr>
+      <tr><td><strong>本格的な全文検索</strong></td><td>日本語の形態素解析を伴う検索</td><td>本書は <code>ILIKE</code> + <code>pg_trgm</code> のあいまい一致止まり。次の一歩は OpenSearch / Elasticsearch や PGroonga による日本語全文検索</td></tr>
+      <tr><td><strong>認証の本格化</strong></td><td>リフレッシュトークン・失効・多要素</td><td>本書の JWT は 24h 固定・失効管理なし。次の一歩はリフレッシュトークンの導入とセッション失効</td></tr>
+      <tr><td><strong>HTTPS / 本番運用</strong></td><td>TLS 終端・監視・スケール</td><td>本書は HTTP のローカル専用。<code>?token=</code> 受け付け（<code>&lt;img&gt;</code>/EventSource/ネイティブ HLS がヘッダを付けられないための仕様）も、本番では URL にトークンが残る点を要検討</td></tr>
+    </table>
+
+    <p>これらは「作れなかった」のではなく、<strong>「この本の焦点から外した」</strong>ものです。動画サービスの<strong>骨格</strong>——受け取り・変換・配信の非同期パイプラインと、その守り——を手を動かして作った今のあなたなら、これらの大陸はどれも「今の土台のどこに接ぐか」が見えるはずです。DRM は <code>media.go</code> の配信直前に、ライブは変換モデルの隣に、レコメンドは <code>view_events</code> の先に。<strong>骨格を持っていることが、次の一歩を具体的にする</strong>のです。</p>
+
+    <h2 class="step" id="step-7"><span class="step-no">Step 7</span>通しで確かめる — 46 項目の E2E スモークテスト</h2>
+    <p>本書の<strong>クライマックス</strong>です。ここまで章ごとに部品を確認してきましたが、最後に<strong>全行程を 1 本の動画で通しで</strong>検証します。<code>src/e2e_test.py</code> は、要件の受け入れ基準に沿った <strong>46 項目</strong>のスモークテストです。実際に動画をアップロードし、変換完了を待ち、HLS を取得し、反応・通知・発見・公開範囲まで、Step 1 の全行程をそっくりなぞります。</p>
+    <p>テストは 12 のセクションに分かれ、Step 1 の全行程とほぼ 1 対 1 で対応します。</p>
+
+    <table>
+      <tr><th>セクション</th><th>何を確かめるか</th><th>対応する章 / 全行程</th></tr>
+      <tr><td>1. アカウント</td><td>登録・誤パスワード拒否・<code>me</code></td><td>第01章</td></tr>
+      <tr><td>2. チャンネル登録</td><td>登録・自分は登録不可（投稿前に登録して新着通知を待つ）</td><td>第05章 / 通知の受け手を用意</td></tr>
+      <tr><td>3. 投稿</td><td>合鍵発行 → 直 PUT → complete → メタ設定</td><td>第02章 / ①②③</td></tr>
+      <tr><td>4. 変換</td><td>状態を追跡して <code>ready</code> になる・長さ・サムネイル</td><td>第03章 / ④⑤⑥</td></tr>
+      <tr><td>5. 配信</td><td>マスター/画質別プレイリスト/セグメント/サムネイル取得・<strong>パスすり抜け拒否</strong></td><td>第04章 / ⑧</td></tr>
+      <tr><td>6. 通知</td><td>新着通知が届く・未読件数・既読化</td><td>第07章 / ⑦⑨</td></tr>
+      <tr><td>7. 反応</td><td>いいね（連打でも 1）・コメント・返信・通知連鎖</td><td>第05章</td></tr>
+      <tr><td>8. 視聴の記録</td><td>視聴カウント（重複防止）・続きから再生・履歴</td><td>第05/06章</td></tr>
+      <tr><td>9. 発見</td><td>検索・トレンド・フィード・おすすめ</td><td>第06章</td></tr>
+      <tr><td>10. 視聴数の反映</td><td>一時置き場（Redis）→ DB へ流れる</td><td>第05/06章</td></tr>
+      <tr><td>11. 公開範囲</td><td>非公開はメタも中身も届かない・限定公開はリンクなら見えるが検索に出ない</td><td>第04章 / NFR-6</td></tr>
+      <tr><td>12. チャンネルページ</td><td>プロフィール更新・閲覧・持ち主は非公開も一覧</td><td>第01/05章</td></tr>
+    </table>
+
+    <p>とりわけ意義深いのが、<strong>守りの設計を検証する項目</strong>です。セクション 5 の「パスのすり抜けは拒否」（<code>../secret.txt</code> を 400/404 で弾く）は <code>media.go</code> の <code>path.Clean</code> ガードを、セクション 7 の「連打しても 1 のまま」は「1 人 1 回」を主キーで担保する設計を、セクション 11 の「非公開の中身も届けない」は権限チェックしてから配信する NFR-6 を、それぞれ機械的に証明します。一方、第03章で作り込んだ守り（世代 fencing・一意プレフィックス）はこのスモークでは直接検証されません——「ゾンビ worker の生き返り」や「同一世代ジョブの二重配送」は外から再現しにくい競合だからです。そこを守っているのは自動テストではなく、「遷移条件を WHERE に含めた 1 文の条件つき UPDATE」と「実行ごとに一意な置き場」という<strong>設計そのもの</strong>です（第03章）。</p>
+
+    <div class="box do"><div class="box-k">▸ 動かして確認 — テスト用の動画を作る</div>
+      <p>まず、変換にかけるテスト用の動画を ffmpeg で合成します（カラーバー 15 秒・720p・音声つき）。これなら手元に動画ファイルが無くても試せます。</p>
+      <pre class="term"><code><span class="ps">$</span> ffmpeg -y -f lavfi -i <span class="st">"testsrc=duration=15:size=1280x720:rate=30"</span> \
+    -f lavfi -i <span class="st">"sine=frequency=440:duration=15"</span> \
+    -c:v libx264 -c:a aac -shortest test.mp4
+<span class="out">... Output #0, mp4, to 'test.mp4': ...</span></code></pre>
+      <p>ffmpeg が手元に無ければ、任意の <code>.mp4</code> を用意しても構いません。15 秒程度の短いものが、変換の待ち時間の点で扱いやすいです。</p>
+    </div>
+
+    <div class="box do"><div class="box-k">▸ 動かして確認 — スタックを起動してスモークを流す</div>
+      <p><code>CLAUDE.md</code> の指示どおり、<strong>変換に関わる api / worker はビルドし直してから</strong>スタックを起動し、スモークを流します。テストは毎回新しいテストユーザー（<code>alice&lt;時刻&gt;@…</code>）を作るので、何度でも繰り返し実行できます。</p>
+      <pre class="term"><code><span class="ps">$</span> cd src
+<span class="ps">$</span> docker compose up --build -d api worker
+<span class="ps">$</span> python e2e_test.py test.mp4
+<span class="out">== 1. アカウント (FR-A1/A2) ==
+  OK   投稿者アリスを登録
+  OK   視聴者ボブを登録
+  OK   誤ったパスワードは拒否
+  OK   ログイン状態の確認 (me)
+== 3. 投稿 (FR-U1/U2, NFR-1/2) ==
+  OK   アップロード申請（合鍵の発行）
+  OK   保管庫へ直接アップロード（受付を通らない）
+  OK   完了通知 → 注文箱へ
+== 4. 変換 (FR-U3, NFR-2) — 状態を追跡できる ==
+  OK   変換が完了して「視聴可能」になった
+  OK   動画の長さが記録された
+  OK   サムネイルが生成された
+== 5. 配信 (FR-V1/V2, NFR-3) ==
+  OK   総目次（マスタープレイリスト）が取れる
+  OK   複数画質がある（360p/720p）
+  OK   断片（セグメント）が取れる
+  OK   パスのすり抜けは拒否
+...
+RESULT: 46 passed, 0 failed</span></code></pre>
+      <p><code>RESULT: 46 passed, 0 failed</code>。この 1 行が、本書 9 章のすべて——認証・presigned 直アップロード・非同期変換・HLS 配信・反応・発見・通知・公開範囲——が<strong>同時に成立していること</strong>の、機械による証明です。1 本の動画が <code>uploading</code> から <code>ready</code> を経て視聴者に届き、通知が飛び、非公開が守られるまでの全行程が、一息に通りました。</p>
+    </div>
+
+    <div class="box hazard"><div class="box-k">⚠ 落とし穴 — セクション 4 が <code>failed</code> で止まるとき</div>
+      <p>スモークで最も詰まりやすいのがセクション 4（変換）です。<code>変換が完了して「視聴可能」になった</code> が <code>failed</code> や <code>processing</code> のまま返るなら、まず <code>docker compose logs worker</code> を見てください。多くは (1) worker コンテナに ffmpeg が入っていない（<code>Dockerfile</code> の worker ステージだけが <code>apk add ffmpeg</code> する——第00章）、(2) 職人が保管庫から元動画を読めない（<code>S3_ENDPOINT</code> がコンテナ内アドレス <code>minio:9000</code> になっているか）、のいずれか。テストは最大 60 回（約 2 分）状態をポーリングするので、初回のイメージ pull やビルドが重いと待ち切れないこともあります。<code>--build</code> でビルドを済ませてから流すのが確実です。</p>
+    </div>
+
+    <div class="gonote"><div class="box-k">実装メモ · なぜ「スモークテスト」で E2E を代替するのか</div>
+      <p>この 46 項目は、細部を網羅する単体テストではなく、<strong>全行程が繋がっていることを 1 本の動画で確かめるスモーク（煙探知）</strong>です。動画サービスは ffmpeg・MinIO・Redis・PostgreSQL という<strong>外部プロセスの協調</strong>で成り立っており、モックで固めた単体テストだけでは「実際に繋がるか」を保証できません。だから本物の Docker スタックを起動し、HTTP を実際に叩き、変換完了を実時間で待ち、HLS のバイト列を取得する——という<strong>統合的なスモーク</strong>で受け入れ基準を検証しています。なお <code>src/backend</code> に <code>_test.go</code> の単体テストは置いていません——外部プロセスの協調で成り立つこのサービスでは、モックで固めた単体テストに投資するより、本物を繋いだこのスモークを受け入れ基準として維持する、という割り切りです。実装を直したら「必ず <code>up --build</code> してからスモークを流す」——それが本書の受け入れ確認の作法です。</p>
+    </div>
+
+    <h2 class="step" id="step-8"><span class="step-no">Step 8</span>落とし穴総覧と、次の一歩</h2>
+    <p>最後に、本書 9 章を通して<strong>実際に踏んだ落とし穴</strong>を 1 枚に集めます。これらの多くは、机上では気づけず、手を動かして——あるいは Codex のクロスレビューで——初めて見えたものです。この表は、あなたが次に別の分散システムを作るときの<strong>チェックリスト</strong>になります。</p>
+
+    <table>
+      <tr><th>落とし穴</th><th>症状</th><th>本書の対処</th><th>章</th></tr>
+      <tr><td>読んで判定して書く</td><td>読み取りと更新の隙間に他者が割り込み、<code>ready</code> を引き戻す</td><td>遷移条件を <code>WHERE</code> に畳んだ 1 文の条件つき UPDATE＋<code>RowsAffected</code> 判定</td><td>03/09</td></tr>
+      <tr><td>状態条件だけの柵</td><td>停滞リトライで生き返ったゾンビ職人が新世代の成果を上書き</td><td><code>job_generation</code>（fencing token）を全書き込みの <code>WHERE</code> に付ける</td><td>03/09</td></tr>
+      <tr><td>世代だけで場所を分ける</td><td>同一世代の二重配送で成果物が同じ場所へ衝突</td><td><code>hls/&lt;id&gt;/g&lt;世代&gt;-&lt;乱数hex&gt;/</code> の実行ごと一意プレフィックス＋<code>media_prefix</code> 確定</td><td>03/09</td></tr>
+      <tr><td>通知を各所から配る</td><td>変換完了と公開範囲変更の両方から通知して二重配布</td><td><code>MaybeFanoutNewVideo</code> に一本化＋<code>notified_at</code> 原子的 UPDATE</td><td>07/09</td></tr>
+      <tr><td>presigned で Region 省略</td><td>署名前のリージョン問い合わせがコンテナ内から <code>localhost:9000</code> へ届かず 500</td><td>両クライアントで <code>Region</code> 明示（2 クライアント構成）</td><td>02</td></tr>
+      <tr><td>master を ffmpeg 任せ</td><td>出力先の挙動がバージョン依存で曖昧</td><td>Go の <code>writeMaster</code> でマスタープレイリストを自前生成</td><td>03</td></tr>
+      <tr><td>保管庫を直接公開</td><td>非公開・限定公開が権限のない人に見える</td><td><code>media.go</code> で権限チェックしてから配信（保管庫は非公開）</td><td>04</td></tr>
+      <tr><td>ヘッダ前提の認証</td><td><code>&lt;img&gt;</code>/EventSource/ネイティブ HLS がヘッダを付けられず認証できない</td><td><code>?token=</code> クエリ認証も受け付ける（本番では URL 残留を要検討）</td><td>04/07</td></tr>
+    </table>
+
+    <p>この表を貫く教訓は 1 つです。<strong>「正しさを、なるべく 1 か所（DB の 1 文、1 つの関数、1 つの境界ファイル）に集約する」</strong>。状態遷移は 1 文の UPDATE に、世代の柵は <code>WHERE</code> 句に、通知の判定は <code>MaybeFanoutNewVideo</code> に、保管庫の知識は <code>storage.go</code> に。集約されているからこそ、競合を防げ、重複を防げ、移行が局所化できる。分散した部品が増えるほど、この「集約」の規律が効いてきます。</p>
+
+    <h2>つまずき FAQ</h2>
+    <details class="qa"><summary>「守りの設計」の 4 本柱は、結局どれか 1 つだけでは足りないの? 全部要る?</summary>
+      <div class="qa-body"><p>全部要ります。守る対象が違うからです。<strong>柱 1（条件つき UPDATE）</strong>は「読み取りと更新の隙間の割り込み」を、<strong>柱 2（<code>job_generation</code>）</strong>は「状態条件では区別できないゾンビ職人」を、<strong>柱 3（一意プレフィックス）</strong>は「DB では止められないストレージ書き込みの衝突」を、<strong>柱 4（fanout 一本化）</strong>は「複数入口からの通知の二重配布」を防ぎます。たとえば柱 1・2 で DB の書き込みを完璧に守っても、その手前で職人が同じ場所へファイルを書けば衝突する（→ 柱 3 が要る）。逆に柱 3 だけあっても、どの成果物を配信するかを DB で一意に確定しなければ配信がぶれる（→ 柱 1 が要る）。<strong>DB 側とストレージ側の両方に fencing を効かせて初めて</strong>、at-least-once なキューの世界で正しく振る舞えます。</p></div>
+    </details>
+    <details class="qa"><summary>CDN を差すのに <code>media.go</code> を 1 行も変えなくていい、というのは本当? 権限チェックはどうなる?</summary>
+      <div class="qa-body"><p>「オリジンとして 1 行も変えずに置ける」のは本当ですが、<strong>権限チェックと CDN キャッシュの両立という設計判断が別途要る</strong>のも本当です（Step 4 の落とし穴）。<code>media.go</code> の <code>Cache-Control</code> はすでに「<code>.ts</code> は永久キャッシュ可、<code>.m3u8</code> は <code>no-cache</code>」と正しく宣言しているので、CloudFront を前に置けばセグメントのキャッシュはそのまま効きます。ただし本書の <code>media.go</code> は<strong>全セグメントを権限チェック経由で配信</strong>するので、CDN に「権限なしで写しを配ってよい」と任せると非公開が漏れます。実務では (1) 公開動画だけキャッシュ・非公開は常にオリジン、(2) 署名付き Cookie で CDN 自身に検証させる、のどちらかを選びます。本書はここを<strong>やっていない</strong>——「境界はここにある」と示すに留めています。</p></div>
+    </details>
+    <details class="qa"><summary>MinIO→S3、Redis→SQS の移行が「境界の差し替えだけ」で済むのはなぜ? 本当にそんなに楽?</summary>
+      <div class="qa-body"><p>楽なのは、<strong>外部依存を触るコードを専用パッケージ（<code>storage</code> / <code>queue</code> / <code>db</code>）に閉じ込め、上位はメソッド名でしか呼んでいない</strong>からです。<code>videos.go</code> は「<code>PresignPut</code> を呼ぶ」としか知らず、それが MinIO か S3 かを知りません。だから <code>storage.go</code> の中身だけ替えればよい。ただし「差し替えだけ」が本当に成立するのは、<strong>移行先が元の発想を共有している</strong>から——S3 は presigned の元祖なので <code>PresignPut</code> はそのまま通り、SQS は at-least-once なので柱 2・3 の守りがそのまま効きます。もし移行先が根本的に別の抽象（例: presigned の無いストレージ）なら、境界の内側だけでなく発想の見直しが要ります。<strong>「境界の局所化」は移行を楽にするが、無条件の魔法ではない</strong>——移行先との相性が前提です。</p></div>
+    </details>
+
+    <h2>理解度チェック</h2>
+    <p>次の問いに<strong>自分の言葉で</strong>答えられたら、この本は卒業です。</p>
+    <details class="qa"><summary>1. 1 本の動画が <code>uploading</code> から視聴者に届くまでの全行程を、担当ファイル名を挙げながら順に述べよ。</summary>
+      <div class="qa-body"><p>①申請: ブラウザが <code>POST /api/uploads</code>、受付（<code>videos.go</code>）が <code>uploading</code> の行を作り <code>storage.go</code> の <code>PresignPut</code> で合鍵を返す。②直 PUT: ブラウザが合鍵で保管庫へ直接アップロード（受付を通らない）。③完了: <code>POST /complete</code> で実物を確認し <code>uploaded</code> へ、<code>job_generation</code>+1、<code>queue.go</code> で注文箱に積む。④claim: 職人（<code>cmd/worker</code>）が Dequeue し、世代一致のときだけ <code>processing</code> へ。⑤変換: <code>transcode.go</code> が ffmpeg で複数画質 HLS＋サムネイルを一意プレフィックスへ生成、<code>writeMaster</code> で総目次。⑥宣言: <code>ready</code>＋<code>media_prefix</code> を 1 文で確定。⑦通知: <code>MaybeFanoutNewVideo</code> が登録者へ一度だけ。⑧再生: <code>media.go</code> が権限チェックして <code>media_prefix</code> 配下を配信、hls.js が画質適応。⑨通知受信: <code>Header.tsx</code> が SSE でベル更新。貫くのは <code>videos.status</code> という DB の 1 列。</p></div>
+    </details>
+    <details class="qa"><summary>2. 「守りの設計」4 本柱を挙げ、それぞれが防ぐ競合を述べよ。柱 2 と柱 3 の役割の違いは?</summary>
+      <div class="qa-body"><p>柱 1（条件つき UPDATE 1 文）: 読み取りと更新の隙間への割り込み（<code>ready</code> 引き戻し）を防ぐ。柱 2（<code>job_generation</code>）: 状態条件では区別できない、生き返った古い職人（ゾンビ）の書き込みを防ぐ。柱 3（実行ごと一意プレフィックス）: DB では止められない、二重配送されたジョブのストレージ書き込み衝突を防ぐ。柱 4（<code>MaybeFanoutNewVideo</code> 一本化）: 変換完了と公開範囲変更の両入口からの通知の二重配布を防ぐ。柱 2 と柱 3 の違いは<strong>守る場所</strong>——柱 2 は「誰が DB を書けるか」（DB 側 fencing）、柱 3 は「書き込み同士がぶつからない＋どの成果物を配信するか」（ストレージ側 fencing）。DB とストレージの両方に fencing が要るのは、条件つき UPDATE がストレージへの書き込みを止められないから。</p></div>
+    </details>
+    <details class="qa"><summary>3. この学習用サービスを本物の YouTube に近づける「境界」を 3 つ挙げ、それぞれで何が置き換わるか述べよ。</summary>
+      <div class="qa-body"><p>(1) <strong>CDN / キャッシュ</strong>: <code>media.go</code> の前に CloudFront を置き、<code>.ts</code> の <code>immutable</code> 宣言を活かしてセグメントをエッジにキャッシュする。<code>media.go</code> はそのままオリジンになれる（権限とキャッシュの両立は別途設計）。(2) <strong>クラウド移行</strong>: 境界パッケージの中身を差し替える——<code>storage.go</code> の MinIO→S3、<code>queue.go</code> の Redis→SQS/SNS、単一 worker→ECS/Lambda オートスケール、PostgreSQL→RDS。上位ロジックはほぼ触らない。SQS の at-least-once に柱 2・3 がそのまま効く。(3) <strong>やらなかったこと</strong>: DRM（配信バイト列の保護）、ライブ配信（別の変換・状態モデル）、レコメンド ML（<code>view_events</code> を素地にした推薦）、本格全文検索、認証の本格化。いずれも今の骨格のどこに接ぐかが見える。</p></div>
+    </details>
+
+    <h2>まとめ — 完成、そして次へ</h2>
+    <p>10 章、お疲れさまでした。第00章で、動画をまだ 1 本も受け取れない「舞台」——6 人の登場人物と、<code>uploading → uploaded → processing → ready / failed</code> という背骨——を組みました。そこから一段ずつ、人・アップロード・変換・配信・反応・発見・通知・画面を積み上げて、今、1 本の動画がブラウザから上がり、保管庫へ直接運ばれ、職人に拾われ、ffmpeg で複数画質の HLS に変わり、<code>ready</code> を宣言した瞬間に視聴者へ届き、登録者に新着通知が飛ぶ——本物の YouTube と同じ骨格の動画サービスが、あなたの手の中で動いています。<code>e2e_test.py</code> の <code>RESULT: 46 passed</code> が、その全部を一息に証明しました。</p>
+    <p>この本が本当に渡したかったのは、コードそのものではありません。<strong>「大きくて、時間がかかって、失敗し得るもの」を、分散した部品でどう安全に運ぶか</strong>という設計の勘所です。<code>presigned URL</code> で大容量を受付から剥がし、<code>キュー＋ワーカー</code>で重い変換を非同期に逃がし、<code>状態遷移</code>を DB の 1 列に集約し、<code>fencing token</code>と<code>一意プレフィックス</code>でゾンビと二重配送に耐え、<code>fanout 一本化</code>で二重配布を防ぐ——これらはどれも動画サービスに限らず、<strong>分散システムを作るときに何度でも出会う守り</strong>です。もう動画サービスは、あなたにとって魔法ではありません。中で何が起きているか、目で見える箱になりました。</p>
+    <p>そして最後に置いた境界——CDN・クラウド移行・DRM・ライブ配信・レコメンド——は、この箱を開けたあなたなら、今の土台から手を伸ばせるものばかりです。<code>Cache-Control</code> の宣言はそのまま CloudFront に効き、<code>storage.go</code> の差し替えは S3 になり、<code>job_generation</code> の柵は SQS でそのまま活きる。守りの設計が、そのまま次の拡張の下ごしらえになっている——それを確かめられたなら、この本の目的は果たされました。<strong>ここが終点ではなく、次の起点です。</strong> 良い旅を。</p>
+
+    <div class="chap-foot">
+      <a class="pager" href="08-web.html"><span class="dir">← 前へ</span>第08章 · 画面をつける</a>
+      <a class="pager next" href="index.html"><span class="dir">↩ 最初に戻る</span>序章 · はじめに・準備へ</a>
+    </div>
+  </main>
+</div>
+</body>
+</html>

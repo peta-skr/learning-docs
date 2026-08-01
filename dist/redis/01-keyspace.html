@@ -1,0 +1,375 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>第01章 キーと値 — Redis をつくる</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500;600&family=Source+Serif+4:opsz,wght@8..60,400;8..60,600;8..60,700&family=Noto+Serif+JP:wght@400;600;700&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<div class="shell">
+
+  <aside class="spine">
+    <a class="wordmark" href="index.html">MINI-REDIS · from scratch</a>
+    <div class="book-title">Redis を<br>つくる</div>
+    <div class="book-sub">Go で RESP から Sorted Set まで</div>
+
+    <div class="legend"><span>読む <b>↓</b></span><span>組む <b>↑</b></span></div>
+
+    <nav aria-label="目次">
+      <ul class="toc">
+        <li><a class="nav-item" href="index.html"><span class="nav-num">序</span><span class="nav-label">はじめに・準備<span class="nav-tag">Setup</span></span></a></li>
+        <li><a class="nav-item" href="00-server.html"><span class="nav-num">00</span><span class="nav-label">返事をするサーバ<span class="nav-tag">RESP</span></span></a></li>
+        <li><a class="nav-item current" aria-current="page" href="01-keyspace.html"><span class="nav-num">01</span><span class="nav-label">キーと値<span class="nav-tag">Store</span></span></a></li>
+        <li><a class="nav-item" href="02-expire.html"><span class="nav-num">02</span><span class="nav-label">有効期限<span class="nav-tag">Expire</span></span></a></li>
+        <li><a class="nav-item" href="03-string.html"><span class="nav-num">03</span><span class="nav-label">数としての文字列<span class="nav-tag">String</span></span></a></li>
+        <li><a class="nav-item" href="04-list.html"><span class="nav-num">04</span><span class="nav-label">List<span class="nav-tag">List</span></span></a></li>
+        <li><a class="nav-item" href="05-hash.html"><span class="nav-num">05</span><span class="nav-label">Hash<span class="nav-tag">Hash</span></span></a></li>
+        <li><a class="nav-item" href="06-set.html"><span class="nav-num">06</span><span class="nav-label">Set とエンコーディング<span class="nav-tag">Set</span></span></a></li>
+        <li><a class="nav-item" href="07-zset.html"><span class="nav-num">07</span><span class="nav-label">Sorted Set と skiplist<span class="nav-tag">ZSet</span></span></a></li>
+        <li><a class="nav-item" href="08-pubsub.html"><span class="nav-num">08</span><span class="nav-label">Pub/Sub<span class="nav-tag">PubSub</span></span></a></li>
+        <li><a class="nav-item" href="09-finish.html"><span class="nav-num">09</span><span class="nav-label">仕上げと設計判断<span class="nav-tag">Finish</span></span></a></li>
+      </ul>
+    </nav>
+
+    <div class="spine-foot">
+      各章は一つのデータ型・機能。<br>下（RESP）から上（Sorted Set）へ<br>積み上げて動かしていく。
+    </div>
+  </aside>
+
+  <main class="reading">
+    <div class="progress-tag">第01章 / 全10章 · 層: STORE · 読了目安 2〜3時間</div>
+    <div class="eyebrow"><span>STORE</span><span class="depth">— キースペース</span></div>
+    <h1>キーと値</h1>
+    <p class="lede">第00章で、クライアントと言葉が通じる口ができました。しかしその口の奥はまだ空っぽで、<code>SET</code> と言われても何も覚えられません。この章では、その奥に <strong>キースペース</strong> — キーと値をしまう「1つの大きな辞書」— を置きます。作るのは <code>store.go</code> の <code>Store</code> 型と、その上で動く汎用コマンド <code>DEL</code>/<code>EXISTS</code>/<code>TYPE</code>/<code>KEYS</code>/<code>FLUSHDB</code>。全部で 130 行ほど。終えたとき、あなたのサーバは<strong>「データを覚えている」</strong>最初の一歩を踏み出します。</p>
+
+    <div class="box goal"><div class="box-k">◈ この章のゴール</div>
+      <p>次の 2 つを、自分の目と手で確認できたら達成です。</p>
+      <ol>
+        <li><code>go test -run TestKeysAndFlush -v</code> と <code>go test -run TestTypeAndWrongType -v</code> が PASS する。キーがしまえ、パターンで引け、型を答え、まとめて消せることが機械で確かめられる。</li>
+        <li>（<code>redis-cli</code> がある人は）<code>redis-cli -p 6380 keys 'user:*'</code> が、<code>SET</code> しておいたキーだけを返す。1つの <code>map</code> が Redis のキースペースそのものだと目で見る。</li>
+      </ol>
+    </div>
+
+    <div class="box map"><div class="box-k">☰ この章のステップ</div>
+      <ol>
+        <li><a href="#step-1"><code>Store</code> 型を定義する — 「辞書 + 有効期限表」</a></li>
+        <li><a href="#step-2"><code>typeName</code> — 値の正体を型スイッチで見分ける</a></li>
+        <li><a href="#step-3"><code>getLocked</code> と Lazy 失効の入口</a></li>
+        <li><a href="#step-4"><code>Del</code> / <code>Exists</code> / <code>Type</code> — 汎用コマンドの実体</a></li>
+        <li><a href="#step-5"><code>Keys</code> — パターンでキーを引く</a></li>
+        <li><a href="#step-6"><code>FlushDB</code> — 全部を捨てて作り直す</a></li>
+        <li><a href="#step-7">演習: 1つの辞書を <code>redis-cli</code> で覗く</a></li>
+      </ol>
+    </div>
+
+    <h2>なぜ「1つの大きな辞書」なのか</h2>
+    <p>Redis を初めて使うと、<code>SET</code>・<code>LPUSH</code>・<code>HSET</code>・<code>ZADD</code> と型ごとにコマンドが分かれていて、内部にも型ごとの別々の入れ物があるように錯覚します。しかし実体は驚くほど素朴です。Redis のデータベースは、<strong>たった1つの辞書（ハッシュテーブル）</strong>でできています。キーはすべて文字列。値だけが、文字列だったり List だったり Hash だったり Sorted Set だったりする。「型が違う」のは<strong>値の中身の話</strong>であって、キーからそれを引く仕組みは全キー共通の1つの辞書なのです。</p>
+    <p>これを Go で素直に書くと <code>map[string]any</code> になります。キーは <code>string</code>、値は「なんでも入る箱」= <code>any</code>（Go 1.18 以降の <code>interface{}</code> の別名）。<code>SET k v</code> なら値は <code>string</code>、<code>LPUSH l a</code> なら値は <code>*List</code>。同じ <code>map</code> に、型の違う値が同居します。この章で作るのは、その<strong>1つの辞書と、辞書そのものを操作する汎用コマンド</strong>——「値が何型であろうと関係ない」操作だけです。文字列を数として増やす、List に積む、といった<strong>型ごとの意味づけ</strong>は、第03章以降がそれぞれの回で足していきます。</p>
+
+    <h2>この層が上の層に約束すること</h2>
+    <p>この章で作る層（キースペース = <code>Store</code>）が周囲に約束するのは、次の3つです。</p>
+    <ul>
+      <li>キーから値を<strong>安全に</strong>読み書きできる。複数の接続（goroutine）が同時に触っても壊れない（<code>sync.Mutex</code> で守る）。</li>
+      <li>キーの存在確認・削除・型の問い合わせ・パターン検索という<strong>型に依らない操作</strong>を提供する。</li>
+      <li>有効期限の切れたキーは、読もうとした瞬間に「もう無い」と答える（Lazy 失効。詳しい仕組みは第02章）。</li>
+    </ul>
+    <p>逆に、この層が<strong>やらない</strong>ことも決めておきます。「値が文字列として整数か」「List の何番目か」——そういう型ごとの解釈は一切しません。<code>Store</code> から見れば、値はただの <code>any</code> です。第00章で「通信」と「処理」を分けたのと同じ規律を、今度は<strong>「入れ物」と「型ごとの意味」</strong>の間に引きます。この分離のおかげで、第03章以降は「<code>Store</code> にどう値を出し入れするか」だけに集中できます。</p>
+
+    <h2 class="step" id="step-1"><span class="step-no">Step 1</span><code>Store</code> 型を定義する — 「辞書 + 有効期限表」</h2>
+    <p>まず入れ物そのものを定義します。作るファイルは <code>store.go</code>。第00章の <code>main.go</code> で名前だけ登場していた <code>*Store</code> が、ここで実体を持ちます。冒頭のインポートと <code>Store</code> 型から。</p>
+
+    <div class="file-tag">store.go</div>
+    <pre><code><span class="kw">package</span> main
+
+<span class="kw">import</span> (
+	<span class="st">"errors"</span>
+	<span class="st">"sync"</span>
+	<span class="st">"time"</span>
+)
+
+<span class="cm">// errWrongType は「そのキーは別の型で使われている」ことを表す。</span>
+<span class="cm">// 応答文字列への変換は dispatch 側で行う。</span>
+<span class="kw">var</span> errWrongType = errors.New(<span class="st">"WRONGTYPE Operation against a key holding the wrong kind of value"</span>)
+
+<span class="cm">// Store はキースペース本体。</span>
+<span class="cm">//   - data:    キー → 値。値は string / *List / Hash / *Set / *ZSet のどれか</span>
+<span class="cm">//   - expires: キー → 失効時刻。有効期限を持つキーだけがここに載る</span>
+<span class="cm">//</span>
+<span class="cm">// ロックは RWMutex ではなく Mutex。Lazy 失効を入れると「読むだけの操作」が</span>
+<span class="cm">// 失効キーの削除（＝書き込み）を伴うため、読み書きを区別する意味が薄くなる。</span>
+<span class="kw">type</span> <span class="ty">Store</span> <span class="kw">struct</span> {
+	mu      sync.<span class="ty">Mutex</span>
+	data    <span class="kw">map</span>[<span class="ty">string</span>]<span class="ty">any</span>
+	expires <span class="kw">map</span>[<span class="ty">string</span>]time.<span class="ty">Time</span>
+}
+
+<span class="kw">func</span> NewStore() *<span class="ty">Store</span> {
+	<span class="kw">return</span> &amp;<span class="ty">Store</span>{
+		data:    <span class="kw">make</span>(<span class="kw">map</span>[<span class="ty">string</span>]<span class="ty">any</span>),
+		expires: <span class="kw">make</span>(<span class="kw">map</span>[<span class="ty">string</span>]time.<span class="ty">Time</span>),
+	}
+}</code></pre>
+
+    <p>1つずつ見ます。まず <code>errWrongType</code>。これは第00章の <code>errProtocol</code> と同じ<strong>番兵エラー</strong>で、「そのキーは別の型で使われている」ことを表します。<code>GET</code> を List に対して呼んだり、<code>LPUSH</code> を文字列に対して呼んだりしたときに、型ごとのコマンド（第03章以降）がこのエラーを返します。この章の <code>Store</code> 自身は型を解釈しないので直接は使いませんが、<strong>キースペースの共有語彙</strong>としてここに定義しておきます。実際に <code>-WRONGTYPE ...</code> という RESP エラー文字列に変換するのは <code>dispatch</code> 側の仕事です（コメントの通り）。</p>
+    <p>本体の <code>Store</code> は<strong>フィールド3つだけ</strong>です。<code>data</code> が「1つの大きな辞書」そのもの——キー（<code>string</code>）から値（<code>any</code>）への <code>map</code>。<code>expires</code> は<strong>有効期限を持つキーだけ</strong>が載る、キーから失効時刻への別の <code>map</code>。ほとんどのキーには期限が無いので、<code>data</code> と <code>expires</code> を分けて「期限付きのキーだけ <code>expires</code> にも登録する」設計にすると、無駄なメモリを食いません。3つ目の <code>mu</code> が、この2つの <code>map</code> をまとめて守る <code>sync.Mutex</code> です。</p>
+    <p>コメントに「なぜ <code>RWMutex</code> ではなく <code>Mutex</code> か」がわざわざ書いてあります。これはこの章の隠れた主役なので、少し立ち止まります。素朴に考えると「読むだけの操作は複数同時に許し、書くときだけ排他する」<code>sync.RWMutex</code> のほうが速そうです。ところが Redis のキースペースには<strong>Lazy 失効</strong>があり、「<code>GET</code> のような読み取り」であっても、失効済みキーに当たれば<strong>その場で削除する（＝書き込む）</strong>。つまり純粋な読み取りが存在しないので、読み書きを区別する <code>RWMutex</code> の旨味が消えます。ならばと、素直な <code>Mutex</code> を1個だけ使う——この決定の伏線が、Step 3 の <code>getLocked</code> で回収されます。</p>
+    <p><code>NewStore</code> は決まり文句です。Go の <code>map</code> は <code>make</code> で初期化しないと <code>nil</code> のままで、<code>nil</code> マップへの書き込みは <code>panic</code> します。だから <code>data</code> と <code>expires</code> を両方 <code>make</code> し、<code>Store</code> へのポインタ <code>*Store</code> を返します。第00章の <code>newServer</code> が呼んでいた <code>NewStore()</code> は、これです。</p>
+
+    <div class="gonote"><div class="box-k">GO メモ · any と map[string]any</div>
+      <p><code>any</code> は Go 1.18 で入った <code>interface{}</code> の別名で、意味は同じ「どんな型の値でも入る箱」です。<code>map[string]any</code> は「キーは文字列、値は何でもよい辞書」。ただし取り出すときは箱に入ったままなので、中身を使うには<strong>型アサーション</strong>（<code>v.(string)</code>）や<strong>型スイッチ</strong>（次の Step 2）で「実際は何型か」を取り出す必要があります。この「何でも入れられるが、出すときに型を確かめる」性質が、1つの <code>map</code> に文字列も List も同居させられる理由であり、同時に「間違った型のコマンドを弾く」（WRONGTYPE）必要が生まれる理由でもあります。</p>
+    </div>
+
+    <div class="gonote"><div class="box-k">GO メモ · sync.Mutex とゼロ値で使える約束</div>
+      <p><code>sync.Mutex</code> は「同時に1つの goroutine だけが通れる関所」です。<code>mu.Lock()</code> で鍵をかけ、<code>mu.Unlock()</code> で開ける。ロック中に別の goroutine が <code>Lock()</code> を呼ぶと、開くまで待たされます。注目してほしいのは、<code>Store</code> の <code>mu</code> フィールドを <code>NewStore</code> で<strong>初期化していない</strong>こと。<code>sync.Mutex</code> は<strong>ゼロ値（何もしない状態）がそのまま「開いた鍵」</strong>として使えるので、<code>make</code> や <code>new</code> が要りません。この「ゼロ値で使える」は Go の設計思想で、<code>strings.Builder</code> や <code>bytes.Buffer</code> も同じです。第00章で <code>client</code> が持っていた <code>wmu sync.Mutex</code> も、同じ理由で明示初期化していませんでした。</p>
+    </div>
+
+    <h2 class="step" id="step-2"><span class="step-no">Step 2</span><code>typeName</code> — 値の正体を型スイッチで見分ける</h2>
+    <p>値は <code>any</code> の箱に入っているので、<code>TYPE</code> コマンドで「このキーは何型か」を答えるには、箱を開けて中身の型を見る必要があります。それをやるのが <code>typeName</code> です。</p>
+
+    <div class="file-tag">store.go（つづき）</div>
+    <pre><code><span class="cm">// typeName は TYPE コマンドが返す型名。</span>
+<span class="kw">func</span> typeName(v <span class="ty">any</span>) <span class="ty">string</span> {
+	<span class="kw">switch</span> v.(<span class="kw">type</span>) {
+	<span class="kw">case</span> <span class="ty">string</span>:
+		<span class="kw">return</span> <span class="st">"string"</span>
+	<span class="kw">case</span> *<span class="ty">List</span>:
+		<span class="kw">return</span> <span class="st">"list"</span>
+	<span class="kw">case</span> <span class="ty">Hash</span>:
+		<span class="kw">return</span> <span class="st">"hash"</span>
+	<span class="kw">case</span> *<span class="ty">Set</span>:
+		<span class="kw">return</span> <span class="st">"set"</span>
+	<span class="kw">case</span> *<span class="ty">ZSet</span>:
+		<span class="kw">return</span> <span class="st">"zset"</span>
+	<span class="kw">default</span>:
+		<span class="kw">return</span> <span class="st">"none"</span>
+	}
+}</code></pre>
+
+    <p><code>switch v.(type)</code> が Go の<strong>型スイッチ</strong>です。<code>any</code> の箱 <code>v</code> の中身が実際にどの型かで枝分かれし、それぞれ Redis の型名を返します。<code>string</code> なら <code>"string"</code>、<code>*List</code> なら <code>"list"</code>、という具合。ここに並ぶ5つの型（<code>string</code> / <code>*List</code> / <code>Hash</code> / <code>*Set</code> / <code>*ZSet</code>）が、この本のキースペースに入りうる<strong>値の全種類</strong>です。<code>*List</code>・<code>*Set</code>・<code>*ZSet</code> がポインタ型で、<code>Hash</code> だけポインタでない（第05章で <code>map</code> の別名として定義するため）——という細かな違いはありますが、いまは「5種類の値がある」とだけ掴めば十分です。それぞれの型は担当章で実体を作ります。</p>
+    <p><code>default</code> が <code>"none"</code> を返すのがポイントです。本家 Redis の <code>TYPE</code> は、存在しないキーに対して <code>none</code> という文字列を返します（エラーではなく）。<code>typeName</code> はここでは「知らない型が来たら none」という保険を兼ねていますが、実際に <code>TYPE nothing</code> が <code>none</code> を返す経路は Step 4 の <code>Type</code> メソッドが担います（存在しないキーは <code>typeName</code> に渡る前に弾かれる）。テスト <code>TestTypeAndWrongType</code> が <code>+string</code>/<code>+list</code>/<code>+hash</code>/<code>+set</code>/<code>+zset</code>/<code>+none</code> の6通りをすべて検証しています。</p>
+
+    <div class="gonote"><div class="box-k">GO メモ · 型スイッチ switch v.(type)</div>
+      <p>ふつうの <code>switch</code> は値で分岐しますが、<code>switch v.(type)</code> は<strong>型で分岐</strong>します。<code>v</code> が <code>any</code>（<code>interface{}</code>）のとき、その中身が実際にどの具体型かを <code>case string:</code> <code>case *List:</code> のように書けます。中身を使いたいときは <code>switch x := v.(type)</code> と束縛すれば、各 <code>case</code> の中で <code>x</code> がその型として使えます（ここでは型名を返すだけなので束縛不要）。「<code>any</code> に入れた値を、型ごとに違う扱いをする」ときの Go の定石で、この本では <code>typeName</code> のほかにも値のディスパッチで何度も登場します。</p>
+    </div>
+
+    <h2 class="step" id="step-3"><span class="step-no">Step 3</span><code>getLocked</code> と Lazy 失効の入口</h2>
+    <p>ここがこの章で<strong>いちばん大事な関数</strong>です。<code>getLocked</code> は「キーの値を返す」だけの小さなヘルパーに見えますが、Redis の有効期限のうち<strong>Lazy 失効</strong>の入口がここに埋め込まれています。まずコードを見て、それから名前の <code>Locked</code> の意味に踏み込みます。</p>
+
+    <div class="file-tag">store.go（つづき）</div>
+    <pre><code><span class="cm">// ---- ロックを取った内側で使うヘルパー ----</span>
+
+<span class="cm">// getLocked はキーの値を返す。失効済みならその場で消して「無い」と答える（Lazy失効）。</span>
+<span class="kw">func</span> (s *<span class="ty">Store</span>) getLocked(key <span class="ty">string</span>) (<span class="ty">any</span>, <span class="ty">bool</span>) {
+	v, ok := s.data[key]
+	<span class="kw">if</span> !ok {
+		<span class="kw">return</span> <span class="kw">nil</span>, <span class="kw">false</span>
+	}
+	<span class="kw">if</span> exp, hasExp := s.expires[key]; hasExp &amp;&amp; time.Now().After(exp) {
+		<span class="kw">delete</span>(s.data, key)
+		<span class="kw">delete</span>(s.expires, key)
+		<span class="kw">return</span> <span class="kw">nil</span>, <span class="kw">false</span>
+	}
+	<span class="kw">return</span> v, <span class="kw">true</span>
+}
+
+<span class="kw">func</span> (s *<span class="ty">Store</span>) removeLocked(key <span class="ty">string</span>) {
+	<span class="kw">delete</span>(s.data, key)
+	<span class="kw">delete</span>(s.expires, key)
+}</code></pre>
+
+    <p>まず名前の <code>...Locked</code> という接尾辞。これは Go でよく使う命名の約束で、<strong>「この関数は、呼び出す前に呼び出し側が <code>s.mu.Lock()</code> を済ませていることを前提とする」</strong>という意味です。<code>getLocked</code> 自身はロックを取りません。だから <code>getLocked</code> を単独で外から呼ぶことはなく、必ず「ロックを取ったメソッド（Step 4 の <code>Del</code> など）の内側」から呼ばれます。この規律のおかげで、1つの操作の中で「値を読んで、失効を判定して、消す」を全部<strong>1回のロックの内側</strong>で完結できます。</p>
+    <p>中身は3段です。第1段、<code>s.data[key]</code> でキーを引き、<strong>そもそも辞書に無ければ</strong> <code>nil, false</code>。Go の <code>map</code> の <code>v, ok := m[key]</code> は「値と、存在したかの真偽」を同時に返す2値受けの形で、<code>ok</code> が <code>false</code> なら「キーが無い」です。</p>
+    <p>第2段が<strong>Lazy 失効の核心</strong>。キーは辞書にあった。では期限切れではないか? <code>s.expires[key]</code> を引いて、<strong>期限が登録されていて（<code>hasExp</code>）かつ今がその時刻を過ぎている（<code>time.Now().After(exp)</code>）</strong>なら、このキーはもう死んでいます。そこで <code>data</code> と <code>expires</code> の両方から <code>delete</code> し、「無い」（<code>nil, false</code>）と答える。<strong>読もうとしたその瞬間に、ついでに掃除する</strong>——これが Lazy（怠惰な）失効です。期限が切れていても、誰もアクセスしなければメモリには残り続けます。逆に言えば「アクセスされたときに初めて消える」ので、掃除のコストをアクセスに便乗させられる、という賢い設計です。</p>
+    <p>第3段、期限切れでなければ値 <code>v</code> と <code>true</code> を返す。<code>getLocked</code> の戻り値 <code>(any, bool)</code> は「値と、それが有効に存在したか」で、Step 4 のコマンドたちはこの <code>bool</code> だけを見て「キーはあったか」を判断します。</p>
+    <p>相棒の <code>removeLocked</code> は、<code>data</code> と <code>expires</code> の両方から <code>delete</code> するだけの後始末係。<strong>片方だけ消すと <code>expires</code> に幽霊エントリが残る</strong>ので、削除は必ずこの2行セットで行う——それを1つの関数に閉じ込めておくことで、消し忘れを防いでいます。</p>
+
+    <div class="box hazard"><div class="box-k">⚠ 落とし穴 — 「なぜ Mutex なのか」の答えがここにある</div>
+      <p>Step 1 で「<code>RWMutex</code> ではなく <code>Mutex</code>」と決めた理由が、この <code>getLocked</code> です。見ての通り、<strong>「値を読む」だけのつもりの <code>getLocked</code> が、失効キーに当たると <code>delete</code>（＝書き込み）を行います</strong>。もし <code>RWMutex</code> で「読み取りロック（複数同時OK）」の下でこれを呼ぶと、複数の goroutine が同時に同じ <code>map</code> を <code>delete</code> しようとして<strong>データ競合で壊れます</strong>（Go の <code>map</code> は同時書き込みで <code>panic</code> する）。「純粋な読み取りが存在しない」なら、読み書きを区別する意味がない。だから素直に <code>Mutex</code> 1個。この設計判断の伏線が、いまきれいに回収されました。第09章では、この選択を「単一 goroutine に集約する案」と比較して振り返ります。</p>
+    </div>
+
+    <div class="gonote"><div class="box-k">GO メモ · map の2値受けと delete</div>
+      <p>Go の <code>map</code> から値を取るとき、<code>v := m[key]</code> だと「キーが無い場合はゼロ値」が返り、「無い」と「ゼロ値が入っている」を区別できません。<code>v, ok := m[key]</code> と<strong>2つ受け取る</strong>と、<code>ok</code>（<code>bool</code>）で存在を判定できます。<code>getLocked</code> はこれを2回使っています（<code>data</code> の存在と <code>expires</code> の存在）。<br>
+      削除は組み込み関数 <code>delete(m, key)</code>。存在しないキーを <code>delete</code> しても<strong>エラーにならない</strong>（何も起きない）ので、<code>removeLocked</code> が期限の無いキーに対して <code>delete(s.expires, key)</code> を呼んでも安全です。</p>
+    </div>
+
+    <h2 class="step" id="step-4"><span class="step-no">Step 4</span><code>Del</code> / <code>Exists</code> / <code>Type</code> — 汎用コマンドの実体</h2>
+    <p>入れ物（Step 1）と、その中を安全に覗くヘルパー（Step 3）が揃いました。ここからは、それらを使った<strong>汎用コマンドの実体</strong>です。まず削除・存在確認・型問い合わせの3つ。どれも「ロックを取る → <code>getLocked</code> で覗く → 数える or 答える → ロックを離す」という同じリズムで書けます。</p>
+
+    <div class="file-tag">store.go（つづき）</div>
+    <pre><code><span class="cm">// ---- 汎用コマンドの実体 ----</span>
+
+<span class="kw">func</span> (s *<span class="ty">Store</span>) Del(keys ...<span class="ty">string</span>) <span class="ty">int</span> {
+	s.mu.Lock()
+	<span class="kw">defer</span> s.mu.Unlock()
+	n := <span class="st">0</span>
+	<span class="kw">for</span> _, k := <span class="kw">range</span> keys {
+		<span class="kw">if</span> _, ok := s.getLocked(k); ok {
+			s.removeLocked(k)
+			n++
+		}
+	}
+	<span class="kw">return</span> n
+}
+
+<span class="kw">func</span> (s *<span class="ty">Store</span>) Exists(keys ...<span class="ty">string</span>) <span class="ty">int</span> {
+	s.mu.Lock()
+	<span class="kw">defer</span> s.mu.Unlock()
+	n := <span class="st">0</span>
+	<span class="kw">for</span> _, k := <span class="kw">range</span> keys {
+		<span class="kw">if</span> _, ok := s.getLocked(k); ok {
+			n++
+		}
+	}
+	<span class="kw">return</span> n
+}
+
+<span class="kw">func</span> (s *<span class="ty">Store</span>) Type(key <span class="ty">string</span>) <span class="ty">string</span> {
+	s.mu.Lock()
+	<span class="kw">defer</span> s.mu.Unlock()
+	v, ok := s.getLocked(key)
+	<span class="kw">if</span> !ok {
+		<span class="kw">return</span> <span class="st">"none"</span>
+	}
+	<span class="kw">return</span> typeName(v)
+}</code></pre>
+
+    <p>3つとも先頭が <code>s.mu.Lock()</code> と <code>defer s.mu.Unlock()</code> です。この<strong>「関数の頭でロック、<code>defer</code> で必ず解放」</strong>が、この本のキースペース操作すべてに共通する型です。<code>defer</code> は「この関数を抜けるとき（どんな経路でも）実行する」予約なので、途中で <code>return</code> しても <code>Unlock</code> を忘れません。ロックの取り忘れ・解放忘れはデッドロックやデータ競合の温床で、<code>defer</code> はそれを構文レベルで防ぎます。</p>
+    <p><code>Del</code> を見ます。<code>keys ...string</code> と可変長引数なので、<code>DEL k1 k2 k3</code> のように複数キーを一度に消せます。各キーについて <code>getLocked</code> で「有効に存在するか」を確かめ、存在したときだけ <code>removeLocked</code> で消して <code>n</code> を1つ増やす。返すのは<strong>実際に消した件数</strong>です。存在しないキーを消そうとしても件数には数えない——本家 Redis の <code>DEL</code> の仕様そのままで、テスト <code>TestStringBasics</code> の <code>DEL k</code> が <code>:1</code>、続く <code>DEL k</code>（もう無い）が <code>:0</code> を返すのがこれです。</p>
+    <p>ここで <code>getLocked</code> を経由していることに意味があります。もし <code>s.data[k]</code> を直接見て消したら、<strong>失効済みキーも「存在した」と数えてしまう</strong>。<code>getLocked</code> を通すことで、期限切れのキーは「無い」と判定され（かつその場で掃除され）、<code>DEL</code> は生きているキーだけを正しく数えます。Lazy 失効が全コマンドに一貫して効くのは、こうして<strong>読み口を <code>getLocked</code> に一本化している</strong>からです。</p>
+    <p><code>Exists</code> は <code>Del</code> から <code>removeLocked</code> を抜いただけ——数えるが消さない。<code>EXISTS k k</code> が <code>:2</code> を返す（同じキーを2回数える）のは、ループが引数の個数ぶん回るからで、これも本家準拠です（テスト <code>TestStringBasics</code>）。</p>
+    <p><code>Type</code> は単一キー。<code>getLocked</code> で値を取り、無ければ <code>"none"</code>、あれば Step 2 の <code>typeName(v)</code> で型名にして返す。<code>dispatch</code> 側はこの戻り値を <code>simpleString</code> で包むので、<code>TYPE s</code> は <code>+string\r\n</code> になります。ここでも「存在しないキーは <code>none</code>、エラーではない」という Redis の約束が守られています。</p>
+
+    <div class="box hazard"><div class="box-k">⚠ 落とし穴 — dispatch との橋渡し（引数チェックはコマンド側）</div>
+      <p><code>Store</code> のメソッドは<strong>「正しい引数が来る前提」</strong>で書かれています。<code>DEL</code> に引数が1つも無い（キーゼロ個）ようなエラーは、<code>Store</code> ではなく <code>command.go</code> の <code>dispatch</code> が手前で弾きます。実際、<code>dispatch</code> の <code>case "DEL":</code> は <code>len(args) &lt; 2</code> なら <code>-ERR wrong number of arguments</code> を返し、そうでなければ <code>integer(s.Del(args[1:]...))</code> と、<strong>コマンド名を除いた引数 <code>args[1:]</code> を展開して</strong> <code>Del</code> に渡します。<code>Del</code> の <code>int</code> 戻り値を <code>integer(...)</code> で RESP の <code>:件数</code> に変換するのも <code>dispatch</code> の役目。この「<code>Store</code> は数を返すだけ、RESP 化と引数検証は <code>dispatch</code>」という分担が、第00章で作った層分けの延長です。</p>
+    </div>
+
+    <h2 class="step" id="step-5"><span class="step-no">Step 5</span><code>Keys</code> — パターンでキーを引く</h2>
+    <p>次は <code>KEYS user:*</code> のように<strong>パターンにマッチするキーを全部集める</strong> <code>Keys</code> です。「1つの大きな辞書」を全部なめて、パターンに合うものだけ拾います。</p>
+
+    <div class="file-tag">store.go（つづき）</div>
+    <pre><code><span class="kw">func</span> (s *<span class="ty">Store</span>) Keys(pattern <span class="ty">string</span>) []<span class="ty">string</span> {
+	s.mu.Lock()
+	<span class="kw">defer</span> s.mu.Unlock()
+	now := time.Now()
+	<span class="kw">var</span> out []<span class="ty">string</span>
+	<span class="kw">for</span> k := <span class="kw">range</span> s.data {
+		<span class="kw">if</span> exp, hasExp := s.expires[k]; hasExp &amp;&amp; now.After(exp) {
+			<span class="kw">continue</span> <span class="cm">// 失効済みは見せない（削除は Active 失効に任せる）</span>
+		}
+		<span class="kw">if</span> globMatch(pattern, k) {
+			out = append(out, k)
+		}
+	}
+	<span class="kw">return</span> out
+}</code></pre>
+
+    <p>いつものロック定型のあと、<code>for k := range s.data</code> で<strong>辞書の全キーを走査</strong>します。各キーについて2つの関門を通します。第1関門、<strong>失効済みかどうか</strong>。期限が登録されていて今を過ぎていたら <code>continue</code> でスキップ——失効したキーは <code>KEYS</code> の結果に<strong>見せない</strong>。第2関門、<code>globMatch(pattern, k)</code> でパターンに合えば <code>out</code> に追加。両方を通ったキーだけが返ります。テスト <code>TestKeysAndFlush</code> で <code>Keys("user:*")</code> が <code>user:1</code> と <code>user:2</code> の2つだけ（<code>post:1</code> は除く）を返すのがこれです。</p>
+    <p>ここで<strong>Step 3 の <code>getLocked</code> とのわずかな違い</strong>に気づいてほしいです。<code>getLocked</code> は失効キーをその場で <code>delete</code> しました。しかし <code>Keys</code> は失効キーを<strong>スキップするだけで削除しません</strong>（コメント「削除は Active 失効に任せる」）。なぜか——<code>Keys</code> はループの中で <code>s.data</code> を走査しています。もしそのループの中で <code>delete(s.data, k)</code> をすると、<code>KEYS</code> という<strong>一覧を見せるだけの読み取りコマンドが、大量削除を引き起こす</strong>ことになります（誤解されやすいのですが、Go の <code>range</code> 中の <code>delete</code> 自体は仕様上まったく安全です。実際、第02章の <code>expireCycle</code> はそれを使います。ここは言語の制約ではなく<strong>設計の判断</strong>）。<code>KEYS *</code> を1回打っただけで数万キーの削除が走り、その間ロックを握り続けるのは避けたい。だから <code>Keys</code> は「見せないが消さない」に留め、実際の掃除は第02章で作る<strong>Active 失効</strong>（バックグラウンドで定期的にサンプリングして消す）に委ねます。同じ「失効を隠す」でも、<strong>単一キーの読みは Lazy で即消し、全走査は消さずに Active に任せる</strong>——この使い分けが Redis の失効設計の妙です。</p>
+    <p>パターン照合の <code>globMatch</code> はここでは<strong>ブラックボックスとして使う</strong>だけにします。<code>*</code>（任意の並び）・<code>?</code>（任意の1文字）・<code>[a-z]</code>（文字クラス）に対応した Redis の glob マッチャで、実装は別ファイル <code>glob.go</code> にあります。中身の再帰的なマッチングアルゴリズムは、同じく <code>globMatch</code> を使う <code>PSUBSCRIBE</code>（パターン購読）と合わせて<strong>第09章で腰を据えて解説</strong>します。いまは「<code>KEYS</code> はこの関数にパターン照合を丸投げしている」とだけ掴めば十分です。</p>
+
+    <div class="gonote"><div class="box-k">GO メモ · var out []string と append / nil スライス</div>
+      <p><code>var out []string</code> は「まだ何も入っていない <code>nil</code> スライス」を作ります。<code>make</code> していないので長さ0・容量0ですが、Go の <code>append(out, x)</code> は <code>nil</code> スライスに対しても<strong>問題なく動き</strong>、必要に応じて内部配列を確保してくれます。だから「空かもしれないし要素が増えるかもしれない」集約は、<code>var out []string</code> から始めて <code>append</code> で足す、が定石です。<br>
+      一点だけ Redis 的な注意: マッチが0件のとき <code>Keys</code> は <code>nil</code> スライスを返しますが、<code>dispatch</code> 側の <code>bulkArray</code> がそれを空配列 <code>*0\r\n</code> に変換するので、クライアントには正しく「空の配列」が返ります。</p>
+    </div>
+
+    <h2 class="step" id="step-6"><span class="step-no">Step 6</span><code>FlushDB</code> — 全部を捨てて作り直す</h2>
+    <p>最後は <code>FLUSHDB</code>——<strong>データベースを丸ごと空にする</strong>コマンドです。この章でいちばん短いですが、Go らしい賢さが1つ詰まっています。</p>
+
+    <div class="file-tag">store.go（つづき・これで担当範囲は全文）</div>
+    <pre><code><span class="kw">func</span> (s *<span class="ty">Store</span>) FlushDB() {
+	s.mu.Lock()
+	<span class="kw">defer</span> s.mu.Unlock()
+	s.data = <span class="kw">make</span>(<span class="kw">map</span>[<span class="ty">string</span>]<span class="ty">any</span>)
+	s.expires = <span class="kw">make</span>(<span class="kw">map</span>[<span class="ty">string</span>]time.<span class="ty">Time</span>)
+}</code></pre>
+
+    <p>ロックを取り、<code>data</code> と <code>expires</code> に<strong>まっさらな新しい <code>map</code> を代入</strong>する。それだけです。ここでの選択がちょっとした見どころ——「全キーを1つずつ <code>delete</code> でループして消す」のではなく、<strong>新品の <code>map</code> に差し替える</strong>。こうすると古い <code>map</code>（と、その中の全キー・全値）はどこからも参照されなくなり、Go の<strong>ガベージコレクタがまとめて回収</strong>します。1つずつ消すより速く、コードも短い。「捨てるなら、消すより丸ごと置き換える」は Go（に限らずGC言語）の定番テクニックです。</p>
+    <p>ロックを忘れずに取っているのも大事です。<code>FlushDB</code> の最中に別の接続が <code>GET</code> しようとしたら——ロックが無ければ、差し替えの途中の中途半端な状態を読んでしまうかもしれません。<code>s.mu.Lock()</code> があるので、<code>FlushDB</code> が2つの <code>map</code> を差し替え終わるまで、他の操作は待たされます。テスト <code>TestKeysAndFlush</code> は <code>FLUSHDB</code> のあと <code>Keys("*")</code> が0件になることを確認しています。</p>
+
+    <div class="box hazard"><div class="box-k">⚠ 落とし穴 — 空になったコレクションはキーごと消す（この章の外だが約束は共有）</div>
+      <p>この章の <code>Del</code>/<code>removeLocked</code> は「キーを丸ごと消す」操作でした。しかし第04章以降の型（List/Hash/Set/ZSet）では、もう一段の約束が加わります——<strong>最後の要素を <code>LPOP</code> や <code>SREM</code> で抜いて中身が空になったら、そのキー自体を辞書から消す</strong>のが Redis の流儀です。空の List が <code>data</code> に居座ると、<code>EXISTS</code> が <code>:1</code> を返し「あるのに空」という Redis に無い状態が生まれてしまう。テスト <code>TestList</code>/<code>TestHash</code>/<code>TestZRem</code> はどれも「空になったら <code>EXISTS</code> が <code>:0</code>」を検証しています。実際に空判定して <code>removeLocked</code> を呼ぶのは各型の担当章ですが、<strong>その受け皿がこの章の <code>removeLocked</code></strong>だ、と覚えておいてください。キースペースの土台は、上の型たちのこうした約束を静かに支えます。</p>
+    </div>
+
+    <div class="box do"><div class="box-k">▸ 動かして確認</div>
+      <p>この章のコマンドが一通り動くことを、2本のテストで確かめます。<code>src</code> の中で実行します。</p>
+      <pre class="term"><code><span class="ps">$</span> cd src
+<span class="ps">$</span> go test -run TestKeysAndFlush -v
+<span class="out">=== RUN   TestKeysAndFlush
+--- PASS: TestKeysAndFlush (0.00s)
+PASS</span>
+<span class="ps">$</span> go test -run TestTypeAndWrongType -v
+<span class="out">=== RUN   TestTypeAndWrongType
+--- PASS: TestTypeAndWrongType (0.00s)
+PASS</span></code></pre>
+      <p><code>TestKeysAndFlush</code> は「<code>user:*</code> で2件・<code>*</code> で3件・<code>FLUSHDB</code> 後に0件」を、<code>TestTypeAndWrongType</code> は5種類の型 + <code>none</code> の <code>TYPE</code> 応答を確かめます。<code>DEL</code>/<code>EXISTS</code> の基本は <code>TestStringBasics</code> にも入っているので、まとめて走らせるなら次です。</p>
+      <pre class="term"><code><span class="ps">$</span> go test ./... -count=1
+<span class="out">ok  	redisclone	0.4s</span></code></pre>
+    </div>
+
+    <h2 class="step" id="step-7"><span class="step-no">Step 7</span>演習: 1つの辞書を <code>redis-cli</code> で覗く</h2>
+    <p>「Redis のデータベースは1つの <code>map</code>」という、この章の一番の主張を<strong>手を動かして</strong>実感します。<code>redis-cli</code> がある人は、完成後のサーバに繋いで次を打ってみてください（この環境に <code>redis-cli</code> が無ければ、上のテストが同じことを機械で証明しています）。</p>
+    <pre class="term"><code><span class="ps">$</span> redis-cli -p 6380
+<span class="ps">127.0.0.1:6380&gt;</span> SET user:1 alice
+<span class="out">OK</span>
+<span class="ps">127.0.0.1:6380&gt;</span> LPUSH mylist a b c
+<span class="out">(integer) 3</span>
+<span class="ps">127.0.0.1:6380&gt;</span> HSET user:2 name bob
+<span class="out">(integer) 1</span>
+<span class="ps">127.0.0.1:6380&gt;</span> TYPE user:1
+<span class="out">string</span>
+<span class="ps">127.0.0.1:6380&gt;</span> TYPE mylist
+<span class="out">list</span>
+<span class="ps">127.0.0.1:6380&gt;</span> KEYS user:*
+<span class="out">1) "user:1"
+2) "user:2"</span>
+<span class="ps">127.0.0.1:6380&gt;</span> EXISTS user:1 user:2 nope
+<span class="out">(integer) 2</span></code></pre>
+    <p>ここで見えているのが、まさに <code>Store.data</code> という1つの <code>map</code> の中身です。<code>user:1</code>（文字列）・<code>mylist</code>（List）・<code>user:2</code>（Hash）が<strong>同じ辞書に同居</strong>し、<code>TYPE</code> は値の型を（Step 2 の型スイッチで）見分け、<code>KEYS user:*</code> は（Step 5 の glob 照合で）キー名だけでパターン検索し、<code>EXISTS</code> は3つ問い合わせて生きている2つを数える。型ごとにデータベースが分かれているわけではない——「1つの大きな辞書 + any 値」というこの章の設計が、そのまま画面に現れています。</p>
+    <div class="box do"><div class="box-k">▸ さらに手を動かすなら</div>
+      <p>余力があれば、次を試してみてください。答えは自分の目で確かめられます。</p>
+      <ol>
+        <li>存在しないキーに <code>TYPE nokey</code> を打ち、エラーではなく <code>none</code> が返ることを確認する（Step 2 の <code>default</code>、Step 4 の <code>Type</code>）。</li>
+        <li><code>DEL user:1 mylist nope</code> と<strong>3つまとめて</strong>削除し、返る件数が実際に消えた <code>2</code> であることを見る（存在しない <code>nope</code> は数えない）。</li>
+        <li><code>KEYS *</code> で全キーを出し、そのあと <code>FLUSHDB</code> → もう一度 <code>KEYS *</code> で <code>(empty array)</code> になるのを確認する。Step 6 の「丸ごと差し替え」が効いている。</li>
+      </ol>
+    </div>
+
+    <h2>つまずき FAQ</h2>
+    <details class="qa"><summary>値が <code>any</code> だと、何を入れたか分からなくならない? 型安全は?</summary>
+      <div class="qa-body"><p>「箱に入れる時点では何でも入る、出す時に型を確かめる」というトレードオフです。<code>map[string]any</code> にしたことで、1つの辞書に文字列も List も同居できます。その代わり、値を型として使う各コマンド（第03章以降）は、取り出すときに型アサーション（<code>v.(string)</code>）や型スイッチで「本当にその型か」を確かめ、違えば <code>errWrongType</code> を返します。<code>redis-cli</code> で見る <code>WRONGTYPE</code> エラーは、この確認の産物です。Redis のような「1つのキー空間に多様な型」を Go で表すには、この <code>any</code> + 実行時チェックが最も素直な選択になります。</p></div>
+    </details>
+    <details class="qa"><summary>なぜ <code>data</code> と <code>expires</code> の2つの <code>map</code> に分けるの? 値の隣に期限を持たせては?</summary>
+      <div class="qa-body"><p>「有効期限を持つキーはごく一部」だからです。もし全値を「値 + 期限」の構造体で包むと、期限の無い大多数のキーにも空の期限フィールドが付いてメモリを食います。<code>expires</code> を別の <code>map</code> にして<strong>期限付きのキーだけ登録する</strong>と、無期限のキーは <code>data</code> にしか載らず軽い。代わりに削除のたびに両方から消す手間が要りますが、それは <code>removeLocked</code> が1か所に閉じ込めています。本家 Redis も概念的にこの「メインの辞書 + 期限専用の辞書」の二本立てです。</p></div>
+    </details>
+    <details class="qa"><summary><code>getLocked</code> の <code>Locked</code> って何? ロックはどこで取っている?</summary>
+      <div class="qa-body"><p><code>...Locked</code> は「呼び出し側がすでにロックを取っている前提」を表す命名の約束です。<code>getLocked</code>/<code>removeLocked</code> 自身は <code>Lock()</code> しません。ロックを取るのは <code>Del</code>/<code>Exists</code>/<code>Type</code>/<code>Keys</code>/<code>FlushDB</code> のような<strong>公開メソッド</strong>で、それらが先頭で <code>s.mu.Lock()</code> してから内側で <code>getLocked</code> を呼びます。こうすると「1つのコマンドの処理はまるごと1回のロックの内側」に収まり、途中で他の goroutine に割り込まれません。もし <code>getLocked</code> が自分でロックを取る設計だと、<code>Del</code> のループの中で毎回ロックし直すことになり、その隙間に別の操作が挟まってしまいます。</p></div>
+    </details>
+
+    <h2>理解度チェック</h2>
+    <p>次の問いに<strong>自分の言葉で</strong>答えられたら、この章は卒業です。</p>
+    <details class="qa"><summary>1. Redis のデータベースが「1つの大きな辞書 + <code>any</code> 値」だとは、具体的にどういう構造か。</summary>
+      <div class="qa-body"><p>キーはすべて文字列で、<code>map[string]any</code> という<strong>1つの辞書</strong>にすべてのキーが載る。値だけが型を持ち、<code>string</code>（文字列）・<code>*List</code>・<code>Hash</code>・<code>*Set</code>・<code>*ZSet</code> のどれかが同じ辞書に同居する。「型が違う」のは値の中身の話で、キーから値を引く仕組みは全型共通の1つの <code>map</code>。だから <code>SET</code> した文字列と <code>LPUSH</code> した List が、同じ <code>Keys("*")</code> に並んで出てくる。</p></div>
+    </details>
+    <details class="qa"><summary>2. Lazy 失効とは何で、なぜ <code>Store</code> のロックが <code>RWMutex</code> ではなく <code>Mutex</code> になるのか。</summary>
+      <div class="qa-body"><p><strong>Lazy 失効</strong>: 期限切れのキーを、バックグラウンドではなく「読もうとしたその瞬間」に <code>getLocked</code> の中で <code>delete</code> して「無い」と答える方式。掃除のコストをアクセスに便乗させる。<strong>Mutex の理由</strong>: この Lazy 失効のせいで、<code>GET</code> のような「読むだけ」の操作でも失効キーに当たれば <code>delete</code>（＝書き込み）を伴う。純粋な読み取りが存在しないので、読み取りを複数同時に許す <code>RWMutex</code> の利点が消える。むしろ複数 goroutine が同時に <code>map</code> を <code>delete</code> すると壊れるので、素直な <code>Mutex</code> 1個で全操作を直列化する。</p></div>
+    </details>
+    <details class="qa"><summary>3. 同じ「失効を隠す」でも、<code>getLocked</code> と <code>Keys</code> で扱いが違う。どう違い、なぜか。</summary>
+      <div class="qa-body"><p><code>getLocked</code>（単一キーの読み）は失効キーを<strong>その場で <code>delete</code> する</strong>（Lazy 失効）。一方 <code>Keys</code>（全キーの走査）は失効キーを<strong>スキップするだけで消さない</strong>。理由は、<code>Keys</code> は <code>s.data</code> を <code>range</code> で走査している最中なので、その中で大量削除を走らせたくないから。<code>Keys</code> が見送った失効キーの実際の掃除は、第02章で作る Active 失効（定期的にサンプリングして消すバックグラウンド処理）に委ねる。「単一の読みは即消し、全走査は消さずに後回し」という使い分け。</p></div>
+    </details>
+
+    <h2>まとめ — 次の層へ</h2>
+    <p>この章で、第00章の口の奥に<strong>キースペース</strong>——キーと値をしまう1つの大きな辞書——が置かれました。<code>map[string]any</code> という素朴な入れ物を <code>sync.Mutex</code> で守り、<code>getLocked</code> という一本の読み口に Lazy 失効を仕込み、その上に <code>Del</code>/<code>Exists</code>/<code>Type</code>/<code>Keys</code>/<code>FlushDB</code> という「値が何型でも関係ない」汎用操作を積みました。まだ文字列を数として増やすことも、List に積むこともできませんが、<strong>Redis が「データを覚えている」土台</strong>は、もう手の中にあります。</p>
+    <p>この章で何度か顔を出しながら「詳しくは次章」と先送りしたものが1つあります——<strong>有効期限</strong>です。<code>getLocked</code> は失効を判定しましたが、その期限を<strong>設定する</strong>（<code>EXPIRE</code>）方法も、<code>Keys</code> が消さずに残した失効キーを<strong>掃除する</strong>（Active 失効）仕組みも、まだ空白のままです。次の第02章では、この <code>expires</code> テーブルに息を吹き込みます。<code>EXPIRE</code>/<code>TTL</code>/<code>PERSIST</code> でキーに寿命を与え、<code>expireCycle</code> がバックグラウンドで死んだキーを掃く。Lazy と Active、2つの失効が揃って、Redis の有効期限がようやく完成します。</p>
+
+    <div class="chap-foot">
+      <a class="pager" href="00-server.html"><span class="dir">← 前へ</span>第00章 · 返事をするサーバ</a>
+      <a class="pager next" href="02-expire.html"><span class="dir">次へ →</span>第02章 · 有効期限</a>
+    </div>
+  </main>
+</div>
+</body>
+</html>

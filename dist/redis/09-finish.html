@@ -1,0 +1,565 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>第09章 仕上げと設計判断 — Redis をつくる</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500;600&family=Source+Serif+4:opsz,wght@8..60,400;8..60,600;8..60,700&family=Noto+Serif+JP:wght@400;600;700&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<div class="shell">
+
+  <aside class="spine">
+    <a class="wordmark" href="index.html">MINI-REDIS · from scratch</a>
+    <div class="book-title">Redis を<br>つくる</div>
+    <div class="book-sub">Go で RESP から Sorted Set まで</div>
+
+    <div class="legend"><span>読む <b>↓</b></span><span>組む <b>↑</b></span></div>
+
+    <nav aria-label="目次">
+      <ul class="toc">
+        <li><a class="nav-item" href="index.html"><span class="nav-num">序</span><span class="nav-label">はじめに・準備<span class="nav-tag">Setup</span></span></a></li>
+        <li><a class="nav-item" href="00-server.html"><span class="nav-num">00</span><span class="nav-label">返事をするサーバ<span class="nav-tag">RESP</span></span></a></li>
+        <li><a class="nav-item" href="01-keyspace.html"><span class="nav-num">01</span><span class="nav-label">キーと値<span class="nav-tag">Store</span></span></a></li>
+        <li><a class="nav-item" href="02-expire.html"><span class="nav-num">02</span><span class="nav-label">有効期限<span class="nav-tag">Expire</span></span></a></li>
+        <li><a class="nav-item" href="03-string.html"><span class="nav-num">03</span><span class="nav-label">数としての文字列<span class="nav-tag">String</span></span></a></li>
+        <li><a class="nav-item" href="04-list.html"><span class="nav-num">04</span><span class="nav-label">List<span class="nav-tag">List</span></span></a></li>
+        <li><a class="nav-item" href="05-hash.html"><span class="nav-num">05</span><span class="nav-label">Hash<span class="nav-tag">Hash</span></span></a></li>
+        <li><a class="nav-item" href="06-set.html"><span class="nav-num">06</span><span class="nav-label">Set とエンコーディング<span class="nav-tag">Set</span></span></a></li>
+        <li><a class="nav-item" href="07-zset.html"><span class="nav-num">07</span><span class="nav-label">Sorted Set と skiplist<span class="nav-tag">ZSet</span></span></a></li>
+        <li><a class="nav-item" href="08-pubsub.html"><span class="nav-num">08</span><span class="nav-label">Pub/Sub<span class="nav-tag">PubSub</span></span></a></li>
+        <li><a class="nav-item current" aria-current="page" href="09-finish.html"><span class="nav-num">09</span><span class="nav-label">仕上げと設計判断<span class="nav-tag">Finish</span></span></a></li>
+      </ul>
+    </nav>
+
+    <div class="spine-foot">
+      各章は一つのデータ型・機能。<br>下（RESP）から上（Sorted Set）へ<br>積み上げて動かしていく。
+    </div>
+  </aside>
+
+  <main class="reading">
+    <div class="progress-tag">第09章 / 全10章 · 層: FINISH · 読了目安 2〜3時間</div>
+    <div class="eyebrow"><span>FINISH</span><span class="depth">— 最上層・総仕上げ</span></div>
+    <h1>仕上げと設計判断</h1>
+    <p class="lede">積み上げは、あと一段で完成します。この章では、まだ埋めていない最後の部品——<code>KEYS</code> と <code>PSUBSCRIBE</code> が使う <strong>glob パターン照合</strong>——を書き、10 章ぶんの <code>case</code> が出そろった <code>dispatch</code> を<strong>エラー方針の総まとめ</strong>として読み直します。そして最後に、この本の一番深い問いに答えます。「なぜ本家 Redis は<strong>単一スレッド</strong>なのに、この本は<strong>1接続1 goroutine + Mutex</strong> を選んだのか」。手を動かして作ったからこそ意味を持つ、通しの設計判断です。</p>
+
+    <div class="box goal"><div class="box-k">◈ この章のゴール</div>
+      <p>次の 3 つを、自分の目と手で確認・言語化できたら、この本は完成です。</p>
+      <ol>
+        <li><code>go test ./... -count=1 -v</code> で、10 章ぶんの全テストが <strong>1つ残らず PASS</strong> する（本書のクライマックス）。</li>
+        <li><code>globMatch</code> が <code>*</code> <code>?</code> <code>[a-z]</code> <code>\</code> を正しく扱い、再帰でバックトラックする仕組みを追える。</li>
+        <li>「ロックか、1本の goroutine か」——2 案のトレードオフを自分の言葉で説明し、本書が後者を選んだ理由を言える。</li>
+      </ol>
+    </div>
+
+    <div class="box map"><div class="box-k">☰ この章のステップ</div>
+      <ol>
+        <li><a href="#step-1">glob パターン照合 — <code>glob.go</code> を全文で読む</a></li>
+        <li><a href="#step-2"><code>dispatch</code> の完成形 — 全 case が出そろう</a></li>
+        <li><a href="#step-3">エラー方針の総まとめ — 3 分類と本家準拠の文言</a></li>
+        <li><a href="#step-4">通しで確かめる — <code>go test ./...</code></a></li>
+        <li><a href="#step-5">最後の設計判断 — ロック vs 単一 goroutine</a></li>
+        <li><a href="#step-6">スコープ外と発展課題 — 完成、そして次へ</a></li>
+      </ol>
+    </div>
+
+    <h2>残った部品を埋める。そして、通しの設計を振り返る</h2>
+    <p>ここまでの 9 章で、Redis の主要なデータ型——文字列・List・Hash・Set・Sorted Set——と、それらを載せる RESP サーバ、有効期限、Pub/Sub まで作りました。動くものは、もうほぼ手の中にあります。残っているのは、パズルの最後の 1 ピース——<code>KEYS user:*</code> や <code>PSUBSCRIBE news.*</code> のような<strong>パターン照合</strong>だけです。</p>
+    <p>この章は、その 1 ピースを埋めることから始めます。ですが本題はその先です。<code>glob.go</code> を埋めれば <code>dispatch</code> の全 <code>case</code> が出そろうので、この機に<strong>全体のエラー方針</strong>を1枚の絵として読み直します。そして最後に——手を動かして 10 章を積み上げた「今のあなた」にしか実感できない問い——<strong>並行モデルの設計判断</strong>を、判断軸 → 2 案のトレードオフ → 選定、という形で正面から論じます。作る前に読んでも腑に落ちない議論が、作った後なら「たしかにそうだ」と読める。それがこの最終章の狙いです。</p>
+
+    <h2 class="step" id="step-1"><span class="step-no">Step 1</span>glob パターン照合 — glob.go を全文で読む</h2>
+    <p><code>KEYS user:*</code> は「<code>user:</code> で始まる全キー」を返し、<code>PSUBSCRIBE news.*</code> は「<code>news.</code> で始まる全チャネル」を購読します。この <code>user:*</code> や <code>news.*</code> が <strong>glob パターン</strong>で、ある文字列がそのパターンに当てはまるかを判定するのが <code>globMatch</code> です。本家 Redis の <code>util.c</code> にある <code>stringmatchlen</code> の素直な移植で、作るファイルは <code>glob.go</code>。これ1つで <code>KEYS</code> と <code>PSUBSCRIBE</code> の両方が動きます。</p>
+    <p>まず、対応するメタ文字を4つ確認します。正規表現よりずっと小さい言語です。</p>
+
+    <table>
+      <tr><th>記号</th><th>意味</th><th>例</th></tr>
+      <tr><td><code>*</code></td><td>任意の並び（0 文字以上）</td><td><code>user:*</code> が <code>user:1</code> にマッチ</td></tr>
+      <tr><td><code>?</code></td><td>任意の 1 文字</td><td><code>h?llo</code> が <code>hello</code>・<code>hallo</code> にマッチ</td></tr>
+      <tr><td><code>[...]</code></td><td>文字クラス。<code>[a-c]</code> は範囲、<code>[^e]</code> は否定</td><td><code>h[ae]llo</code> が <code>hello</code>・<code>hallo</code> にマッチ</td></tr>
+      <tr><td><code>\</code></td><td>エスケープ。次の 1 文字をリテラル扱い</td><td><code>\*</code> は文字 <code>*</code> そのものにマッチ</td></tr>
+    </table>
+
+    <p>では全文を読みます。関数はこれ 1 つだけ。パターン側の位置 <code>p</code> と文字列側の位置 <code>s</code> を、2 本の指のように進めていきます。</p>
+
+    <div class="file-tag">glob.go（これで全文）</div>
+    <pre><code><span class="kw">package</span> main
+
+<span class="cm">// globMatch は Redis の KEYS / PSUBSCRIBE が使う glob パターン照合。</span>
+<span class="cm">// 対応: '*'（任意の並び） '?'（任意の1文字） '[a-z]'（文字クラス、[^...] で否定） '\'（エスケープ）</span>
+<span class="cm">// 本家 util.c の stringmatchlen の素直な移植。</span>
+<span class="kw">func</span> globMatch(pattern, str <span class="ty">string</span>) <span class="ty">bool</span> {
+	p, s := <span class="st">0</span>, <span class="st">0</span>
+	<span class="kw">for</span> p &lt; len(pattern) {
+		<span class="kw">switch</span> pattern[p] {
+		<span class="kw">case</span> <span class="st">'*'</span>:
+			<span class="kw">for</span> p+<span class="st">1</span> &lt; len(pattern) &amp;&amp; pattern[p+<span class="st">1</span>] == <span class="st">'*'</span> {
+				p++ <span class="cm">// 連続する * は1つ扱い</span>
+			}
+			<span class="kw">if</span> p+<span class="st">1</span> == len(pattern) {
+				<span class="kw">return</span> <span class="kw">true</span> <span class="cm">// 末尾の * は残り全部にマッチ</span>
+			}
+			<span class="kw">for</span> ; s &lt;= len(str); s++ {
+				<span class="kw">if</span> globMatch(pattern[p+<span class="st">1</span>:], str[s:]) {
+					<span class="kw">return</span> <span class="kw">true</span>
+				}
+			}
+			<span class="kw">return</span> <span class="kw">false</span>
+		<span class="kw">case</span> <span class="st">'?'</span>:
+			<span class="kw">if</span> s == len(str) {
+				<span class="kw">return</span> <span class="kw">false</span>
+			}
+			s++
+		<span class="kw">case</span> <span class="st">'['</span>:
+			<span class="kw">if</span> s == len(str) {
+				<span class="kw">return</span> <span class="kw">false</span>
+			}
+			p++
+			not := p &lt; len(pattern) &amp;&amp; pattern[p] == <span class="st">'^'</span>
+			<span class="kw">if</span> not {
+				p++
+			}
+			match := <span class="kw">false</span>
+			<span class="kw">for</span> p &lt; len(pattern) &amp;&amp; pattern[p] != <span class="st">']'</span> {
+				<span class="kw">if</span> pattern[p] == <span class="st">'\\'</span> &amp;&amp; p+<span class="st">1</span> &lt; len(pattern) {
+					p++
+					<span class="kw">if</span> pattern[p] == str[s] {
+						match = <span class="kw">true</span>
+					}
+				} <span class="kw">else</span> <span class="kw">if</span> p+<span class="st">2</span> &lt; len(pattern) &amp;&amp; pattern[p+<span class="st">1</span>] == <span class="st">'-'</span> &amp;&amp; pattern[p+<span class="st">2</span>] != <span class="st">']'</span> {
+					lo, hi := pattern[p], pattern[p+<span class="st">2</span>]
+					<span class="kw">if</span> lo &gt; hi {
+						lo, hi = hi, lo
+					}
+					<span class="kw">if</span> str[s] &gt;= lo &amp;&amp; str[s] &lt;= hi {
+						match = <span class="kw">true</span>
+					}
+					p += <span class="st">2</span>
+				} <span class="kw">else</span> <span class="kw">if</span> pattern[p] == str[s] {
+					match = <span class="kw">true</span>
+				}
+				p++
+			}
+			<span class="kw">if</span> not {
+				match = !match
+			}
+			<span class="kw">if</span> !match {
+				<span class="kw">return</span> <span class="kw">false</span>
+			}
+			s++
+		<span class="kw">case</span> <span class="st">'\\'</span>:
+			<span class="kw">if</span> p+<span class="st">1</span> &lt; len(pattern) {
+				p++
+			}
+			<span class="kw">fallthrough</span>
+		<span class="kw">default</span>:
+			<span class="kw">if</span> s == len(str) || pattern[p] != str[s] {
+				<span class="kw">return</span> <span class="kw">false</span>
+			}
+			s++
+		}
+		p++
+	}
+	<span class="kw">return</span> s == len(str)
+}</code></pre>
+
+    <p>1 文字ずつ、パターンの現在位置 <code>pattern[p]</code> を見て枝分かれします。素直な 4 ケースから見ましょう。</p>
+    <p><strong><code>?</code>（任意の1文字）</strong>: 文字列がまだ残っていれば <code>s++</code> で1文字消費するだけ。残っていなければ <code>false</code>。何にでも当たる1文字なので、中身は問いません。</p>
+    <p><strong><code>\</code>（エスケープ）</strong>: <code>p++</code> で次の文字へ進んでから <code>fallthrough</code> で <code>default</code> に落ちます。これで「<code>\*</code> の <code>*</code>」を、メタ文字ではなく<strong>ただの文字 <code>*</code></strong>として比較できます。<code>fallthrough</code> は Go の <code>switch</code> で「次の <code>case</code> へ意図的に流す」明示的な指示です（Go は既定でフォールスルーしないので、こう書かないと落ちません）。</p>
+    <p><strong><code>default</code>（普通の文字）</strong>: パターンの文字と文字列の文字がそのまま一致すれば <code>s++</code>、違えば <code>false</code>。<code>abc</code> と <code>abc</code> のような素の照合はここです。ループの最後で必ず <code>p++</code> するので、パターン側も1つ進みます。</p>
+
+    <div class="gonote"><div class="box-k">GO メモ · switch の fallthrough</div>
+      <p>多くの言語（C/Java）の <code>switch</code> は <code>break</code> を書かないと次の <code>case</code> へ落ちますが、Go は逆で、<strong>各 <code>case</code> は既定で自動的に抜ける</strong>（<code>break</code> 不要）。意図的に次へ流したいときだけ、末尾に <code>fallthrough</code> と明記します。ここでは <code>'\\'</code> の処理（1文字進める）を済ませたあと、リテラル比較のロジックを <code>default</code> と共有するために使っています。「エスケープした文字は、ただの文字として比較する」を、コードの重複なしに表現する手筋です。</p>
+    </div>
+
+    <p>難所は残り 2 つ——<code>[...]</code> と <code>*</code> です。まず<strong>文字クラス <code>[...]</code></strong>。<code>[</code> を見たら <code>p++</code> で中に入り、先頭が <code>^</code> なら否定フラグ <code>not</code> を立ててさらに 1 つ進みます。あとは <code>]</code> が来るまでループし、その 1 文字が範囲・エスケープ・単独文字のどれに当たるかを見て、当たれば <code>match = true</code>。3 つの分岐が要点です。</p>
+    <ul>
+      <li><code>pattern[p+1] == '-'</code>（かつ次が <code>]</code> でない）なら<strong>範囲</strong>。<code>[a-c]</code> の <code>a</code> と <code>c</code> を <code>lo</code>/<code>hi</code> に取り、<code>lo &gt; hi</code> なら入れ替えて（<code>[c-a]</code> でも壊れない）、対象文字が範囲内かを見る。範囲は 3 文字ぶんなので <code>p += 2</code> で余分に進めます。</li>
+      <li><code>\</code> なら<strong>クラス内エスケープ</strong>。<code>[\]]</code> のように <code>]</code> 自体をクラスに含めるときのため、次の1文字をリテラルとして比べます。</li>
+      <li>それ以外は<strong>単独文字</strong>。<code>[ae]</code> の <code>a</code> や <code>e</code> をそのまま照合します。</li>
+    </ul>
+    <p>ループを抜けたら、否定フラグが立っていれば <code>match</code> を反転（<code>h[^e]llo</code> は「<code>e</code> 以外」なので <code>hallo</code> に当たり <code>hello</code> に当たらない）。当たらなければ <code>false</code>、当たれば <code>s++</code> で 1 文字消費します。文字クラスも「任意の1文字を消費する」点では <code>?</code> の仲間で、当たる文字の集合を <code>[...]</code> で絞っているだけです。</p>
+
+    <p>そして最大の山場、<strong><code>*</code>（任意の並び）</strong>です。ここだけ<strong>再帰</strong>を使います。理屈はこうです。</p>
+    <div class="ascii">パターン  a*c   を   文字列 aXXc   に当てる
+
+  a  ── a と一致、両方 1 つ進む
+  *  ── ここが問題。* は「0文字以上の何か」。
+        何文字ぶん食べればいいか、この場では決められない。
+        → 「* の次のパターン(c)」を、str の "全ての残り" に対して試す
+
+     c を str="XXc" に当てる? → 先頭 X ≠ c で失敗
+     c を str="Xc"  に当てる? → 先頭 X ≠ c で失敗
+     c を str="c"   に当てる? → 一致！ → true
+
+  ＝ * が "XX" を食べれば全体が一致する、と探し当てた</div>
+    <p>コードで追います。まず <code>for p+1 &lt; len(pattern) &amp;&amp; pattern[p+1] == '*'</code> で<strong>連続する <code>*</code> をまとめ</strong>ます（<code>**</code> は <code>*</code> と同じ意味なので、無駄な再帰を減らす）。次に <code>p+1 == len(pattern)</code>——つまり <code>*</code> がパターンの<strong>末尾</strong>なら、残りの文字列が何であろうと当たるので即 <code>true</code>（<code>user:*</code> が <code>user:</code> 以降の全てに当たるのはこれ）。</p>
+    <p>末尾でなければ、<strong>「<code>*</code> の次から先のパターン」を、文字列の切れ目を1つずつずらしながら再帰的に試す</strong>のが核心です。</p>
+    <pre><code><span class="kw">for</span> ; s &lt;= len(str); s++ {
+	<span class="kw">if</span> globMatch(pattern[p+<span class="st">1</span>:], str[s:]) { <span class="cm">// * の後ろを、str の s 以降に当てる</span>
+		<span class="kw">return</span> <span class="kw">true</span>
+	}
+}
+<span class="kw">return</span> <span class="kw">false</span></code></pre>
+    <p><code>str[s:]</code> の切り出し位置 <code>s</code> を <code>0</code> から <code>len(str)</code> まで動かし、そのたびに「<code>*</code> より後ろのパターン <code>pattern[p+1:]</code>」がそこに当たるかを<strong>丸ごと <code>globMatch</code> に投げ直す</strong>。1 つでも当たれば全体成功。全部ダメなら失敗。これが<strong>バックトラック</strong>です。<code>*</code> が「何文字食べるべきか」を決め打ちできないので、あり得る食べ方を<strong>端から全部試す</strong>。<code>s &lt;= len(str)</code> の等号（<code>&lt;</code> でなく <code>&lt;=</code>）が効いていて、これで <code>*</code> が「0 文字」を食べる場合（<code>str[len(str):]</code> = 空文字列）まで含めています。</p>
+    <p>最後に、ループを正常に抜けたときの <code>return s == len(str)</code>。パターンを使い切ったとき、<strong>文字列も同時に使い切っているか</strong>を確かめています。パターンは終わったのに文字列がまだ残っている（<code>abc</code> vs <code>abcd</code>）なら不一致。両方きっかり尽きて初めて完全一致です。</p>
+
+    <div class="box hazard"><div class="box-k">⚠ 落とし穴 — glob は「途中一致」ではなく「全体一致」</div>
+      <p>正規表現に慣れていると、<code>news</code> というパターンが <code>news.tech</code> に「含まれるから当たる」と錯覚しがちですが、glob は<strong>文字列全体がパターンに一致</strong>して初めて真です。<code>news</code> は <code>news.tech</code> には当たらず、<code>news*</code> や <code>news.*</code> と書く必要があります。最後の <code>s == len(str)</code> がこの「全体一致」を担保しています。テスト <code>TestGlobMatch</code> の <code>{"news.*", "sports.tech", false}</code> や <code>{"abc", "abcd", false}</code> がまさにこれを検証しています。もう一つ、<code>{"", "", true}</code> / <code>{"", "a", false}</code> にも注目——空パターンは空文字列にだけ当たる、という端の挙動も <code>for</code> に入らず <code>s == len(str)</code> で正しく落ちます。</p>
+    </div>
+
+    <div class="gonote"><div class="box-k">GO メモ · スライスの再スライス str[s:] にコピーは無い</div>
+      <p><code>str[s:]</code> や <code>pattern[p+1:]</code> は、<strong>元の文字列の一部を指す新しい string ヘッダ</strong>を作るだけで、中身をコピーしません（string は不変なので共有して安全）。だから <code>*</code> のバックトラックで <code>globMatch</code> を何度呼んでも、実体のバイト列は 1 つのまま。再帰は「見る範囲（先頭位置）」を変えているだけで、メモリを食い散らかしはしません。とはいえ最悪ケース（<code>a*a*a*...</code> のような多重 <code>*</code>）では呼び出し回数が指数的に膨らみ得ます。本家 Redis も同じ素朴な実装で、KEYS はそもそも本番で使うなと言われる所以の一つです（この点は Step 6 の発展課題で触れます）。</p>
+    </div>
+
+    <div class="box do"><div class="box-k">▸ 動かして確認</div>
+      <p><code>glob.go</code> 単体のテストを走らせます。<code>*</code> <code>?</code> <code>[a-c]</code> <code>[^e]</code> <code>\*</code> <code>**</code> と空パターン、そして「途中一致は当たらない」までを 26 ケースで網羅しています。</p>
+      <pre class="term"><code><span class="ps">$</span> go test -run TestGlobMatch -v
+<span class="out">=== RUN   TestGlobMatch
+--- PASS: TestGlobMatch (0.00s)
+PASS
+ok  	redisclone	0.15s</span></code></pre>
+      <p>この <code>globMatch</code> は、<code>store.go</code> の <code>Keys</code>（全キーを走査して当たったものを集める）と <code>pubsub.go</code> の <code>PUBLISH</code>（購読パターンとチャネル名を照合して配信先を決める）の両方から呼ばれます。1 つの純粋関数が、コマンドを 2 つ支えているわけです。</p>
+    </div>
+
+    <h2 class="step" id="step-2"><span class="step-no">Step 2</span>dispatch の完成形 — 全 case が出そろう</h2>
+    <p><code>glob.go</code> で <code>KEYS</code> と <code>PSUBSCRIBE</code> が動くようになり、これで <code>dispatch</code> の <code>switch</code> に載せるべき <code>case</code> が<strong>すべて出そろいました</strong>。第00章では 4 つ（<code>PING</code>/<code>ECHO</code>/<code>QUIT</code>/<code>COMMAND</code>）だけだった骨格が、10 章を経てここまで育ちました。まず、その全景を分類で俯瞰します。</p>
+
+    <div class="ascii">dispatch の switch に載った全コマンド（章ごとに case が増えてきた）
+
+  接続・汎用 (00/01)  PING  ECHO  QUIT  COMMAND
+                      DEL   EXISTS  TYPE  KEYS  FLUSHDB
+  String     (03)     SET  GET  SETNX  SETEX  INCR  DECR
+                      INCRBY  DECRBY  APPEND  STRLEN
+  有効期限   (02)     EXPIRE  PEXPIRE  TTL  PTTL  PERSIST
+  List       (04)     LPUSH  RPUSH  LPOP  RPOP  LRANGE  LLEN  LINDEX
+  Hash       (05)     HSET  HGET  HDEL  HGETALL  HKEYS  HVALS  HLEN  HEXISTS
+  Set        (06)     SADD  SREM  SMEMBERS  SISMEMBER  SCARD  SINTER  SUNION
+  Sorted Set (07)     ZADD  ZSCORE  ZRANK  ZRANGE  ZRANGEBYSCORE  ZREM  ZCARD
+  Pub/Sub    (08)     SUBSCRIBE  UNSUBSCRIBE  PSUBSCRIBE  PUNSUBSCRIBE  PUBLISH
+  ─────────────────────────────────────────────────────────
+  default             未知コマンド → -ERR unknown command（接続は維持）</div>
+
+    <p>各 <code>case</code> の中身は、担当した章で見た専用関数（<code>cmdSet</code>・<code>cmdZAdd</code> など）に処理を委ねるだけ。<code>dispatch</code> 自身は「コマンド名を見て、担当へ振り分け、返ってきた RESP 文字列を返す」交通整理に徹します。ここでは、この章の主眼である<strong>2つの守り</strong>——購読モードの制限と、未知コマンドの受け皿——に絞って、実物を抜粋します。</p>
+
+    <div class="file-tag">command.go（先頭・購読モード制限と分岐の入口）</div>
+    <pre><code><span class="cm">// dispatch はコマンド名で処理を振り分ける。戻り値は RESP 形式の応答。</span>
+<span class="cm">// Pub/Sub 系は自前で書き込むので "" を返す。</span>
+<span class="kw">func</span> dispatch(srv *<span class="ty">server</span>, c *<span class="ty">client</span>, args []<span class="ty">string</span>) <span class="ty">string</span> {
+	<span class="kw">if</span> len(args) == <span class="st">0</span> {
+		<span class="kw">return</span> errorMsg(<span class="st">"ERR empty command"</span>)
+	}
+	name := upper(args[<span class="st">0</span>])
+	s := srv.store
+
+	<span class="cm">// 購読モード中は、使えるコマンドが制限される</span>
+	<span class="kw">if</span> c != <span class="kw">nil</span> &amp;&amp; c.subCount() &gt; <span class="st">0</span> {
+		<span class="kw">switch</span> name {
+		<span class="kw">case</span> <span class="st">"SUBSCRIBE"</span>, <span class="st">"UNSUBSCRIBE"</span>, <span class="st">"PSUBSCRIBE"</span>, <span class="st">"PUNSUBSCRIBE"</span>, <span class="st">"PING"</span>, <span class="st">"QUIT"</span>:
+			<span class="cm">// ok</span>
+		<span class="kw">default</span>:
+			<span class="kw">return</span> errorMsg(<span class="st">"ERR Can't execute '"</span> + strings.ToLower(args[<span class="st">0</span>]) +
+				<span class="st">"': only (P|S)SUBSCRIBE / (P|S)UNSUBSCRIBE / PING / QUIT / RESET are allowed in this context"</span>)
+		}
+	}
+
+	<span class="kw">switch</span> name {
+	<span class="cm">// --- 接続・汎用 ---</span>
+	<span class="kw">case</span> <span class="st">"PING"</span>:
+		<span class="cm">// … 各データ型の case が続く（前ページの全景を参照） …</span>
+
+	<span class="kw">default</span>:
+		<span class="kw">return</span> errorMsg(<span class="st">"ERR unknown command '"</span> + args[<span class="st">0</span>] + <span class="st">"'"</span>)
+	}
+}</code></pre>
+
+    <p>本題の <code>switch</code> の<strong>手前</strong>に、もう一段の関門があります。<code>c != nil &amp;&amp; c.subCount() &gt; 0</code>——つまり<strong>この接続が何かを購読中</strong>なら、実行できるコマンドを Pub/Sub 系と <code>PING</code>/<code>QUIT</code> に制限し、それ以外は専用のエラーで拒否します。これは本家 Redis の仕様で、いったん <code>SUBSCRIBE</code> したクライアントは「配信を待ち受ける耳」になり、<code>SET</code> のような一般コマンドを打てなくなります（RESP2 の制約。理由は下のメモ）。<code>c != nil</code> のガードは、接続を伴わない <code>dispatch</code> 直叩きテスト（<code>commands_test.go</code>）でこの制限を素通りさせるためです。</p>
+    <p>そして <code>switch</code> の一番下、<strong><code>default</code></strong>。第00章から一貫して本書の<strong>安全網</strong>であり続けた 1 行です。知らないコマンドが来ても <code>panic</code> せず、<code>-ERR unknown command '...'</code> を返して接続を保つ。10 章ぶんの <code>case</code> をどれだけ積んでも、その網の目からこぼれた入力は必ずここが受け止めます。</p>
+
+    <div class="gonote"><div class="box-k">GO メモ · 二段構えの switch と、購読モードの意味</div>
+      <p>ここでは <code>switch</code> を 2 回書いています。1 つ目は「購読中に打ってよいコマンドか」の<strong>ふるい</strong>で、通ってよいものだけ空の <code>case</code>（<code>// ok</code>）に集め、残りを <code>default</code> で弾く——「ホワイトリスト方式」の定石です。2 つ目が本来の振り分け。<br>
+      なぜ購読中はコマンドが制限されるのか? RESP2 では 1 本の接続に「コマンドへの応答」と「購読メッセージの配信」が混在して流れます。もし購読中に <code>GET</code> を許すと、クライアントは受け取ったバイト列が「<code>GET</code> の答え」なのか「誰かの <code>PUBLISH</code>」なのか区別できなくなる。だから購読モードでは一般コマンドを禁じ、流れるものを配信メッセージ（と限られた応答）に限定して、混線を仕様レベルで防いでいます。第08章の <code>client.send</code> の Mutex が「書き込みの物理的な混線」を防いだのに対し、こちらは「意味の混線」を防ぐ約束です。</p>
+    </div>
+
+    <div class="box do"><div class="box-k">▸ 動かして確認</div>
+      <p>全 <code>case</code> が出そろった <code>dispatch</code> を、応答テストでまとめて叩きます。<code>commands_test.go</code> は接続を張らず <code>dispatch</code> を直接呼ぶので、全コマンドの「入力 → RESP 応答」を高速に検証できます。</p>
+      <pre class="term"><code><span class="ps">$</span> go test -run 'TestPingEcho|TestUnknownCommand|TestKeysAndFlush' -v
+<span class="out">=== RUN   TestPingEcho
+--- PASS: TestPingEcho (0.00s)
+=== RUN   TestUnknownCommand
+--- PASS: TestUnknownCommand (0.00s)
+=== RUN   TestKeysAndFlush
+--- PASS: TestKeysAndFlush (0.00s)
+PASS</span></code></pre>
+      <p><code>TestKeysAndFlush</code> は <code>SET user:1</code> / <code>SET user:2</code> の後に <code>KEYS user:*</code> で 2 件返ることを確かめ、Step 1 の <code>globMatch</code> が <code>dispatch</code> 経由でも効いていることを保証します。</p>
+    </div>
+
+    <h2 class="step" id="step-3"><span class="step-no">Step 3</span>エラー方針の総まとめ — 3 分類と本家準拠の文言</h2>
+    <p>10 章を通して、本書はエラーの扱いに一貫した規律を敷いてきました。ここで、その全体像を 1 枚にまとめます。堅牢なサーバは「落ちない」だけでなく「<strong>間違いの種類に応じて正しく振る舞う</strong>」もの。本書はエラーを<strong>3 つ</strong>に分類し、それぞれで対応を変えています。</p>
+
+    <table>
+      <tr><th>分類</th><th>例</th><th>応答</th><th>接続</th><th>実装箇所</th></tr>
+      <tr><td>① プロトコル違反</td><td>配列長が数字でない、Bulk の長さ詐称、CRLF 欠落</td><td><code>-ERR Protocol error: ...</code></td><td><strong>切断する</strong></td><td><code>readCommand</code> → <code>handle</code></td></tr>
+      <tr><td>② 意味エラー</td><td>未知コマンド、<code>WRONGTYPE</code>、引数不足（arity）</td><td><code>-ERR ...</code> / <code>-WRONGTYPE ...</code></td><td><strong>維持する</strong></td><td><code>dispatch</code> と各 <code>cmd*</code></td></tr>
+      <tr><td>③ 自分のバグ</td><td>想定外の <code>nil</code> 参照、境界の取りこぼし</td><td>（起こさないのが理想）</td><td>—</td><td>テストで①②へ寄せる</td></tr>
+    </table>
+
+    <p>この 3 分類は、第00章で仕込んだ番兵エラー <code>errProtocol</code> が骨格になっています。もう一度、接続ループの心臓部を見ます。ここに①と②の分かれ道が凝縮されています。</p>
+
+    <div class="file-tag">main.go（handle のエラー分岐・再掲）</div>
+    <pre><code><span class="kw">for</span> {
+	args, err := readCommand(r)
+	<span class="kw">if</span> err != <span class="kw">nil</span> {
+		<span class="cm">// プロトコル違反はエラーを返してから切る。それ以外（EOF等）は黙って切る。</span>
+		<span class="kw">if</span> errors.Is(err, errProtocol) {
+			c.send(errorMsg(<span class="st">"ERR Protocol error: "</span> + err.Error()))
+		}
+		<span class="kw">return</span> <span class="cm">// ① プロトコル違反 → 応答して切断</span>
+	}
+	<span class="kw">if</span> len(args) == <span class="st">0</span> {
+		<span class="kw">continue</span>
+	}
+	reply := dispatch(srv, c, args)  <span class="cm">// ② 意味エラーは dispatch 内で -ERR を返す</span>
+	<span class="kw">if</span> reply != <span class="st">""</span> {
+		c.send(reply)             <span class="cm">//    応答は返すが、ループは回り続ける（接続維持）</span>
+	}
+	<span class="kw">if</span> strings.EqualFold(args[<span class="st">0</span>], <span class="st">"QUIT"</span>) {
+		<span class="kw">return</span>
+	}
+}</code></pre>
+
+    <p><strong>①プロトコル違反は「叱ってから切る」。</strong> <code>readCommand</code> が返したエラーが <code>errProtocol</code> なら（<code>errors.Is</code> で判定）、<code>-ERR Protocol error: ...</code> を送ってから <code>return</code> で接続を閉じます。なぜ切るのか——プロトコルが壊れているということは、<strong>バイト列のフレーム同期が崩れている</strong>可能性が高いからです。「これから 4 バイト」と言って 2 バイトしか送らないような入力を受けると、続く全フレームがずれて読めなくなる。だから正常な会話に戻る望みは薄く、いったん切って仕切り直すのが安全です。一方、エラーが <code>errProtocol</code> でない（クライアントが単に接続を閉じた <code>EOF</code> など）なら、応答も出さず黙って <code>return</code>——正常な別れに叱責は要りません。</p>
+    <p><strong>②意味エラーは「応答して続ける」。</strong> 未知コマンド・<code>WRONGTYPE</code>（型違いのキーに操作）・引数不足は、<code>dispatch</code> や各 <code>cmd*</code> が <code>-ERR ...</code> という<strong>普通の応答</strong>として返します。<code>handle</code> はそれを <code>c.send</code> で書くだけで、ループはそのまま回り続ける。クライアントが 1 つコマンドを打ち間違えただけで接続を切るのは乱暴で、本物の Redis もこうはしません。「間違いを教えて、会話は続ける」——サーバの寛容さです。</p>
+    <p>そして本書がこだわったのが、<strong>エラー文言を本家 Redis に合わせる</strong>ことです。単に「エラー」と返すのではなく、<code>ERR wrong number of arguments for 'set' command</code>・<code>WRONGTYPE Operation against a key holding the wrong kind of value</code>・<code>ERR value is not an integer or out of range</code> のように、本家とバイト単位で同じメッセージを返す。これによって、既存のクライアントライブラリや <code>redis-cli</code> がエラーを本家と同じように解釈でき、「互換サーバ」を名乗れます。</p>
+
+    <div class="box hazard"><div class="box-k">⚠ 落とし穴 — ②を①に混ぜると、正しいクライアントを切ってしまう</div>
+      <p>「エラーはすべて接続を切る」と単純化したくなりますが、それは危険です。もし <code>WRONGTYPE</code> や引数不足でも切っていたら、たった 1 度のタイプミスでクライアントの接続が落ち、再接続の嵐を招きます。逆に、①のプロトコル違反で切らずに続けようとすると、フレームがずれたまま延々と誤読を垂れ流します。<strong>①は切る、②は続ける</strong>——この境界を <code>errProtocol</code> という番兵エラー 1 個で仕分けているのが、本書のエラー設計の要です。第00章で「なぜ <code>var</code> で 1 個だけ作るのか」と説明した伏線が、9 章を経てここで完全に回収されます。テスト <code>TestServerProtocolError</code> は <code>*abc\r\n</code>（配列長が数字でない）を送りつけ、<code>-ERR Protocol error</code> が返って接続が切れることを確認しています。</p>
+    </div>
+
+    <div class="box do"><div class="box-k">▸ 動かして確認</div>
+      <p>①と②の両方——プロトコル違反で切れること、意味エラー（未知コマンド）でも接続が生き続けること——を実 TCP で確かめます。</p>
+      <pre class="term"><code><span class="ps">$</span> go test -run 'TestServerProtocolError|TestServerEndToEnd' -v
+<span class="out">=== RUN   TestServerProtocolError
+--- PASS: TestServerProtocolError (0.01s)
+=== RUN   TestServerEndToEnd
+--- PASS: TestServerEndToEnd (0.01s)
+PASS
+ok  	redisclone	0.33s</span></code></pre>
+      <p><code>TestServerEndToEnd</code> は「未知コマンド → その直後の <code>PING</code> がまた <code>+PONG</code>」で②を、<code>TestServerProtocolError</code> は「壊れた入力 → <code>-ERR Protocol error</code> の後に切断」で①を、それぞれ証明しています。</p>
+    </div>
+
+    <h2 class="step" id="step-4"><span class="step-no">Step 4</span>通しで確かめる — go test ./...</h2>
+    <p>部品はすべて埋まりました。ここが本書の<strong>クライマックス</strong>です。10 章ぶんに積み上げた実装を、一発の <code>go test ./...</code> で通しで検証します。単一パッケージ <code>main</code> なので、これで全テストファイルが一斉に走ります。</p>
+    <p>走るテストの顔ぶれを、ファイルごとに把握しておきましょう。</p>
+
+    <table>
+      <tr><th>テストファイル</th><th>何を守るか</th></tr>
+      <tr><td><code>resp_test.go</code></td><td>RESP のパース。正常・インライン・壊れた入力（<code>TestReadCommand</code> ほか）</td></tr>
+      <tr><td><code>glob_test.go</code></td><td>パターン照合の 26 ケース（<code>TestGlobMatch</code>）</td></tr>
+      <tr><td><code>commands_test.go</code></td><td><code>dispatch</code> 直叩きで全型・TTL・エラー文言（<code>TestStringBasics</code>・<code>TestZSetOrdering</code> ほか多数）</td></tr>
+      <tr><td><code>zsl_test.go</code></td><td>skiplist を参照実装と突き合わせ（<code>TestSkiplistAgainstReference</code> ほか）</td></tr>
+      <tr><td><code>server_test.go</code></td><td>実 TCP 統合: E2E・Pub/Sub 2 接続・並行 INCR・失効・プロトコルエラー</td></tr>
+    </table>
+
+    <div class="box do"><div class="box-k">▸ 動かして確認 — 本書の総決算</div>
+      <p>全テストを、キャッシュを使わず（<code>-count=1</code>）詳細表示（<code>-v</code>）で走らせます。</p>
+      <pre class="term"><code><span class="ps">$</span> go test ./... -count=1 -v
+<span class="out">=== RUN   TestPingEcho
+--- PASS: TestPingEcho (0.00s)
+=== RUN   TestUnknownCommand
+--- PASS: TestUnknownCommand (0.00s)
+=== RUN   TestStringBasics
+--- PASS: TestStringBasics (0.00s)
+=== RUN   TestSetOptions
+--- PASS: TestSetOptions (0.00s)
+=== RUN   TestIncrDecr
+--- PASS: TestIncrDecr (0.00s)
+=== RUN   TestDecrByMinInt64LeavesValueIntact
+--- PASS: TestDecrByMinInt64LeavesValueIntact (0.00s)
+=== RUN   TestAppendStrlen
+--- PASS: TestAppendStrlen (0.00s)
+=== RUN   TestTypeAndWrongType
+--- PASS: TestTypeAndWrongType (0.00s)
+=== RUN   TestKeysAndFlush
+--- PASS: TestKeysAndFlush (0.00s)
+=== RUN   TestExpireLazyAndTTL
+--- PASS: TestExpireLazyAndTTL (0.06s)
+=== RUN   TestExpireOverflow
+--- PASS: TestExpireOverflow (0.00s)
+=== RUN   TestActiveExpire
+--- PASS: TestActiveExpire (0.05s)
+=== RUN   TestList
+--- PASS: TestList (0.00s)
+=== RUN   TestHash
+--- PASS: TestHash (0.00s)
+=== RUN   TestSetCommands
+--- PASS: TestSetCommands (0.00s)
+=== RUN   TestSetOps
+--- PASS: TestSetOps (0.00s)
+=== RUN   TestIntsetConversionAtLimit
+--- PASS: TestIntsetConversionAtLimit (0.00s)
+=== RUN   TestZSetCommands
+--- PASS: TestZSetCommands (0.00s)
+=== RUN   TestZSetOrdering
+--- PASS: TestZSetOrdering (0.00s)
+=== RUN   TestZRangeByScore
+--- PASS: TestZRangeByScore (0.00s)
+=== RUN   TestZRem
+--- PASS: TestZRem (0.00s)
+=== RUN   TestGlobMatch
+--- PASS: TestGlobMatch (0.00s)
+=== RUN   TestReadCommand
+--- PASS: TestReadCommand (0.00s)
+=== RUN   TestReadCommandInline
+--- PASS: TestReadCommandInline (0.00s)
+=== RUN   TestReadCommandProtocolErrors
+--- PASS: TestReadCommandProtocolErrors (0.00s)
+=== RUN   TestServerEndToEnd
+--- PASS: TestServerEndToEnd (0.00s)
+=== RUN   TestServerPubSub
+--- PASS: TestServerPubSub (0.00s)
+=== RUN   TestServerConcurrentIncr
+--- PASS: TestServerConcurrentIncr (0.01s)
+=== RUN   TestServerExpireEndToEnd
+--- PASS: TestServerExpireEndToEnd (0.08s)
+=== RUN   TestServerProtocolError
+--- PASS: TestServerProtocolError (0.00s)
+=== RUN   TestSkiplistAgainstReference
+--- PASS: TestSkiplistAgainstReference (0.00s)
+=== RUN   TestSkiplistRangeByScore
+--- PASS: TestSkiplistRangeByScore (0.00s)
+PASS
+ok  	redisclone	1.213s</span></code></pre>
+      <p><strong>32 本すべて PASS。</strong> 時間の数字は環境によって変わりますが、<strong>件数と <code>ok  redisclone</code> の行</strong>が一致すれば成功です。テストが流れる順番は<strong>ファイル名のアルファベット順</strong>（<code>commands_test.go</code> → <code>glob_test.go</code> → <code>resp_test.go</code> → <code>server_test.go</code> → <code>zsl_test.go</code>）で、章の順番とは一致しません。<code>TestGlobMatch</code>（第09章の題材）が真ん中に、<code>TestReadCommand</code>（第00章）が後半に現れるのはそのためです。</p>
+      <p><code>ok  redisclone</code>。この 1 行が、本書 10 章のすべて——プロトコル・キースペース・失効・5 つのデータ型・Pub/Sub・パターン照合・エラー堅牢性——が同時に成立していることの、機械による証明です。とりわけ <code>TestServerConcurrentIncr</code> は、次の Step 5 で論じる並行モデルの正しさ（複数接続が同時に <code>INCR</code> しても取りこぼさない）を担保する、この章の議論の伏線です。</p>
+    </div>
+
+    <div class="gonote"><div class="box-k">GO メモ · -count=1 と -race</div>
+      <p><code>go test</code> は結果をキャッシュし、コードが変わらなければ再実行せず前回の PASS を再利用します。<code>-count=1</code> は「キャッシュを使わず必ず走らせる」おまじないで、統合テスト（TCP を張る・時間に依存する失効）を確実に再実行したいときに付けます。<br>
+      並行処理の検証には本来 <code>go test -race</code>（データ競合検出器）を併用したいところですが、<code>-race</code> は CGO＝ C コンパイラを要求します。本書の開発環境（gcc の無い Windows）では動かせないため、代わりに <code>TestServerConcurrentIncr</code> で「並行 <code>INCR</code> の結果が期待値ちょうどになる」という<strong>振る舞い</strong>で正しさを担保しています。Linux 環境が使えるなら、一度 <code>-race</code> を通しておく価値があります。</p>
+    </div>
+
+    <h2 class="step" id="step-5"><span class="step-no">Step 5</span>最後の設計判断 — ロック vs 単一 goroutine</h2>
+    <p>実装は完成しました。ここからは、この本で最も深い問いに答えます。<strong>「本家 Redis は単一スレッドで有名なのに、なぜ本書は 1 接続 1 goroutine + Mutex を選んだのか」</strong>。第00章の FAQ で「最終章でじっくり比較する」と約束した宿題です。手を動かして 10 章を積み上げた今なら、この議論が具体的に読めるはずです。これは思いつきではなく、<strong>判断軸 → 2 案のトレードオフ → 選定</strong>という順で通した設計判断の記録でもあります。</p>
+
+    <h3>まず判断軸を決める</h3>
+    <p>設計判断は、案を並べる前に<strong>何を優先するか</strong>を決めておくのが鉄則です。案から入ると「なんとなく好み」で選んでしまう。本書の並行モデルの判断軸は、こう順序づけました。</p>
+    <ol>
+      <li><strong>正確性</strong> — 複数接続が同じキーを同時に触っても、取りこぼし・データ破損が起きない。これが最優先（要件 NFR-4）。</li>
+      <li><strong>実装の単純さ</strong> — 学習教材なので、並行制御そのものが主役ではない。コードが素直に読めること。</li>
+      <li><strong>本家忠実度</strong> — 本家の設計を写せるほど教材価値は上がるが、正確性・単純さより下。</li>
+      <li><strong>性能</strong> — 本番運用しないので最下位。ベンチマークで勝つことは狙わない。</li>
+    </ol>
+
+    <h3>案A: 1 接続 1 goroutine + 単一 Mutex</h3>
+    <p>本書が採った形です。接続ごとに goroutine を起こし（第00章の <code>go srv.handle(conn)</code>）、共有する <code>Store</code> 全体を 1 本の <code>sync.Mutex</code> で守ります。各 <code>Store</code> メソッドは、ロックを取ってから read-modify-write を完結させ、ロックを放す。</p>
+    <div class="ascii">案A: goroutine が並ぶ / Store は 1 本の Mutex が門番
+
+  conn1 ─ goroutine1 ┐
+  conn2 ─ goroutine2 ┼─► [ Mutex ] ─► Store（map・skiplist…）
+  conn3 ─ goroutine3 ┘        ▲
+                              └ 一度に 1 goroutine だけが中に入れる</div>
+    <ul>
+      <li><strong>利点</strong>: Go の並行サーバの<strong>教科書どおりの形</strong>で、コードが素直。<code>Accept</code> → <code>go handle</code> の 3 行で複数接続を捌ける。ロックの範囲が「Store メソッド 1 回」に閉じているので、どこが危険かが目で追える。マルチコアで複数接続の I/O（パース・応答組み立て）を<strong>並列に</strong>こなせる。</li>
+      <li><strong>欠点</strong>: 共有データへのアクセスは Mutex で<strong>直列化</strong>されるので、データ操作そのものはコア 1 つぶんの速度。ロックの取り忘れ・二重取得（デッドロック）が理屈上あり得る（本書は「Store の公開メソッドが必ず先頭でロック」という規律で防いだ）。</li>
+    </ul>
+    <p>ここで<strong>なぜ RWMutex ではなく通常の Mutex なのか</strong>が、この本ならではの落とし穴です。「読みが多いなら <code>RWMutex</code> で読みを並列化すれば速いのでは?」——第02章までなら正しい。ところが第02章で<strong>Lazy 失効</strong>を入れた瞬間、<code>GET</code> のような「読むだけ」の操作が、失効キーに当たると<strong>削除（書き込み）を伴う</strong>ようになりました。「読み取り操作」と「書き込み操作」の境界が消えたのです。<code>RWMutex</code> は読みと書きを区別できて初めて価値が出るのに、その区別自体が無意味になった。だから素直な <code>Mutex</code> に一本化しました。これは第03章で「読むだけの操作が消す操作になる」として山場に据えた設計判断で、この章はその結論を再確認しています。</p>
+
+    <h3>案B: 単一 goroutine + チャネル集約（本家スタイル）</h3>
+    <p>本家 Redis の「単一スレッド + イベントループ」を Go で写すなら、こうなります。全接続からのコマンドを 1 本のチャネルに集め、<strong>ただ 1 つの goroutine</strong> が順番に処理する。データを触るのはその 1 本だけなので、ロックが要りません。</p>
+    <div class="ascii">案B: 全コマンドを 1 本の goroutine に集約 / ロック不要
+
+  conn1 ─ reader1 ┐
+  conn2 ─ reader2 ┼─► [ commandCh ] ─► 単一 worker goroutine ─► Store
+  conn3 ─ reader3 ┘                     （逐次処理。競合が原理的に起きない）</div>
+    <ul>
+      <li><strong>利点</strong>: データ競合が<strong>原理的に起きない</strong>（触る者が 1 人だけ）。ロックが 1 つも要らず、本家の「単一スレッドだから simple」という設計思想を忠実に写せる。教材として「なぜ Redis は速いのに単一スレッドなのか」を体感させる価値がある。</li>
+      <li><strong>欠点</strong>: <strong>応答をどう返すか</strong>が一気に難しくなる。worker がコマンドを処理した後、その結果を<strong>正しい接続</strong>へ返す経路（応答チャネル or コールバック）をコマンドごとに設計し直す必要がある。さらに Pub/Sub の配信・Active 失効ループも、この 1 本の goroutine の中に統合するか、別経路との協調を設計しなければならない。本家が C の<strong>イベントループ</strong>（epoll/kqueue）で解いている部分を、Go のチャネルで一から組み直すことになり、<strong>学習の主目的（データ構造とプロトコル）から大きく逸れる</strong>。</li>
+    </ul>
+
+    <h3>トレードオフを 1 枚で</h3>
+    <table>
+      <tr><th>観点</th><th>案A: goroutine + Mutex（採用）</th><th>案B: 単一 goroutine 集約</th></tr>
+      <tr><td>正確性</td><td>Mutex で直列化。テストで取りこぼしゼロ確認</td><td>原理的に競合なし（最も堅い）</td></tr>
+      <tr><td>実装の単純さ</td><td><strong>高い</strong>。Accept→go handle の定石</td><td>低い。応答経路・配信・失効の再設計が要る</td></tr>
+      <tr><td>本家忠実度</td><td>低い（本家は単一スレッド）</td><td><strong>高い</strong>（単一スレッドを写せる）</td></tr>
+      <tr><td>性能</td><td>I/O は並列、データ操作は直列</td><td>全て 1 本。ただしイベントループなし</td></tr>
+      <tr><td>教材の焦点</td><td><strong>データ構造とプロトコルに集中できる</strong></td><td>並行設計に紙面を奪われる</td></tr>
+    </table>
+
+    <h3>選定 — なぜ案A なのか</h3>
+    <p>判断軸の最上位は<strong>正確性</strong>で、これは両案とも満たします（A は Mutex で、B は原理的に）。差がついたのは第 2 軸の<strong>実装の単純さ</strong>と、教材としての<strong>焦点</strong>でした。案B は本家忠実度で勝りますが、その代償として「応答をどの接続に返すか」「Pub/Sub 配信をどう混ぜるか」「失効ループをどう統合するか」というチャネル設計に紙面と読者の集中を奪われます。本書の主目的は<strong>データ構造とプロトコルを理解すること</strong>であって、並行アーキテクチャの再発明ではない。だから、正確性を Mutex で担保しつつ最も素直に書ける<strong>案A を採用</strong>しました。</p>
+    <p>これは「案B が劣る」という結論ではありません。<strong>判断軸が違えば結論も変わる</strong>のが設計判断の本質です。もし本書の目的が「本家 Redis の並行モデルを正確に再現する」だったなら、迷わず案B を選んだでしょう。実際、案A の再検討条件も決めてあります——<strong><code>BLPOP</code> のようなブロッキングコマンドを足すとき</strong>。「値が来るまで待つ」コマンドは、Mutex を握ったまま待つと全体が止まるため、待機と通知の仕組み（条件変数やチャネル）が要り、そこで案B 的な集約や、より凝ったロック設計を再検討することになります。設計判断は永遠の正解ではなく、<strong>要件が変わったら開き直す前提</strong>で記録しておくものです。</p>
+
+    <div class="box map"><div class="box-k">◈ この設計判断ゲートの記録（要約）</div>
+      <p><strong>判断軸</strong>: 正確性 &gt; 実装の単純さ &gt; 本家忠実度 &gt; 性能。<br>
+      <strong>案A（採用）</strong>: 1 接続 1 goroutine + 単一 Mutex。素直で、データ構造・プロトコルに焦点を保てる。<code>RWMutex</code> は Lazy 失効で読みが書きを伴うため不採用。<br>
+      <strong>案B（不採用）</strong>: 単一 goroutine 集約。本家忠実だが、応答経路・配信・失効の再設計コストが学習目的に見合わない。<br>
+      <strong>再検討条件</strong>: <code>BLPOP</code> 等のブロッキングコマンド追加時。</p>
+    </div>
+
+    <div class="box hazard"><div class="box-k">⚠ 落とし穴 — 「Mutex だから遅い」は早合点</div>
+      <p>案A の Mutex は「データ操作を直列化する」だけで、<strong>接続ごとの I/O（RESP のパース・応答文字列の組み立て）は並列に走ります</strong>。ボトルネックになるのはロック内の処理時間だけで、そこは map への 1 アクセスなど極短時間です。逆に本家 Redis が単一スレッドで速いのも、「メモリ上の操作は元々一瞬なので、直列でも十分速く、ロックのオーバーヘッドと複雑さを丸ごと消せる」という同じ洞察に立っています。<strong>案A と本家は、見た目は逆でも「データ操作は直列でよい」という判断を共有している</strong>——これが 10 章作ってようやく見える景色です。ただし本書の <code>PUBLISH</code> はロック保持中に遅い購読者へ書き込みうる弱点があり、これは発展課題（次 Step）に回します。</p>
+    </div>
+
+    <h2 class="step" id="step-6"><span class="step-no">Step 6</span>スコープ外と発展課題 — 完成、そして次へ</h2>
+    <p>本書はここで完成です。本物の <code>redis-cli</code> が握手でき、5 つのデータ型を操れ、期限で消え、Pub/Sub で配信し、壊れた入力でも倒れない——<strong>ミニ Redis</strong> が、あなたの手の中で動いています。ですが Redis の全貌からすれば、まだ見えていない大陸があります。本書が<strong>意図的にスコープ外にした</strong>ものを、発展課題として置いていきます。ここから先は、あなた自身の探検です。</p>
+
+    <table>
+      <tr><th>テーマ</th><th>何をするものか</th><th>次の一歩</th></tr>
+      <tr><td><strong>永続化 (RDB / AOF)</strong></td><td>メモリ上のデータをディスクに保存し、再起動後に復元する。RDB はスナップショット、AOF は書き込みコマンドのログ</td><td><code>Store</code> の全キーを走査してファイルへ書き出す <code>SAVE</code> から。読み込みは起動時に 1 度</td></tr>
+      <tr><td><strong>レプリケーション</strong></td><td>マスターの書き込みをレプリカへ流し、読みを分散・冗長化する</td><td>書き込みコマンドを購読者へ流す——実は Pub/Sub の応用。<code>PSYNC</code> の初期同期が肝</td></tr>
+      <tr><td><strong>MULTI / EXEC</strong></td><td>複数コマンドを 1 つの塊として原子的に実行するトランザクション</td><td>接続 (<code>client</code>) にコマンドをキューする状態を足し、<code>EXEC</code> でまとめて実行。単一 Mutex なら実装しやすい</td></tr>
+      <tr><td><strong>Lua スクリプト</strong></td><td><code>EVAL</code> でサーバ側にロジックを送り込み、原子的に実行する</td><td>Go から Lua VM を呼ぶ（本家は組み込み Lua）。まずは限定的な組み込みコマンドから</td></tr>
+      <tr><td><strong>RESP3</strong></td><td>プロトコルの新版。Map / Set 型やプッシュ型メッセージを表現できる</td><td><code>HELLO 3</code> でネゴシエートし、応答の組み立て（第00章の <code>reply.go</code>）を型ごとに拡張</td></tr>
+    </table>
+
+    <p>いくつかは、本書のコードから素直に伸ばせます。たとえば<strong>永続化の <code>SAVE</code></strong> は、<code>Store</code> の <code>Keys("*")</code> で全キーを取り、型ごとに値を書き出すファイル形式を決めれば骨格ができます。<strong>MULTI/EXEC</strong> は、本書が単一 Mutex を選んだおかげで「<code>EXEC</code> の間ロックを握りっぱなしにすれば原子性が出る」と見通しがよい——Step 5 の設計判断が、そのまま次の機能の土台になっているのです。</p>
+
+    <div class="box do"><div class="box-k">▸ 手を動かすなら — 実装コードに残した「宿題」</div>
+      <p>本書のコードには、意図的に素朴なままにした改善余地があります。腕試しにどうぞ。</p>
+      <ol>
+        <li><strong>LPUSH の O(n)</strong>: 現状はスライス先頭挿入で、要素数に比例して遅い。リングバッファか双方向連結リストにすると O(1) になる。</li>
+        <li><strong>PUBLISH のロック粒度</strong>: 配信をロック保持中に行うため、遅い購読者が全体を止めうる（Step 5 の落とし穴で触れた弱点）。配信先を先に集めてロックを放してから書く、あるいは購読者ごとにバッファ付きチャネルを挟む改善を考える。</li>
+        <li><strong>KEYS の代替</strong>: <code>KEYS *</code> は全キー走査で本番では危険。カーソル方式の <code>SCAN</code> を実装すると、少しずつ走査して他の処理を止めない。</li>
+      </ol>
+    </div>
+
+    <h2>つまずき FAQ</h2>
+    <details class="qa"><summary><code>globMatch</code> の <code>*</code> はなぜ再帰? ループで数えて進めないの?</summary>
+      <div class="qa-body"><p><code>*</code> が「何文字食べるべきか」は、その場では決められないからです。<code>a*c</code> を <code>aXXc</code> に当てるとき、<code>*</code> が <code>XX</code>（2文字）を食べれば成功しますが、それは<strong>後ろの <code>c</code> が当たるところまで見て初めて分かる</strong>。だから「<code>*</code> の後ろのパターンを、文字列の各切れ目に対して試す」を再帰で全パターン探索します（バックトラック）。ループで貪欲に食べさせると、<code>a*a</code> vs <code>aXa</code> のような場合に食べ過ぎて取りこぼします。</p></div>
+    </details>
+    <details class="qa"><summary>なぜ本書は本家と同じ「単一スレッド」にしなかったの? 忠実なほうが良い教材では?</summary>
+      <div class="qa-body"><p>判断軸の問題です（Step 5）。本書の第 1 目的は<strong>データ構造とプロトコルの理解</strong>で、並行アーキテクチャの再現ではありません。単一 goroutine 集約（案B）は本家に忠実な反面、「応答をどの接続に返すか」「Pub/Sub 配信・失効ループをどう統合するか」というチャネル設計に紙面と集中を奪われ、主目的から逸れます。正確性を Mutex で担保しつつ最も素直に書ける案A を選びました。目的が「本家の並行モデルを再現する」だったなら、結論は案B に変わります。</p></div>
+    </details>
+    <details class="qa"><summary>購読中に <code>SET</code> を打つと拒否されるのはバグ? 不便では?</summary>
+      <div class="qa-body"><p>仕様どおりの動作で、本家 Redis も同じです（RESP2 の制約）。<code>SUBSCRIBE</code> した接続には配信メッセージが流れ込むので、そこに <code>SET</code> の応答を混ぜると、クライアントは受け取ったバイト列が「コマンドの答え」か「他人の <code>PUBLISH</code>」か区別できなくなります。だから購読中は Pub/Sub 系と <code>PING</code>/<code>QUIT</code> だけを許し、それ以外を <code>dispatch</code> の入口で拒否しています。両方やりたければ接続を 2 本張るのが Redis の作法です（RESP3 ではこの制約が緩みます）。</p></div>
+    </details>
+
+    <h2>理解度チェック</h2>
+    <p>次の問いに<strong>自分の言葉で</strong>答えられたら、この本は卒業です。</p>
+    <details class="qa"><summary>1. <code>globMatch</code> の末尾 <code>return s == len(str)</code> は、何を保証しているか。</summary>
+      <div class="qa-body"><p>パターンを使い切ったとき、<strong>文字列も同時に使い切っているか</strong>——すなわち<strong>全体一致</strong>を保証している。パターンが尽きても文字列が残っている（<code>abc</code> vs <code>abcd</code>）なら不一致。glob は「途中に含まれるか」ではなく「文字列全体がパターンに一致するか」を判定するので、この等号が「途中一致で当たってしまう」誤りを防ぐ。空パターンが空文字列にだけ当たる端の挙動もここが担う。</p></div>
+    </details>
+    <details class="qa"><summary>2. 本書のエラーの 3 分類と、それぞれの接続の扱いを述べよ。</summary>
+      <div class="qa-body"><p><strong>①プロトコル違反</strong>（配列長が数字でない・長さ詐称・CRLF 欠落）: <code>readCommand</code> が <code>errProtocol</code> を返し、<code>handle</code> が <code>errors.Is</code> で見分けて<strong>エラー応答を返してから切断</strong>（フレーム同期が壊れているため）。<strong>②意味エラー</strong>（未知コマンド・<code>WRONGTYPE</code>・引数不足）: <code>dispatch</code>/各 <code>cmd*</code> が <code>-ERR</code> を普通の応答として返し、<strong>接続は維持</strong>。<strong>③自分のバグ</strong>: 起こさないのが理想で、テストで①②へ寄せる。文言は本家に合わせて互換性を保つ。</p></div>
+    </details>
+    <details class="qa"><summary>3. なぜ本書は <code>RWMutex</code> ではなく通常の <code>Mutex</code> を使ったか。</summary>
+      <div class="qa-body"><p>Lazy 失効を導入した結果、<code>GET</code> のような「読むだけ」の操作が、失効キーに当たると<strong>削除（書き込み）を伴う</strong>ようになり、「読み取り操作」と「書き込み操作」の境界が消えたため。<code>RWMutex</code> は読みと書きを区別して読みを並列化することで価値が出るが、その区別自体が無意味になった以上、素直な <code>Mutex</code> に一本化するのが正しい。第03章「読むだけの操作が消す操作になる」の帰結。</p></div>
+    </details>
+
+    <h2>まとめ — 完成、そして次へ</h2>
+    <p>10 章、お疲れさまでした。第00章で、TCP からバイト列を受け取り <code>+PONG\r\n</code> と返すだけの小さな口を作りました。そこから一段ずつ——キースペース、有効期限、数としての文字列、List、Hash、Set、Sorted Set と skiplist、Pub/Sub、そしてこの章のパターン照合と設計判断——を積み上げて、今、本物の <code>redis-cli</code> が握手し、5 つのデータ型を操り、期限で消え、チャネルで配信し、壊れた入力でも倒れない<strong>ミニ Redis</strong> が動いています。<code>go test ./...</code> の <code>ok redisclone</code> が、その全部を一息に証明しました。</p>
+    <p>この本が本当に渡したかったのは、コードそのものではありません。<strong>「使えること」と「作れること」の間にある谷</strong>を、自分の足で渡った経験です。<code>redis-cli</code> の <code>GET</code> が返す <code>(nil)</code> が <code>$-1\r\n</code> だと知り、<code>KEYS user:*</code> の裏で再帰がバックトラックしていると分かり、「単一スレッドで速い」の意味を <code>Mutex</code> との対比で説明できる——もう Redis は、あなたにとって魔法ではありません。中で何が起きているか、目で見える箱になりました。</p>
+    <p>そして最後の Step で置いた発展課題——永続化、レプリケーション、トランザクション、Lua、RESP3——は、この箱を開けたあなたなら、今の土台から手を伸ばせるものばかりです。<code>SAVE</code> は <code>Keys("*")</code> の先にあり、<code>MULTI/EXEC</code> は本書が選んだ単一 Mutex の上に素直に載る。設計判断の記録を残す習慣も、次の探検であなたを助けます。<strong>ここが終点ではなく、次の起点です。</strong> 良い旅を。</p>
+
+    <div class="chap-foot">
+      <a class="pager" href="08-pubsub.html"><span class="dir">← 前へ</span>第08章 · Pub/Sub</a>
+      <a class="pager next" href="index.html"><span class="dir">↩ 最初に戻る</span>序章 · はじめに・準備へ</a>
+    </div>
+  </main>
+</div>
+</body>
+</html>

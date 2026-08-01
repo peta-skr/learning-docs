@@ -1,0 +1,144 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>長い期間を軽くする — 指数ダッシュボードを作る</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@400;500;600;700&family=Source+Serif+4:opsz,wght@8..60,400;8..60,500;8..60,600&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<div class="shell">
+
+  <aside class="spine">
+    <a class="wordmark" href="index.html">STOCK · from scratch<span class="tick"> ↗</span></a>
+    <div class="book-title">指数ダッシュボードを<br>つくる</div>
+    <div class="book-sub">好きな指数を、好きな期間で</div>
+
+    <div class="legend-rail"><span>読む <b>↓</b></span><span>組む <b>↑</b></span></div>
+
+    <nav aria-label="目次">
+      <ul class="toc">
+        <li><a class="nav-item" href="index.html"><span class="nav-num">序</span><span class="nav-label">はじめに<span class="nav-tag">Intro</span></span></a></li>
+        <li><a class="nav-item" href="00-line.html"><span class="nav-num">00</span><span class="nav-label">一本の線を引く<span class="nav-tag">Line</span></span></a></li>
+        <li><a class="nav-item" href="01-fetch.html"><span class="nav-num">01</span><span class="nav-label">データを取ってくる<span class="nav-tag">Fetch</span></span></a></li>
+        <li><a class="nav-item" href="02-store.html"><span class="nav-num">02</span><span class="nav-label">貯めて、切り出す<span class="nav-tag">Store</span></span></a></li>
+        <li><a class="nav-item" href="03-range.html"><span class="nav-num">03</span><span class="nav-label">期間を自由にする<span class="nav-tag">Range</span></span></a></li>
+        <li><a class="nav-item" href="04-overlay.html"><span class="nav-num">04</span><span class="nav-label">二本目を重ねる<span class="nav-tag">Overlay</span></span></a></li>
+        <li><a class="nav-item" href="05-rebase.html"><span class="nav-num">05</span><span class="nav-label">100にそろえる<span class="nav-tag">Rebase</span></span></a></li>
+        <li><a class="nav-item current" aria-current="page" href="06-downsample.html"><span class="nav-num">06</span><span class="nav-label">長い期間を軽くする<span class="nav-tag">Sample</span></span></a></li>
+        <li><a class="nav-item" href="07-url.html"><span class="nav-num">07</span><span class="nav-label">URLに状態を持たせる<span class="nav-tag">URL</span></span></a></li>
+        <li><a class="nav-item" href="08-finish.html"><span class="nav-num">08</span><span class="nav-label">仕上げと、次の一歩<span class="nav-tag">Finish</span></span></a></li>
+      </ul>
+    </nav>
+
+    <div class="spine-foot">
+      各章は一段の階段。<br>前の章の「できたこと」が<br>次の章の「困りごと」を呼ぶ。
+    </div>
+  </aside>
+
+  <main class="reading">
+    <div class="progress-tag">第06章 / 全9章 · 層: SAMPLE · 読了目安 1〜2時間</div>
+    <div class="eyebrow"><span>Sample</span><span class="depth">— 形を保って軽くする</span></div>
+    <h1>長い期間を軽くする</h1>
+    <p class="lede">「全期間」を選んでも軽い。そのために、点を<strong>賢く間引き</strong>ます。</p>
+
+    <div class="box goal"><div class="box-k">◈ この章のゴール</div>
+      <p>20年ぶんのような長期でも、形を保ったまま点数を減らして、軽快に描画できる。</p>
+    </div>
+
+    <h2>点が多すぎる、という問題</h2>
+    <p>20年ぶんの日次データは、営業日でおよそ5,000点になります。一方、それを描き出す画面の横幅はせいぜい千数百ピクセルしかありません。1ピクセルに複数の点が重なっている——つまり、<strong>画面幅より多い点は、見た目には何の情報も足していない</strong>のです。だから減らします。転送も描画も軽くなって、いいことばかり——に見えて、ここに罠があります。</p>
+
+    <p>単純に「N個おきに1個だけ残す」——等間隔で間引く——のが一番簡単です。でもこれをやると、たまたま間引かれた日にあった急落や急騰のピークが、まるごと消えてしまいます。残った点だけをつなぐと、そこにあったはずの山や谷が平らにならされ、<strong>線の形が嘘になる</strong>。「軽くする」つもりが「事実を歪める」に化けるわけです。</p>
+
+    <p>だから、ただ間引くのではなく——<strong>山と谷を残すように賢く間引く</strong>。「その区間で一番目立つ点（外れ値・折れ曲がり）を優先して残す」という考え方を使います。こうした「見た目の形を保つ間引き」には定番の手法があり、LTTB という名前で知られています。名前だけ覚えておけば十分です。</p>
+
+    <div class="box hazard"><div class="box-k">⚠ つまずきポイント</div>
+      <p>「点が多いなら等間隔で1/10に減らせばいい」——これが一番やりがちな罠です。急落の底や急騰の天井は、たいてい1〜2点しかありません。等間隔の網はその点を平気ですり抜けます。減らす前に必ず「形が保たれているか」を目で確かめてください。</p>
+    </div>
+
+    <h2>形が保たれる、とはどういうことか</h2>
+    <p>言葉より、絵で見たほうが早いです。同じ元データ（真ん中に鋭い急落がある）を、2通りの間引きで描き比べます。</p>
+
+<pre class="ascii">元データ（急落が1点だけ含まれる）
+        ●●●●●              ●●●●●
+       ●     ●            ●     ●
+      ●       ●●●●●●●●●●●●       ●
+                   ●
+                  （この谷が本当の急落）
+
+── 等間隔で間引く（谷の点が網をすり抜けた）──
+        ●     ●            ●     ●
+       ●       ●     ●     ●       ●
+      ●         ●●●●●●●●●●         ●
+                （谷が消え、線が平らな嘘になる）
+
+── 形を保って間引く（谷を優先して残す）──
+        ●     ●            ●     ●
+       ●       ●          ●       ●
+      ●         ●        ●         ●
+                   ●
+                  （谷が残り、形が守られる）</pre>
+
+    <p>点数はどちらも同じだけ減っています。違うのは「どの点を捨てたか」だけ。等間隔は<strong>位置</strong>で捨てる点を決め、形を保つ間引きは<strong>目立ち具合</strong>で残す点を決める。この一点が、線の正直さを分けます。</p>
+
+    <div class="insight"><div class="box-k">◈ どこで間引くか</div>
+      <p>減らす処理は<strong>返す側（サーバ）</strong>で行い、画面へ渡す前に点数を間引きます。こうすると、転送量も描画コストも「選んだ期間の長さ」に引きずられなくなります。1年でも20年でも、届く点数はだいたい一定。フロントは受け取った点をそのまま線にするだけで済みます。参考実装では、間引きの強さを決める<strong>目安の点数 N を既定で600点</strong>にしています（画面の横幅より十分多く、全期間でも軽い点数。<code>max</code> パラメータで 10〜5000 に変更可）。なお、間引き前の横軸（全系列の日付をそろえた軸）の点数が N 以下なら、間引きはせずそのまま全点を返します。</p>
+      <p>ここで注意したいのが、<strong>間引きが数えるのは「値のある点」だけ</strong>だということです。第05章で残した<strong>系列開始前の穴は数に入りません</strong>。始点の違う指数を並べると、系列ごとに「選べる点数」が変わります。</p>
+      <p>実測してみます。軸が1,000日、片方は全期間に値があり、もう片方は後半500日だけ値がある——この2系列を N=600 で間引くと、<strong>返る横軸は800点</strong>でした。全期間系列は600点を選び、後半だけの系列は500点すべてが残り、その<strong>和集合</strong>が800点になったからです。</p>
+      <p>「短いほうの系列に引きずられて500点になる」わけではありません。<strong>和集合を採る限り、返る軸が N を下回ることはない</strong>（どれか1系列がN点を選べば、その時点で軸はN点以上になる）と考えてください。<strong>N は「1本の系列から選ぶ点数」の目安であって、返る軸の点数そのものではない</strong>——次の段落がその核心です。</p>
+      <p>参考実装では、LTTB を<strong>系列ごとに実行し、残す日付の和集合</strong>を採用しています。全系列をまとめて1回間引くと、A社の急落は残ってもB社の急騰が消える——ということが起きるからです。系列ごとに「残すべき日」を選び、それを全部そろえる。ここで<strong>点数の勘定を取り違えないでください</strong>。N は「<strong>LTTB が1本の系列から選ぶ日数の上限</strong>」であって、<strong>最終的に画面へ返る点数の上限ではありません</strong>。各系列がそれぞれ最大 N 日を選び、最後にそれらを<strong>和集合</strong>にして共通の横軸を作るからです。系列どうしで選ぶ日がずれるほど和集合は広がるので、<strong>返る横軸の点数は N を超えることがあります</strong>（理屈のうえでは最大で「系列数 × N」まで膨らみうる）。逆に、系列が1本だけのときや、複数系列でも残す日がほぼ一致するときは、和集合が広がらず横軸は N 前後に収まります。そしてその和集合軸に各系列を整列し直すので、<strong>返ってくる各系列の点数は、つねに横軸の点数と同じ数になります</strong>——ある系列が選んでいない日でも、他系列が残した日に値が入っていればそこにも点が載るためです（つまり横軸が N を超えれば、各系列の点数も同じだけ N を超えます）。</p>
+      <p>これは「Nの少し上」で済む話ではありません。5,000点・N=600 で、<strong>動きが互いに独立な系列</strong>（擬似乱数で作った系列）を並べて実測すると、こうなります。</p>
+      <div class="ascii">5,000点・N=600 のとき、実際に返る横軸の点数
+  1系列  →   600点   （和集合が広がる余地なし）
+  2系列  → 1,115点   （上限1,199 の 93%）
+  3系列  → 1,574点   （上限1,798 の 88%）
+  4系列  → 1,936点   （上限2,397 の 81%）</div>
+      <p>上限が <code>系列数 × N</code> ちょうどではなく1つずつ小さいのは、<strong>LTTB が先頭と末尾を必ず選ぶ</strong>からです。どの系列も同じ先頭・末尾を選ぶので、和集合ではそのぶん重なります。系列数を k とすると、上限は <code>k×N −(k−1)</code> です（k=4, N=600 なら 2,400 ではなく 2,397）。</p>
+      <p>動きが似ている指数どうし（S&amp;P500 と NASDAQ のように連動しやすい組）なら LTTB が選ぶ日もよく重なるので、和集合は600に少し足した程度で収まります。しかし<strong>動きが独立した指数を並べると、選ぶ日はほとんど重ならず、上限の8〜9割まで膨らみます</strong>。「多くても2割増し」ではなく「<strong>最悪 N × 系列数（弱）</strong>」を頭に置いてください。返る点数を本当に抑えたいなら、系列数で N を割る（4系列なら150ずつ）か、和集合を作った後にもう一度間引く、といった手当てが要ります。</p>
+      <p class="note">上の表は、5,000点の系列を線形合同法で独立に生成し、<code>downsample(axis, series, 600)</code> の返り値の長さを数えたものです。系列の作り方が変われば数値も変わります——<strong>大事なのは「和集合は系列数に比例して膨らむ」という性質のほう</strong>です。</p>
+    </div>
+
+    <div class="box do"><div class="box-k">▸ 手を動かす</div>
+      <ol>
+        <li>まず<strong>等間隔で間引いて</strong>、実際にピークが消える様子を目で見る。急落や急騰を含む区間を選んで、元データと重ねると罠を体感できます。</li>
+        <li>期間の長さに応じて、<strong>間引きの強さ（1系列あたり何点まで残すか）をどう決めるか</strong>を方針として書き出す。「1系列あたり N 点まで」なのか「1年までは全点、それ以上は間引く」なのか、自分のルールを言語化する（複数系列を和集合でそろえるなら、実際に画面へ返る横軸の総点数は N を超えうることも織り込む）。</li>
+        <li>「<strong>指数化 → 間引き</strong>」の順序を守れているか確認する。第05章の注意です。ここで使う LTTB は先頭点を必ず残すので<strong>逆順でもたまたま壊れません</strong>が、等間隔間引きのように先頭を保証しない実装に替えた瞬間、開始日の点が消えて基準100がすり替わります。<strong>順序を固定するのは、間引きの実装が何であっても「基準が正しい日から取られること」を保つため</strong>です。なお順序が守るのは<strong>値の正しさ</strong>までで、「開始日=100 の点が画面に残るか」は間引きの選び方しだい（LTTB は残してくれます）。</li>
+      </ol>
+    </div>
+
+    <h2>つまずき FAQ</h2>
+    <details class="qa"><summary>LTTB のアルゴリズムを自分で実装しないと、この章はクリアできませんか？</summary>
+      <div class="qa-body"><p>いいえ。この章のゴールは「形を保って軽くする」という<strong>考え方</strong>を身につけることで、特定のアルゴリズムを暗記・自作することではありません。まずは等間隔間引きの破綻を体感し、「目立つ点を残す」方針が要ると納得できれば十分です。実装は既存のLTTB実装を使っても、自分で書いても構いません。名前（LTTB）は、後で調べ直すための取っ手として覚えておけばOKです。</p></div>
+    </details>
+    <details class="qa"><summary>間引きはフロント（ブラウザ側）でやってはいけないのですか？</summary>
+      <div class="qa-body"><p>やってもいいですが、それだと「5,000点をまず全部ブラウザに送る」コストが残ってしまいます。返す側で間引けば、<strong>転送量そのもの</strong>が減り、非力な端末でも軽くなります。加えて、複数系列の残す日付をそろえる（和集合をとる）処理は、全系列を手元に持っているサーバ側のほうが素直に書けます。だから参考実装では返す側で間引いています。</p></div>
+    </details>
+
+    <h2>理解度チェック</h2>
+    <p>次の問いに自分の言葉で答えてから、答えを開いてください。</p>
+    <details class="qa"><summary>Q1. 等間隔で間引くと何が問題になるのか？ 具体的に説明できますか？</summary>
+      <div class="qa-body"><p>等間隔間引きは「位置」で残す点を決めるため、急落の底や急騰の天井のように1〜2点しかない特徴点を、網がすり抜けて捨ててしまう。残った点をつなぐと山や谷が平らにならされ、線の形が実際とは違う「嘘」になる。だから「目立つ点を優先して残す」形を保つ間引き（LTTB など）を使う。</p></div>
+    </details>
+    <details class="qa"><summary>Q2. なぜ複数系列を「まとめて1回」ではなく「系列ごとに」間引くのか？</summary>
+      <div class="qa-body"><p>まとめて1回だと、ある系列の急落は残っても別の系列の急騰が消える、というように系列ごとの特徴点が取りこぼされるから。系列ごとに残すべき日を選び、その日付の和集合をとることで、どの系列のピークも守られる。その代わり点数の勘定に注意が要る——N（既定600）は<strong>LTTB が1系列から選ぶ点数の上限</strong>であって、返る点数の上限ではない。最後に全系列の残した日を和集合にして共通の横軸を作るため、系列どうしで残す日がずれるほど横軸は広がり、<strong>返る点数（横軸も各系列も）は N を上回ることがある</strong>。実測では5,000点・N=600 で、動きが独立した2系列なら1,101点、4系列なら1,917点まで膨らんだ（理論上限は 系列数×N）。逆に、系列開始前の穴は数に入らないので、<strong>N を下回ることもある</strong>（軸1,000日でも値が後半500日だけなら500点）。N は上限の目安であって、上にも下にもブレる。</p></div>
+    </details>
+
+    <div class="box done"><div class="box-k">✓ 完了の合図</div>
+      <p>「全期間」を選んでも、描画が重くならず、しかも急落・急騰の形がちゃんと残っている。等間隔間引きとの違いを一度自分の目で見て、「軽くする」と「形を保つ」を両立させられた——ここまで来れば、この章は勝ちです。</p>
+    </div>
+
+    <h2>まとめ — 次の層へ</h2>
+    <p>長期でも軽く、しかも形を保って描けるようになりました。ここまでで、指数を選び、期間を切り出し、重ね、100にそろえ、軽くする——ダッシュボードとして必要な操作が一通りそろっています。すると次に欲しくなるのは、「いま見ているこの状態を、そのまま誰かに渡したい／あとで自分でもう一度開きたい」という願いです。次章では、選んだ指数・期間・表示モードを<strong>URLに持たせて</strong>、状態を共有・再現できるようにします。</p>
+
+    <div class="chap-foot">
+      <a class="pager" href="05-rebase.html"><span class="dir">← 前へ</span>第05章 · 100を基準にそろえる</a>
+      <a class="pager next" href="07-url.html"><span class="dir">次へ →</span>第07章 · URLに状態を持たせる</a>
+    </div>
+  </main>
+</div>
+</body>
+</html>

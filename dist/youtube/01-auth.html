@@ -1,0 +1,585 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>第01章 人を扱う — 動画サービスをつくる</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500;600&family=Source+Serif+4:opsz,wght@8..60,400;8..60,600;8..60,700&family=Noto+Serif+JP:wght@400;600;700&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<div class="shell">
+
+  <aside class="spine">
+    <a class="wordmark" href="index.html">VIDEO-STREAM · from scratch</a>
+    <div class="book-title">動画サービスを<br>つくる</div>
+    <div class="book-sub">Go と ffmpeg で presigned から HLS 配信まで</div>
+
+    <div class="legend"><span>受け取る <b>↓</b></span><span>届ける <b>↑</b></span></div>
+
+    <nav aria-label="目次">
+      <ul class="toc">
+        <li><a class="nav-item" href="index.html"><span class="nav-num">序</span><span class="nav-label">はじめに・準備<span class="nav-tag">Setup</span></span></a></li>
+        <li><a class="nav-item" href="00-setup.html"><span class="nav-num">00</span><span class="nav-label">土台をつくる<span class="nav-tag">Setup</span></span></a></li>
+        <li><a class="nav-item current" aria-current="page" href="01-auth.html"><span class="nav-num">01</span><span class="nav-label">人を扱う<span class="nav-tag">Auth</span></span></a></li>
+        <li><a class="nav-item" href="02-upload.html"><span class="nav-num">02</span><span class="nav-label">動画を受け取る<span class="nav-tag">Upload</span></span></a></li>
+        <li><a class="nav-item" href="03-transcode.html"><span class="nav-num">03</span><span class="nav-label">動画を変換する<span class="nav-tag">Transcode</span></span></a></li>
+        <li><a class="nav-item" href="04-deliver.html"><span class="nav-num">04</span><span class="nav-label">動画を届ける<span class="nav-tag">Deliver</span></span></a></li>
+        <li><a class="nav-item" href="05-social.html"><span class="nav-num">05</span><span class="nav-label">反応をつくる<span class="nav-tag">Social</span></span></a></li>
+        <li><a class="nav-item" href="06-discover.html"><span class="nav-num">06</span><span class="nav-label">見つけてもらう<span class="nav-tag">Discover</span></span></a></li>
+        <li><a class="nav-item" href="07-notify.html"><span class="nav-num">07</span><span class="nav-label">つながりを届ける<span class="nav-tag">Notify</span></span></a></li>
+        <li><a class="nav-item" href="08-web.html"><span class="nav-num">08</span><span class="nav-label">画面をつける<span class="nav-tag">Web</span></span></a></li>
+        <li><a class="nav-item" href="09-beyond.html"><span class="nav-num">09</span><span class="nav-label">仕上げと次の一歩<span class="nav-tag">Beyond</span></span></a></li>
+      </ul>
+    </nav>
+
+    <div class="spine-foot">
+      各章は動画が通る道の一区間。<br>受け取る（下）から届ける（上）へ、<br>1本の動画を最後まで運びきる。
+    </div>
+  </aside>
+
+  <main class="reading">
+    <div class="progress-tag">第01章 / 全10章 · 層: Auth · 読了目安 2〜3時間</div>
+    <div class="eyebrow"><span>Auth</span><span class="depth">— 土台の上 · 最初の役者</span></div>
+    <h1>人を扱う</h1>
+    <p class="lede">第00章で舞台が組み上がりました。まだ動画は1本もありませんが、動画を運ぶ登場人物は全員そろっています。この章では、その舞台に<strong>最初の役者 —— 人（アカウント）と、その顔であるチャンネル</strong>を乗せます。パスワードを <strong>bcrypt</strong> で守り、ログイン状態を <strong>JWT（会員証）</strong>で保つ。そして、なぜ「ユーザー」と「チャンネル」を分けて持つのか、なぜトークンをサーバに保存しないのか、なぜ <code>?token=</code> という一見あやしい認証も受け付けるのかを、実コードを1行ずつ読みながら腑に落とします。この章を終えたとき、<code>curl</code> で登録してトークンを受け取り、そのトークンで <code>/api/auth/me</code> が自分の情報を返すところまで、自分の手で確認できます。</p>
+
+    <div class="box goal"><div class="box-k">◈ この章のゴール</div>
+      <p>次の3つを、自分の目と手で確認できたら達成です。</p>
+      <ol>
+        <li><code>POST /api/auth/register</code> でアカウントを作ると、<strong>トークン（JWT）</strong>と、同時に作られた<strong>自分のチャンネル</strong>が返ってくる。</li>
+        <li>返ってきたトークンを <code>Authorization: Bearer ...</code> ヘッダに付けて <code>GET /api/auth/me</code> を叩くと、自分の情報が返る。トークン無しなら <code>401</code>。</li>
+        <li><code>psql</code> で <code>users</code> テーブルの <code>password_hash</code> 列を見て、<strong>平文のパスワードがどこにも保存されていない</strong>（<code>$2a$...</code> で始まる bcrypt ハッシュだけがある）ことを確認する。</li>
+      </ol>
+    </div>
+
+    <div class="box map"><div class="box-k">☰ この章のステップ</div>
+      <ol>
+        <li><a href="#step-1">パスワードを二度と平文にしない — <code>bcrypt</code> でハッシュ化</a></li>
+        <li><a href="#step-2">照合は「復号」ではなく「比較」 — <code>CheckPassword</code></a></li>
+        <li><a href="#step-3">会員証を発行する — JWT の <code>CreateToken</code></a></li>
+        <li><a href="#step-4">会員証の印を検証する — <code>ParseToken</code></a></li>
+        <li><a href="#step-5">登録する — <code>handleRegister</code> とトランザクション</a></li>
+        <li><a href="#step-6">ログインする — <code>handleLogin</code> と情報を漏らさない失敗</a></li>
+        <li><a href="#step-7">会員証から人を取り出すミドルウェア — <code>currentUser</code> / <code>requireUser</code></a></li>
+        <li><a href="#step-8">チャンネルという「顔」 — ユーザーと分ける理由</a></li>
+        <li><a href="#step-9">登録してトークンで自分を名乗る</a></li>
+      </ol>
+    </div>
+
+    <h2>なぜ最初に「人」を作るのか</h2>
+    <p>動画サービスなのだから、まず動画のアップロードから作りたくなります。しかし、その前に必ず答えなければならない問いがあります —— <strong>「この動画は誰のものか?」</strong>。投稿された動画には持ち主が要ります。コメントを書いた人、チャンネルを登録した人、通知を受け取る人 —— この本のこの先に出てくるほとんどすべての機能が、「操作しているのは誰か」を前提にしています。だから、動画を受け取る第02章より前に、まず<strong>「誰か」を表現できるようにする</strong>のがこの章の役割です。</p>
+    <p>「人を扱う」には、大きく2つの技術的な壁があります。1つは<strong>パスワードをどう守るか</strong>。もう1つは<strong>「一度ログインした人を、次のリクエストでも同じ人だと分かる」をどう実現するか</strong>です。HTTP は本来、リクエストごとに記憶を持たない（ステートレスな）通信です。前のリクエストで誰がログインしたかを、サーバは何もしなければ覚えていません。この章の前半（Step 1〜4）で、この2つの壁を越える道具 —— bcrypt と JWT —— を <code>auth.go</code> で1つずつ組み立て、後半（Step 5〜8）でそれを実際の登録・ログイン・認証のハンドラに組み込みます。</p>
+
+    <h2>この層が上の層に約束すること</h2>
+    <p>この章で作る「認証」の層が、上の全章に約束するのは次の3つです。</p>
+    <ul>
+      <li><strong>パスワードは決して平文で残らない</strong> — DB が漏れても、そこにあるのは bcrypt ハッシュだけ。元のパスワードは誰にも（サーバ自身にも）復元できない。</li>
+      <li><strong>「誰が操作しているか」を、どのハンドラからも1関数で取り出せる</strong> — <code>s.currentUser(r)</code> を呼べばログイン中の利用者IDが返る。認証の詳細（トークンの検証）は1か所に閉じ込める。</li>
+      <li><strong>すべての利用者は、登録した瞬間から自分のチャンネルを1つ持つ</strong> — 「人（users）」と「顔（channels）」がペアで生まれ、以降の投稿はすべてチャンネルに紐づく。</li>
+    </ul>
+    <p>逆に、この層が<strong>やらない</strong>ことも明確です。動画を受け取ることも、権限の細かい判定（この動画は見てよいか）もしません。後者は第02章以降の各ハンドラが、この層が提供する「誰か（<code>uid</code>）」を使って自分で判断します。この章はあくまで「誰かを表現し、その誰かを証明する土台」を敷くだけです。</p>
+
+    <h2 class="step" id="step-1"><span class="step-no">Step 1</span>パスワードを二度と平文にしない — bcrypt でハッシュ化</h2>
+    <p>認証のいちばん最初の一歩は、<strong>「パスワードを DB に保存してはいけない」</strong>という鉄則です。正確には、<strong>元に戻せる形では保存しない</strong>。もし平文で保存すれば、DB が漏れた瞬間に全員のパスワードが流出します。しかも人はパスワードを使い回すので、あなたのサービスの漏洩が、その人の銀行口座まで危険にさらしかねない。だから保存するのは、パスワードそのものではなく、パスワードから計算した<strong>一方向の指紋（ハッシュ）</strong>です。その道具が <code>bcrypt</code> で、実装は <code>internal/auth/auth.go</code> の冒頭にあります。</p>
+
+    <div class="file-tag">internal/auth/auth.go（import と HashPassword）</div>
+    <pre><code><span class="kw">package</span> auth
+
+<span class="kw">import</span> (
+	<span class="st">"errors"</span>
+	<span class="st">"time"</span>
+
+	<span class="st">"github.com/golang-jwt/jwt/v5"</span>
+	<span class="st">"golang.org/x/crypto/bcrypt"</span>
+)
+
+<span class="cm">// HashPassword はパスワードを一方向に変換する。平文は決して保存しない。</span>
+<span class="kw">func</span> HashPassword(pw <span class="ty">string</span>) (<span class="ty">string</span>, <span class="ty">error</span>) {
+	b, err := bcrypt.GenerateFromPassword([]<span class="ty">byte</span>(pw), bcrypt.DefaultCost)
+	<span class="kw">return</span> <span class="ty">string</span>(b), err
+}</code></pre>
+
+    <p>コメントが方針そのものです —— <strong>「パスワードを一方向に変換する。平文は決して保存しない」</strong>。<code>bcrypt.GenerateFromPassword</code> にパスワードのバイト列を渡すと、そこから計算されたハッシュ（<code>$2a$10$...</code> のような文字列）が返ってきます。この変換は<strong>一方向</strong>です。ハッシュからは元のパスワードを計算で戻せません。だから DB にはこのハッシュだけを保存し、平文はメモリ上で使い終わったら捨てます。</p>
+
+    <p>第2引数の <code>bcrypt.DefaultCost</code> が bcrypt の要（かなめ）です。これは<strong>「ハッシュ計算にわざと何回も繰り返し処理を挟む」その回数（コスト）</strong>を指定します。なぜ<strong>わざと遅くする</strong>のか? 攻撃者は漏れたハッシュに対して「候補のパスワードを片っ端からハッシュ化して一致を探す」（総当たり）を仕掛けます。ハッシュ計算が1回1ミリ秒なら1秒間に千個試せますが、コストを上げて1回0.1秒にすれば、同じ時間で試せる数は百分の一になる。正規のログインは1回だけなので0.1秒は誰も気にしませんが、攻撃者にとっては致命的に遅くなる。<strong>「正しい人には無害、攻撃者には壊滅的」</strong>な非対称を、コストという1つの数字で作り出しているのです。</p>
+
+    <div class="gonote"><div class="box-k">実装メモ · なぜ SHA-256 ではなく bcrypt なのか</div>
+      <p>「ハッシュ」と聞くと SHA-256 のような高速なハッシュ関数を思い浮かべるかもしれません。しかしパスワードの保存に SHA-256 を<strong>そのまま使うのは危険</strong>です。理由は2つ。第一に、SHA-256 は<strong>速すぎる</strong>。GPU を使えば1秒間に何十億回も計算でき、総当たりが現実的になってしまう。bcrypt は上で見た「コスト」で意図的に遅くしてこれを防ぎます。第二に、bcrypt は<strong>ソルト（salt）を自動で埋め込む</strong>。ソルトとは各パスワードごとにランダムに足す「隠し味」で、これがあると「同じパスワードでも人ごとに違うハッシュになる」ため、あらかじめ計算しておいた辞書（レインボーテーブル）で一気に破る攻撃が効かなくなります。<code>bcrypt.GenerateFromPassword</code> が返す文字列には、コスト・ソルト・ハッシュ本体がすべて詰め込まれているので、こちらでソルトを別管理する必要はありません。パスワード保存には bcrypt / scrypt / Argon2 のような「意図的に遅い」ハッシュを使う、と覚えてください。</p>
+    </div>
+
+    <div class="box hazard"><div class="box-k">⚠ 落とし穴 — bcrypt には 72 バイトの上限がある</div>
+      <p>bcrypt は入力の<strong>先頭 72 バイトまで</strong>しか見ません。73 バイト目以降は無視されます。日本語パスワードは1文字が UTF-8 で3バイトになるので、24文字を超えると末尾が効かなくなる計算です。学習用の本書ではこのまま素朴に使っていますが、本番で「非常に長いパスワードやパスフレーズも尊重したい」場合は、bcrypt に渡す前に一度 SHA-256 などで固定長に潰してから bcrypt にかける、といった対処をします（潰し方にも注意が要るので、本番では実績あるライブラリの流儀に従うのが安全です）。いまは「bcrypt には長さの上限があり、それは仕様である」とだけ知っておいてください。</p>
+    </div>
+
+    <h2 class="step" id="step-2"><span class="step-no">Step 2</span>照合は「復号」ではなく「比較」 — CheckPassword</h2>
+    <p>ハッシュは一方向で元に戻せない。では、ログイン時に「入力されたパスワードが正しいか」をどうやって確かめるのでしょうか? 答えは<strong>「入力を同じ方法でハッシュ化して、保存済みのハッシュと突き合わせる」</strong>です。この照合を担うのが <code>CheckPassword</code> です。</p>
+
+    <div class="file-tag">internal/auth/auth.go（CheckPassword）</div>
+    <pre><code><span class="kw">func</span> CheckPassword(hash, pw <span class="ty">string</span>) <span class="ty">bool</span> {
+	<span class="kw">return</span> bcrypt.CompareHashAndPassword([]<span class="ty">byte</span>(hash), []<span class="ty">byte</span>(pw)) == <span class="kw">nil</span>
+}</code></pre>
+
+    <p>たった1行ですが、大事なことが詰まっています。<code>bcrypt.CompareHashAndPassword</code> は、第1引数の保存済みハッシュ（<code>$2a$...</code>）から<strong>コストとソルトを読み取り</strong>、第2引数の平文パスワードを<strong>同じコスト・同じソルトでハッシュ化し直して</strong>、結果が一致するかを調べます。ここが誤解しやすい点 —— <strong>ハッシュを「復号」してパスワードに戻しているわけではありません</strong>。あくまで「入力をもう一度ハッシュ化して、答え合わせをしている」だけです。だからこそサーバは、正しいパスワードが何だったかを最後まで知らずに、正しさだけを判定できます。</p>
+
+    <p>Go の慣習として、<code>CompareHashAndPassword</code> は<strong>一致すれば <code>nil</code>（エラー無し）、不一致ならエラー</strong>を返します。それを <code>== nil</code> で <code>bool</code> に変換し、「一致=true / 不一致=false」という素直な真偽値にして呼び出し側に返しています。ラッパーを1つ噛ませることで、認証を使う側（<code>handleLogin</code>）は bcrypt のエラーの流儀を意識せず、<code>if !auth.CheckPassword(...)</code> と直感的に書けます。</p>
+
+    <div class="box hazard"><div class="box-k">⚠ 落とし穴 — 「復号できない」ことは弱点ではなく強み</div>
+      <p>「パスワードを元に戻せないなら、ユーザーが忘れたとき困るのでは?」と思うかもしれません。その通りで、<strong>だからこそ本物のサービスは「パスワードを教える」のではなく「パスワードを再設定させる」</strong>のです（リセットリンクをメールで送る）。もし「あなたのパスワードは○○です」と教えられるサービスがあったら、それは<strong>平文か復号可能な形で保存している</strong>証拠で、危険信号です。bcrypt の一方向性は不便に見えて、実は「サーバですらパスワードを知らない」という強い安全性の裏返しなのだ、と理解しておくとよいです。</p>
+    </div>
+
+    <h2 class="step" id="step-3"><span class="step-no">Step 3</span>会員証を発行する — JWT の CreateToken</h2>
+    <p>パスワードの照合ができました。ここで例の2つ目の壁 —— <strong>「一度ログインした人を、次のリクエストでも同じ人だと分かる」</strong> —— に取りかかります。HTTP はリクエストごとに記憶を持たないので、ログインが成功したその瞬間に、利用者に<strong>「あなたはログイン済みです」という証明書</strong>を渡し、以降のリクエストで毎回それを提示してもらう作戦を採ります。この証明書が <strong>JWT（JSON Web Token）</strong>、本書の比喩で言えば<strong>「会員証」</strong>です。発行するのが <code>CreateToken</code>。</p>
+
+    <div class="file-tag">internal/auth/auth.go（CreateToken）</div>
+    <pre><code><span class="cm">// CreateToken は期限つきの「会員証」（JWT）を発行する。</span>
+<span class="kw">func</span> CreateToken(secret, userID <span class="ty">string</span>, ttl time.<span class="ty">Duration</span>) (<span class="ty">string</span>, <span class="ty">error</span>) {
+	claims := jwt.<span class="ty">RegisteredClaims</span>{
+		Subject:   userID,
+		ExpiresAt: jwt.NewNumericDate(time.Now().Add(ttl)),
+		IssuedAt:  jwt.NewNumericDate(time.Now()),
+	}
+	<span class="kw">return</span> jwt.NewWithClaims(jwt.SigningMethodHS256, claims).SignedString([]<span class="ty">byte</span>(secret))
+}</code></pre>
+
+    <p>JWT は乱暴に言えば<strong>「中身（誰が・いつまで）＋その中身に対する署名」を1つの文字列に詰めたもの</strong>です。この関数はそれを組み立てています。</p>
+    <ul>
+      <li><code>claims</code>（クレーム）が会員証に書き込む<strong>中身</strong>です。<code>Subject: userID</code> で「この証明書の持ち主は誰か」を、<code>ExpiresAt</code> で「いつまで有効か」（<code>time.Now().Add(ttl)</code> = 今から <code>ttl</code> 後）を、<code>IssuedAt</code> で「いつ発行したか」を記録します。<code>jwt.RegisteredClaims</code> は JWT 標準で決められた定番フィールドをまとめた型です。</li>
+      <li><code>jwt.NewWithClaims(jwt.SigningMethodHS256, claims)</code> —— 中身に対して <strong>HS256</strong> という方式で署名するトークンを作ります。HS256 は「秘密の鍵（<code>secret</code>）を使って、中身から署名を計算する」共通鍵方式です。</li>
+      <li><code>.SignedString([]byte(secret))</code> —— 実際に鍵で署名し、最終的な文字列（<code>xxxxx.yyyyy.zzzzz</code> の3部構成）を作って返します。この <code>secret</code> は第00章の <code>config.go</code> で見た <code>JWTSecret</code>（<code>docker-compose.yml</code> の <code>JWT_SECRET</code>）です。</li>
+    </ul>
+
+    <p><strong>ここが JWT の肝です</strong>。会員証の「中身」（誰が・いつまで）は<strong>暗号化されていません</strong> —— 誰でも読めます。JWT が守っているのは秘密ではなく<strong>「改ざんされていないこと」</strong>です。署名は秘密鍵 <code>secret</code> を持つサーバだけが正しく計算できるので、もし誰かが中身の <code>userID</code> を別人に書き換えたら、署名が中身と合わなくなり、検証（次のステップ）で一発で弾かれます。<strong>「中身は公開、でも書き換えは不可能」</strong> —— これが JWT の性質だと押さえてください。だから会員証に「パスワード」のような秘密は絶対に入れません（誰でも読めてしまう）。入れてよいのは「持ち主のID」や「有効期限」のような、読まれても困らない情報だけです。</p>
+
+    <div class="gonote"><div class="box-k">実装メモ · JWT の3部構成（ヘッダ.ペイロード.署名）</div>
+      <p>返ってくる文字列は <code>.</code> で区切られた3つの部分から成ります。<strong>ヘッダ</strong>（どの署名方式か = HS256）、<strong>ペイロード</strong>（クレーム = Subject / ExpiresAt など）、<strong>署名</strong>の3つです。前2つは Base64URL で<strong>エンコードされているだけ</strong>で、暗号化ではありません。試しに <code>jwt.io</code> のようなツールに貼れば、鍵が無くても中身がそのまま読めます。だからこそ「中身は秘密にできない」。3つ目の署名だけが鍵に依存し、これがトークン全体の真正性を担保します。<code>time.Duration</code> は Go の時間の長さを表す型で、<code>24 * time.Hour</code> のように書けます（次のハンドラで実際に使います）。</p>
+    </div>
+
+    <h2 class="step" id="step-4"><span class="step-no">Step 4</span>会員証の印を検証する — ParseToken</h2>
+    <p>会員証を発行したら、受け取ったときに<strong>「本物か」を確かめる</strong>裏返しの関数が要ります。それが <code>ParseToken</code> です。この関数は「トークン文字列」を受け取り、署名を検証したうえで「持ち主のID」を返します。認証の心臓部なので、丁寧に読みます。</p>
+
+    <div class="file-tag">internal/auth/auth.go（ParseToken）</div>
+    <pre><code><span class="cm">// ParseToken は会員証の印（署名）を検証し、持ち主のIDを返す。</span>
+<span class="kw">func</span> ParseToken(secret, token <span class="ty">string</span>) (<span class="ty">string</span>, <span class="ty">error</span>) {
+	t, err := jwt.ParseWithClaims(token, &amp;jwt.<span class="ty">RegisteredClaims</span>{}, <span class="kw">func</span>(t *jwt.<span class="ty">Token</span>) (<span class="ty">any</span>, <span class="ty">error</span>) {
+		<span class="kw">if</span> t.Method != jwt.SigningMethodHS256 {
+			<span class="kw">return</span> <span class="kw">nil</span>, errors.New(<span class="st">"unexpected signing method"</span>)
+		}
+		<span class="kw">return</span> []<span class="ty">byte</span>(secret), <span class="kw">nil</span>
+	})
+	<span class="kw">if</span> err != <span class="kw">nil</span> || !t.Valid {
+		<span class="kw">return</span> <span class="st">""</span>, errors.New(<span class="st">"invalid token"</span>)
+	}
+	claims, ok := t.Claims.(*jwt.<span class="ty">RegisteredClaims</span>)
+	<span class="kw">if</span> !ok || claims.Subject == <span class="st">""</span> {
+		<span class="kw">return</span> <span class="st">""</span>, errors.New(<span class="st">"invalid claims"</span>)
+	}
+	<span class="kw">return</span> claims.Subject, <span class="kw">nil</span>
+}</code></pre>
+
+    <p><code>jwt.ParseWithClaims</code> は「トークン文字列を分解し、署名を検証し、クレームを取り出す」を1度に行います。注目すべきは第3引数の<strong>関数</strong>です。ここには「署名の検証に使う鍵を返す」処理を渡します。ライブラリは、トークンのヘッダを読んでから「この鍵で検証していいか?」とこのコールバックを呼んでくるので、ここで<strong>2つの防御</strong>を仕込んでいます。</p>
+    <ol>
+      <li><strong>署名方式のチェック</strong>: <code>if t.Method != jwt.SigningMethodHS256</code> で、トークンが「HS256 で署名された」と主張していることを確かめ、そうでなければ拒否します。これは有名な JWT の攻撃 —— 攻撃者が署名方式を <code>none</code>（署名なし）に書き換えて「署名は無いけど正しいトークンです」と偽る攻撃や、方式のすり替え攻撃 —— を防ぐための<strong>必須の守り</strong>です。「発行時は HS256 なのだから検証も HS256 のはず」を明示的に固定します。</li>
+      <li><strong>鍵を渡す</strong>: 方式が正しければ、検証に使う <code>[]byte(secret)</code> を返します。ライブラリはこの鍵で署名を計算し直し、トークンの署名部分と一致するかを確かめます。</li>
+    </ol>
+
+    <p>コールバックが終わると、ライブラリは検証の結果を <code>t.Valid</code> と <code>err</code> で教えてくれます。<code>if err != nil || !t.Valid</code> で「検証に失敗した、あるいは有効でない（署名が合わない・期限切れ・改ざんされた）」を一括で弾き、外へは中身を漏らさない汎用の <code>"invalid token"</code> エラーだけを返します。<strong>期限切れ（<code>ExpiresAt</code> を過ぎたトークン）も、この検証で自動的に無効</strong>になります —— だから会員証は「一定時間だけ有効」になり、盗まれても永遠には使えません。</p>
+
+    <p>最後の <code>t.Claims.(*jwt.RegisteredClaims)</code> は Go の<strong>型アサーション</strong>で、「取り出したクレームを、渡したのと同じ <code>RegisteredClaims</code> 型として読む」操作です。<code>ok</code> で変換の成否を確かめ、さらに <code>claims.Subject == ""</code> で「持ち主IDが空でない」ことまで念押ししてから、<code>claims.Subject</code>（= 発行時に入れた <code>userID</code>）を返します。ここで返る文字列が、以降のすべてのハンドラで「操作しているのは誰か」を表す <code>uid</code> になります。</p>
+
+    <div class="box hazard"><div class="box-k">⚠ 落とし穴 — 署名方式を固定しないと「認証が丸ごと破られる」</div>
+      <p>上の <code>t.Method != jwt.SigningMethodHS256</code> のチェックは、面倒に見えて<strong>省いてはいけない</strong>核心です。歴史的に、JWT ライブラリで最も有名な脆弱性が「<strong>alg: none 攻撃</strong>」と「<strong>アルゴリズム混同攻撃</strong>」です。前者は、攻撃者がヘッダの署名方式を <code>none</code> に書き換えて「このトークンは署名不要です」と主張し、検証を素通りさせる攻撃。後者は、公開鍵方式（RS256）と共通鍵方式（HS256）を取り違えさせて、公開されている鍵を使って偽トークンを署名させる攻撃です。どちらも「検証側が方式を固定していない」ことに付け込みます。このコードのように<strong>「HS256 以外は即拒否」と明示</strong>しておけば、両方まとめて防げます。JWT を自前で扱うときの鉄則として覚えておいてください。</p>
+    </div>
+
+    <div class="gonote"><div class="box-k">実装メモ · セッションを DB に持たない「ステートレス認証」の利点と代償</div>
+      <p>ログイン状態を保つ方法は大きく2つあります。1つは<strong>サーバ側にセッションを保存する</strong>方式（ログイン時に「セッションID」を発行し、その中身は DB や Redis に持つ）。もう1つがこの JWT のような<strong>ステートレス</strong>方式で、<strong>状態をサーバに持たず、トークン自体に情報を入れて署名で守る</strong>。JWT の利点は、検証に<strong>DB 参照が要らない</strong>こと —— 鍵さえあれば署名を確かめるだけで「誰か」が分かるので、サーバを増やしても状態を共有する必要がなく、スケールしやすい。代償は<strong>「即時に無効化しづらい」</strong>ことです。発行済みのトークンは期限が来るまで有効なので、「今すぐログアウトさせたい」を厳密にやるには失効リストのような別の仕組みが要ります。本書は学習用に単純な JWT を採用し、有効期限（24時間）で自然に切れる割り切りにしています。「状態を持たない代わりに、即時失効を諦める」というトレードオフを意識しておくと、認証設計の判断ができるようになります。</p>
+    </div>
+
+    <h2 class="step" id="step-5"><span class="step-no">Step 5</span>登録する — handleRegister とトランザクション</h2>
+    <p>道具（bcrypt と JWT）がそろいました。ここからは <code>internal/httpapi/auth.go</code> で、それらを実際の HTTP ハンドラに組み込みます。まず登録（<code>POST /api/auth/register</code>、FR-A1）。少し長いので、前半（入力の検証とハッシュ化）から見ます。</p>
+
+    <div class="file-tag">internal/httpapi/auth.go（定数・型と handleRegister 前半）</div>
+    <pre><code><span class="kw">const</span> tokenTTL = <span class="st">24</span> * time.Hour <span class="cm">// 会員証の有効期限（FR-A3）</span>
+
+<span class="kw">type</span> <span class="ty">userJSON</span> <span class="kw">struct</span> {
+	ID      <span class="ty">string</span>     <span class="st">`json:"id"`</span>
+	Email   <span class="ty">string</span>     <span class="st">`json:"email"`</span>
+	Channel <span class="ty">ChannelRef</span> <span class="st">`json:"channel"`</span>
+}
+
+<span class="kw">func</span> (s *<span class="ty">Server</span>) handleRegister(w http.<span class="ty">ResponseWriter</span>, r *http.<span class="ty">Request</span>) {
+	<span class="kw">var</span> req <span class="kw">struct</span> {
+		Email       <span class="ty">string</span> <span class="st">`json:"email"`</span>
+		Password    <span class="ty">string</span> <span class="st">`json:"password"`</span>
+		ChannelName <span class="ty">string</span> <span class="st">`json:"channelName"`</span>
+	}
+	<span class="kw">if</span> err := readJSON(r, &amp;req); err != <span class="kw">nil</span> {
+		httpError(w, http.StatusBadRequest, <span class="st">"リクエストが不正です"</span>)
+		<span class="kw">return</span>
+	}
+	req.Email = strings.TrimSpace(strings.ToLower(req.Email))
+	<span class="kw">if</span> !strings.Contains(req.Email, <span class="st">"@"</span>) {
+		httpError(w, http.StatusBadRequest, <span class="st">"メールアドレスの形式が正しくありません"</span>)
+		<span class="kw">return</span>
+	}
+	<span class="kw">if</span> len(req.Password) &lt; <span class="st">8</span> {
+		httpError(w, http.StatusBadRequest, <span class="st">"パスワードは8文字以上にしてください"</span>)
+		<span class="kw">return</span>
+	}
+	name := strings.TrimSpace(req.ChannelName)
+	<span class="kw">if</span> name == <span class="st">""</span> {
+		name = strings.SplitN(req.Email, <span class="st">"@"</span>, <span class="st">2</span>)[<span class="st">0</span>]
+	}
+
+	hash, err := auth.HashPassword(req.Password)
+	<span class="kw">if</span> err != <span class="kw">nil</span> {
+		httpError(w, http.StatusInternalServerError, <span class="st">"登録に失敗しました"</span>)
+		<span class="kw">return</span>
+	}</code></pre>
+
+    <p>まず一番上の <code>const tokenTTL = 24 * time.Hour</code>。これが Step 3 で <code>CreateToken</code> に渡す有効期限で、コメントの通り FR-A3「ログイン状態が一定時間保たれる」を24時間という具体値で満たします。定数として1か所に置くことで、登録・ログインの両方が同じ寿命の会員証を発行します。</p>
+
+    <p>ハンドラの入口は<strong>入力の検証</strong>です。<code>readJSON</code> でリクエストボディの JSON を <code>req</code> 構造体へ流し込み（この <code>req</code> はこの関数の中でだけ使う無名構造体）、続けて3つの検証をします。</p>
+    <ul>
+      <li><code>strings.TrimSpace(strings.ToLower(req.Email))</code> —— メールを<strong>小文字化し、前後の空白を除く</strong>正規化。これをしないと <code>Taro@example.com</code> と <code>taro@example.com</code> が別アカウントとして登録できてしまい、後のログインでも取り違えます。「保存する前に形をそろえる」は地味ですが重要な習慣です。</li>
+      <li><code>!strings.Contains(req.Email, "@")</code> —— メールらしさの最低限の確認（<code>@</code> を含むか）。厳密なメール検証はやらず、素朴に留めています。</li>
+      <li><code>len(req.Password) &lt; 8</code> —— パスワードは8文字以上。ここで弾いておけば、弱すぎるパスワードの登録を防げます。</li>
+    </ul>
+
+    <p><code>name := strings.TrimSpace(req.ChannelName)</code> は、登録時にチャンネル名を省略できるようにする配慮です。空なら <code>strings.SplitN(req.Email, "@", 2)[0]</code> で<strong>メールの <code>@</code> より前の部分</strong>をチャンネル名の初期値にします（<code>taro@example.com</code> なら <code>taro</code>）。そして検証を全部通ったら <code>auth.HashPassword(req.Password)</code> —— Step 1 の関数を呼んで、<strong>この時点でパスワードをハッシュに変える</strong>。以降、平文の <code>req.Password</code> は二度と保存に使いません。次は後半、DB への保存です。</p>
+
+    <div class="file-tag">internal/httpapi/auth.go（handleRegister 後半・トランザクション）</div>
+    <pre><code>	ctx := r.Context()
+	tx, err := s.DB.Begin(ctx)
+	<span class="kw">if</span> err != <span class="kw">nil</span> {
+		httpError(w, http.StatusInternalServerError, <span class="st">"登録に失敗しました"</span>)
+		<span class="kw">return</span>
+	}
+	<span class="kw">defer</span> tx.Rollback(ctx)
+
+	<span class="kw">var</span> u userJSON
+	u.Email = req.Email
+	err = tx.QueryRow(ctx,
+		<span class="st">`INSERT INTO users (email, password_hash) VALUES ($1, $2) RETURNING id`</span>,
+		req.Email, hash).Scan(&amp;u.ID)
+	<span class="kw">if</span> err != <span class="kw">nil</span> {
+		httpError(w, http.StatusConflict, <span class="st">"このメールアドレスは登録済みです"</span>)
+		<span class="kw">return</span>
+	}
+	<span class="cm">// 利用者は最初から自分のチャンネルを1つ持つ</span>
+	err = tx.QueryRow(ctx,
+		<span class="st">`INSERT INTO channels (user_id, name) VALUES ($1, $2) RETURNING id, name`</span>,
+		u.ID, name).Scan(&amp;u.Channel.ID, &amp;u.Channel.Name)
+	<span class="kw">if</span> err != <span class="kw">nil</span> {
+		httpError(w, http.StatusInternalServerError, <span class="st">"登録に失敗しました"</span>)
+		<span class="kw">return</span>
+	}
+	<span class="kw">if</span> err := tx.Commit(ctx); err != <span class="kw">nil</span> {
+		httpError(w, http.StatusInternalServerError, <span class="st">"登録に失敗しました"</span>)
+		<span class="kw">return</span>
+	}
+
+	token, err := auth.CreateToken(s.Cfg.JWTSecret, u.ID, tokenTTL)
+	<span class="kw">if</span> err != <span class="kw">nil</span> {
+		httpError(w, http.StatusInternalServerError, <span class="st">"登録に失敗しました"</span>)
+		<span class="kw">return</span>
+	}
+	writeJSON(w, http.StatusCreated, map[<span class="ty">string</span>]<span class="ty">any</span>{<span class="st">"token"</span>: token, <span class="st">"user"</span>: u})
+}</code></pre>
+
+    <p>後半の主役は<strong>トランザクション</strong>です。登録では<strong>2つの INSERT</strong> —— <code>users</code>（アカウント）と <code>channels</code>（そのアカウントの顔） —— を続けて行います。ここで問われるのが「もし1つ目は成功したのに2つ目で失敗したら?」です。もしトランザクションを使わなければ、<strong>ユーザーだけ作られてチャンネルの無い、中途半端なアカウント</strong>が DB に残ってしまう。それは第08章以降で「全ユーザーは必ずチャンネルを持つ」という前提を崩し、あちこちで <code>NULL</code> 参照のバグを生みます。</p>
+
+    <p>それを防ぐのが <code>s.DB.Begin(ctx)</code> 〜 <code>tx.Commit(ctx)</code> の囲いです。この間の2つの INSERT は<strong>「全部成功か、全部無かったことにするか」のどちらか</strong>になります（原子性）。特に <code>defer tx.Rollback(ctx)</code> が効いています —— <code>defer</code> は「この関数を抜けるとき必ず実行」の予約なので、途中でエラーが起きて <code>return</code> しても、<strong>コミット前なら自動でロールバック</strong>されます。正常に <code>tx.Commit</code> できた場合は、既にコミット済みなので後から呼ばれる <code>Rollback</code> は「もう終わっている」として無害に空振りします。<strong>「成功時はコミット、どこで失敗しても defer が巻き戻す」</strong> —— これがトランザクションの定型です。</p>
+
+    <p>細部も拾っておきます。<code>RETURNING id</code> は PostgreSQL の機能で、INSERT した行の<strong>自動生成された値（ここでは <code>gen_random_uuid()</code> で作られた <code>id</code>）をその場で返してもらう</strong>書き方です。おかげで「INSERT してから改めて SELECT で id を取り直す」という2往復が要りません。1つ目で得た <code>u.ID</code> を、2つ目の <code>channels</code> の <code>user_id</code> にそのまま渡して親子を結びます。</p>
+
+    <p>2つ目の INSERT が失敗したときのエラーメッセージに注目してください。<code>users</code> の INSERT が失敗したときは <code>http.StatusConflict</code>（409）で「このメールアドレスは登録済みです」を返します。これは <code>users.email</code> に <code>UNIQUE</code> 制約（第00章のスキーマ）があるためで、同じメールで2度目の登録をすると DB が制約違反で弾き、それを「登録済み」という利用者に分かる言葉に翻訳しています。すべて通れば <code>tx.Commit</code> で確定し、<strong>その場で会員証（<code>auth.CreateToken</code>）を発行</strong>して、<code>201 Created</code> でトークンとユーザー情報を返します。<strong>登録の直後からログイン済み</strong>にしてあげる、という UX の配慮です。</p>
+
+    <div class="gonote"><div class="box-k">実装メモ · なぜ INSERT の失敗を「事前チェック」で防がないのか</div>
+      <p>「登録前に <code>SELECT</code> で同じメールが無いか確認してから INSERT すればいいのでは?」と思うかもしれません。しかし<strong>「確認してから挿入」の間に、別のリクエストが同じメールで挿入してしまう</strong>（競合状態）と、確認は素通りしたのに INSERT で衝突する、という穴が残ります。このコードは事前 SELECT をせず、<strong>DB の <code>UNIQUE</code> 制約に判定を任せ、失敗を捕まえて 409 に翻訳</strong>しています。「アプリで先回りチェックするより、DB の制約に守らせて、違反を捕まえる」ほうが競合に強い —— 第00章で見た「DBの制約で二重に守る」思想の、実践版です。<code>tx.QueryRow(...).Scan(...)</code> は「クエリを実行し、返ってきた1行の値を変数に書き込む」pgx の定型で、<code>&amp;u.ID</code> のようにポインタを渡して受け取ります。</p>
+    </div>
+
+    <h2 class="step" id="step-6"><span class="step-no">Step 6</span>ログインする — handleLogin と情報を漏らさない失敗</h2>
+    <p>登録の裏返しがログイン（<code>POST /api/auth/login</code>、FR-A2）です。「メールとパスワードを受け取り、正しければ会員証を発行する」。ここには<strong>セキュリティ上の細やかな配慮</strong>が1つ隠れています。</p>
+
+    <div class="file-tag">internal/httpapi/auth.go（handleLogin）</div>
+    <pre><code><span class="kw">func</span> (s *<span class="ty">Server</span>) handleLogin(w http.<span class="ty">ResponseWriter</span>, r *http.<span class="ty">Request</span>) {
+	<span class="kw">var</span> req <span class="kw">struct</span> {
+		Email    <span class="ty">string</span> <span class="st">`json:"email"`</span>
+		Password <span class="ty">string</span> <span class="st">`json:"password"`</span>
+	}
+	<span class="kw">if</span> err := readJSON(r, &amp;req); err != <span class="kw">nil</span> {
+		httpError(w, http.StatusBadRequest, <span class="st">"リクエストが不正です"</span>)
+		<span class="kw">return</span>
+	}
+	req.Email = strings.TrimSpace(strings.ToLower(req.Email))
+
+	<span class="kw">var</span> u userJSON
+	<span class="kw">var</span> hash, iconKey <span class="ty">string</span>
+	err := s.DB.QueryRow(r.Context(),
+		<span class="st">`SELECT u.id, u.email, u.password_hash, c.id, c.name, c.icon_key
+		 FROM users u JOIN channels c ON c.user_id = u.id WHERE u.email = $1`</span>,
+		req.Email).Scan(&amp;u.ID, &amp;u.Email, &amp;hash, &amp;u.Channel.ID, &amp;u.Channel.Name, &amp;iconKey)
+	<span class="kw">if</span> err == pgx.ErrNoRows || (err == <span class="kw">nil</span> &amp;&amp; !auth.CheckPassword(hash, req.Password)) {
+		httpError(w, http.StatusUnauthorized, <span class="st">"メールアドレスまたはパスワードが違います"</span>)
+		<span class="kw">return</span>
+	}
+	<span class="kw">if</span> err != <span class="kw">nil</span> {
+		httpError(w, http.StatusInternalServerError, <span class="st">"ログインに失敗しました"</span>)
+		<span class="kw">return</span>
+	}
+	<span class="kw">if</span> iconKey != <span class="st">""</span> {
+		u.Channel.IconURL = <span class="st">"/api/channels/"</span> + u.Channel.ID + <span class="st">"/image/icon"</span>
+	}
+	token, err := auth.CreateToken(s.Cfg.JWTSecret, u.ID, tokenTTL)
+	<span class="kw">if</span> err != <span class="kw">nil</span> {
+		httpError(w, http.StatusInternalServerError, <span class="st">"ログインに失敗しました"</span>)
+		<span class="kw">return</span>
+	}
+	writeJSON(w, http.StatusOK, map[<span class="ty">string</span>]<span class="ty">any</span>{<span class="st">"token"</span>: token, <span class="st">"user"</span>: u})
+}</code></pre>
+
+    <p>メールを同じように正規化してから、<strong>ユーザーとそのチャンネルを1回の SQL でまとめて引きます</strong>。<code>FROM users u JOIN channels c ON c.user_id = u.id</code> の <strong>JOIN</strong> は「<code>users</code> と <code>channels</code> を <code>user_id</code> でつなぎ、両方の列を1行として取る」操作です。登録時に必ずユーザーとチャンネルをペアで作っているからこそ、この JOIN は常に1行を返せます。取り出すのは <code>password_hash</code>（照合用）と、応答に載せるチャンネル情報（id・名前・アイコン）。</p>
+
+    <p>この関数のいちばん学ぶべき点が、失敗の扱いです。</p>
+    <pre><code><span class="kw">if</span> err == pgx.ErrNoRows || (err == <span class="kw">nil</span> &amp;&amp; !auth.CheckPassword(hash, req.Password)) {
+	httpError(w, http.StatusUnauthorized, <span class="st">"メールアドレスまたはパスワードが違います"</span>)
+	<span class="kw">return</span>
+}</code></pre>
+    <p><strong>「メールが存在しない（<code>pgx.ErrNoRows</code>）」と「メールはあるがパスワードが違う（<code>!CheckPassword</code>）」を、あえて同じ <code>401</code> と同じメッセージにまとめている</strong>のです。これは意図的な設計です。もしここで「そのメールは登録されていません」と「パスワードが違います」を<strong>別のメッセージ</strong>で返すと、攻撃者は<strong>「どのメールアドレスが登録済みか」を総当たりで調べられて</strong>しまう（アカウント列挙攻撃）。だから「どちらが違うかは教えず、ただ<strong>『メールかパスワードのどちらかが違う』</strong>とだけ答える」。ログイン失敗のメッセージが常にこの言い回しなのには、こうした理由があります。</p>
+
+    <p>照合に成功したら、<code>iconKey</code> があればアイコンの URL を組み立て、<code>auth.CreateToken</code> で会員証を発行して <code>200 OK</code> で返します。<strong>登録と同じ関数（<code>CreateToken</code>）・同じ寿命（<code>tokenTTL</code>）</strong>の会員証を発行しているのが分かります。認証の道具を <code>auth</code> パッケージに切り出しておいたおかげで、登録もログインも同じ2行（ハッシュ照合 → トークン発行）で書けています。</p>
+
+    <div class="box hazard"><div class="box-k">⚠ 落とし穴 — エラーの出し分けが「情報漏洩」になる</div>
+      <p>「親切なエラーメッセージ」は UX では善ですが、<strong>認証では逆に働くことがある</strong>のを、この <code>handleLogin</code> は教えてくれます。「そのメールは未登録です」は一見親切ですが、攻撃者にとっては「このメールは<strong>存在する / しない</strong>」という貴重な情報源になります。登録フォームでも同じ罠があり、「このメールは登録済みです」を安易に返すと、やはりアカウントの存在が漏れます（本書は学習用に登録では 409 で明示していますが、機密性の高いサービスでは登録でも曖昧にする判断があります）。<strong>「認証まわりのエラーは、正規ユーザーには十分・攻撃者には最小限の情報になるよう、あえて曖昧にする」</strong> —— セキュリティ設計の基本感覚として覚えておいてください。</p>
+    </div>
+
+    <h2 class="step" id="step-7"><span class="step-no">Step 7</span>会員証から人を取り出すミドルウェア — currentUser / requireUser</h2>
+    <p>会員証を発行できるようになりました。最後の仕上げは、<strong>受け取ったリクエストから「操作しているのは誰か」を取り出す共通処理</strong>です。これがなければ、各ハンドラが毎回トークンを解析することになります。<code>internal/httpapi/server.go</code> に、その心臓部があります。まずコメントを含めて全文を。</p>
+
+    <div class="file-tag">internal/httpapi/server.go（currentUser / requireUser）</div>
+    <pre><code><span class="cm">// currentUser は会員証（トークン）から利用者IDを取り出す。未ログインなら空文字。</span>
+<span class="cm">// SSE や &lt;img&gt;/&lt;video&gt; などヘッダを付けられない場所のために ?token= も受け付ける。</span>
+<span class="kw">func</span> (s *<span class="ty">Server</span>) currentUser(r *http.<span class="ty">Request</span>) <span class="ty">string</span> {
+	tok := <span class="st">""</span>
+	<span class="kw">if</span> h := r.Header.Get(<span class="st">"Authorization"</span>); strings.HasPrefix(h, <span class="st">"Bearer "</span>) {
+		tok = strings.TrimPrefix(h, <span class="st">"Bearer "</span>)
+	} <span class="kw">else</span> <span class="kw">if</span> t := r.URL.Query().Get(<span class="st">"token"</span>); t != <span class="st">""</span> {
+		tok = t
+	}
+	<span class="kw">if</span> tok == <span class="st">""</span> {
+		<span class="kw">return</span> <span class="st">""</span>
+	}
+	uid, err := auth.ParseToken(s.Cfg.JWTSecret, tok)
+	<span class="kw">if</span> err != <span class="kw">nil</span> {
+		<span class="kw">return</span> <span class="st">""</span>
+	}
+	<span class="kw">return</span> uid
+}
+
+<span class="kw">func</span> (s *<span class="ty">Server</span>) requireUser(w http.<span class="ty">ResponseWriter</span>, r *http.<span class="ty">Request</span>) (<span class="ty">string</span>, <span class="ty">bool</span>) {
+	uid := s.currentUser(r)
+	<span class="kw">if</span> uid == <span class="st">""</span> {
+		httpError(w, http.StatusUnauthorized, <span class="st">"ログインが必要です"</span>)
+		<span class="kw">return</span> <span class="st">""</span>, <span class="kw">false</span>
+	}
+	<span class="kw">return</span> uid, <span class="kw">true</span>
+}</code></pre>
+
+    <p><code>currentUser</code> は「トークンを見つけ、検証し、利用者IDを返す」を1か所に閉じ込めた関数です。順に読みます。</p>
+    <ul>
+      <li>まず <code>Authorization</code> ヘッダを見て、<code>Bearer </code> で始まっていればその後ろをトークンとして取ります。<strong>これが標準の渡し方</strong>で、フロントの API クライアント（第08章）が付けてきます。</li>
+      <li>ヘッダが無ければ <code>else if</code> で <code>r.URL.Query().Get("token")</code> —— <strong>URL の <code>?token=...</code> クエリ</strong>を見ます。これが後述の「一見あやしい認証」です。</li>
+      <li>どちらでもトークンが得られなければ空文字を返す（＝未ログイン扱い）。得られたら <code>auth.ParseToken</code>（Step 4）で検証し、成功すれば利用者ID、失敗（改ざん・期限切れ）ならこれも空文字。</li>
+    </ul>
+
+    <p>肝心なのは、<code>currentUser</code> は<strong>「未ログインでもエラーにしない」</strong>ことです。空文字を返すだけ。これは、<strong>ログインしていなくても使える機能</strong>（動画の閲覧・チャンネルの閲覧など）で「ログインしていれば追加情報を出す」ような柔らかい使い方をするためです（この章の Step 8 で読む <code>handleGetChannel</code> がまさにそれで、<code>uid</code> が空なら「登録済みか」の判定をスキップします）。</p>
+
+    <p>一方、<strong>ログイン必須</strong>の操作（投稿・コメント・チャンネル編集など）では <code>requireUser</code> を使います。これは <code>currentUser</code> を呼んで、空文字（未ログイン）なら<strong>その場で <code>401</code>「ログインが必要です」を返して <code>false</code></strong> を、ログイン済みなら利用者IDと <code>true</code> を返します。呼ぶ側は <code>uid, ok := s.requireUser(w, r); if !ok { return }</code> という定型で、「未ログインなら即座に打ち切る」を1行で書けます。この2つの関数を通じて、<strong>認証の判断（トークンをどう解釈するか）は <code>server.go</code> の1か所に集約</strong>され、他のすべてのハンドラは「<code>uid</code> をもらう」だけで済みます。これが「この層は上に <code>s.currentUser(r)</code> を約束する」の実体です。</p>
+
+    <div class="box hazard"><div class="box-k">⚠ 落とし穴 — なぜ <code>?token=</code> というURLクエリ認証を許すのか（これは仕様）</div>
+      <p>「トークンを URL に載せるのは危険では?」という直感は正しく、通常は <code>Authorization</code> ヘッダで渡すのが基本です。URL はブラウザの履歴やサーバのアクセスログに残りやすいからです。それでも本書が <code>?token=</code> を<strong>あえて受け付けている</strong>のには、動画サービス特有のはっきりした理由があります。<strong>ブラウザの一部の読み込みは、リクエストヘッダを付けられない</strong>のです。具体的には —— <code>&lt;img src="..."&gt;</code> でのサムネイル画像、<code>&lt;video&gt;</code> やネイティブの HLS 再生（第04章）、そして <strong>EventSource による SSE（通知の受信・第07章）</strong>。これらはブラウザが自動でリクエストを投げるため、JavaScript から <code>Authorization</code> ヘッダを差し込む余地がありません。そこで「ヘッダを付けられない場所のためだけに、URL クエリのトークンも受け付ける」という割り切りをしています。コメントにもはっきり「SSE や <code>&lt;img&gt;/&lt;video&gt;</code> などヘッダを付けられない場所のために」と書かれている通り、これは<strong>抜け穴ではなく意図した仕様</strong>です。第04章（配信）と第07章（通知）で、この <code>?token=</code> が実際に効く場面を見ます。</p>
+    </div>
+
+    <div class="gonote"><div class="box-k">実装メモ · Go 標準の <code>net/http</code> だけで作るルーティング</div>
+      <p>この本のサーバは、外部の Web フレームワークを使わず <strong>Go 標準ライブラリの <code>net/http</code> だけ</strong>で作られています。<code>server.go</code> の <code>Routes()</code> を見ると、<code>mux.HandleFunc("POST /api/auth/register", s.handleRegister)</code> のように、<strong>メソッドとパスを1つの文字列</strong>で登録しています。これは Go 1.22 で強化された標準ルータの機能で、<code>GET /api/channels/{id}</code> のような<strong>パスパラメータ</strong>（<code>r.PathValue("id")</code> で取れる）も標準だけで扱えます。認証は上で見た <code>currentUser</code> / <code>requireUser</code> を各ハンドラの冒頭で呼ぶ方式で、専用の「認証ミドルウェア」を挟むフレームワーク流とは少し違いますが、<strong>「認証必須なら <code>requireUser</code>、任意なら <code>currentUser</code>」を各ハンドラが自分で選べる</strong>柔軟さがあります。<code>Routes()</code> の最後に <code>withCORS(mux)</code> でCORS対応を全体に被せているのも、ミドルウェアの一種です。</p>
+    </div>
+
+    <h2 class="step" id="step-8"><span class="step-no">Step 8</span>チャンネルという「顔」 — ユーザーと分ける理由</h2>
+    <p>ここまで何度も「ユーザーを作ると同時にチャンネルも作る」と書いてきました。この章の最後に、<strong>なぜ「ユーザー（users）」と「チャンネル（channels）」を別のテーブルに分けるのか</strong>を、<code>channels.go</code> のコードで確かめます。まず、チャンネルを取得するハンドラ（<code>GET /api/channels/{id}</code>、FR-C2）です。</p>
+
+    <div class="file-tag">internal/httpapi/channels.go（channelJSON と handleGetChannel）</div>
+    <pre><code><span class="kw">type</span> <span class="ty">channelJSON</span> <span class="kw">struct</span> {
+	ID              <span class="ty">string</span> <span class="st">`json:"id"`</span>
+	Name            <span class="ty">string</span> <span class="st">`json:"name"`</span>
+	Description     <span class="ty">string</span> <span class="st">`json:"description"`</span>
+	IconURL         <span class="ty">string</span> <span class="st">`json:"iconUrl,omitempty"`</span>
+	BannerURL       <span class="ty">string</span> <span class="st">`json:"bannerUrl,omitempty"`</span>
+	SubscriberCount <span class="ty">int64</span>  <span class="st">`json:"subscriberCount"`</span>
+	VideoCount      <span class="ty">int64</span>  <span class="st">`json:"videoCount"`</span>
+	IsSubscribed    <span class="ty">bool</span>   <span class="st">`json:"isSubscribed"`</span>
+	IsOwner         <span class="ty">bool</span>   <span class="st">`json:"isOwner"`</span>
+}
+
+<span class="kw">func</span> (s *<span class="ty">Server</span>) handleGetChannel(w http.<span class="ty">ResponseWriter</span>, r *http.<span class="ty">Request</span>) {
+	uid := s.currentUser(r)
+	id := r.PathValue(<span class="st">"id"</span>)
+	<span class="kw">var</span> ch channelJSON
+	<span class="kw">var</span> ownerID, iconKey, bannerKey <span class="ty">string</span>
+	err := s.DB.QueryRow(r.Context(),
+		<span class="st">`SELECT c.id, c.user_id, c.name, c.description, c.icon_key, c.banner_key,
+		        (SELECT COUNT(*) FROM subscriptions s WHERE s.channel_id = c.id),
+		        (SELECT COUNT(*) FROM videos v WHERE v.channel_id = c.id
+		           AND v.status = 'ready' AND v.visibility = 'public')
+		 FROM channels c WHERE c.id = $1`</span>, id).
+		Scan(&amp;ch.ID, &amp;ownerID, &amp;ch.Name, &amp;ch.Description, &amp;iconKey, &amp;bannerKey,
+			&amp;ch.SubscriberCount, &amp;ch.VideoCount)
+	<span class="kw">if</span> err != <span class="kw">nil</span> {
+		httpError(w, http.StatusNotFound, <span class="st">"チャンネルが見つかりません"</span>)
+		<span class="kw">return</span>
+	}
+	<span class="kw">if</span> iconKey != <span class="st">""</span> {
+		ch.IconURL = <span class="st">"/api/channels/"</span> + ch.ID + <span class="st">"/image/icon"</span>
+	}
+	<span class="kw">if</span> bannerKey != <span class="st">""</span> {
+		ch.BannerURL = <span class="st">"/api/channels/"</span> + ch.ID + <span class="st">"/image/banner"</span>
+	}
+	ch.IsOwner = uid != <span class="st">""</span> &amp;&amp; uid == ownerID
+	<span class="kw">if</span> uid != <span class="st">""</span> {
+		s.DB.QueryRow(r.Context(),
+			<span class="st">`SELECT EXISTS (SELECT 1 FROM subscriptions WHERE user_id = $1 AND channel_id = $2)`</span>,
+			uid, id).Scan(&amp;ch.IsSubscribed)
+	}
+	writeJSON(w, http.StatusOK, ch)
+}</code></pre>
+
+    <p>このハンドラの応答（<code>channelJSON</code>）を眺めると、<strong>チャンネルが「公開上の顔」である</strong>ことが分かります。名前・説明・アイコン・バナー・登録者数・動画数 —— これらは<strong>誰にでも見せてよい情報</strong>です。一方、<code>users</code> テーブルにあるのは <code>email</code> と <code>password_hash</code> —— <strong>絶対に他人に見せてはいけない情報</strong>。この<strong>「見せてよいもの / 見せてはいけないもの」の境界</strong>が、テーブルを2つに分ける最大の理由です。</p>
+    <ul>
+      <li><strong>users（プライベートな身元）</strong>: メール・パスワードハッシュ。ログインのための情報。他人には一切見せない。</li>
+      <li><strong>channels（パブリックな顔）</strong>: 名前・説明・アイコン。動画の持ち主として公開される情報。誰でも見られる。</li>
+    </ul>
+    <p>もし1つのテーブルに全部混ぜていたら、「チャンネルページを表示する」ためにユーザー行を引くたびに、うっかりメールやハッシュまで一緒に取ってしまい、応答に漏らす事故が起きやすくなります。テーブルを分けておけば、<code>handleGetChannel</code> のように<strong><code>channels</code> だけを SELECT すれば、身元情報には触れようがない</strong>。「公開する顔」と「秘密の身元」を物理的に別の箱に入れることで、漏洩の事故を構造的に防いでいるのです。</p>
+
+    <p>さらに、この分離は<strong>拡張にも効きます</strong>。いまは <code>channels</code> の <code>user_id</code> に <code>UNIQUE</code> 制約（第00章のスキーマ）が付いていて「1ユーザー＝1チャンネル」ですが、将来「1人が複数チャンネルを持てる」ようにしたくなったら、この <code>UNIQUE</code> を外すだけで、users と channels の関係を「1対多」に広げられます。人（ログインの単位）と顔（投稿・公開の単位）が別テーブルだからこそ、この進化がスキーマの小さな変更で済む。逆に混ぜていたら、大手術になります。</p>
+
+    <p>コードの細部も見ておきましょう。<code>uid := s.currentUser(r)</code> で<strong>「見ているのが誰か（未ログインなら空）」を取り</strong>、それを使って応答を出し分けています。<code>ch.IsOwner = uid != "" &amp;&amp; uid == ownerID</code> は「見ている人が、このチャンネルの持ち主本人か」の判定（本人だけに編集ボタンを見せるため）。<code>if uid != ""</code> の中の <code>SELECT EXISTS(...)</code> は「見ている人が、このチャンネルを登録済みか」の判定で、<strong>ログイン中だけ問い合わせる</strong>（未ログインなら登録もありえないのでスキップ）。ここが Step 7 で言った「<code>currentUser</code> は未ログインでもエラーにしない」設計が活きる場面 —— <strong>同じチャンネルページを、ログインの有無で少しずつ違う内容にして返せる</strong>のです。</p>
+
+    <p>最後に、認証がどう「持ち主だけの操作」を守るかを、チャンネル編集（<code>PATCH /api/channels/me</code>、FR-C1）で確認します。</p>
+
+    <div class="file-tag">internal/httpapi/channels.go（handleUpdateMyChannel 抜粋）</div>
+    <pre><code><span class="kw">func</span> (s *<span class="ty">Server</span>) handleUpdateMyChannel(w http.<span class="ty">ResponseWriter</span>, r *http.<span class="ty">Request</span>) {
+	uid, ok := s.requireUser(w, r)
+	<span class="kw">if</span> !ok {
+		<span class="kw">return</span>
+	}
+	<span class="cm">// …（name / description の検証。全文は src を参照）</span>
+	_, err := s.DB.Exec(r.Context(),
+		<span class="st">`UPDATE channels SET name = COALESCE($2, name), description = COALESCE($3, description)
+		 WHERE user_id = $1`</span>, uid, req.Name, req.Description)
+	<span class="cm">// …（エラー処理と 204 応答）</span>
+}</code></pre>
+
+    <p>2つ、認証設計の要点があります。1つ目 —— 冒頭が <code>s.requireUser(w, r)</code> で始まり、<strong>未ログインなら即 401 で打ち切る</strong>。編集はログイン必須の操作なので <code>currentUser</code> ではなく <code>requireUser</code> を使います。2つ目 —— UPDATE の <code>WHERE user_id = $1</code> に注目。パスに「どのチャンネルを編集するか」の ID は<strong>ありません</strong>。編集対象は常に「<strong>会員証が指す本人の</strong>チャンネル」に固定され、<code>uid</code>（トークンから取り出した本人のID）で <code>WHERE</code> を絞っています。だから、他人のチャンネルIDを指定して書き換える、という攻撃が<strong>そもそも成立しません</strong>（<code>/api/channels/me</code> の <code>me</code> がそれを表しています）。「編集は必ず本人の1行にしか当たらない」を、URL 設計と SQL の <code>WHERE</code> の両方で保証している —— 認証（誰か）と認可（何をしてよいか）が噛み合う好例です。</p>
+
+    <h2 class="step" id="step-9"><span class="step-no">Step 9</span>登録してトークンで自分を名乗る</h2>
+    <p>部品が出そろいました。実際に登録し、返ってきた会員証で「自分」を名乗れることを、手を動かして確認します（第00章の <code>docker compose up --build -d</code> が済んでいる前提）。</p>
+
+    <div class="box do"><div class="box-k">▸ 動かして確認 — 登録するとトークンとチャンネルが返る</div>
+      <p><code>POST /api/auth/register</code> にメールとパスワードを送ります。返り値に <code>token</code>（会員証）と、同時に作られた <code>channel</code> が入っていることを確認します。</p>
+      <pre class="term"><code><span class="ps">$</span> curl -s -X POST http://localhost:8080/api/auth/register \
+    -H "Content-Type: application/json" \
+    -d '{"email":"taro@example.com","password":"pass1234","channelName":"太郎の実験室"}'
+<span class="out">{"token":"eyJhbGciOiJIUzI1NiIs...","user":{"id":"3f2a...","email":"taro@example.com",
+ "channel":{"id":"91bc...","name":"太郎の実験室"}}}</span></code></pre>
+      <p><code>token</code> が <code>eyJ...</code> で始まる3部構成の JWT です。<code>user.channel</code> があるので、<strong>登録と同時にチャンネルが1つ生まれた</strong>ことが分かります。この <code>token</code> を次で使うので控えておきます。</p>
+    </div>
+
+    <div class="box do"><div class="box-k">▸ 動かして確認 — 会員証で「自分」を名乗る</div>
+      <p>受け取ったトークンを <code>Authorization: Bearer ...</code> ヘッダに付けて <code>GET /api/auth/me</code> を叩くと、自分の情報が返ります。トークン無しなら <code>401</code> になることも確認します。</p>
+      <pre class="term"><code><span class="cm"># トークンあり → 自分の情報が返る</span>
+<span class="ps">$</span> TOKEN="eyJhbGciOiJIUzI1NiIs..."
+<span class="ps">$</span> curl -s http://localhost:8080/api/auth/me -H "Authorization: Bearer $TOKEN"
+<span class="out">{"user":{"id":"3f2a...","email":"taro@example.com",
+ "channel":{"id":"91bc...","name":"太郎の実験室"}}}</span>
+
+<span class="cm"># トークンなし → 401「ログインが必要です」</span>
+<span class="ps">$</span> curl -s http://localhost:8080/api/auth/me
+<span class="out">{"error":"ログインが必要です"}</span></code></pre>
+      <p>トークンがあれば <code>handleMe</code> が <code>requireUser</code> → <code>currentUser</code> → <code>ParseToken</code> の順で会員証を検証し、持ち主のIDから情報を引いて返します。無ければ <code>requireUser</code> が <code>401</code> で打ち切る。Step 7 の2関数が実際に働いているのが見えます。</p>
+    </div>
+
+    <div class="box do"><div class="box-k">▸ 動かして確認 — ログインできる／間違うと同じメッセージ</div>
+      <p>同じメールとパスワードでログインできること、そして<strong>メールが違っても・パスワードが違っても同じ <code>401</code> メッセージ</strong>になること（Step 6 の情報漏洩対策）を確かめます。</p>
+      <pre class="term"><code><span class="cm"># 正しい資格情報 → トークンが返る</span>
+<span class="ps">$</span> curl -s -X POST http://localhost:8080/api/auth/login \
+    -H "Content-Type: application/json" \
+    -d '{"email":"taro@example.com","password":"pass1234"}'
+<span class="out">{"token":"eyJhbGciOiJIUzI1NiIs...","user":{...}}</span>
+
+<span class="cm"># パスワードが違う → 401</span>
+<span class="ps">$</span> curl -s -X POST http://localhost:8080/api/auth/login \
+    -H "Content-Type: application/json" \
+    -d '{"email":"taro@example.com","password":"wrong"}'
+<span class="out">{"error":"メールアドレスまたはパスワードが違います"}</span>
+
+<span class="cm"># 存在しないメール → まったく同じ 401 メッセージ（存在を漏らさない）</span>
+<span class="ps">$</span> curl -s -X POST http://localhost:8080/api/auth/login \
+    -H "Content-Type: application/json" \
+    -d '{"email":"nobody@example.com","password":"pass1234"}'
+<span class="out">{"error":"メールアドレスまたはパスワードが違います"}</span></code></pre>
+    </div>
+
+    <div class="box do"><div class="box-k">▸ 動かして確認 — 平文パスワードが保存されていないことを DB で見る</div>
+      <p>この章のクライマックス。<code>psql</code> で <code>users</code> テーブルを覗き、<code>password_hash</code> 列に<strong>平文の <code>pass1234</code> がどこにも無く、<code>$2a$...</code> の bcrypt ハッシュだけ</strong>があることを、自分の目で確かめます。</p>
+      <pre class="term"><code><span class="ps">$</span> docker compose exec db psql -U video -d video
+
+<span class="ps">video=#</span> SELECT email, password_hash FROM users;
+<span class="out">      email          |                    password_hash
+---------------------+--------------------------------------------------------------
+ taro@example.com    | $2a$10$N9qo8uLOickgx2ZMRZoMy.Mrq...（60文字のハッシュ）</span>
+
+<span class="cm"># チャンネルも同時に作られ、users と 1対1 で結ばれている</span>
+<span class="ps">video=#</span> SELECT u.email, c.name FROM users u JOIN channels c ON c.user_id = u.id;
+<span class="out">      email          |     name
+---------------------+---------------
+ taro@example.com    | 太郎の実験室</span></code></pre>
+      <p><code>password_hash</code> に <code>pass1234</code> という文字はどこにもありません。あるのは <code>$2a$10$...</code> —— <code>$2a$</code> が bcrypt の印、<code>10</code> が <code>DefaultCost</code>、続くのがソルトとハッシュ本体です。DB が丸ごと漏れても、ここから元のパスワードは復元できない。Step 1 の設計が、データベースの実物として確認できました。</p>
+    </div>
+
+    <h2>つまずき FAQ</h2>
+    <details class="qa"><summary>JWT の中身は暗号化されていないなら、盗まれたら危ないのでは?</summary>
+      <div class="qa-body"><p>2つに分けて考えます。まず<strong>中身（誰が・いつまで）は暗号化されていない</strong>ので、トークンを持っている人は中身を読めます。だから<strong>秘密（パスワード等）は絶対に入れません</strong>。次に、トークンを<strong>盗まれた</strong>場合 —— これは確かに危険で、盗んだ人はその会員証で「本人」としてふるまえます。だからこそ本書は <code>ExpiresAt</code>（24時間）で<strong>寿命を切って</strong>被害の窓を狭め、本番では HTTPS で通信路を暗号化してトークンの盗聴を防ぎます。JWT が守るのは「<strong>改ざん</strong>されていないこと」であって「盗まれないこと」ではない、と切り分けるのが理解の鍵です。盗難対策は「短い寿命 + HTTPS + （必要なら）失効の仕組み」で別途行います。</p></div>
+    </details>
+    <details class="qa"><summary>なぜログインの失敗で「メールが無い」と「パスワードが違う」を区別しないの? 不便では?</summary>
+      <div class="qa-body"><p>正規ユーザーにとっては、どちらが違うか分からなくても「もう一度正しく入れ直す」で解決するので、実害はほぼありません。一方、区別して返すと<strong>攻撃者が「このメールは登録されているか」を総当たりで調べられる</strong>（アカウント列挙）。あるサービスに登録していること自体が漏れると、標的型のフィッシングなどに悪用されます。だから <code>handleLogin</code> は「メールかパスワードのどちらかが違う」という<strong>同じ 401・同じメッセージ</strong>にまとめています。「わずかな不便と引き換えに、攻撃者への情報を断つ」という、認証では定番の割り切りです。</p></div>
+    </details>
+    <details class="qa"><summary><code>?token=</code> でトークンを URL に載せるのはセキュリティ的にダメと聞いた。なぜ許しているの?</summary>
+      <div class="qa-body"><p>原則としてトークンは <code>Authorization</code> ヘッダで渡すのが正しく、URL は履歴やログに残りやすいので避けるべきです。それでも本書が <code>?token=</code> を受け付けるのは、<strong>ブラウザが自動で投げる読み込みにはヘッダを差し込めない</strong>という動画サービス特有の事情があるからです。<code>&lt;img&gt;</code> のサムネイル、<code>&lt;video&gt;</code> やネイティブ HLS の再生（第04章）、<code>EventSource</code> の SSE 通知（第07章）は、いずれも JavaScript から <code>Authorization</code> ヘッダを付けられません。そこで「ヘッダを付けられない場所のためだけの逃げ道」として URL クエリのトークンを許しています。<code>currentUser</code> のコメントに明記された<strong>意図した仕様</strong>で、抜け穴ではありません。本番では、この用途に限って短命の専用トークンを別発行する、といった強化も考えられます。</p></div>
+    </details>
+
+    <h2>理解度チェック</h2>
+    <p>次の問いに<strong>自分の言葉で</strong>答えられたら、この章は卒業です。</p>
+    <details class="qa"><summary>1. パスワードを bcrypt で保存する理由を、「一方向」「コスト」「ソルト」の3語を使って説明せよ。ログイン時に正しさをどう判定するか。</summary>
+      <div class="qa-body"><p>平文で保存すると DB 漏洩時に全員のパスワードが流出するので、<strong>一方向</strong>（元に戻せない）に変換したハッシュだけを保存する。bcrypt は<strong>コスト</strong>（繰り返し回数）で計算をわざと遅くし、攻撃者の総当たりを非現実的にする（正規のログインは1回なので無害）。さらに各パスワードごとの<strong>ソルト</strong>を自動で埋め込むので、同じパスワードでも人ごとにハッシュが異なり、事前計算した辞書（レインボーテーブル）攻撃が効かない。ログイン時は、ハッシュを復号するのではなく、<strong>入力パスワードを同じコスト・同じソルトでハッシュし直して、保存済みハッシュと比較</strong>する（<code>CheckPassword</code> = <code>bcrypt.CompareHashAndPassword</code>）。だからサーバは正しいパスワードを知らないまま正しさだけ判定できる。</p></div>
+    </details>
+    <details class="qa"><summary>2. JWT は何を守り、何を守らないか。<code>ParseToken</code> で署名方式を HS256 に固定しているのはなぜか。</summary>
+      <div class="qa-body"><p>JWT が守るのは<strong>「改ざんされていないこと」（真正性）</strong>で、守らないのは<strong>「中身の秘密」</strong>。中身（誰が・いつまで）は Base64 でエンコードされているだけで誰でも読めるので、秘密は入れない。署名は秘密鍵を持つサーバだけが正しく計算でき、中身を書き換えると署名が合わなくなって検証で弾かれる。<code>ParseToken</code> が <code>t.Method != jwt.SigningMethodHS256</code> で方式を固定するのは、<strong>「alg: none 攻撃」（署名なしと偽る）と「アルゴリズム混同攻撃」を防ぐため</strong>。発行時は HS256 なのだから検証も HS256 のはずで、それ以外を主張するトークンは即拒否する。方式を固定しないと認証が丸ごと破られうる、必須の守り。</p></div>
+    </details>
+    <details class="qa"><summary>3. なぜ「ユーザー（users）」と「チャンネル（channels）」を別テーブルに分けるのか。<code>currentUser</code> と <code>requireUser</code> の使い分けは?</summary>
+      <div class="qa-body"><p>users は<strong>秘密の身元</strong>（メール・パスワードハッシュ、他人に見せない）、channels は<strong>公開の顔</strong>（名前・アイコン・登録者数、誰でも見られる）で、「見せてよいもの／見せてはいけないもの」の境界が違う。分けておくと、チャンネルページの表示は <code>channels</code> だけを SELECT すればよく、身元情報をうっかり漏らす事故を構造的に防げる。将来「1人が複数チャンネル」へ拡張する余地も残る。<code>currentUser</code> は<strong>トークンから利用者IDを取り出すだけ（未ログインなら空文字、エラーにしない）</strong>で、ログイン任意の機能（閲覧など）で使う。<code>requireUser</code> は <code>currentUser</code> を呼び、<strong>未ログインなら即 401 で打ち切る</strong>もので、ログイン必須の操作（投稿・編集・コメント）で使う。認証の判断を <code>server.go</code> の1か所に集約し、各ハンドラは <code>uid</code> をもらうだけで済む。</p></div>
+    </details>
+
+    <h2>まとめ — 次の層へ</h2>
+    <p>この章で、舞台に最初の役者が乗りました。パスワードは bcrypt で一方向に守られ、DB が漏れても平文は残らない。ログイン状態は JWT の会員証で保たれ、<code>currentUser</code> / <code>requireUser</code> を通じて、どのハンドラからも「操作しているのは誰か」を1関数で取り出せる。そして全ユーザーは、登録した瞬間から「顔」であるチャンネルを1つ持ち、秘密の身元（users）と公開の顔（channels）はきれいに分かれている。<strong>「誰か」を表現し、その誰かを証明する土台</strong>が、これで整いました。</p>
+    <p>次の第02章では、いよいよ本書の最初の山場 —— <strong>動画を受け取る</strong> —— に踏み込みます。ここでチャンネルという「持ち主」が効いてきます。投稿された動画は必ずチャンネルに紐づき、<code>uploading</code> として生まれる。しかし動画ファイルは大きく、受付（API）に通すわけにはいきません。そこで登場するのが <strong>presigned URL</strong> —— ブラウザが受付を介さず、保管庫（MinIO）へ<strong>直接</strong>アップロードするための「使い捨ての合鍵」です。第00章の落とし穴で予告した「内部用エンドポイントとブラウザ用エンドポイントは別」の謎が、ついに解けます。</p>
+
+    <div class="chap-foot">
+      <a class="pager" href="00-setup.html"><span class="dir">← 前へ</span>第00章 · 土台をつくる</a>
+      <a class="pager next" href="02-upload.html"><span class="dir">次へ →</span>第02章 · 動画を受け取る</a>
+    </div>
+  </main>
+</div>
+</body>
+</html>

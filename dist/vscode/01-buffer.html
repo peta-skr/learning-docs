@@ -1,0 +1,528 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>第01章 テキストを持つ — ゼロから作るテキストエディタ</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500;600&family=Source+Serif+4:opsz,wght@8..60,400;8..60,600;8..60,700&family=Noto+Serif+JP:wght@400;600;700&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<div class="shell">
+
+  <aside class="spine">
+    <a class="wordmark" href="index.html">MINT EDITOR · from scratch</a>
+    <div class="book-title">ゼロから作る<br>テキストエディタ</div>
+    <div class="book-sub">TypeScript と Canvas で mint editor を組む</div>
+
+    <div class="legend"><span>読む <b>↓</b></span><span>組む <b>↑</b></span></div>
+
+    <nav aria-label="目次">
+      <ul class="toc">
+        <li><a class="nav-item" href="index.html"><span class="nav-num">序</span><span class="nav-label">はじめに・準備<span class="nav-tag">Setup</span></span></a></li>
+        <li><a class="nav-item" href="00-overview.html"><span class="nav-num">00</span><span class="nav-label">文字を打てる箱の正体<span class="nav-tag">Overview</span></span></a></li>
+        <li><a class="nav-item current" aria-current="page" href="01-buffer.html"><span class="nav-num">01</span><span class="nav-label">テキストを持つ<span class="nav-tag">Buffer</span></span></a></li>
+        <li><a class="nav-item" href="02-document.html"><span class="nav-num">02</span><span class="nav-label">行とカーソル<span class="nav-tag">Doc</span></span></a></li>
+        <li><a class="nav-item" href="03-history.html"><span class="nav-num">03</span><span class="nav-label">編集と取り消し<span class="nav-tag">Undo</span></span></a></li>
+        <li><a class="nav-item" href="04-view.html"><span class="nav-num">04</span><span class="nav-label">画面に描く<span class="nav-tag">Canvas</span></span></a></li>
+        <li><a class="nav-item" href="05-input.html"><span class="nav-num">05</span><span class="nav-label">入力を受ける<span class="nav-tag">Input</span></span></a></li>
+        <li><a class="nav-item" href="06-search.html"><span class="nav-num">06</span><span class="nav-label">複数カーソルと検索<span class="nav-tag">Multi</span></span></a></li>
+        <li><a class="nav-item" href="07-highlight.html"><span class="nav-num">07</span><span class="nav-label">色をつける<span class="nav-tag">Syntax</span></span></a></li>
+        <li><a class="nav-item" href="08-ime.html"><span class="nav-num">08</span><span class="nav-label">日本語を打つ<span class="nav-tag">IME</span></span></a></li>
+        <li><a class="nav-item" href="09-assemble.html"><span class="nav-num">09</span><span class="nav-label">開いて保存する・組み立て<span class="nav-tag">Assemble</span></span></a></li>
+      </ul>
+    </nav>
+
+    <div class="spine-foot">
+      各章は一つの部品・機能。<br>下（バッファ）から上（UI）へ<br>積み上げて動かしていく。
+    </div>
+  </aside>
+
+  <main class="reading">
+    <div class="progress-tag">第01章 / 全10章 · 層: BUFFER · 読了目安 2〜2.5時間</div>
+    <div class="eyebrow"><span>BUFFER</span><span class="depth">— 本命バッファ・ピーステーブル</span></div>
+    <h1>テキストを持つ</h1>
+    <p class="lede">第00章で <code>TextBuffer</code> という<strong>境界</strong>を1本引き、その素朴な実装 <code>SimpleBuffer</code> を作りました。<code>SimpleBuffer</code> は正しいけれど、1文字打つたびに全文をコピーして遅い。この章では、同じ境界の裏側に<strong>本命のバッファ</strong> —— <code>PieceTableBuffer</code>（ピーステーブル）—— を据えます。原文を一切書き換えず、「どの断片をどの順で読むか」という<strong>参照の列</strong>だけで編集を表す。挿入も削除も、文字列を動かすのではなく<strong>ピースを分割・連結する</strong>だけ。この発想が、10万行のファイルでも軽いエディタの心臓になります。</p>
+
+    <div class="box goal"><div class="box-k">◈ この章のゴール</div>
+      <p>次の 3 つを、自分の目と手で確認できたら達成です。</p>
+      <ol>
+        <li>ギャップバッファと比べたうえで、「なぜピーステーブルは原文を書き換えないのか」「挿入・削除がなぜ<strong>ピースの分割・連結</strong>で表せるのか」を自分の言葉で言える。</li>
+        <li><code>PieceTableBuffer</code> の <code>replace</code> が、連続タイプでもピース数を増やさない<strong>結合最適化</strong>を、なぜ<strong>2か所</strong>見る必要があるのかを説明できる。</li>
+        <li><code>npx vitest run src/core/pieceTable.test.ts</code> で 6 件が PASS し、なかでも「ランダム編集 2000 回で SimpleBuffer と一致する」が、第00章の <code>SimpleBuffer</code> をオラクルにして本実装を見張っていることを目視する。</li>
+      </ol>
+    </div>
+
+    <div class="box map"><div class="box-k">☰ この章のステップ</div>
+      <ol>
+        <li><a href="#step-1">なぜギャップバッファではなく、ピーステーブルなのか</a></li>
+        <li><a href="#step-2">部品を決める — <code>Piece</code> と2本のバッファ（<code>core/pieceTable.ts</code>）</a></li>
+        <li><a href="#step-3">開始位置の表を持つ — <code>rebuildStarts</code> と <code>length</code></a></li>
+        <li><a href="#step-4">どのピースにいるか — 二分探索 <code>pieceIndexAt</code></a></li>
+        <li><a href="#step-5">読む — <code>slice</code> がピース境界をまたぐ</a></li>
+        <li><a href="#step-6">置き換える① — <code>replace</code> の骨格と「左片」</a></li>
+        <li><a href="#step-7">置き換える② — 連続タイプの結合最適化（2か所を見る）</a></li>
+        <li><a href="#step-8">置き換える③ — 「右片」と <code>splice</code>、そして <code>getText</code></a></li>
+        <li><a href="#step-9">正しさを SimpleBuffer に見張らせる — オラクル一致テスト</a></li>
+      </ol>
+    </div>
+
+    <h2>境界はそのまま、中身だけ入れ替える</h2>
+    <p>まず思い出してください。第00章で <code>TextBuffer</code> はたった4つの約束でした —— <code>length</code>・<code>slice</code>・<code>replace</code>・<code>getText</code>。上の層（第02章の <code>Document</code> 以降）は、テキストが<strong>どう持たれているか</strong>を知りません。だからこの章でやることは、上の層に一切触れずに、<code>SimpleBuffer</code> を <code>PieceTableBuffer</code> に<strong>差し替える</strong>こと。第00章の Step 4 で「境界を先に決めると実装を差し替えられる」と予告した、その見返りをいま受け取ります。</p>
+    <p>そして差し替えの正しさは、捨てたはずの <code>SimpleBuffer</code> が<strong>テストの中で保証</strong>します。「明らかに正しい遅い実装」を正解の物差し（オラクル）にして、「速いが間違えやすい実装」に同じ操作を浴びせ、一致を検証する。速いデータ構造ほどバグを埋めやすいからこそ、この二段構えが効きます。では、その「速い持ち方」の正体から始めましょう。</p>
+
+    <h2 class="step" id="step-1"><span class="step-no">Step 1</span>なぜギャップバッファではなく、ピーステーブルなのか</h2>
+    <p><code>SimpleBuffer</code> の弱点は明快でした。<code>this.text = this.text.slice(0, from) + text + this.text.slice(to)</code> —— 1文字挿入するだけで、後続の文字を<strong>まるごとコピーし直す</strong>。10万文字の先頭に <code>a</code> を打つたびに10万文字が動く <code>O(n)</code> です。これを速くする定番の持ち方が2つあります。<strong>ギャップバッファ</strong>と<strong>ピーステーブル</strong>。本書は後者を採ります。まず両者を並べて、理由をはっきりさせましょう。</p>
+
+    <div class="ascii">2つの速いバッファ — どちらも「全文コピー」を避ける
+
+  ■ ギャップバッファ（gap buffer）
+    1本の配列の中に「空き（ギャップ）」を持ち歩く。
+    カーソル位置にギャップを寄せておけば、その場の挿入は
+    ギャップを1つ詰めるだけ＝ほぼ O(1)。
+      [ h e l l o ___________ w o r l d ]
+                    ↑ここがギャップ（カーソル位置）
+    ・強い: カーソル近傍の連続タイプが最速
+    ・弱い: カーソルが大きく飛ぶとギャップ移動で O(n)
+            Undo 用の履歴や複数カーソルと相性が悪い
+
+  ■ ピーステーブル（piece table）★本書はこちら
+    原文は絶対に書き換えない。追記は別バッファに足すだけ。
+    文書は「どの断片(piece)をどの順で読むか」の列で表す。
+      original: "hello world"      added: "brave "
+      pieces:   [orig 0..6]["brave "]["world"] → "hello brave world"
+    ・強い: 原文不変なので Undo が「ピース列を戻すだけ」で済む
+            編集は木/配列の局所操作、履歴・差分と相性が良い
+    ・弱い: 読むときにピースをまたぐ処理が要る（本章で書く）</div>
+
+    <p>両者とも「全文コピー」を避ける点は同じです。違うのは<strong>何を不変に保つか</strong>。ギャップバッファは1本の配列を書き換え続けます。ピーステーブルは逆で、<strong>原文（original）を最初から最後まで一切書き換えません</strong>。新しく打った文字は「追記バッファ（added）」の末尾に足すだけ。そして文書の中身は、「original のこの範囲」「added のこの範囲」……という<strong>断片（piece）への参照の列</strong>で表します。</p>
+    <p>この「原文を書き換えない」という一点が、後の章に効いてきます。第03章の Undo を思い出してください —— 編集を取り消すとは、ピースの列を<strong>1手前の並びに戻す</strong>だけ。文字そのものは original にも added にも残っているので、消したはずのテキストを「復元」する必要すらありません。ギャップバッファだと履歴管理が面倒になるところを、ピーステーブルは<strong>構造そのもの</strong>が助けてくれる。だから本書はピーステーブルを選びます。VSCode の内部バッファがピーステーブル（正確にはその木構造版）なのも、同じ理由です。</p>
+
+    <div class="gonote"><div class="box-k">TS メモ · 「参照の列」という発想</div>
+      <p>ピーステーブルの肝は、<strong>文字列を持たずに「文字列のどこを見るか」だけを持つ</strong>ことです。プログラミングでは、実体をコピーする代わりに「実体への参照（ポインタ・添字・範囲）」を持ち回すと、コピーのコストが消え、実体を共有できます。<code>original</code> の一部を10個のピースが指していても、文字列の実体は1つ。編集で動くのは軽い <code>Piece</code>（3つの数）の配列だけです。本書ではこのあと、この「重いデータは動かさず、軽い参照だけ動かす」という発想が繰り返し出てきます。</p>
+    </div>
+
+    <h2 class="step" id="step-2"><span class="step-no">Step 2</span>部品を決める — Piece と2本のバッファ</h2>
+    <p>作るファイルは <code>core/pieceTable.ts</code>。まず冒頭の設計コメントと、この構造の最小単位である <code>Piece</code> を定義します。第00章と同じく、上に「何のためのファイルか」を宣言してから中身に入ります。</p>
+
+    <div class="file-tag">core/pieceTable.ts</div>
+    <pre><code><span class="kw">import type</span> { <span class="ty">TextBuffer</span> } <span class="kw">from</span> <span class="st">"./buffer"</span>;
+
+<span class="cm">/**
+ * PieceTableBuffer — ピーステーブルによる TextBuffer 実装。
+ *
+ * 元テキスト(original)と追記専用バッファ(added)の2本を持ち、
+ * 文書は「どちらかのバッファの一部分」を指すピースの列として表す。
+ * 編集では文字列そのものを動かさず、ピースの分割・挿入だけを行うので、
+ * 巨大なファイルでも1回の編集コストが文書サイズに比例しない。
+ *
+ * - starts[i] = pieces[i] の文書内開始オフセット（編集のたびに再計算 O(ピース数)）
+ * - 連続タイプは直前の add ピースを伸ばすだけにする（ピース数の爆発を防ぐ）
+ */</span>
+
+<span class="kw">interface</span> <span class="ty">Piece</span> {
+  <span class="cm">/** 0 = original / 1 = added */</span>
+  buf: <span class="st">0</span> | <span class="st">1</span>;
+  <span class="cm">/** 参照先バッファ内の開始位置 */</span>
+  start: <span class="ty">number</span>;
+  length: <span class="ty">number</span>;
+}</code></pre>
+
+    <p>最初の行 <code>import type { TextBuffer } from "./buffer"</code> は、第00章で引いた境界を取り込む宣言です。<code>import <strong>type</strong></code> と書いているのがポイント —— これは「型としてしか使わない」ことを明示する構文で、コンパイル後の JavaScript から <strong>import 文ごと消えます</strong>。<code>TextBuffer</code> はインターフェース（実行時には存在しない型情報）なので、値として持ち込む必要がないからです。</p>
+    <p>次に <code>Piece</code>。これがピーステーブルの<strong>原子</strong>です。たった3つのフィールドしか持ちません。</p>
+    <ul>
+      <li><code>buf: 0 | 1</code> —— この断片が<strong>どちらのバッファを指すか</strong>。<code>0</code> なら原文 <code>original</code>、<code>1</code> なら追記バッファ <code>added</code>。<code>0 | 1</code> という型は「<code>0</code> か <code>1</code> のどちらかだけ」を許すリテラル型で、<code>2</code> や <code>-1</code> を代入しようとすると TypeScript が叱ってくれます。</li>
+      <li><code>start: number</code> —— 指す先の<strong>バッファ内での開始位置</strong>。文書の中での位置ではなく、あくまで <code>original</code> あるいは <code>added</code> という文字列の何文字目か、です。</li>
+      <li><code>length: number</code> —— そこから何文字ぶんを読むか。</li>
+    </ul>
+    <p>つまり1つの <code>Piece</code> は「<strong>どのバッファの</strong>・<strong>どこから</strong>・<strong>何文字</strong>」という、文字列への<strong>切り取り指示書</strong>です。文字そのものは1つも持っていません。ここが <code>SimpleBuffer</code> との決定的な違いです。<code>SimpleBuffer</code> が文字列そのもの（<code>private text: string</code>）を握っていたのに対し、<code>PieceTableBuffer</code> が握るのは、この軽い指示書の<strong>列</strong>だけになります。</p>
+    <p>続いて、クラス本体のフィールドとコンストラクタです。</p>
+
+    <div class="file-tag">core/pieceTable.ts（つづき）</div>
+    <pre><code><span class="kw">export class</span> <span class="ty">PieceTableBuffer</span> <span class="kw">implements</span> <span class="ty">TextBuffer</span> {
+  <span class="kw">private readonly</span> original: <span class="ty">string</span>;
+  <span class="kw">private</span> added = <span class="st">""</span>;
+  <span class="kw">private</span> pieces: <span class="ty">Piece</span>[] = [];
+  <span class="kw">private</span> starts: <span class="ty">number</span>[] = [];
+  <span class="kw">private</span> totalLength = <span class="st">0</span>;
+
+  <span class="kw">constructor</span>(text = <span class="st">""</span>) {
+    <span class="kw">this</span>.original = text;
+    <span class="kw">if</span> (text.length &gt; <span class="st">0</span>) {
+      <span class="kw">this</span>.pieces.push({ buf: <span class="st">0</span>, start: <span class="st">0</span>, length: text.length });
+    }
+    <span class="kw">this</span>.rebuildStarts();
+  }</code></pre>
+
+    <p><code>class PieceTableBuffer implements TextBuffer</code> —— 第00章の <code>SimpleBuffer</code> とまったく同じ境界を実装します。上の層から見れば、この2つは<strong>見分けがつきません</strong>。それが境界の力です。フィールドは5つ。</p>
+    <ul>
+      <li><code>private readonly original: string</code> —— <strong>原文</strong>。<code>readonly</code> が付いているのは飾りではありません。「ピーステーブルは原文を書き換えない」という Step 1 の約束を、<strong>型で強制</strong>しています。コンストラクタ以外の場所で <code>this.original = ...</code> と書けば、その場でコンパイルエラー。設計の意図を、うっかり破れないように縛っているわけです。</li>
+      <li><code>private added = ""</code> —— <strong>追記バッファ</strong>。ユーザーが打った文字は、すべてこの末尾に足されていきます。こちらは伸びるので <code>readonly</code> ではありません（ただし後述するとおり、足すのは<strong>末尾追記だけ</strong>で、途中を書き換えることはありません）。</li>
+      <li><code>private pieces: Piece[] = []</code> —— 文書の本体。<strong>ピースの列</strong>です。これを先頭から順に読むと文書全体になります。</li>
+      <li><code>private starts: number[] = []</code> —— <code>starts[i]</code> は「<code>pieces[i]</code> が文書の何文字目から始まるか」。ピースの長さを毎回足し算しなくても位置が分かるようにする<strong>索引</strong>で、Step 3 で作ります。</li>
+      <li><code>private totalLength = 0</code> —— 文書全体の文字数。<code>length</code> ゲッターが返す値です。</li>
+    </ul>
+    <p>コンストラクタは <code>text</code>（初期テキスト＝原文）を受け取り、<code>this.original</code> に据えます。そして原文が空でなければ、「<strong>原文の全体を1つのピースで指す</strong>」—— <code>{ buf: 0, start: 0, length: text.length }</code> —— を <code>pieces</code> に1つだけ積みます。最初は文書＝原文まるごと、なので断片は1つで足りるのです。原文が空文字なら、ピースは1つも作らず、空の文書として始まります（この分岐が効く場面は Step 6 で出てきます）。最後に <code>rebuildStarts()</code> を呼んで索引と <code>totalLength</code> を初期化します。次のステップで、その <code>rebuildStarts</code> を見ましょう。</p>
+
+    <div class="gonote"><div class="box-k">TS メモ · private と readonly、そして「不変を型で守る」</div>
+      <p><code>private</code> はそのフィールドを<strong>クラスの外から触れなくする</strong>アクセス修飾子です。<code>buf.pieces</code> のように外からピース列を直接いじられると、<code>starts</code> や <code>totalLength</code> と辻褄が合わなくなって壊れます。<code>private</code> で囲い込み、変更はすべて <code>replace</code> というたった1つの入り口を通すことで、内部の一貫性を守っています。<br>
+      <code>readonly</code> は「初期化後は再代入できない」制約です。<code>private readonly original</code> は「外から触れず、かつ中でも書き換えない」という二重の鍵。設計上の約束（＝原文不変）を<strong>コメントではなく型で</strong>表明しておくと、半年後の自分がうっかり破ろうとしても、コンパイラが止めてくれます。</p>
+    </div>
+
+    <h2 class="step" id="step-3"><span class="step-no">Step 3</span>開始位置の表を持つ — rebuildStarts と length</h2>
+    <p>ピース列があっても、「文書の20文字目はどのピースの中か」を知るには、各ピースが文書内で<strong>どこから始まるか</strong>が要ります。それを毎回ゼロから足し算するのは無駄なので、<code>starts</code> という表に持っておきます。この表を作り直すのが <code>rebuildStarts</code> です。</p>
+
+    <div class="file-tag">core/pieceTable.ts（つづき）</div>
+    <pre><code>  <span class="kw">get</span> length(): <span class="ty">number</span> {
+    <span class="kw">return</span> <span class="kw">this</span>.totalLength;
+  }
+
+  <span class="cm">/** デバッグ・テスト用: 現在のピース数 */</span>
+  <span class="kw">get</span> pieceCount(): <span class="ty">number</span> {
+    <span class="kw">return</span> <span class="kw">this</span>.pieces.length;
+  }
+
+  <span class="kw">private</span> rebuildStarts(): <span class="ty">void</span> {
+    <span class="kw">let</span> off = <span class="st">0</span>;
+    <span class="kw">this</span>.starts.length = <span class="kw">this</span>.pieces.length;
+    <span class="kw">for</span> (<span class="kw">let</span> i = <span class="st">0</span>; i &lt; <span class="kw">this</span>.pieces.length; i++) {
+      <span class="kw">this</span>.starts[i] = off;
+      off += <span class="kw">this</span>.pieces[i].length;
+    }
+    <span class="kw">this</span>.totalLength = off;
+  }
+
+  <span class="kw">private</span> sourceOf(p: <span class="ty">Piece</span>): <span class="ty">string</span> {
+    <span class="kw">return</span> p.buf === <span class="st">0</span> ? <span class="kw">this</span>.original : <span class="kw">this</span>.added;
+  }</code></pre>
+
+    <p><code>get length()</code> は境界 <code>TextBuffer</code> が求める <code>readonly length</code> の実装です。<code>this.totalLength</code> を返すだけ。第00章の <code>SimpleBuffer</code> が <code>this.text.length</code> を返したのと、外から見た振る舞いは同じですが、内部では「あらかじめ計算しておいた合計」を返しているのがポイントです。ピース列を毎回なめて長さを数えていたら遅いので、<code>rebuildStarts</code> のときに <code>totalLength</code> へ焼き込んでおきます。</p>
+    <p><code>get pieceCount()</code> は境界にはない<strong>おまけ</strong>です。コメントどおり「デバッグ・テスト用」で、いまピースが何個あるかを覗く窓。この窓が、Step 7 の結合最適化の正しさを検証するテスト（「連続タイプでピース数が増えない」）で決定的な役割を果たします。本番のロジックは <code>pieceCount</code> を使いませんが、<strong>内部状態の健全性をテストから観測できる小さな穴</strong>を開けておくと、後でとても助かります。</p>
+    <p>本体の <code>rebuildStarts</code> はシンプルな<strong>累積和</strong>です。<code>off</code>（オフセット）を <code>0</code> から始め、ピースを先頭から順に見て、「このピースは <code>off</code> から始まる」と <code>starts[i]</code> に記録し、その長さぶん <code>off</code> を進める。全ピースを見終わったときの <code>off</code> が、そのまま文書全体の長さ <code>totalLength</code> です。<code>this.starts.length = this.pieces.length</code> の一行は、<strong>索引配列の長さをピース数ちょうどに切り詰める</strong>おまじない —— 前回より減っていれば余りを捨て、増えていれば伸ばします。これで <code>starts</code> と <code>pieces</code> の長さが常に一致します。</p>
+    <p><code>sourceOf(p)</code> は小さいけれど重要なヘルパーです。ピース <code>p</code> の <code>buf</code> を見て、<strong>そのピースが指す実体の文字列</strong>を返します —— <code>0</code> なら <code>this.original</code>、それ以外（<code>1</code>）なら <code>this.added</code>。以降 <code>slice</code> でも <code>getText</code> でも、「このピースの文字を取り出す」ときは必ずこの <code>sourceOf</code> を通して大元の文字列にたどり着きます。<code>Piece</code> が「指示書」なら、<code>sourceOf</code> は「指示書を実物に引き当てる窓口」です。</p>
+
+    <div class="box hazard"><div class="box-k">⚠ 落とし穴 — starts は「編集のたびに作り直す」派生データ</div>
+      <p><code>starts</code> と <code>totalLength</code> は、<code>pieces</code> から<strong>計算で導ける派生データ</strong>です。だから <code>pieces</code> を書き換えたら、必ず <code>rebuildStarts()</code> を呼んで作り直さなければなりません。呼び忘れると、<code>starts</code> が古い並びを指したまま二分探索が的外れの場所を返し、文書が壊れます。本実装がこれを事故らせない仕組みは単純で、<strong>ピースを書き換える場所を <code>replace</code>（と <code>constructor</code>）ただ1か所に閉じ込め、その末尾で必ず <code>rebuildStarts()</code> を呼ぶ</strong>こと。派生データの更新漏れは自作データ構造の定番バグです。「本体を触ったら索引を作り直す」を1か所に集約するのが、いちばん確実な予防策です。</p>
+    </div>
+
+    <h2 class="step" id="step-4"><span class="step-no">Step 4</span>どのピースにいるか — 二分探索 pieceIndexAt</h2>
+    <p>読むにも書くにも、まず必要なのは「文書オフセット <code>offset</code> は、どのピースの中にあるか」を突き止めることです。<code>starts</code> は昇順に並んでいる（累積和なので当然）ので、<strong>二分探索</strong>で一発です。</p>
+
+    <div class="file-tag">core/pieceTable.ts（つづき）</div>
+    <pre><code>  <span class="cm">/** offset を含む（または直前で終わる）ピースの添字。starts[i] &lt;= offset を満たす最大の i */</span>
+  <span class="kw">private</span> pieceIndexAt(offset: <span class="ty">number</span>): <span class="ty">number</span> {
+    <span class="kw">let</span> lo = <span class="st">0</span>;
+    <span class="kw">let</span> hi = <span class="kw">this</span>.pieces.length - <span class="st">1</span>;
+    <span class="kw">let</span> ans = <span class="st">0</span>;
+    <span class="kw">while</span> (lo &lt;= hi) {
+      <span class="kw">const</span> mid = (lo + hi) &gt;&gt; <span class="st">1</span>;
+      <span class="kw">if</span> (<span class="kw">this</span>.starts[mid] &lt;= offset) {
+        ans = mid;
+        lo = mid + <span class="st">1</span>;
+      } <span class="kw">else</span> {
+        hi = mid - <span class="st">1</span>;
+      }
+    }
+    <span class="kw">return</span> ans;
+  }</code></pre>
+
+    <p>やりたいのは、コメントどおり「<code>starts[i] &lt;= offset</code> を満たす<strong>最大の <code>i</code></strong>」を見つけること —— 言い換えれば、「<code>offset</code> の位置か、その手前で始まる最後のピース」です。素朴に先頭から線形に探すと <code>O(ピース数)</code> ですが、<code>starts</code> が昇順なので二分探索で <code>O(log ピース数)</code> に落とせます。ピースが数万個になっても、20回ほどの比較で当たります。</p>
+    <p>ロジックを追います。<code>lo</code> と <code>hi</code> で「まだ答えがあり得る範囲」を挟み込み、その真ん中 <code>mid</code> を調べます。</p>
+    <ul>
+      <li><code>this.starts[mid] &lt;= offset</code> なら、<code>mid</code> は<strong>条件を満たす候補</strong>。ひとまず <code>ans = mid</code> と暫定答えにしておき、「もっと右にもっと良い（大きい）候補があるかもしれない」ので <code>lo = mid + 1</code> で探索を右へ寄せます。</li>
+      <li>そうでなければ（<code>starts[mid] &gt; offset</code>）、<code>mid</code> は始まりが <code>offset</code> より後ろで<strong>行き過ぎ</strong>。<code>hi = mid - 1</code> で左を探します。</li>
+    </ul>
+    <p><code>lo &gt; hi</code> になったら探索終了。「条件を満たす最大の <code>i</code>」が <code>ans</code> に残ります。<code>ans</code> の初期値を <code>0</code> にしてあるので、<code>offset</code> が <code>0</code>（先頭）でもちゃんと先頭ピースを返します。</p>
+
+    <div class="gonote"><div class="box-k">TS メモ · (lo + hi) &gt;&gt; 1 という書き方</div>
+      <p><code>&gt;&gt;</code> は<strong>符号付き右ビットシフト</strong>で、<code>&gt;&gt; 1</code> は「2で割って小数点以下を切り捨てる」のと同じです。<code>(lo + hi) &gt;&gt; 1</code> は <code>Math.floor((lo + hi) / 2)</code> と結果が一致し、しかも整数演算で速い —— 二分探索の中点計算の定番イディオムです。JavaScript の数値は本来 64bit 浮動小数点ですが、ビット演算のときだけ 32bit 整数として扱われるため、添字のような小さな非負整数では安心して使えます（巨大な値では 32bit を超えて破綻しますが、ピース数がそこに達することはありません）。<code>&gt;&gt;</code> を <code>/2</code> と <code>Math.floor</code> に置き換えても動きますが、この場面ではこの書き方が最も素直です。</p>
+    </div>
+
+    <h2 class="step" id="step-5"><span class="step-no">Step 5</span>読む — slice がピース境界をまたぐ</h2>
+    <p>位置の特定ができたので、境界 <code>TextBuffer</code> の「読む」—— <code>slice(from, to)</code> —— を実装します。<code>SimpleBuffer</code> では <code>this.text.slice(from, to)</code> の一行で済みました。ピーステーブルでは、要求範囲が<strong>複数のピースにまたがる</strong>ので、関係するピースを順にたどって<strong>継ぎ合わせ</strong>ます。</p>
+
+    <div class="file-tag">core/pieceTable.ts（つづき）</div>
+    <pre><code>  slice(from: <span class="ty">number</span>, to: <span class="ty">number</span>): <span class="ty">string</span> {
+    from = <span class="ty">Math</span>.max(<span class="st">0</span>, from);
+    to = <span class="ty">Math</span>.min(<span class="kw">this</span>.totalLength, to);
+    <span class="kw">if</span> (to &lt;= from) <span class="kw">return</span> <span class="st">""</span>;
+    <span class="kw">let</span> i = <span class="kw">this</span>.pieceIndexAt(from);
+    <span class="kw">const</span> parts: <span class="ty">string</span>[] = [];
+    <span class="kw">while</span> (i &lt; <span class="kw">this</span>.pieces.length &amp;&amp; <span class="kw">this</span>.starts[i] &lt; to) {
+      <span class="kw">const</span> p = <span class="kw">this</span>.pieces[i];
+      <span class="kw">const</span> s = <span class="ty">Math</span>.max(from - <span class="kw">this</span>.starts[i], <span class="st">0</span>);
+      <span class="kw">const</span> e = <span class="ty">Math</span>.min(to - <span class="kw">this</span>.starts[i], p.length);
+      <span class="kw">const</span> src = <span class="kw">this</span>.sourceOf(p);
+      parts.push(src.slice(p.start + s, p.start + e));
+      i++;
+    }
+    <span class="kw">return</span> parts.join(<span class="st">""</span>);
+  }</code></pre>
+
+    <p>最初の3行は<strong>範囲の正規化</strong>です。<code>from</code> は <code>0</code> より小さくならないように、<code>to</code> は文書末（<code>totalLength</code>）を超えないように挟み込み、<code>to &lt;= from</code> なら（幅ゼロや逆順）空文字を即返します。呼び出し側がうっかり範囲外を渡しても壊れないよう、入口で守っておく —— これも自作データ構造では大事な作法です。</p>
+    <p>核心はループです。まず <code>pieceIndexAt(from)</code> で「<code>from</code> を含むピース」の添字 <code>i</code> を得て、そこから<strong>右へ</strong>ピースをたどります。ループ条件 <code>this.starts[i] &lt; to</code> は「このピースの開始が <code>to</code> より前＝まだ要求範囲にかかっている」うちだけ回る、という意味。<code>starts[i] &gt;= to</code> になったら、そのピースはもう範囲の外なので打ち切ります。</p>
+    <p>各ピースの中で、<strong>どこからどこまでを切り取るか</strong>を計算するのが <code>s</code> と <code>e</code> です。ここが <code>slice</code> のいちばん頭を使うところ。<code>starts[i]</code> はこのピースの<strong>文書内</strong>での開始位置なので、<code>from - starts[i]</code> は「このピースの<strong>先頭から数えて</strong>要求開始が何文字目か」になります。</p>
+    <ul>
+      <li><code>s = Math.max(from - starts[i], 0)</code> —— このピース内での<strong>切り取り開始</strong>。ただし2つめ以降のピースでは <code>from</code> はもう手前にあるので <code>from - starts[i]</code> が負になります。そのときは <code>0</code>（ピースの先頭から全部）にクランプします。</li>
+      <li><code>e = Math.min(to - starts[i], p.length)</code> —— このピース内での<strong>切り取り終端</strong>。要求終端 <code>to</code> がこのピースの途中なら <code>to - starts[i]</code>、範囲がこのピースをはみ出すなら <code>p.length</code>（ピースの最後まで）にクランプします。</li>
+    </ul>
+    <p>そして <code>src = sourceOf(p)</code> で実体の文字列を得て、<code>src.slice(p.start + s, p.start + e)</code> で切り取ります。ここで <code>p.start</code> を足しているのを見逃さないでください。<code>s</code>・<code>e</code> は<strong>ピース内の相対位置</strong>ですが、実体の文字列（<code>original</code> や <code>added</code>）の中での位置は <code>p.start</code> ぶんずれています。だから <code>p.start + s</code> ～ <code>p.start + e</code> が<strong>実体内での絶対位置</strong>になります。切り取った断片を <code>parts</code> に積み、最後に <code>join("")</code> で継ぎ合わせて完成です。</p>
+    <p>文字列を <code>+=</code> で継ぎ足さず、いったん <code>parts</code> 配列に <code>push</code> してから <code>join("")</code> する書き方にも意味があります。多数の断片を <code>+</code> でつなぐと途中の文字列を何度も作り直しますが、配列に集めて最後に一度だけ結合すれば無駄が減ります。<code>getText</code> でも同じ手を使います。</p>
+
+    <div class="box hazard"><div class="box-k">⚠ 落とし穴 — p.start を足し忘れると「別の場所」を読む</div>
+      <p><code>slice</code> でいちばんやりがちなバグが、<code>src.slice(s, e)</code> と書いて <code>p.start</code> を足し忘れることです。<code>s</code>・<code>e</code> は<strong>ピース先頭からの相対位置</strong>であって、実体バッファ内の位置ではありません。たとえば <code>added = "brave world"</code> の中の <code>"world"</code>（<code>start:6, length:5</code>）を指すピースから <code>"wor"</code> を取りたいとき、相対では <code>[0,3)</code> ですが、実体では <code>[6,9)</code>。<code>p.start</code>（＝6）を足さないと <code>"bra"</code> を読んでしまいます。<strong>相対位置と絶対位置の変換</strong>は、ピーステーブルのあらゆる場所（<code>slice</code>・<code>replace</code> の左片右片・<code>getText</code>）に顔を出します。「ピース内の位置には必ず <code>p.start</code> を足して実体位置に直す」を体に刷り込んでおくと転びません。</p>
+    </div>
+
+    <div class="box do"><div class="box-k">▸ 動かして確認</div>
+      <p>ここまでで <code>slice</code> がピース境界をまたいで正しく読めるはずです。それを狙い撃ちするテストが1件あります。</p>
+      <pre class="term"><code><span class="ps">$</span> cd src &amp;&amp; npx vitest run src/core/pieceTable.test.ts -t "slice がピース境界をまたいで正しい"
+<span class="out">✓ src/core/pieceTable.test.ts (6 tests | 5 skipped) 2ms
+ Test Files  1 passed (1)
+      Tests  1 passed | 5 skipped (6)</span></code></pre>
+      <p>このテストは <code>"0123456789"</code> の <code>5</code> の位置に <code>"abc"</code> を挿入し、ピースを <code>012345 / abc / 56789</code> の3つに割ってから <code>slice(3, 10)</code> を要求します。答えは <code>"34abc56"</code> —— 最初のピースの途中（<code>34</code>）から始まり、真ん中のピース（<code>abc</code>）を丸ごと通り、最後のピースの途中（<code>56</code>）で終わる。<code>s</code>・<code>e</code> のクランプと <code>p.start</code> 加算が全部正しく噛み合って初めて通ります。</p>
+    </div>
+
+    <h2 class="step" id="step-6"><span class="step-no">Step 6</span>置き換える① — replace の骨格と「左片」</h2>
+    <p>いよいよ心臓部、<code>replace(from, to, text)</code> です。長いので3ステップに分けて読みます。まずは<strong>骨格</strong>と、削除・挿入で切り離される<strong>左片</strong>の処理から。</p>
+    <p>基本の発想はこうです。<code>[from, to)</code> を <code>text</code> で置き換えるとは、ピース列のうち <code>[from, to)</code> にかかる範囲を、<strong>「左片＋新テキスト＋右片」という新しいピース列で差し替える</strong>こと。<code>from</code> や <code>to</code> がピースの途中に落ちると、そのピースは分割されます。</p>
+
+    <div class="ascii">replace の骨格 — かかったピース列を「左片 + 新 + 右片」に差し替える
+
+  文書:  … [   piece A   ][ piece B ] …
+                    │from      to│
+                    ▼           ▼
+         … [左片A][   新テキスト   ][右片B] …
+            ↑A の前半     ↑added に追記   ↑B の後半
+            （from の手前）              （to の後ろ）
+
+  この3つを replacement[] に組み立て、
+  splice で startIdx..endIdx のピースと丸ごと入れ替える。</div>
+
+    <div class="file-tag">core/pieceTable.ts（つづき）</div>
+    <pre><code>  replace(from: <span class="ty">number</span>, to: <span class="ty">number</span>, text: <span class="ty">string</span>): <span class="ty">void</span> {
+    from = <span class="ty">Math</span>.max(<span class="st">0</span>, <span class="ty">Math</span>.min(from, <span class="kw">this</span>.totalLength));
+    to = <span class="ty">Math</span>.max(from, <span class="ty">Math</span>.min(to, <span class="kw">this</span>.totalLength));
+
+    <span class="kw">const</span> replacement: <span class="ty">Piece</span>[] = [];
+    <span class="kw">let</span> startIdx = <span class="st">0</span>;
+    <span class="kw">let</span> endIdx = -<span class="st">1</span>; <span class="cm">// 空バッファのときは何も取り除かない</span>
+
+    <span class="kw">if</span> (<span class="kw">this</span>.pieces.length &gt; <span class="st">0</span>) {
+      startIdx = <span class="kw">this</span>.pieceIndexAt(from);
+      endIdx = <span class="kw">this</span>.pieceIndexAt(to);
+
+      <span class="cm">// from より手前に残る左片</span>
+      <span class="kw">const</span> sp = <span class="kw">this</span>.pieces[startIdx];
+      <span class="kw">const</span> sOff = from - <span class="kw">this</span>.starts[startIdx];
+      <span class="kw">if</span> (sOff &gt; <span class="st">0</span>) {
+        replacement.push({ buf: sp.buf, start: sp.start, length: sOff });
+      }
+    }</code></pre>
+
+    <p>先頭2行の正規化は <code>slice</code> と同じ発想ですが、<code>to = Math.max(from, ...)</code> になっているのが細かい工夫です。<code>to</code> が <code>from</code> より小さくならないよう <code>from</code> で下限を切っています。これで <code>[from, to)</code> は必ず「幅ゼロ以上の正しい範囲」になります。</p>
+    <p>次に、これから組み立てる新しいピース列 <code>replacement</code> を空配列で用意し、<strong>差し替え対象の範囲</strong>を表す <code>startIdx</code>・<code>endIdx</code> を宣言します。初期値 <code>endIdx = -1</code> は「空バッファ（ピースが1つもない）なら、取り除くピースは無い」ことを表す番兵です。コメントにあるとおり、後の <code>splice</code> で <code>endIdx - startIdx + 1 = -1 - 0 + 1 = 0</code>、つまり「0個削除して挿入」になり、空文書への挿入が自然に処理されます。</p>
+    <p><code>if (this.pieces.length &gt; 0)</code> の中が、ピースがある通常ケース。<code>pieceIndexAt(from)</code> と <code>pieceIndexAt(to)</code> で、範囲がかかる<strong>最初のピース <code>startIdx</code></strong> と<strong>最後のピース <code>endIdx</code></strong> を特定します。</p>
+    <p>そして<strong>左片</strong>の処理です。<code>sp = this.pieces[startIdx]</code> が「<code>from</code> がかかるピース」。<code>sOff = from - this.starts[startIdx]</code> は「そのピースの先頭から数えて <code>from</code> が何文字目か」—— <code>slice</code> の <code>s</code> と同じ計算です。もし <code>sOff &gt; 0</code> なら、<code>from</code> はこのピースの<strong>途中</strong>に落ちているので、<strong>ピースの前半（<code>[0, sOff)</code>）は削除されず残る</strong>。これが左片です。<code>{ buf: sp.buf, start: sp.start, length: sOff }</code> —— 同じバッファの、同じ開始位置から、<code>sOff</code> 文字ぶん、という新しいピースにして <code>replacement</code> の先頭に積みます。<code>sOff === 0</code>（<code>from</code> がピース境界ちょうど）なら左片は無く、何も積みません。この「左片があるかないか」が、次のステップの結合最適化で決定的に効いてきます。</p>
+
+    <h2 class="step" id="step-7"><span class="step-no">Step 7</span>置き換える② — 連続タイプの結合最適化（2か所を見る）</h2>
+    <p>ここがこの章の<strong>山場</strong>です。素朴に実装すると、ユーザーが1文字打つたびに新しいピースが1個増えます。10万文字打てばピースが10万個 —— <code>slice</code> も <code>getText</code> もピース数に比例して重くなり、ピーステーブルの利点が台無しです。そこで「<strong>連続してタイプしているなら、新しいピースを作らず、直前の add ピースを伸ばすだけ</strong>」という最適化を入れます。</p>
+
+    <div class="file-tag">core/pieceTable.ts（つづき）</div>
+    <pre><code>    <span class="cm">// 挿入テキスト。added の末尾に追記し、挿入点の直前がちょうど added の
+    // 末尾で終わる add ピースなら、新ピースを作らず伸ばすだけにする
+    // （連続タイプの最適化 — ピース数の爆発を防ぐ）。
+    // 「直前の片」は2通りある:
+    //   a) 左片として replacement に積んだもの（ピースの途中に挿入したとき）
+    //   b) splice 範囲の1つ手前のピース（ピース境界ちょうどに挿入したとき —
+    //      文書の途中で連続タイプすると2打目以降は常にここに来る）</span>
+    <span class="kw">if</span> (text.length &gt; <span class="st">0</span>) {
+      <span class="kw">const</span> addStart = <span class="kw">this</span>.added.length;
+      <span class="kw">this</span>.added += text;
+      <span class="kw">const</span> last = replacement[replacement.length - <span class="st">1</span>];
+      <span class="kw">const</span> before = replacement.length === <span class="st">0</span> &amp;&amp; startIdx &gt; <span class="st">0</span> ? <span class="kw">this</span>.pieces[startIdx - <span class="st">1</span>] : <span class="kw">null</span>;
+      <span class="kw">if</span> (last &amp;&amp; last.buf === <span class="st">1</span> &amp;&amp; last.start + last.length === addStart) {
+        last.length += text.length;
+      } <span class="kw">else if</span> (before &amp;&amp; before.buf === <span class="st">1</span> &amp;&amp; before.start + before.length === addStart) {
+        before.length += text.length; <span class="cm">// splice 範囲の外なのでその場で伸ばしてよい</span>
+      } <span class="kw">else</span> {
+        replacement.push({ buf: <span class="st">1</span>, start: addStart, length: text.length });
+      }
+    }</code></pre>
+
+    <p>順に読みます。<code>text</code> が空（純粋な削除）なら、このブロックはまるごとスキップされます。挿入があるときだけ入ります。</p>
+    <p><code>addStart = this.added.length</code> —— 追記する文字は <code>added</code> の<strong>現在の末尾</strong>に置かれるので、その位置を先に控えます。そして <code>this.added += text</code> で実際に追記。この <code>addStart</code> が、これから作る（あるいは伸ばす）add ピースの <code>start</code> になります。</p>
+    <p>ここからが本題。「直前のピースが、ちょうど <code>added</code> の末尾で終わる add ピースなら、そのピースを伸ばすだけでいい」—— なぜなら、いま追記した <code>text</code> はその直後（<code>addStart</code> から）に続いているので、<strong>連続した1つの断片として読める</strong>からです。問題は「<strong>直前のピース</strong>」がどこにいるか。コメントが明言するとおり、これには<strong>2通り</strong>あります。</p>
+
+    <div class="ascii">「直前の add ピース」は2か所にあり得る
+
+  ケース a) ピースの"途中"に挿入 → 左片が replacement に積まれている
+     文書:  [ … added片 … ]
+                   │ここに挿入
+            [左片(=直前)][新テキスト]
+                ↑ replacement の末尾(last) がそれ
+            → last を見る
+
+  ケース b) ピース"境界ちょうど"に挿入 → 左片は無い(sOff==0)
+            [ 直前の add ピース ][ 次のピース ]
+                              │ここに挿入(=境界)
+            → replacement は空。直前は splice 範囲の
+              1つ手前 pieces[startIdx-1] にいる
+            → before を見る
+
+  文書の途中で連続タイプすると、2打目以降は挿入点が
+  「前回作った add ピースの末尾＝境界ちょうど」に来る。
+  だから b) を見ないと 1打ごとにピースが増える。</div>
+
+    <p><strong>ケース a（<code>last</code>）</strong>: <code>const last = replacement[replacement.length - 1]</code> は、いま <code>replacement</code> に積んである最後の要素 —— つまり Step 6 で積んだ<strong>左片</strong>です。<code>from</code> がピースの途中（<code>sOff &gt; 0</code>）に落ちたときだけ左片が存在します。その左片が add バッファ由来（<code>last.buf === 1</code>）で、しかも<strong>ちょうど <code>added</code> の末尾で終わっている</strong>（<code>last.start + last.length === addStart</code>）なら、新テキストはその続きなので、<code>last.length += text.length</code> で<strong>伸ばすだけ</strong>。新しいピースは作りません。</p>
+    <p><strong>ケース b（<code>before</code>）</strong>: <code>const before = replacement.length === 0 &amp;&amp; startIdx &gt; 0 ? this.pieces[startIdx - 1] : null</code>。これは「<strong>左片が無く</strong>（<code>replacement.length === 0</code>、＝ピース境界ちょうどに挿入）、かつ先頭ピースでない（<code>startIdx &gt; 0</code>）」ときにだけ、<strong>splice 範囲の1つ手前のピース</strong> <code>pieces[startIdx - 1]</code> を候補にします。それ以外は <code>null</code>。この <code>before</code> が add 由来で <code>added</code> 末尾で終わっているなら、<code>before.length += text.length</code> で伸ばします。コメントの「splice 範囲の外なのでその場で伸ばしてよい」が重要で、<code>pieces[startIdx - 1]</code> は <code>splice(startIdx, ...)</code> の<strong>削除対象に入っていない</strong>（<code>startIdx</code> より手前）ので、直接書き換えても後段の <code>splice</code> と衝突しません。</p>
+    <p>どちらのケースにも当てはまらなければ（<code>else</code>）、素直に新しい add ピース <code>{ buf: 1, start: addStart, length: text.length }</code> を <code>replacement</code> に積みます。連続タイプの最初の1打や、原文ピースの直後に打ったときはここに来ます。</p>
+
+    <div class="box hazard"><div class="box-k">⚠ 落とし穴 — 結合は「左片」と「splice の1つ手前」の 2 か所を見る（ここを外すと文書中間で1打1ピース増える）</div>
+      <p>この最適化の罠は、<strong>ケース a（<code>last</code>）だけ見て満足してしまう</strong>ことです。ケース a しか見ないと、<strong>文書の末尾</strong>で連続タイプするぶんには動いてしまう —— 末尾では毎回同じピースの途中に挿し込むように見え、左片がうまく効くからです。ところが<strong>文書の中間</strong>で連続タイプすると破綻します。</p>
+      <p>なぜか。文書の途中の位置 <code>pos</code> に1打目を挿すと、そこに add ピースが1つできます。2打目は <code>pos+1</code> に挿しますが、そこは<strong>いま作った add ピースの末尾＝ピース境界ちょうど</strong>。すると <code>sOff === 0</code> で<strong>左片が生まれず</strong>、<code>replacement</code> は空、<code>last</code> は <code>undefined</code>。ケース a は空振りします。ここで <code>before</code>（1つ手前＝さっき作った add ピース）を見に行かないと、毎回 <code>else</code> に落ちて<strong>1打ごとに新ピースが増え続けます</strong>。200文字打てばピースが約200個。</p>
+      <p>これは机上の話ではなく、実際に <strong>Codex のレビューで指摘された回帰バグ</strong>で、<code>pieceTable.test.ts</code> の「<strong>連続タイプでピース数が増えない（文書の中間）</strong>」がまさにこの再発を見張るテストです。<code>head-tail</code> の <code>5</code> の位置に200文字を連続挿入して <code>pieceCount &lt;= 3</code> を要求します。ケース b を落とすと、このテストがピース約200個で即座に落ちます。<strong>「直前の片」は左片と1つ手前の2か所にいる</strong> —— この二面性が、連続タイプ最適化の本質です。</p>
+    </div>
+
+    <h2 class="step" id="step-8"><span class="step-no">Step 8</span>置き換える③ — 「右片」と splice、そして getText</h2>
+    <p><code>replace</code> の最後です。<code>to</code> の後ろに残る<strong>右片</strong>を積み、組み立てた <code>replacement</code> で元のピース列を <code>splice</code> し、索引を作り直します。</p>
+
+    <div class="file-tag">core/pieceTable.ts（つづき）</div>
+    <pre><code>    <span class="kw">if</span> (<span class="kw">this</span>.pieces.length &gt; <span class="st">0</span>) {
+      <span class="cm">// to より後ろに残る右片</span>
+      <span class="kw">const</span> ep = <span class="kw">this</span>.pieces[endIdx];
+      <span class="kw">const</span> eOff = to - <span class="kw">this</span>.starts[endIdx];
+      <span class="kw">if</span> (eOff &lt; ep.length) {
+        replacement.push({ buf: ep.buf, start: ep.start + eOff, length: ep.length - eOff });
+      }
+    }
+
+    <span class="kw">this</span>.pieces.splice(startIdx, endIdx - startIdx + <span class="st">1</span>, ...replacement);
+    <span class="kw">this</span>.rebuildStarts();
+  }</code></pre>
+
+    <p><strong>右片</strong>は左片の鏡像です。<code>ep = this.pieces[endIdx]</code> が「<code>to</code> がかかるピース」、<code>eOff = to - this.starts[endIdx]</code> が「そのピースの先頭から数えて <code>to</code> が何文字目か」。もし <code>eOff &lt; ep.length</code> なら、<code>to</code> はこのピースの<strong>途中</strong>に落ちていて、<strong>後半（<code>[eOff, ep.length)</code>）は削除されず残る</strong>。これが右片です。ここで <code>start: ep.start + eOff</code> と <code>p.start</code> に相当する <code>ep.start</code> を足しているのは、Step 5 の落とし穴で強調した「相対→絶対」の変換そのもの。<code>eOff</code> はピース内の相対位置なので、実体バッファ内の開始位置は <code>ep.start + eOff</code> になります。長さは残りの <code>ep.length - eOff</code>。<code>eOff === ep.length</code>（<code>to</code> がピース末ちょうど）なら右片は無く、何も積みません。</p>
+    <p>ここまでで <code>replacement</code> には「左片（あれば）＋新テキスト（あれば）＋右片（あれば）」が正しい順で並びました。あとは1行、</p>
+    <pre><code><span class="kw">this</span>.pieces.splice(startIdx, endIdx - startIdx + <span class="st">1</span>, ...replacement);</code></pre>
+    <p>で、元のピース列の <code>startIdx</code> から <code>endIdx</code> までの <code>(endIdx - startIdx + 1)</code> 個を取り除き、その場所に <code>replacement</code> の要素を<strong>展開して</strong>差し込みます。空バッファのときは <code>startIdx=0, endIdx=-1</code> なので削除数が <code>0</code>、つまり純粋な挿入になる —— Step 6 で仕込んだ番兵がここで効きます。最後に <code>this.rebuildStarts()</code> で <code>starts</code> と <code>totalLength</code> を作り直し、内部の一貫性を回復します（Step 3 の落とし穴で言った「本体を触ったら索引を作り直す」の実行地点がここです）。</p>
+
+    <div class="gonote"><div class="box-k">TS メモ · splice と ...（スプレッド）の合わせ技</div>
+      <p><code>Array.prototype.splice(start, deleteCount, ...items)</code> は、配列の <code>start</code> から <code>deleteCount</code> 個を取り除き、そこに <code>items</code> を挿入する破壊的メソッドです。「削除」と「挿入」を1回で行えるので、ピース列の一部を別の列に<strong>丸ごと差し替える</strong>のにぴったりです。<code>...replacement</code> の <code>...</code> は<strong>スプレッド構文</strong>で、配列を「個々の引数」に展開します。<code>splice(i, n, ...[a, b, c])</code> は <code>splice(i, n, a, b, c)</code> と同じ。<code>replacement</code> の要素数は0〜3個と可変なので、スプレッドで一様に渡せるのが綺麗です。もしスプレッドを使わず <code>splice(i, n, replacement)</code> と書くと、配列そのものが1要素として挿入されてしまい壊れます。</p>
+    </div>
+
+    <p>最後に、全文を返す <code>getText</code> です。ピーステーブルの締めくくりにふさわしく、これで <code>pieceTable.ts</code> は全文になります。</p>
+
+    <div class="file-tag">core/pieceTable.ts（つづき・これで全文）</div>
+    <pre><code>  getText(): <span class="ty">string</span> {
+    <span class="kw">const</span> parts: <span class="ty">string</span>[] = [];
+    <span class="kw">for</span> (<span class="kw">const</span> p <span class="kw">of</span> <span class="kw">this</span>.pieces) {
+      parts.push(<span class="kw">this</span>.sourceOf(p).slice(p.start, p.start + p.length));
+    }
+    <span class="kw">return</span> parts.join(<span class="st">""</span>);
+  }
+}</code></pre>
+
+    <p><code>getText</code> は、ピース列を<strong>先頭から順に全部</strong>読み出して継ぎ合わせるだけ。各ピース <code>p</code> について <code>sourceOf(p)</code> で実体を引き、<code>slice(p.start, p.start + p.length)</code> でそのピースぶんを取り出し、<code>parts</code> に積んで最後に <code>join("")</code>。<code>slice</code> のような範囲クランプが要らないのは、「全ピースを丸ごと」読むからです。ここでも <code>p.start</code> を足して実体内の絶対位置に直しているのを確認してください。ピーステーブルにとって <code>getText</code> は「散らばった参照の列から、いま見えている文書を1本の文字列に<strong>実体化</strong>する」操作です。保存のときや、テストでオラクルと突き合わせるときに使います。</p>
+
+    <div class="box do"><div class="box-k">▸ 動かして確認</div>
+      <p>基本の挿入・削除と、連続タイプ最適化の両方（末尾・中間）をまとめて走らせましょう。</p>
+      <pre class="term"><code><span class="ps">$</span> cd src &amp;&amp; npx vitest run src/core/pieceTable.test.ts
+<span class="out">✓ src/core/pieceTable.test.ts (6 tests)
+   ✓ 空のバッファに挿入できる
+   ✓ 先頭・末尾・中間の挿入と削除
+   ✓ slice がピース境界をまたいで正しい
+   ✓ 連続タイプでピース数が増えない（末尾）
+   ✓ 連続タイプでピース数が増えない（文書の中間）
+   ✓ ランダム編集 2000 回で SimpleBuffer と一致する
+ Test Files  1 passed (1)
+      Tests  6 passed (6)</span></code></pre>
+      <p><strong>「連続タイプでピース数が増えない（末尾）」</strong>は <code>base\n</code> の末尾に <code>x</code> を200回打って <code>pieceCount &lt;= 2</code> を要求（原文ピース＋伸び続ける1つの add ピース）。<strong>「（文書の中間）」</strong>は Step 7 の落とし穴そのもので、<code>head-tail</code> の途中に200回打って <code>pieceCount &lt;= 3</code> を要求します。ケース b の結合を落とすと後者だけが落ちる —— この2つが揃って通ることが、最適化が「2か所」正しく効いている証拠です。</p>
+    </div>
+
+    <h2 class="step" id="step-9"><span class="step-no">Step 9</span>正しさを SimpleBuffer に見張らせる — オラクル一致テスト</h2>
+    <p><code>PieceTableBuffer</code> は速い代わりに、ここまで見てきたとおり<strong>分岐が多く間違えやすい</strong>。左片・右片のクランプ、<code>p.start</code> 加算、2か所の結合最適化、番兵……どこか1つ間違えれば文書が壊れます。この複雑さを、第00章で作った<strong>「明らかに正しい」<code>SimpleBuffer</code></strong> に見張らせる —— それがこの章の締めであり、本書の品質保証の核です。テストのいちばん重い1件を読みます。</p>
+
+    <div class="file-tag">core/pieceTable.test.ts（オラクル一致テスト）</div>
+    <pre><code>  it(<span class="st">"ランダム編集 2000 回で SimpleBuffer と一致する"</span>, () =&gt; {
+    <span class="kw">const</span> rand = rng(<span class="st">42</span>);
+    <span class="kw">const</span> oracle = <span class="kw">new</span> SimpleBuffer(<span class="st">"こんにちは world\nsecond line\n"</span>);
+    <span class="kw">const</span> pt = <span class="kw">new</span> PieceTableBuffer(<span class="st">"こんにちは world\nsecond line\n"</span>);
+    <span class="kw">const</span> alphabet = <span class="st">"abcあい😀\n "</span>;
+    <span class="kw">for</span> (<span class="kw">let</span> step = <span class="st">0</span>; step &lt; <span class="st">2000</span>; step++) {
+      <span class="kw">const</span> len = oracle.length;
+      <span class="kw">const</span> from = <span class="ty">Math</span>.floor(rand() * (len + <span class="st">1</span>));
+      <span class="kw">const</span> to = <span class="ty">Math</span>.min(len, from + <span class="ty">Math</span>.floor(rand() * <span class="st">8</span>));
+      <span class="kw">let</span> text = <span class="st">""</span>;
+      <span class="kw">const</span> insertLen = <span class="ty">Math</span>.floor(rand() * <span class="st">6</span>);
+      <span class="kw">for</span> (<span class="kw">let</span> i = <span class="st">0</span>; i &lt; insertLen; i++) {
+        text += alphabet[<span class="ty">Math</span>.floor(rand() * alphabet.length)];
+      }
+      oracle.replace(from, to, text);
+      pt.replace(from, to, text);
+      <span class="kw">if</span> (step % <span class="st">100</span> === <span class="st">0</span>) {
+        expect(pt.getText()).toBe(oracle.getText());
+        expect(pt.length).toBe(oracle.length);
+      }
+      <span class="cm">// slice の抜き取り検査</span>
+      <span class="kw">const</span> s = <span class="ty">Math</span>.floor(rand() * (oracle.length + <span class="st">1</span>));
+      <span class="kw">const</span> e = <span class="ty">Math</span>.min(oracle.length, s + <span class="ty">Math</span>.floor(rand() * <span class="st">20</span>));
+      expect(pt.slice(s, e)).toBe(oracle.slice(s, e));
+    }
+    expect(pt.getText()).toBe(oracle.getText());
+  });</code></pre>
+
+    <p>仕掛けは単純ですが強力です。<strong>まったく同じ初期テキスト</strong>で <code>SimpleBuffer</code>（<code>oracle</code>）と <code>PieceTableBuffer</code>（<code>pt</code>）を作り、<strong>まったく同じランダムな編集</strong>を2000回、両方に浴びせます。そして節目ごとに <code>getText()</code>・<code>length</code>・<code>slice()</code> が<strong>完全に一致するか</strong>を <code>expect(...).toBe(...)</code> で突き合わせる。<code>oracle</code> は「誰が見ても正しい」ので、もし食い違えば、間違っているのは必ず <code>pt</code> の側 —— つまりこの章で書いた複雑なロジックのバグです。速い実装のバグを、遅い実装が<strong>炙り出す</strong>のです。</p>
+    <p>細部にも意味があります。乱数は <code>rng(42)</code> と<strong>固定シード</strong>（mulberry32）で回すので、失敗したら<strong>毎回まったく同じ2000手</strong>が再現されます。バグ調査で「たまに落ちる」ほど厄介なものはありませんが、決定論的な乱数なら落ちるケースを確実に再現できます。編集は <code>from</code>・<code>to</code>・<code>text</code> をランダムに選ぶので、挿入・削除・置換・全消し・境界ちょうど・途中……<strong>あらゆる組み合わせ</strong>が2000回のうちに現れます。人間が思いつかない意地悪な系列も、乱数が勝手に作ってくれます。</p>
+    <p>そして <code>alphabet = "abcあい😀\n "</code>。ここに<strong>日本語</strong>と<strong>絵文字 😀</strong>と<strong>改行</strong>が混ざっているのが肝です。第00章の演習で「<code>😀</code> を入れると <code>length</code> が 1 ではなく 2 になる」と予告した、<strong>UTF-16 サロゲートペア</strong>を正面から踏ませています。次で少し掘り下げます。</p>
+
+    <div class="gonote"><div class="box-k">TS メモ · UTF-16 サロゲートペアと「コード単位」の位置</div>
+      <p>JavaScript の文字列は <strong>UTF-16 コード単位</strong>の列で、<code>str.length</code> も <code>slice</code> の添字も「コード単位」で数えます。<code>"a"</code> や <code>"あ"</code> は1コード単位ですが、<code>"😀"</code> のような補助面の文字は<strong>2コード単位（サロゲートペア）</strong>で表され、<code>"😀".length</code> は <code>2</code> になります。ピーステーブルにとって重要なのは、<code>original</code>・<code>added</code> も、<code>starts</code> のオフセットも、すべて<strong>同じ「コード単位」という物差し</strong>で一貫していること。<code>SimpleBuffer</code> も同じ物差しなので、両者は絵文字が入っても一致します。<br>
+      ただし「コード単位で数える」には副作用があります。<code>from</code>・<code>to</code> がサロゲートペアの<strong>真ん中</strong>を指すと、絵文字が半分に割れた壊れた文字列になり得る。このテストでは <code>oracle</code> と <code>pt</code> が<strong>同じ壊れ方</strong>をするので一致は保たれます（＝バッファ層としては正しい）。「絵文字を割らないようにカーソルを動かす」のはバッファの責務ではなく、上の層 —— 第02章の <code>Document</code>／カーソル移動 —— の仕事です。ここではバッファが「コード単位で一貫して正しい」ことだけを保証します。</p>
+    </div>
+
+    <div class="box do"><div class="box-k">▸ 手を動かすなら — わざと壊してテストに叱られる</div>
+      <p>このオラクル一致テストの威力を体感する最良の方法は、<strong>わざとバグを入れてみる</strong>ことです。次を試して、テストが赤くなるのを見てください（確認したら必ず元に戻すこと）。</p>
+      <ol>
+        <li>Step 7 の結合最適化の <code>else if (before &amp;&amp; ...)</code> ブロックを丸ごと消す（ケース b を落とす）。→「連続タイプでピース数が増えない（文書の中間）」が <code>pieceCount</code> 約200で落ちる。ランダム一致テストは<strong>通ったまま</strong>（結果は正しく、ピースが増えて遅くなるだけ）なのも観察ポイント。</li>
+        <li>Step 8 の右片で <code>start: ep.start + eOff</code> を <code>start: eOff</code> に変える（<code>p.start</code> 加算を忘れる）。→ <code>added</code> 由来ピースで読む場所がずれ、「ランダム編集 2000 回で SimpleBuffer と一致する」が食い違いで落ちる。</li>
+        <li>Step 5 の <code>slice</code> で <code>Math.max(from - this.starts[i], 0)</code> の <code>Math.max(..., 0)</code> を外す。→ 2つめ以降のピースで負の添字が混じり、<code>slice</code> 抜き取り検査が落ちる。</li>
+      </ol>
+      <p>どれも <code>SimpleBuffer</code> という「正解の物差し」があるから<strong>即座に</strong>捕まります。速い実装を安心して書けるのは、この見張りがいるからです。</p>
+    </div>
+
+    <h2>つまずき FAQ</h2>
+    <details class="qa"><summary>ギャップバッファのほうが「その場のタイプが O(1)」なら速いのでは? なぜピーステーブル?</summary>
+      <div class="qa-body"><p>単発のタイプ速度だけならギャップバッファも優秀です。しかし本書がピーステーブルを採る理由は<strong>その先</strong>にあります。原文を書き換えないので、第03章の <strong>Undo が「ピース列を1手前に戻すだけ」</strong>で済み、消したテキストの復元すら不要。カーソルが大きく飛んでもギャップ移動の <code>O(n)</code> が発生しない。複数カーソル（第06章）で文書の離れた場所を同時編集しても素直。エディタは「1文字打つ」より「履歴・検索・複数箇所編集」の総合力が効くので、構造として履歴と相性の良いピーステーブルが勝ちます。VSCode の内部バッファがピーステーブル系なのも同じ判断です。</p></div>
+    </details>
+    <details class="qa"><summary>連続タイプの結合は、なぜ「左片」と「1つ手前」の2か所を見ないといけないの?</summary>
+      <div class="qa-body"><p>「直前の add ピース」がいる場所が、挿入位置によって<strong>2通り</strong>に変わるからです。<strong>ピースの途中</strong>に挿すと、手前半分が<strong>左片</strong>として <code>replacement</code> に積まれるので、直前は <code>replacement</code> の末尾（<code>last</code>）にいます。一方<strong>ピース境界ちょうど</strong>に挿すと <code>sOff===0</code> で左片が生まれず、<code>replacement</code> は空。直前は <code>splice</code> 範囲の1つ手前 <code>pieces[startIdx-1]</code>（<code>before</code>）にいます。そして<strong>文書の途中で連続タイプすると、2打目以降は必ず境界ちょうど</strong>（前回作った add ピースの末尾）に来るので、<code>before</code> を見ないと1打ごとにピースが増えます。末尾タイプだけ試すとこのバグに気づけない —— だから中間タイプの回帰テストが要るのです。</p></div>
+    </details>
+    <details class="qa"><summary>絵文字を入れると <code>length</code> が2増える。これはバグ? 直すべき?</summary>
+      <div class="qa-body"><p>バグではありません。JavaScript の文字列は <strong>UTF-16 コード単位</strong>で数える約束で、<code>"😀".length === 2</code>（サロゲートペア）です。バッファ層の責務は「コード単位という物差しで一貫して正しく読み書きする」ことだけ。<code>original</code>・<code>added</code>・<code>starts</code> がすべて同じ物差しなので、<code>SimpleBuffer</code> と完全に一致します（ランダム一致テストが絵文字入りで通るのがその証拠）。「絵文字を半分に割らないようカーソルを動かす」のはバッファではなく<strong>上の層（第02章の <code>Document</code>）</strong>の仕事です。層ごとに責務を分けているので、バッファはここで直しません。</p></div>
+    </details>
+
+    <h2>理解度チェック</h2>
+    <p>次の問いに<strong>自分の言葉で</strong>答えられたら、この章は卒業です。</p>
+    <details class="qa"><summary>1. ピーステーブルはなぜ「原文を書き換えない」のか。その不変性が後の章にどう効くか。</summary>
+      <div class="qa-body"><p><code>original</code> は最初から最後まで不変で（<code>private readonly</code> で型でも縛る）、新しい文字は <code>added</code> の末尾に<strong>追記するだけ</strong>。文書は「どの断片(<code>Piece</code>)をどの順で読むか」の列 <code>pieces</code> で表す。編集は文字列を動かさずピースの分割・連結だけなので、巨大ファイルでも1編集のコストが文書サイズに比例しない。原文も追記も消えないので、第03章の <strong>Undo は「ピース列を1手前に戻すだけ」</strong>で復元が要らず、履歴・差分・複数カーソルと相性が良い。</p></div>
+    </details>
+    <details class="qa"><summary>2. <code>replace(from, to, text)</code> が組み立てる <code>replacement</code> は、どんなピースからなるか。左片・右片はいつ生まれるか。</summary>
+      <div class="qa-body"><p><strong>左片＋新テキスト＋右片</strong>（それぞれ有無あり）の順。<strong>左片</strong>は <code>from</code> がピースの途中（<code>sOff = from - starts[startIdx] &gt; 0</code>）に落ちたとき、そのピースの前半 <code>[0, sOff)</code> として生まれる。<strong>右片</strong>は <code>to</code> がピースの途中（<code>eOff = to - starts[endIdx] &lt; ep.length</code>）に落ちたとき、後半 <code>[eOff, length)</code> として生まれ、実体位置は <code>ep.start + eOff</code>。<strong>新テキスト</strong>は <code>added</code> 末尾に追記し、結合最適化に当たらなければ新 add ピースとして積む。最後に <code>splice(startIdx, endIdx-startIdx+1, ...replacement)</code> で差し替え、<code>rebuildStarts()</code> で索引を作り直す。</p></div>
+    </details>
+    <details class="qa"><summary>3. 「ランダム編集 2000 回で SimpleBuffer と一致する」テストは、何を・なぜ保証できるのか。</summary>
+      <div class="qa-body"><p>同じ初期テキストで <code>SimpleBuffer</code>（オラクル＝明らかに正しい遅い実装）と <code>PieceTableBuffer</code>（速いが複雑）を作り、固定シード乱数で<strong>同一の編集</strong>を2000回浴びせ、<code>getText()</code>・<code>length</code>・<code>slice()</code> の一致を突き合わせる。食い違えば必ず <code>pt</code> 側のバグなので、<strong>速い実装のバグを遅い実装が炙り出せる</strong>。乱数が挿入・削除・置換・境界・途中のあらゆる系列を作り、<code>alphabet</code> に日本語・絵文字・改行を混ぜて UTF-16 サロゲートペアでも壊れないことまで確かめる。固定シードなので落ちれば確実に再現できる。この二段構えが、複雑な実装に安心して挑める土台になる。</p></div>
+    </details>
+
+    <h2>まとめ — 次の層へ</h2>
+    <p>この章で、エディタの最下層に<strong>本命のバッファ</strong>が入りました。原文を書き換えず、追記バッファと<strong>ピース（切り取り指示書）の列</strong>だけで編集を表す —— <code>Piece</code> という3つの数の部品、累積和の索引 <code>starts</code>、二分探索 <code>pieceIndexAt</code>、境界をまたぐ <code>slice</code>、そして左片・新テキスト・右片を組み立てる <code>replace</code>。とりわけ、連続タイプでピースを爆発させないための結合最適化が<strong>「左片」と「splice の1つ手前」の2か所</strong>を見る、という一点は、実際のレビューで見つかった落とし穴でした。そして書き上げたそばから、第00章の <code>SimpleBuffer</code> がオラクルとして2000回の一致検証で正しさを見張ってくれます。<code>SimpleBuffer</code> から <code>PieceTableBuffer</code> へ、<strong>上の層に一切触れず</strong>に中身だけ入れ替えられた —— これが第00章で引いた「境界」の果実です。</p>
+    <p>次の第02章では、この <code>TextBuffer</code> の上に <strong><code>Document</code></strong> を乗せます。バッファは「文字の列」しか知りませんが、人間が編集するときに欲しいのは「<strong>行</strong>」と「<strong>カーソル</strong>」です。オフセットと <code>{line, column}</code> の相互変換、改行位置の管理、<code>Edit</code> の適用と選択範囲の追従 —— 第00章で定義した <code>Position</code> と <code>SelRange</code> が、いよいよ主役になります。エディタが「行を数え、カーソルが動く」最初の一歩です。</p>
+
+    <div class="chap-foot">
+      <a class="pager" href="00-overview.html"><span class="dir">← 前へ</span>第00章 · 文字を打てる箱の正体</a>
+      <a class="pager next" href="02-document.html"><span class="dir">次へ →</span>第02章 · 行とカーソル</a>
+    </div>
+  </main>
+</div>
+</body>
+</html>

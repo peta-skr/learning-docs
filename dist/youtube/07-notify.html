@@ -1,0 +1,618 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>第07章 つながりを届ける — 動画サービスをつくる</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500;600&family=Source+Serif+4:opsz,wght@8..60,400;8..60,600;8..60,700&family=Noto+Serif+JP:wght@400;600;700&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<div class="shell">
+
+  <aside class="spine">
+    <a class="wordmark" href="index.html">VIDEO-STREAM · from scratch</a>
+    <div class="book-title">動画サービスを<br>つくる</div>
+    <div class="book-sub">Go と ffmpeg で presigned から HLS 配信まで</div>
+
+    <div class="legend"><span>受け取る <b>↓</b></span><span>届ける <b>↑</b></span></div>
+
+    <nav aria-label="目次">
+      <ul class="toc">
+        <li><a class="nav-item" href="index.html"><span class="nav-num">序</span><span class="nav-label">はじめに・準備<span class="nav-tag">Setup</span></span></a></li>
+        <li><a class="nav-item" href="00-setup.html"><span class="nav-num">00</span><span class="nav-label">土台をつくる<span class="nav-tag">Setup</span></span></a></li>
+        <li><a class="nav-item" href="01-auth.html"><span class="nav-num">01</span><span class="nav-label">人を扱う<span class="nav-tag">Auth</span></span></a></li>
+        <li><a class="nav-item" href="02-upload.html"><span class="nav-num">02</span><span class="nav-label">動画を受け取る<span class="nav-tag">Upload</span></span></a></li>
+        <li><a class="nav-item" href="03-transcode.html"><span class="nav-num">03</span><span class="nav-label">動画を変換する<span class="nav-tag">Transcode</span></span></a></li>
+        <li><a class="nav-item" href="04-deliver.html"><span class="nav-num">04</span><span class="nav-label">動画を届ける<span class="nav-tag">Deliver</span></span></a></li>
+        <li><a class="nav-item" href="05-social.html"><span class="nav-num">05</span><span class="nav-label">反応をつくる<span class="nav-tag">Social</span></span></a></li>
+        <li><a class="nav-item" href="06-discover.html"><span class="nav-num">06</span><span class="nav-label">見つけてもらう<span class="nav-tag">Discover</span></span></a></li>
+        <li><a class="nav-item current" aria-current="page" href="07-notify.html"><span class="nav-num">07</span><span class="nav-label">つながりを届ける<span class="nav-tag">Notify</span></span></a></li>
+        <li><a class="nav-item" href="08-web.html"><span class="nav-num">08</span><span class="nav-label">画面をつける<span class="nav-tag">Web</span></span></a></li>
+        <li><a class="nav-item" href="09-beyond.html"><span class="nav-num">09</span><span class="nav-label">仕上げと次の一歩<span class="nav-tag">Beyond</span></span></a></li>
+      </ul>
+    </nav>
+
+    <div class="spine-foot">
+      各章は動画が通る道の一区間。<br>受け取る（下）から届ける（上）へ、<br>1本の動画を最後まで運びきる。
+    </div>
+  </aside>
+
+  <main class="reading">
+    <div class="progress-tag">第07章 / 全10章 · 層: Notify · 読了目安 2〜3時間</div>
+    <div class="eyebrow"><span>Notify</span><span class="depth">— つながりの層 · 押し出す</span></div>
+    <h1>つながりを届ける</h1>
+    <p class="lede">ここまでの章で、動画は受け取られ、変換され、配信され、コメントや登録という反応を集められるようになりました。しかし、まだ<strong>「受け身」</strong>です。ユーザーが自分から画面を開き、更新ボタンを押さないと、登録したチャンネルに新しい動画が来たことを知れない。この章では、その関係を反転させます。動画が公開された<strong>瞬間</strong>に、サーバーの側から登録者の画面へ「新着が来たよ」と押し出す —— <code>SSE（Server-Sent Events）</code> によるリアルタイム通知です。そして、この「一度だけ・確実に配る」を支える設計の核 —— <code>notify.MaybeFanoutNewVideo</code> による <strong>fanout の一本化</strong>を読み解きます。読み終えたとき、あなたは「別のブラウザで動画を公開したら、こちらのブラウザの通知ベルに <code>1</code> が即座に灯る」を、更新ボタンを一度も押さずに目にします。</p>
+
+    <div class="box goal"><div class="box-k">◈ この章のゴール</div>
+      <p>次の3つを、自分の目と手で確認できたら達成です。</p>
+      <ol>
+        <li><code>GET /api/notifications/stream</code> に <code>curl</code> で接続し、接続が切れずに <code>: ping</code> の鼓動が届き続けることを確認する（SSE の常時接続）。</li>
+        <li>ブラウザAでチャンネルを登録し、ブラウザBでそのチャンネルの動画を公開すると、ブラウザAの通知ベルに<strong>更新なしで</strong>バッジが灯る。</li>
+        <li>同じ動画を「非公開→公開→非公開→公開」と何度切り替えても、新着通知は<strong>最初の一度だけ</strong>しか配られないことを確認する（<code>notified_at</code> による二重配布防止）。</li>
+      </ol>
+    </div>
+
+    <div class="box map"><div class="box-k">☰ この章のステップ</div>
+      <ol>
+        <li><a href="#step-1">なぜ SSE なのか — WebSocket との分かれ道</a></li>
+        <li><a href="#step-2">登録チャンネルの新着を集める — <code>handleFeed</code></a></li>
+        <li><a href="#step-3">通知を1件記録し、押し出す — <code>notify.Send</code></a></li>
+        <li><a href="#step-4">プロセスを跨ぐ橋 — Redis Pub/Sub</a></li>
+        <li><a href="#step-5">サーバーから画面への一方通行 — <code>handleNotificationStream</code></a></li>
+        <li><a href="#step-6">ヘッダを付けられない相手のために — <code>?token=</code> 認証</a></li>
+        <li><a href="#step-7">fanout の一本化 — <code>MaybeFanoutNewVideo</code></a></li>
+        <li><a href="#step-8">2つの入口から同じ関数を呼ぶ — worker と PATCH</a></li>
+        <li><a href="#step-9">通知ベルをつなぐ — <code>Header.tsx</code> の EventSource</a></li>
+        <li><a href="#step-10">立ち上げて確認する</a></li>
+      </ol>
+    </div>
+
+    <h2>なぜ「つながり」の層が必要なのか</h2>
+    <p>これまでの章のすべての機能は、<strong>ユーザーがサーバーに「聞きに来る」</strong>形でした。動画一覧を見たいなら <code>GET /api/trending</code> を叩き、コメントを読みたいなら <code>GET .../comments</code> を叩く。サーバーは聞かれたことに答えるだけ。この <strong>リクエスト・レスポンス</strong>の関係は Web の基本であり、堅牢で単純です。</p>
+    <p>ところが「通知」だけは、この関係がうまく噛み合いません。<strong>いつ新着が来るかは、ユーザーには分からない</strong>からです。登録チャンネルが動画を公開する瞬間を、ユーザーが予知して <code>GET</code> を叩くことはできません。素朴な解決策は「画面が数秒ごとにサーバーへ<strong>ポーリング</strong>（<code>新着ある?</code> と聞き続ける）」ですが、これは無駄が多い —— 99% は「まだ無いよ」の空振りで、その分だけサーバーへのリクエストが積み上がります。</p>
+    <p>本当に欲しいのは、<strong>関係の反転</strong>です。動画が公開された瞬間に、<strong>サーバーの側から</strong>登録者の画面へ「来たよ」と声をかける。ユーザーは聞きに行かず、ただ耳を澄ませて待つだけ。この「サーバー起点の押し出し（server push）」を、いちばん軽く実現する道具が <strong>SSE（Server-Sent Events）</strong>です。この章は、その仕組みと、押し出す中身（誰に・何を・一度だけ配るか）の設計を、両輪で読み解きます。</p>
+
+    <h2>この層が上の層に約束すること</h2>
+    <p>この章で作る「つながり」の層が、画面（第08章）に約束するのは次の3つです。</p>
+    <ul>
+      <li><strong>登録チャンネルの新着を、いつでも集めて渡せる</strong> —— <code>GET /api/feed</code> を叩けば、登録した全チャンネルの公開済み動画が新しい順に返る。</li>
+      <li><strong>出来事が起きた瞬間に、当人の画面へ押し出せる</strong> —— コメントが付いた・新着が公開された、を SSE でリアルタイムに届ける。画面は更新ボタンを押す必要がない。</li>
+      <li><strong>新着通知は、必ず一度だけ配られる</strong> —— 変換の完了と公開設定の変更、どちらが先でも、どちらから呼ばれても、登録者への新着通知は重複しない。</li>
+    </ul>
+    <p>逆に、この層が<strong>やらない</strong>ことも明確です。通知を「確実に届いたか（既読か）」の追跡はしますが、SSE が届かなかった分を後から再送する仕組み（メッセージキューの永続化）は持ちません。押し出しはあくまで <strong>best-effort（届けば嬉しい）</strong>で、真実は常に DB の <code>notifications</code> テーブルに残っている —— この割り切りが、この章の設計を単純に保つ鍵になります。</p>
+
+    <h2 class="step" id="step-1"><span class="step-no">Step 1</span>なぜ SSE なのか — WebSocket との分かれ道</h2>
+    <p>コードに入る前に、道具選びの理由を固めます。「サーバーから画面へ押し出す」を実現する技術は主に3つ —— <strong>ポーリング</strong>、<strong>WebSocket</strong>、<strong>SSE</strong>。本書は SSE を選びました。なぜかを、比較して腑に落とします。</p>
+
+    <div class="ascii">3つの押し出し方式 — どの向きの通信が要るか
+
+  ポーリング（聞き続ける）
+    画面 ──「新着ある?」──▶ サーバー   ／ 99%は「まだ無い」の空振り
+    画面 ◀──「まだ無い」─── サーバー   ／ 数秒ごとに繰り返す = 無駄が多い
+
+  WebSocket（双方向の常時接続）
+    画面 ◀════════════════▶ サーバー   ／ 双方向。チャット・ゲーム向き
+    ↑ 独自プロトコル(ws://)・接続の張り直しも自前・HTTPの恩恵が薄れる
+
+  SSE（サーバー→画面の一方通行）
+    画面 ◀──────────────── サーバー   ／ 一方向。通知・進捗表示に最適
+    ↑ ただのHTTP。自動再接続はブラウザ任せ。実装が軽い</div>
+
+    <p>通知の要件を思い出してください。必要なのは<strong>「サーバー → 画面」の一方向</strong>だけです。画面からサーバーへリアルタイムに送り返すもの（チャットの発言、ゲームの操作）はありません。既読にする・登録する、といった画面からの操作は、これまで通り普通の <code>POST</code> で足ります。</p>
+    <p>ここで <strong>WebSocket</strong>を選ぶと、双方向の常時接続を張れますが、その双方向性は<strong>オーバースペック</strong>です。WebSocket は <code>ws://</code> という HTTP とは別のプロトコルにアップグレードするため、(1) 接続が切れたときの張り直しを自前で書く必要があり、(2) 途中の HTTP プロキシやロードバランサが素直に通してくれないことがあり、(3) HTTP の認証・圧縮・キャッシュといった既存の仕組みの恩恵が薄れます。双方向が要らないのに、これらのコストを払うのは割に合いません。</p>
+    <p>対して <strong>SSE</strong>は、<strong>ただの HTTP レスポンスを、閉じずに少しずつ書き足し続ける</strong>だけの技術です。サーバーは <code>Content-Type: text/event-stream</code> を宣言し、<code>data: ...\n\n</code> という形式のテキストを書いては流す。接続はそのまま開きっぱなし。ブラウザ側は <code>EventSource</code> という組み込みオブジェクトで受け取り、<strong>接続が切れたら自動で張り直してくれる</strong>（この自動再接続は SSE の大きな利点で、WebSocket なら自前で書く部分です）。HTTP そのものなので、認証もプロキシも既存の Web の仕組みがそのまま使えます。</p>
+
+    <div class="gonote"><div class="box-k">実装メモ · SSE の「ただのテキスト」フォーマット</div>
+      <p>SSE のペイロードは、驚くほど単純なテキスト規約です。1つのイベントは <code>data: 本文</code> の行を、<strong>空行（<code>\n\n</code>）で締める</strong>だけ。<code>data: {"id":"..."}\n\n</code> と書けば、ブラウザの <code>EventSource</code> の <code>onmessage</code> に <code>{"id":"..."}</code> という文字列が届きます。行が <code>:</code> で始まるものは<strong>コメント</strong>で、ブラウザは無視します —— これを「接続がまだ生きているか」を確かめる<strong>ハートビート（鼓動）</strong>に使います（Step 5）。バイナリは扱えず、常に UTF-8 テキスト。この単純さこそが「HTTP のまま押し出せる」SSE の正体で、特別なライブラリもプロトコルも要りません。</p>
+    </div>
+
+    <div class="box hazard"><div class="box-k">⚠ 落とし穴 — SSE の弱点も知っておく</div>
+      <p>SSE は万能ではありません。2つの弱点があります。1つ目は<strong>ブラウザごとの同時接続数の制限</strong>で、HTTP/1.1 では同一ドメインへの接続が6本程度に制限されるため、多くのタブを開くと SSE 接続が枯渇することがあります（HTTP/2 なら大幅に緩和されるので、本番では HTTP/2 配信が推奨）。2つ目は<strong>サーバー側で1接続=1つの居座る処理を抱える</strong>こと —— 本書では1つの SSE 接続ごとに Go の goroutine が1つ、Redis の購読1つを保持し続けます（Step 5）。同時接続ユーザーが数万人規模になると、この保持コストが効いてきます。学習用の規模では問題になりませんが、「常時接続はタダではない」ことは頭の隅に。第09章で、この接続を専用の中継サーバーに逃がす発想に触れます。</p>
+    </div>
+
+    <h2 class="step" id="step-2"><span class="step-no">Step 2</span>登録チャンネルの新着を集める — handleFeed</h2>
+    <p>「つながり」の層は2つの機能でできています。<strong>フィード</strong>（登録チャンネルの新着一覧を、聞かれたときに集めて返す）と、<strong>通知</strong>（出来事が起きた瞬間に押し出す）。まず単純な方のフィードから読みます。<code>internal/httpapi/discover.go</code> の <code>handleFeed</code> です。</p>
+
+    <div class="file-tag">internal/httpapi/discover.go（handleFeed）</div>
+    <pre><code><span class="cm">// handleFeed: 登録チャンネルの新着一覧（FR-F1）。「読むときに集める」素朴な方式。</span>
+<span class="kw">func</span> (s *<span class="ty">Server</span>) handleFeed(w http.<span class="ty">ResponseWriter</span>, r *http.<span class="ty">Request</span>) {
+	uid, ok := s.requireUser(w, r)
+	<span class="kw">if</span> !ok {
+		<span class="kw">return</span>
+	}
+	videos, err := s.listVideos(r.Context(),
+		videoSelect+<span class="st">`
+		 JOIN subscriptions s ON s.channel_id = v.channel_id AND s.user_id = $1
+		 WHERE v.status = 'ready' AND v.visibility = 'public'
+		 ORDER BY v.published_at DESC
+		 LIMIT 50`</span>, uid)
+	<span class="kw">if</span> err != <span class="kw">nil</span> {
+		httpError(w, http.StatusInternalServerError, <span class="st">"取得に失敗しました"</span>)
+		<span class="kw">return</span>
+	}
+	writeJSON(w, http.StatusOK, map[<span class="ty">string</span>]<span class="ty">any</span>{<span class="st">"videos"</span>: videos})
+}</code></pre>
+
+    <p>フィードは「<strong>読むときに集める（read-time fan-in）</strong>」という、いちばん素朴な方式です。ユーザーがフィードを開いた瞬間に、その人の登録テーブル（<code>subscriptions</code>）と動画テーブル（<code>videos</code>）を <code>JOIN</code> して、公開済み・視聴可能な新着を新しい順に50件返す。事前に「この人のフィード」を作り置きしておく（write-time fan-out）ような複雑なことは、していません。</p>
+    <p>SQL の勘所を1つずつ見ます。<code>videoSelect</code> は第05章・第06章でも使った動画の共通 SELECT（<code>videos</code> と <code>channels</code> を <code>JOIN</code> して動画1件の全情報を引く定型句）で、そこに<strong>この人の登録チャンネルだけに絞る</strong> <code>JOIN subscriptions s ON s.channel_id = v.channel_id AND s.user_id = $1</code> を足しています。<code>s.user_id = $1</code>（<code>$1</code> はログインユーザーのID）を <code>JOIN</code> の条件に含めることで、「その人が登録しているチャンネルの動画」だけが残ります。</p>
+    <p><code>WHERE v.status = 'ready' AND v.visibility = 'public'</code> は、この本の背骨（第00章）そのものです。<strong><code>ready</code> でない動画・公開でない動画はフィードに出さない</strong>。まだ変換中の動画や、非公開の下書きが登録者のフィードに漏れることは、この条件で物理的に防がれています。</p>
+
+    <div class="gonote"><div class="box-k">実装メモ · なぜ「読むときに集める」で十分なのか</div>
+      <p>大規模な SNS では、フィードを「投稿されたときに、フォロワー全員の受信箱へ書き込んでおく（fan-out on write）」方式が使われます。読むときの計算を減らすためです。しかし本書は逆に「読むときに集める（fan-out on read）」を選びました。理由は単純さと規模です。読むときに集める方式は、<strong>動画が公開されるたびに何もしなくていい</strong>（受信箱への書き込みが不要）ので、実装も運用もずっと軽い。欠点は「登録数が膨大なユーザーのフィードを引くと <code>JOIN</code> が重くなる」ことですが、<code>subscriptions (channel_id)</code> の索引（第00章の <code>idx_subs_channel</code>）と <code>LIMIT 50</code> があれば、個人開発の規模では十分速い。「まず単純な方式で作り、詰まってから作り置きに移す」——これがフィード設計の定石です。なお、この <code>WHERE status = 'ready' AND visibility = 'public'</code> 付きの新着引きは、第00章で作った部分索引 <code>idx_videos_public</code> が効く形になっています。</p>
+    </div>
+
+    <h2 class="step" id="step-3"><span class="step-no">Step 3</span>通知を1件記録し、押し出す — notify.Send</h2>
+    <p>ここから「押し出す」側 —— 本章の主役に入ります。通知まわりのロジックは <code>internal/notify/notify.go</code> という独立したパッケージにまとまっています。<strong>API と Worker の両方から使う</strong>ので、どちらにも属さない共通の場所に置いてあります。まずパッケージの入口と、通知の1件を表す型から。</p>
+
+    <div class="file-tag">internal/notify/notify.go（宣言と型）</div>
+    <pre><code><span class="cm">// Package notify は通知の作成と押し出しを担う。API と Worker の両方から使う。</span>
+<span class="kw">package</span> notify
+
+<span class="kw">import</span> (
+	<span class="st">"context"</span>
+	<span class="st">"log"</span>
+	<span class="st">"time"</span>
+
+	<span class="st">"github.com/jackc/pgx/v5/pgxpool"</span>
+
+	<span class="st">"video-service/internal/queue"</span>
+)
+
+<span class="kw">type</span> <span class="ty">Notification</span> <span class="kw">struct</span> {
+	ID        <span class="ty">string</span>    <span class="st">`json:"id"`</span>
+	Type      <span class="ty">string</span>    <span class="st">`json:"type"`</span>
+	Title     <span class="ty">string</span>    <span class="st">`json:"title"`</span>
+	Body      <span class="ty">string</span>    <span class="st">`json:"body"`</span>
+	VideoID   *<span class="ty">string</span>   <span class="st">`json:"videoId"`</span>
+	Read      <span class="ty">bool</span>      <span class="st">`json:"read"`</span>
+	CreatedAt time.<span class="ty">Time</span> <span class="st">`json:"createdAt"`</span>
+}</code></pre>
+
+    <p><code>Notification</code> 構造体は、通知1件の姿です。<code>Type</code> は種別（<code>new_video</code> / <code>comment</code> / <code>reply</code> のいずれか。第00章の <code>notifications</code> テーブルのコメント参照）、<code>Title</code> と <code>Body</code> は表示文言、<code>VideoID</code> は「タップしたらどの動画へ飛ぶか」。<code>VideoID</code> だけが <code>*string</code>（ポインタ）なのは、動画に紐づかない通知もあり得るので <code>null</code> を表現できるようにするためです。各フィールドの <code>`json:"..."`</code> タグは、この構造体を JSON に変換するときのキー名を指定していて、SSE で流すときも通知一覧を返すときも、この形でブラウザに届きます。</p>
+    <p>次が、通知を1件作る中心関数 <code>Send</code> です。</p>
+
+    <div class="file-tag">internal/notify/notify.go（Send）</div>
+    <pre><code><span class="cm">// Send は通知をDBへ記録し、つながっている画面へ即時に押し出す。</span>
+<span class="kw">func</span> Send(ctx context.<span class="ty">Context</span>, pool *pgxpool.<span class="ty">Pool</span>, q *queue.<span class="ty">Queue</span>, userID, ntype, title, body <span class="ty">string</span>, videoID *<span class="ty">string</span>) <span class="ty">error</span> {
+	<span class="kw">var</span> n <span class="ty">Notification</span>
+	n.Type, n.Title, n.Body, n.VideoID = ntype, title, body, videoID
+	err := pool.QueryRow(ctx,
+		<span class="st">`INSERT INTO notifications (user_id, type, title, body, video_id)
+		 VALUES ($1, $2, $3, $4, $5) RETURNING id, created_at`</span>,
+		userID, ntype, title, body, videoID).Scan(&amp;n.ID, &amp;n.CreatedAt)
+	<span class="kw">if</span> err != <span class="kw">nil</span> {
+		<span class="kw">return</span> err
+	}
+	<span class="cm">// 押し出しは best-effort。失敗しても通知自体はDBに残っている。</span>
+	<span class="kw">if</span> err := q.PublishNotify(ctx, userID, n); err != <span class="kw">nil</span> {
+		log.Printf(<span class="st">"notify publish: %v"</span>, err)
+	}
+	<span class="kw">return</span> <span class="kw">nil</span>
+}</code></pre>
+
+    <p><code>Send</code> は2つの動作を、この順でこなします。この順序に、本章の設計思想が凝縮されています。</p>
+    <ol>
+      <li><strong>まず DB に記録する</strong>。<code>INSERT INTO notifications ... RETURNING id, created_at</code> で通知を1行書き込み、DB が採番した <code>id</code> と <code>created_at</code> を <code>Scan</code> で受け取って構造体に埋め戻します。この時点で、通知は<strong>永続的な真実</strong>になりました。ユーザーが今オンラインでも、寝ていても、この通知は <code>notifications</code> テーブルに残り、次にログインしたときに一覧（Step 前半の <code>handleListNotifications</code>）で必ず見えます。</li>
+      <li><strong>次に押し出す（<code>PublishNotify</code>）</strong>。今まさに SSE で繋がっている画面があれば、リアルタイムに届けます。ここが Step 4 で見る Redis Pub/Sub の入口です。</li>
+    </ol>
+    <p>いちばん大事なのは、<code>PublishNotify</code> のエラーを <code>return</code> していないことです。<code>log.Printf</code> でログに残すだけで、<code>Send</code> 自体は成功（<code>return nil</code>）として扱います。コメントが明言しています —— <strong>「押し出しは best-effort。失敗しても通知自体はDBに残っている」</strong>。もしユーザーが今オフラインで SSE 接続が1本も無ければ、押し出しは誰にも届きませんが、それで構わない。真実は DB にあり、次にログインすれば一覧で見えるからです。<strong>「確実な記録（DB）」と「届けば嬉しいリアルタイム押し出し（Pub/Sub）」を分け、後者の失敗を前者に波及させない</strong>——この二層構造が、通知を単純かつ堅牢にしています。</p>
+
+    <div class="box hazard"><div class="box-k">⚠ 落とし穴 — なぜ「DB が先、押し出しが後」でなければならないか</div>
+      <p>この順序は入れ替えてはいけません。もし「先に押し出して、後で DB に記録」にすると、押し出しには成功したのに DB 記録が失敗した瞬間、<strong>画面には出たのに一覧には残らない幽霊通知</strong>が生まれます。ユーザーがベルで見た通知が、画面を更新したら消えている —— 最悪の体験です。逆に「DB が先」なら、たとえ押し出しが失敗しても「一覧には出るが、その瞬間はベルが光らなかった」だけで済み、次のログインで必ず見えます。<strong>失敗したときに「多く残る」方向へ倒す</strong>のが、通知のような best-effort な仕組みの鉄則です。</p>
+    </div>
+
+    <h2 class="step" id="step-4"><span class="step-no">Step 4</span>プロセスを跨ぐ橋 — Redis Pub/Sub</h2>
+    <p><code>Send</code> が呼んだ <code>q.PublishNotify</code> の中身を見ます。<code>internal/queue/queue.go</code> の Pub/Sub 部分です。ここに、本章のインフラ上の核心 —— <strong>別プロセス（worker）で起きた出来事を、別プロセス（api）が抱えている SSE 接続へ橋渡しする</strong>仕組みがあります。</p>
+
+    <div class="file-tag">internal/queue/queue.go（通知の Pub/Sub）</div>
+    <pre><code><span class="cm">// ---- 通知の押し出し（SSEへ流すための Pub/Sub） ----</span>
+
+<span class="kw">func</span> notifyChannel(userID <span class="ty">string</span>) <span class="ty">string</span> { <span class="kw">return</span> <span class="st">"notify:"</span> + userID }
+
+<span class="kw">func</span> (q *<span class="ty">Queue</span>) PublishNotify(ctx context.<span class="ty">Context</span>, userID <span class="ty">string</span>, payload <span class="ty">any</span>) <span class="ty">error</span> {
+	b, err := json.Marshal(payload)
+	<span class="kw">if</span> err != <span class="kw">nil</span> {
+		<span class="kw">return</span> err
+	}
+	<span class="kw">return</span> q.R.Publish(ctx, notifyChannel(userID), b).Err()
+}
+
+<span class="kw">func</span> (q *<span class="ty">Queue</span>) SubscribeNotify(ctx context.<span class="ty">Context</span>, userID <span class="ty">string</span>) *redis.<span class="ty">PubSub</span> {
+	<span class="kw">return</span> q.R.Subscribe(ctx, notifyChannel(userID))
+}</code></pre>
+
+    <p>ここで<strong>「なぜ Redis を挟むのか」</strong>という、この章で最も重要なインフラの問いに答えます。答えは第00章の2プロセス構成に遡ります。</p>
+
+    <div class="ascii">なぜ Pub/Sub が要るか — 出来事と接続が別プロセスにいる
+
+  [worker プロセス]                    [api プロセス]
+  変換完了で新着通知を配りたい          ユーザーAのSSE接続を抱えている
+        │                                    ▲
+        │ Send → PublishNotify                │ SubscribeNotify
+        ▼                                    │
+   ┌──────────────────────────────────────────────┐
+   │  Redis   channel = "notify:<ユーザーAのID>"    │
+   │  Publish ───────────────────────────▶ Subscribe │
+   └──────────────────────────────────────────────┘
+        ↑ 発行者と購読者は互いを知らなくていい（疎結合）</div>
+
+    <p>通知を<strong>作る</strong>のは、変換を終えた <strong>worker プロセス</strong>かもしれないし、コメントを受けた <strong>api プロセス</strong>かもしれません（第05章）。一方、通知を<strong>届ける先</strong>である SSE 接続は、必ず <strong>api プロセス</strong>が抱えています（ブラウザは api に繋いでいるから）。つまり<strong>「通知が生まれる場所」と「通知を待っている接続」は、別のプロセスにいる</strong>。worker のメモリから、api が抱える接続へ、直接手を伸ばすことはできません。プロセスの壁があります。</p>
+    <p>この壁を越える橋が <strong>Redis の Pub/Sub</strong>です。仕組みは放送局とラジオに似ています。<code>PublishNotify</code> は「<code>notify:&lt;ユーザーAのID&gt;</code> というチャンネルに向けて、この通知を放送しろ」と Redis に頼むだけ。誰が聞いているかは気にしません。一方 <code>SubscribeNotify</code> は「<code>notify:&lt;ユーザーAのID&gt;</code> チャンネルを購読する」—— そのチャンネルに放送が来たら受け取ります。<strong>発行者（worker）と購読者（api）は互いの存在すら知りません</strong>。両者を仲介するのは Redis のチャンネル名という「待ち合わせ場所」だけ。この疎結合のおかげで、通知を作る側と届ける側を、別プロセスに自由に分けられます。</p>
+    <p>チャンネル名が <code>notify:&lt;userID&gt;</code> と<strong>ユーザーごと</strong>になっているのが勘所です。全員に同じチャンネルで放送してしまうと、api は自分が抱える全ユーザー分の通知を受け取り、宛先を選り分けねばなりません。ユーザーごとにチャンネルを分けておけば、「ユーザーAの SSE 接続は <code>notify:A</code> だけを購読する」——余計な通知は最初から届かず、選り分けが不要になります。</p>
+
+    <div class="gonote"><div class="box-k">実装メモ · Pub/Sub とキュー（List）の違い</div>
+      <p>同じ Redis でも、第03章の変換ジョブは <strong>List（キュー）</strong>、この章の通知は <strong>Pub/Sub</strong>と、使い分けています。違いは「消えても困るか」。変換ジョブは<strong>誰か1人が必ず処理しなければならない</strong>ので、取り出されるまで List に残り続けます（一度取り出したら消える）。対して Pub/Sub は<strong>放送</strong>で、放送した瞬間に聞いていた購読者にだけ届き、<strong>聞いていなければ消える</strong>（残らない）。通知にはこれで十分です —— なぜなら真実は DB にあり、リアルタイム押し出しは「今聞いている人にだけ届けば嬉しい」best-effort だから（Step 3）。もし「オフラインだった人にも後で確実に届けたい」なら Pub/Sub では足りず、ユーザーごとの永続キューが要りますが、本書はその複雑さを DB の一覧で肩代わりしています。第00章で Redis を永続化しなかった（<code>volumes</code> を付けなかった）のは、まさにこの「消えても困らないデータしか置かない」割り切りの表れです。</p>
+    </div>
+
+    <h2 class="step" id="step-5"><span class="step-no">Step 5</span>サーバーから画面への一方通行 — handleNotificationStream</h2>
+    <p>いよいよ SSE の本体です。<code>internal/httpapi/notifications.go</code> の <code>handleNotificationStream</code>。ここが「HTTP レスポンスを閉じずに、Redis の放送を画面へ流し続ける」中継地点です。長いので、前半（接続の確立）と後半（流し続けるループ）に分けて読みます。</p>
+
+    <div class="file-tag">internal/httpapi/notifications.go（handleNotificationStream・前半）</div>
+    <pre><code><span class="cm">// handleNotificationStream: サーバーから画面への一方通行の中継（SSE、FR-N3）。</span>
+<span class="cm">// 出来事が起きた瞬間に押し出す。EventSource はヘッダを付けられないので ?token= を使う。</span>
+<span class="kw">func</span> (s *<span class="ty">Server</span>) handleNotificationStream(w http.<span class="ty">ResponseWriter</span>, r *http.<span class="ty">Request</span>) {
+	uid, ok := s.requireUser(w, r)
+	<span class="kw">if</span> !ok {
+		<span class="kw">return</span>
+	}
+	flusher, canFlush := w.(http.<span class="ty">Flusher</span>)
+	<span class="kw">if</span> !canFlush {
+		httpError(w, http.StatusInternalServerError, <span class="st">"streaming unsupported"</span>)
+		<span class="kw">return</span>
+	}
+	w.Header().Set(<span class="st">"Content-Type"</span>, <span class="st">"text/event-stream"</span>)
+	w.Header().Set(<span class="st">"Cache-Control"</span>, <span class="st">"no-cache"</span>)
+	w.Header().Set(<span class="st">"X-Accel-Buffering"</span>, <span class="st">"no"</span>)
+	w.WriteHeader(http.StatusOK)
+	fmt.Fprint(w, <span class="st">": connected\n\n"</span>)
+	flusher.Flush()</code></pre>
+
+    <p>前半は「SSE の常時接続を成立させる」準備です。1行ずつ意味があります。</p>
+    <ul>
+      <li><code>uid, ok := s.requireUser(w, r)</code> —— まず認証。ただしこの認証は普通のハンドラと少し違い、<code>?token=</code> クエリでのトークンも受け付けます（その理由と仕組みは Step 6 で掘り下げます）。</li>
+      <li><code>flusher, canFlush := w.(http.Flusher)</code> —— これが SSE の要です。通常の HTTP レスポンスは「全部書いてから一気に送る」ものですが、SSE は「少しずつ書いては、<strong>その都度すぐ送り出す</strong>」必要があります。この「今書いた分を今すぐ押し出す」能力を持つのが <code>http.Flusher</code> インターフェイスで、<code>w.(http.Flusher)</code> という<strong>型アサーション</strong>で「この <code>w</code> は Flush できるやつか?」と問い合わせています。できなければ SSE は成立しないので 500 を返して撤退。</li>
+      <li>3つの <code>Header().Set</code> —— <code>Content-Type: text/event-stream</code> が「これは SSE だ」の宣言（ブラウザの <code>EventSource</code> はこれを見て受け取り方を決める）。<code>Cache-Control: no-cache</code> は「この流れをキャッシュするな」（通知はナマモノ）。<code>X-Accel-Buffering: no</code> は、前段に nginx のようなリバースプロキシがいる場合に<strong>「バッファに溜めずにそのまま流せ」</strong>と指示するヘッダ —— これが無いと、プロキシが SSE を溜め込んでしまい、リアルタイム性が失われることがあります（第00章で <code>web</code> が nginx 配信だったことを思い出してください）。</li>
+      <li><code>fmt.Fprint(w, ": connected\n\n")</code> と <code>flusher.Flush()</code> —— <code>:</code> で始まる<strong>コメント行</strong>（Step 1 のメモ参照。ブラウザは無視する）を1つ送って、すぐ Flush します。これで「接続が確かに開いた」ことを最初に確定させます。</li>
+    </ul>
+    <p>続いて後半、実際に放送を待って流し続けるループです。</p>
+
+    <div class="file-tag">internal/httpapi/notifications.go（handleNotificationStream・後半）</div>
+    <pre><code>	sub := s.Q.SubscribeNotify(r.Context(), uid)
+	<span class="kw">defer</span> sub.Close()
+	ch := sub.Channel()
+	heartbeat := time.NewTicker(<span class="st">25</span> * time.Second)
+	<span class="kw">defer</span> heartbeat.Stop()
+
+	<span class="kw">for</span> {
+		<span class="kw">select</span> {
+		<span class="kw">case</span> &lt;-r.Context().Done():
+			<span class="kw">return</span>
+		<span class="kw">case</span> msg, open := &lt;-ch:
+			<span class="kw">if</span> !open {
+				<span class="kw">return</span>
+			}
+			fmt.Fprintf(w, <span class="st">"data: %s\n\n"</span>, msg.Payload)
+			flusher.Flush()
+		<span class="kw">case</span> &lt;-heartbeat.C:
+			<span class="cm">// 回線が生きていることを確かめる小さな鼓動</span>
+			fmt.Fprint(w, <span class="st">": ping\n\n"</span>)
+			flusher.Flush()
+		}
+	}
+}</code></pre>
+
+    <p>まず接続の準備。<code>s.Q.SubscribeNotify(r.Context(), uid)</code> で、このユーザー専用のチャンネル（<code>notify:&lt;uid&gt;</code>）を Redis で購読します（Step 4）。<code>defer sub.Close()</code> は「このハンドラを抜けるとき（=接続が切れたとき）必ず購読を解除する」予約 —— これを忘れると、切れた接続の購読が Redis に残り続けてリークします。<code>ch := sub.Channel()</code> で、放送が届くたびに値が流れてくる Go のチャネルを取り出します。</p>
+    <p>核心は <code>for { select { ... } }</code> の<strong>無限ループ＋<code>select</code></strong>です。<code>select</code> は「複数の待ち事象のうち、最初に起きたものを処理する」Go の構文で、ここでは<strong>3つの事象</strong>を同時に待っています。</p>
+    <ol>
+      <li><code>&lt;-r.Context().Done()</code> —— <strong>接続が切れた</strong>とき。ユーザーがタブを閉じたりネットワークが切れると、リクエストのコンテキストが「done」になります。そうしたら <code>return</code> でループを抜け、<code>defer</code> が購読を後始末します。<strong>これが無いと、切れた相手に永遠に書き続けようとして goroutine がリークします</strong>。</li>
+      <li><code>msg, open := &lt;-ch</code> —— <strong>Redis の放送が届いた</strong>とき。これが通知の本番です。<code>open</code> が <code>false</code>（チャンネルが閉じた）なら <code>return</code>。放送が届いたら <code>fmt.Fprintf(w, "data: %s\n\n", msg.Payload)</code> で、Step 1 の SSE フォーマット（<code>data:</code> + 空行）に包んで書き、<code>flusher.Flush()</code> で即座に画面へ押し出します。<code>msg.Payload</code> は <code>PublishNotify</code> が <code>json.Marshal</code> した通知の JSON 文字列そのもの —— それをそのまま流すだけで、ブラウザの <code>onmessage</code> に届きます。</li>
+      <li><code>&lt;-heartbeat.C</code> —— <strong>25秒ごとの鼓動</strong>。通知が何も来ない時間が長いと、途中のプロキシやブラウザが「もう死んだ接続だ」と勝手に切ってしまうことがあります。それを防ぐため、25秒ごとに <code>: ping</code> というコメント行（ブラウザは無視する無害な行）を送って、<strong>「この回線はまだ生きている」</strong>と示します。中身のない鼓動ですが、常時接続を維持するのに欠かせません。</li>
+    </ol>
+
+    <div class="gonote"><div class="box-k">実装メモ · goroutine と「1接続=1つの居座る処理」</div>
+      <p>Go の HTTP サーバーは、リクエストごとに1つの goroutine（軽量スレッド）を割り当てます。普通のハンドラは JSON を返してすぐ終わり、goroutine も解放されます。しかし <code>handleNotificationStream</code> は <code>for { select }</code> の無限ループなので、<strong>接続が切れるまで終わりません</strong> —— つまり、SSE で繋いでいるユーザー1人につき、api プロセスの中で1つの goroutine が居座り続けます。Go の goroutine は非常に軽い（数KB）ので、数千接続でも耐えますが、Step 1 の落とし穴で触れたとおり「常時接続はタダではない」。そして、この居座る goroutine を確実に解放する鍵が <code>&lt;-r.Context().Done()</code> と <code>defer sub.Close()</code> の組です。切断を検知して抜け、購読を後始末する —— この後始末を怠ると、切れた接続の分だけ goroutine と Redis 購読が積み上がる「接続リーク」になります。</p>
+    </div>
+
+    <h2 class="step" id="step-6"><span class="step-no">Step 6</span>ヘッダを付けられない相手のために — ?token= 認証</h2>
+    <p>Step 5 の <code>requireUser</code> が「<code>?token=</code> も受け付ける」と言いました。ここは本書で繰り返し現れる<strong>「ヘッダを付けられない相手」問題</strong>の一角なので、認証の中身 <code>currentUser</code> を読み解きます。<code>internal/httpapi/server.go</code> です。</p>
+
+    <div class="file-tag">internal/httpapi/server.go（currentUser）</div>
+    <pre><code><span class="cm">// currentUser は会員証（トークン）から利用者IDを取り出す。未ログインなら空文字。</span>
+<span class="cm">// SSE や &lt;img&gt;/&lt;video&gt; などヘッダを付けられない場所のために ?token= も受け付ける。</span>
+<span class="kw">func</span> (s *<span class="ty">Server</span>) currentUser(r *http.<span class="ty">Request</span>) <span class="ty">string</span> {
+	tok := <span class="st">""</span>
+	<span class="kw">if</span> h := r.Header.Get(<span class="st">"Authorization"</span>); strings.HasPrefix(h, <span class="st">"Bearer "</span>) {
+		tok = strings.TrimPrefix(h, <span class="st">"Bearer "</span>)
+	} <span class="kw">else if</span> t := r.URL.Query().Get(<span class="st">"token"</span>); t != <span class="st">""</span> {
+		tok = t
+	}
+	<span class="kw">if</span> tok == <span class="st">""</span> {
+		<span class="kw">return</span> <span class="st">""</span>
+	}
+	uid, err := auth.ParseToken(s.Cfg.JWTSecret, tok)
+	<span class="kw">if</span> err != <span class="kw">nil</span> {
+		<span class="kw">return</span> <span class="st">""</span>
+	}
+	<span class="kw">return</span> uid
+}</code></pre>
+
+    <p>普通の API 呼び出しでは、ブラウザは会員証（JWT）を <code>Authorization: Bearer &lt;token&gt;</code> という<strong>HTTP ヘッダ</strong>に載せて送ります（第01章）。<code>fetch</code> や <code>XMLHttpRequest</code> なら、ヘッダを自由に付けられるからです。<code>currentUser</code> はまず、このヘッダを見に行きます（<code>Authorization</code> が <code>Bearer </code> で始まっていれば、その後ろがトークン）。</p>
+    <p>問題は、<strong>ヘッダを付けられないブラウザの機能</strong>があることです。SSE の <code>EventSource</code> がまさにそれ —— <code>new EventSource(url)</code> には URL しか渡せず、カスタムヘッダを付ける API がありません。同じ問題は <code>&lt;img src="...">＝画像</code>・<code>&lt;video src="...">＝ネイティブ HLS 再生</code>（第04章）にもあります。これらはブラウザが URL を見て勝手に取りに行くので、<code>Authorization</code> ヘッダを差し込む隙がない。</p>
+    <p>そこで <code>else if</code> の分岐 —— <strong>ヘッダに無ければ、URL のクエリ <code>?token=&lt;token&gt;</code> を見る</strong>。<code>EventSource</code> はヘッダを付けられなくても URL は自由に組めるので、<code>Header.tsx</code>（Step 9）は <code>/api/notifications/stream?token=&lt;JWT&gt;</code> と、トークンをクエリに載せて接続します。ヘッダから取れても、クエリから取れても、その先は同じ —— <code>auth.ParseToken</code> で JWT を検証し、正しければユーザーIDを返し、不正なら空文字（＝未ログイン扱い）。<strong>「本命はヘッダ、ヘッダを付けられない相手にはクエリで妥協する」</strong>という二段構えが、この関数の設計です。</p>
+
+    <div class="box hazard"><div class="box-k">⚠ 落とし穴 — ?token= は「妥協」であってセキュリティ上の注意が要る</div>
+      <p>トークンを URL のクエリに載せるのは、<strong>本来は避けたい</strong>やり方です。URL は (1) サーバーのアクセスログに記録されやすく、(2) ブラウザの履歴に残り、(3) <code>Referer</code> ヘッダで外部サイトに漏れることがあるからです。ヘッダに載せたトークンはこれらに残りませんが、クエリのトークンは残る。だからこれは「<code>EventSource</code> や <code>&lt;img&gt;</code> がヘッダを付けられない」という制約への<strong>やむを得ない妥協</strong>であり、本番では (a) このトークンの有効期限を短くする、(b) SSE 専用の使い捨てトークンを別途発行する、(c) ログから <code>token</code> クエリをマスクする、といった緩和策を併せます。本書は学習用なのでログイン用の JWT をそのまま使っていますが、「なぜ普段はヘッダで、ここだけクエリなのか」を理解した上で使うことが大切です。第04章のメディア配信でも同じ <code>?token=</code> が登場したのは、同じ「ヘッダを付けられない相手」問題だったからです。</p>
+    </div>
+
+    <h2 class="step" id="step-7"><span class="step-no">Step 7</span>fanout の一本化 — MaybeFanoutNewVideo</h2>
+    <p>ここが本章の白眉です。「動画が公開されたら、登録者<strong>全員</strong>に新着通知を配る」——この <strong>fanout（一対多の配布）</strong>を、たった1つの関数 <code>MaybeFanoutNewVideo</code> に集約しています。なぜ一本化が必要なのか、その設計が何を防いでいるのかを、コードから読み解きます。まず前半、「配ってよいかの判定と、配った記録」を<strong>1文で</strong>行う部分です。</p>
+
+    <div class="file-tag">internal/notify/notify.go（MaybeFanoutNewVideo・前半）</div>
+    <pre><code><span class="cm">// MaybeFanoutNewVideo は、動画が「視聴可能かつ公開」になった最初の一度だけ、</span>
+<span class="cm">// 登録者全員へ新着通知を配る。変換完了時と公開範囲の変更時の両方から呼ばれても、</span>
+<span class="cm">// notified_at の原子的な更新により二重には配られない。</span>
+<span class="cm">// 登録者が多いほど時間がかかるため、呼び出し側は裏（Worker等）で実行すること。</span>
+<span class="kw">func</span> MaybeFanoutNewVideo(ctx context.<span class="ty">Context</span>, pool *pgxpool.<span class="ty">Pool</span>, q *queue.<span class="ty">Queue</span>, videoID <span class="ty">string</span>) <span class="ty">error</span> {
+	<span class="kw">var</span> channelName, title <span class="ty">string</span>
+	<span class="kw">var</span> subscriberIDs []<span class="ty">string</span>
+	<span class="cm">// 「配ってよい状態」の確認と「配った」の記録を1文で行う（勝ったほうだけが配る）</span>
+	err := pool.QueryRow(ctx,
+		<span class="st">`UPDATE videos v SET notified_at = now()
+		 FROM channels c
+		 WHERE v.id = $1 AND c.id = v.channel_id
+		   AND v.notified_at IS NULL AND v.status = 'ready' AND v.visibility = 'public'
+		 RETURNING c.name, v.title`</span>,
+		videoID).Scan(&amp;channelName, &amp;title)
+	<span class="kw">if</span> err != <span class="kw">nil</span> {
+		<span class="kw">return</span> <span class="kw">nil</span> <span class="cm">// 対象外（未完了・非公開・配布済み）は静かに何もしない</span>
+	}</code></pre>
+
+    <p>この <code>UPDATE ... RETURNING</code> の1文に、本章の設計思想が凝縮されています。第00章の <code>notified_at</code> 列（「登録者への新着通知を配った時刻」）と、第03章で学んだ<strong>「読んでから判定して更新」ではなく「条件を WHERE に含めた1文の条件つき UPDATE」</strong>のパターンが、ここでも決め手になっています。</p>
+    <p><code>WHERE</code> 節に4つの条件が並んでいます。この <strong>AND で束ねた4条件が同時に真</strong>のときだけ、この UPDATE は1行を更新します。</p>
+    <ul>
+      <li><code>v.id = $1</code> —— 対象の動画。</li>
+      <li><code>v.notified_at IS NULL</code> —— <strong>まだ一度も通知を配っていない</strong>。ここが二重配布防止の心臓です。</li>
+      <li><code>v.status = 'ready'</code> —— 変換が完了して視聴可能。</li>
+      <li><code>v.visibility = 'public'</code> —— 公開されている。</li>
+    </ul>
+    <p>そして <code>SET notified_at = now()</code> で「配った時刻」を刻みます。<strong>判定（配ってよい状態か）と記録（配ったことにする）が、分けられない1つの原子的な操作</strong>になっているのが肝心です。もし2つの呼び出しがほぼ同時にこの関数に入っても、DB がこの UPDATE を<strong>順番に</strong>処理するので、<strong>先に UPDATE した方だけが1行を更新でき</strong>、<code>notified_at</code> が <code>now()</code> に変わります。後から来た方は、もう <code>notified_at IS NULL</code> が偽になっているので、<strong>0行しか更新できません</strong> —— つまり <code>RETURNING</code> が何も返さず、<code>QueryRow(...).Scan(...)</code> がエラー（行なし）になり、<code>return nil</code> で静かに撤退します。コメントの<strong>「勝ったほうだけが配る」</strong>とは、この「1行を更新できた方だけが、以降の配布処理へ進む」ことを指しています。</p>
+
+    <div class="ascii">二重配布の防止 — notified_at IS NULL を賭ける
+
+  呼び出しX (worker: 変換完了)      呼び出しY (PATCH: 公開に変更)
+        │  ほぼ同時に MaybeFanoutNewVideo へ  │
+        ▼                                    ▼
+   UPDATE videos SET notified_at=now()
+   WHERE notified_at IS NULL AND status='ready' AND visibility='public'
+        │                                    │
+   ┌────┴────────── DB が順番に処理 ─────────┴────┐
+   │  先に着いた方: 1行更新できた → RETURNINGで名前が返る → 配る  │
+   │  後から来た方: notified_at はもう埋まってる → 0行 → 撤退     │
+   └──────────────────────────────────────────────┘
+        ★ 「初めて ready かつ public が揃った瞬間」を1回だけ捕まえる</div>
+
+    <p><code>RETURNING c.name, v.title</code> は、配布に必要な材料（チャンネル名・動画タイトル）を、この判定と同じ1文でついでに取り出しています。「勝った」ときだけこれらが返るので、勝者だけが正しい材料を手に配布へ進めます。<code>FROM channels c ... AND c.id = v.channel_id</code> は、動画のチャンネルを結合してチャンネル名を引くための join です。</p>
+    <p><code>if err != nil { return nil }</code> の扱いも設計の一部です。ここでの「エラー」の大半は<strong>「更新対象の行が無かった（＝配る条件を満たさない、または既に配布済み）」</strong>であり、これは<strong>異常ではなく正常</strong>です。だからエラーを呼び出し元に投げ返さず、<code>nil</code>（成功）として静かに何もせず返る。コメントの「対象外（未完了・非公開・配布済み）は静かに何もしない」がこれです。続いて後半、勝者が実際に登録者へ配る部分を見ます。</p>
+
+    <div class="file-tag">internal/notify/notify.go（MaybeFanoutNewVideo・後半）</div>
+    <pre><code>	rows, err := pool.Query(ctx,
+		<span class="st">`SELECT s.user_id FROM subscriptions s
+		 JOIN videos v ON v.channel_id = s.channel_id WHERE v.id = $1`</span>, videoID)
+	<span class="kw">if</span> err != <span class="kw">nil</span> {
+		<span class="kw">return</span> err
+	}
+	<span class="kw">defer</span> rows.Close()
+	<span class="kw">for</span> rows.Next() {
+		<span class="kw">var</span> id <span class="ty">string</span>
+		<span class="kw">if</span> err := rows.Scan(&amp;id); err != <span class="kw">nil</span> {
+			<span class="kw">return</span> err
+		}
+		subscriberIDs = append(subscriberIDs, id)
+	}
+	<span class="kw">if</span> err := rows.Err(); err != <span class="kw">nil</span> {
+		<span class="kw">return</span> err
+	}
+	<span class="kw">for</span> _, uid := <span class="kw">range</span> subscriberIDs {
+		<span class="kw">if</span> err := Send(ctx, pool, q, uid, <span class="st">"new_video"</span>, channelName+<span class="st">" が新しい動画を投稿しました"</span>, title, &amp;videoID); err != <span class="kw">nil</span> {
+			log.Printf(<span class="st">"notify fanout to %s: %v"</span>, uid, err)
+		}
+	}
+	<span class="kw">return</span> <span class="kw">nil</span>
+}</code></pre>
+
+    <p>「勝った」関数だけがここへ来ます。まず登録者を集めます —— <code>SELECT s.user_id FROM subscriptions s JOIN videos v ON v.channel_id = s.channel_id WHERE v.id = $1</code> は、「この動画のチャンネルを登録している全ユーザーのID」を引くクエリです。<code>rows.Next()</code> のループで1件ずつ <code>Scan</code> し、<code>subscriberIDs</code> スライスに集めます。<code>defer rows.Close()</code> で行の後始末を予約し、<code>rows.Err()</code> でループ中に隠れたエラーが無かったかを最後に確認する —— pgx で複数行を読むときの定型です。</p>
+    <p>最後の <code>for _, uid := range subscriberIDs</code> が、fanout の本体です。集めた登録者1人ずつに、Step 3 の <code>Send</code> を呼ぶ。<code>Send</code> は各人の <code>notifications</code> テーブルに1行 INSERT し、その人が SSE で繋いでいれば <code>PublishNotify</code> で即座に押し出す(Step 4)。<code>"new_video"</code> が種別、<code>channelName+" が新しい動画を投稿しました"</code> が見出し、<code>title</code> が本文、<code>&amp;videoID</code> がタップ先の動画。<strong>1本の動画公開が、登録者の数だけの通知に扇状に広がる</strong>——これが fanout です。</p>
+    <p><code>Send</code> のエラーを <code>log.Printf</code> でログに残すだけで <code>return</code> しないのが、ここでも効いています。<strong>ある登録者への配布が失敗しても、ループは止まらず次の登録者へ進みます</strong>。1人分の押し出し失敗で、残り全員への配布が巻き添えで止まっては困るからです。</p>
+
+    <div class="gonote"><div class="box-k">実装メモ · 「呼び出し側は裏で実行すること」の意味</div>
+      <p>関数の頭のコメントに<strong>「登録者が多いほど時間がかかるため、呼び出し側は裏（Worker等）で実行すること」</strong>とあります。これは fanout の本質的なコストです。登録者が1万人いれば、この関数は1万回の INSERT と Publish を回す —— 数秒かかることもある。もしこれを、動画を公開する <code>PATCH</code> リクエストの応答を返す<strong>前</strong>に同期実行したら、投稿者は「公開ボタンを押してから数秒フリーズ」を体験します。第00章・第03章で繰り返した「重い処理は受付を塞がない」という設計思想が、ここでも貫かれています。だから呼び出し側は、この関数を <strong>goroutine（<code>go</code>）や worker の中で、応答を返した後に裏で回す</strong>。次の Step 8 で、2つの呼び出し元がまさにそうしているのを見ます。</p>
+    </div>
+
+    <h2 class="step" id="step-8"><span class="step-no">Step 8</span>2つの入口から同じ関数を呼ぶ — worker と PATCH</h2>
+    <p><code>MaybeFanoutNewVideo</code> が「一本化」であることの意味は、<strong>2つの異なる経路から呼ばれる</strong>ことで初めて分かります。動画が「ready かつ public」になる瞬間は、順序が2通りあるからです。</p>
+
+    <div class="ascii">「ready かつ public」が揃う2つの順序
+
+  順序A: 先に公開設定 → 後で変換完了
+    投稿者が「公開」で設定 (まだ processing)  … visibility=public だが status≠ready
+              ↓ しばらくして変換完了 (worker)
+        ★ worker が MaybeFanoutNewVideo → ここで初めて両方揃う → 配る
+
+  順序B: 先に変換完了 → 後で公開に変更
+    変換完了 (worker) … status=ready だが visibility=private
+              ↓ 投稿者が後で「公開」に変更 (PATCH)
+        ★ PATCH が MaybeFanoutNewVideo → ここで初めて両方揃う → 配る
+
+  どちらの順序でも、両方が揃った「最後の一手」が配布を起こす</div>
+
+    <p>投稿者が動画を公開するタイミングと、変換が完了するタイミングは、どちらが先か<strong>予測できません</strong>。だから「ready になったら配る」でも「public にしたら配る」でも不十分 —— <strong>両方が揃った瞬間に、揃えた側の一手が配布を起こす</strong>必要があります。この「揃ったか?」の判定こそ、Step 7 の <code>UPDATE ... WHERE status='ready' AND visibility='public'</code> です。だから両方の経路から同じ関数を呼べば、どちらが「最後の一手」でも正しく捕まえられる。まず1つ目の入口、変換を終えた worker から。</p>
+
+    <div class="file-tag">internal/transcode/transcode.go（変換完了後の呼び出し）</div>
+    <pre><code>	<span class="cm">// 8. 「視聴可能かつ公開」になっていれば登録者へ新着通知を配る（配りも裏でやる）。</span>
+	<span class="cm">// 変換中に投稿者が公開範囲を設定するため、公開になるのが先か後かは分からない。</span>
+	<span class="cm">// 判定は MaybeFanoutNewVideo 側に集約されている（PATCH時にも同じ関数が呼ばれる）</span>
+	<span class="kw">if</span> err := notify.MaybeFanoutNewVideo(ctx, d.DB, d.Q, videoID); err != <span class="kw">nil</span> {
+		log.Printf(<span class="st">"fanout: %v"</span>, err)
+	}
+	<span class="kw">return</span> <span class="kw">nil</span>
+}</code></pre>
+
+    <p>第03章で読んだ変換処理の末尾です。<code>status = 'ready'</code> への条件つき UPDATE（<code>media_prefix</code> の確定を含む、第03章）が成功した<strong>直後</strong>に、<code>MaybeFanoutNewVideo</code> を呼びます。これが「変換完了で ready になった。もし既に public なら配る」という順序A の入口です。worker はそもそも裏方（別プロセス）なので、ここで配布に時間がかかっても受付は無関係 —— Step 7 のメモの「裏で実行」が自然に満たされています。エラーはやはりログに残すだけで、変換処理自体の成否には波及させません。次が2つ目の入口、公開範囲を変える <code>PATCH</code> です。</p>
+
+    <div class="file-tag">internal/httpapi/videos.go（公開範囲の変更時の呼び出し）</div>
+    <pre><code>	<span class="cm">// 「視聴可能かつ公開」が初めて揃ったなら、登録者へ新着通知を配る（配りは裏で）</span>
+	<span class="kw">if</span> req.Visibility != <span class="kw">nil</span> &amp;&amp; *req.Visibility == <span class="st">"public"</span> {
+		<span class="kw">go</span> <span class="kw">func</span>(id <span class="ty">string</span>) {
+			ctx, cancel := context.WithTimeout(context.Background(), time.Minute)
+			<span class="kw">defer</span> cancel()
+			<span class="kw">if</span> err := notify.MaybeFanoutNewVideo(ctx, s.DB, s.Q, id); err != <span class="kw">nil</span> {
+				log.Printf(<span class="st">"fanout: %v"</span>, err)
+			}
+		}(v.ID)
+	}
+	w.WriteHeader(http.StatusNoContent)</code></pre>
+
+    <p>動画のタイトルや公開範囲を更新する <code>PATCH /api/videos/{id}</code> の末尾です（<code>visibility = public</code> への更新 UPDATE が成功した後）。ここが順序B の入口 —— 「公開に変えた。もし既に ready なら配る」。</p>
+    <p>2つの工夫があります。1つ目、<code>if req.Visibility != nil &amp;&amp; *req.Visibility == "public"</code> —— <strong>今回の更新が「公開への変更」を含むときだけ</strong>呼びます。タイトルだけの変更や、非公開への変更では、新着通知を配る意味がないので呼びません（<code>MaybeFanoutNewVideo</code> 側の判定でも弾かれますが、そもそも無駄に呼ばない）。2つ目が本章の設計を体現する部分 —— <code>go func(id string) { ... }(v.ID)</code> の <strong>goroutine</strong>です。ここは受付（api）プロセスなので、fanout を同期実行すると投稿者の応答が遅れます。だから <code>go</code> で裏に逃がし、<strong><code>w.WriteHeader(http.StatusNoContent)</code> で即座に応答を返してから</strong>、配布は裏で回す。Step 7 のメモ「呼び出し側は裏で実行すること」を、api 側では goroutine で実現しています。</p>
+    <p><code>context.WithTimeout(context.Background(), time.Minute)</code> にも理由があります。裏に逃がした goroutine は元のリクエストとは切り離されるので、リクエストのコンテキストをそのまま使うと「応答を返した瞬間にコンテキストがキャンセルされ、配布が途中で止まる」ことがあります。だから <code>context.Background()</code> から新しく、<strong>最大1分の独立したコンテキスト</strong>を作り、それで配布を回す。<code>defer cancel()</code> は使い終わったコンテキストの後始末です。</p>
+
+    <div class="box hazard"><div class="box-k">⚠ 落とし穴 — なぜ「一本化」でなければならなかったか</div>
+      <p>もし fanout の判定ロジック（ready かつ public か? 既に配ったか?）を、worker 側と PATCH 側で<strong>それぞれ別に書いていたら</strong>どうなるでしょう。2箇所に同じ判定が重複し、片方だけ直して片方を直し忘れると、<strong>二重配布や配布漏れ</strong>が起きます。特に「両方の経路がほぼ同時に走る」ケース —— 変換完了と公開設定が偶然重なった瞬間 —— で、2箇所が独立に「配ってよし」と判断すると、登録者に同じ通知が2通届きます。<code>MaybeFanoutNewVideo</code> という<strong>1つの関数に判定と記録を封じ込め</strong>、その中の <code>notified_at IS NULL</code> を賭けた原子的 UPDATE（Step 7）で「勝ったほうだけが配る」を保証したからこそ、2つの入口から安全に呼べるのです。<strong>「同時に呼ばれても壊れない1つの関数」に集約し、判定を DB の原子的操作に委ねる</strong>——これが CLAUDE.md にある「fanout の一本化」の正体です。第03章の <code>job_generation</code>（fencing token）や条件つき UPDATE と同じ、「分散した複数の書き手を、DB の原子性で整流する」という本書に通底する発想です。</p>
+    </div>
+
+    <h2 class="step" id="step-9"><span class="step-no">Step 9</span>通知ベルをつなぐ — Header.tsx の EventSource</h2>
+    <p>サーバー側が出来上がったので、受け手のブラウザへ移ります。<code>src/frontend/src/components/Header.tsx</code> の中の <code>NotificationBell</code> —— ヘッダに常駐する通知ベルです。ここで <code>EventSource</code> が SSE に繋ぎ、押し出された通知をリアルタイムに表示します。まず状態と、通知一覧の初回読み込みから。</p>
+
+    <div class="file-tag">frontend/src/components/Header.tsx（NotificationBell・state と load）</div>
+    <pre><code><span class="kw">function</span> <span class="ty">NotificationBell</span>() {
+  <span class="kw">const</span> [open, setOpen] = useState(<span class="kw">false</span>);
+  <span class="kw">const</span> [items, setItems] = useState&lt;<span class="ty">AppNotification</span>[]&gt;([]);
+  <span class="kw">const</span> [unread, setUnread] = useState(<span class="st">0</span>);
+  <span class="kw">const</span> navigate = useNavigate();
+
+  <span class="kw">const</span> load = <span class="kw">async</span> () =&gt; {
+    <span class="kw">const</span> res = <span class="kw">await</span> api.get&lt;{ notifications: <span class="ty">AppNotification</span>[]; unreadCount: <span class="ty">number</span> }&gt;(
+      <span class="st">"/api/notifications"</span>,
+    );
+    setItems(res.notifications);
+    setUnread(res.unreadCount);
+  };</code></pre>
+
+    <p>React の <code>useState</code> で3つの状態を持ちます。<code>open</code>（ベルのメニューが開いているか）、<code>items</code>（通知の一覧）、<code>unread</code>（未読件数＝ベルのバッジに出る数字）。<code>load</code> は <code>GET /api/notifications</code> を叩いて、既にある通知の一覧と未読数を取ってくる関数です（サーバー側は Step 冒頭の <code>handleListNotifications</code>）。これは<strong>ページを開いた瞬間の「今までの通知」</strong>を埋めるためのもの —— SSE はあくまで「これから来る通知」を運ぶので、過去分は普通の <code>GET</code> で取ります。「過去は GET、未来は SSE」の役割分担です。次が本章の核、SSE への接続です。</p>
+
+    <div class="file-tag">frontend/src/components/Header.tsx（NotificationBell・EventSource）</div>
+    <pre><code>  useEffect(() =&gt; {
+    load().catch(() =&gt; {});
+    <span class="cm">// サーバーからの一方通行の中継（SSE）。出来事が起きた瞬間に届く。</span>
+    <span class="kw">const</span> token = getToken();
+    <span class="kw">if</span> (!token) <span class="kw">return</span>;
+    <span class="kw">const</span> es = <span class="kw">new</span> EventSource(<span class="st">`/api/notifications/stream?token=${encodeURIComponent(token)}`</span>);
+    es.onmessage = (e) =&gt; {
+      <span class="kw">try</span> {
+        <span class="kw">const</span> n = JSON.parse(e.data) <span class="kw">as</span> <span class="ty">AppNotification</span>;
+        setItems((prev) =&gt; [n, ...prev].slice(<span class="st">0</span>, <span class="st">50</span>));
+        setUnread((u) =&gt; u + <span class="st">1</span>);
+      } <span class="kw">catch</span> {
+        <span class="cm">/* ping等は無視 */</span>
+      }
+    };
+    <span class="kw">return</span> () =&gt; es.close();
+  }, []);</code></pre>
+
+    <p><code>useEffect(() =&gt; {...}, [])</code> は「このコンポーネントが画面に現れたとき<strong>一度だけ</strong>実行する」React の仕掛けです（依存配列 <code>[]</code> が空なので初回のみ）。中で3つのことをします。</p>
+    <ol>
+      <li><code>load().catch(() =&gt; {})</code> —— まず過去分を読み込む。失敗しても握りつぶす（<code>.catch</code>）のは、通知はあくまで補助機能で、取れなくてもページ全体を壊したくないから。</li>
+      <li><code>new EventSource(`/api/notifications/stream?token=${encodeURIComponent(token)}`)</code> —— <strong>SSE に接続する1行</strong>。<code>getToken()</code> で会員証（JWT）を取り出し、<code>?token=</code> クエリに載せて渡します。ここが Step 6 の <code>?token=</code> 認証と噛み合う瞬間 —— <code>EventSource</code> はヘッダを付けられないので、クエリで妥協するしかない。<code>encodeURIComponent</code> はトークンに URL で特別な意味を持つ文字が混ざっても壊れないようにエスケープしています。</li>
+      <li><code>es.onmessage = (e) =&gt; {...}</code> —— <strong>放送が届くたびに呼ばれるハンドラ</strong>。サーバーが <code>data: {...}\n\n</code> で流した JSON が <code>e.data</code> に入るので、<code>JSON.parse</code> で通知オブジェクトに戻し、<code>items</code> の先頭に足して（<code>[n, ...prev].slice(0, 50)</code> で最新50件に保つ）、<code>unread</code> を +1 する。これで<strong>ユーザーが何もしなくても、ベルのバッジが増え、一覧に新着が現れます</strong>。</li>
+    </ol>
+    <p><code>catch</code> で「ping 等は無視」しているのが Step 5 と繋がります。サーバーは25秒ごとに <code>: ping</code> という<strong>コメント行</strong>を送りますが、これは <code>data:</code> ではないので <code>onmessage</code> には来ません。ただ、接続確立時の <code>: connected</code> なども含め、パースできないものが来たら黙って無視する安全網です。最後の <code>return () =&gt; es.close()</code> は、<strong>このコンポーネントが画面から消えるとき SSE 接続を閉じる</strong>後始末 —— これが Step 5 の <code>&lt;-r.Context().Done()</code> をサーバー側で発火させ、goroutine と Redis 購読を解放させます。<strong>フロントの <code>es.close()</code> とサーバーの <code>Context().Done()</code> が、接続の両端で対になっている</strong>のです。</p>
+
+    <div class="gonote"><div class="box-k">実装メモ · EventSource の自動再接続という贈り物</div>
+      <p>Step 1 で「SSE は接続が切れたら自動で張り直す」と言いました。それを担うのがこの <code>EventSource</code> です。Wi-Fi が一瞬切れた、サーバーが再起動した、といった理由で SSE 接続が切れると、<code>EventSource</code> は<strong>自分から数秒後に同じ URL へ繋ぎ直します</strong> —— このコードには再接続を書く行が一切ありません。WebSocket なら「切れたら <code>setTimeout</code> で張り直す」ロジックを自前で書く必要がありますが、SSE ではブラウザがタダでやってくれる。これが「一方向の通知には SSE が軽い」と言える、実装上の大きな理由です。ただし再接続の間に配信された通知は Pub/Sub なので失われます（Step 4）—— でも大丈夫、再接続後に <code>load()</code> ……とはこのコードは書いていませんが、次にページを開けば <code>handleListNotifications</code> が DB から全部拾うので、真実は失われません。ここでも「DB が真実、SSE は best-effort」が効いています。</p>
+    </div>
+
+    <p>残りのベルの表示・既読処理は本章の主題（SSE と fanout）から外れるので要点だけ。ベルを開く <code>toggle</code> は、開くと同時に未読があれば <code>POST /api/notifications/read</code> に <code>{ all: true }</code> を送って全既読にし（サーバーは Step 冒頭の <code>handleMarkRead</code>）、バッジを 0 に戻します。通知をタップすると <code>navigate(`/watch/${n.videoId}`)</code> でその動画へ飛ぶ。「未読が来る→ベルが光る→開いたら既読になる→タップで動画へ」という、見慣れた通知ベルの一巡が、ここまでの部品でできあがっています。</p>
+
+    <h2 class="step" id="step-10"><span class="step-no">Step 10</span>立ち上げて確認する</h2>
+    <p>部品が出そろいました。SSE の常時接続、fanout の一本化、通知ベルを、実際に動かして確かめます。</p>
+
+    <div class="box do"><div class="box-k">▸ 動かして確認 — SSE の常時接続を curl で覗く</div>
+      <p>まずログインしてトークンを得て（第01章の <code>/api/auth/login</code>）、そのトークンを <code>?token=</code> に載せて SSE エンドポイントへ繋ぎます。<code>curl -N</code>（<code>--no-buffer</code>）で、閉じない接続をそのまま流し見できます。</p>
+      <pre class="term"><code><span class="cm"># TOKEN=... に、ログインで得た JWT を入れておく</span>
+<span class="ps">$</span> curl -N "http://localhost:8080/api/notifications/stream?token=$TOKEN"
+<span class="out">: connected
+
+: ping
+
+: ping</span>
+<span class="cm"># ↑ 接続が切れず、25秒ごとに : ping の鼓動が届き続ける（Ctrl-C で終了）</span></code></pre>
+      <p><code>: connected</code> が最初に来て、その後 <code>: ping</code> が25秒おきに届き、<strong>接続が切れない</strong>のが SSE です。この状態のまま、別の操作で新着を起こすと <code>data: {...}</code> が割り込んで届きます。</p>
+    </div>
+
+    <div class="box do"><div class="box-k">▸ 動かして確認 — fanout が一度だけ配ることを DB で見る</div>
+      <p>fanout の一本化（<code>notified_at</code> による二重配布防止）を、DB で直接確かめます。ある動画を公開してから、<code>notified_at</code> が一度だけ埋まり、通知が登録者数ぶんだけ作られることを見ます。</p>
+      <pre class="term"><code><span class="ps">$</span> docker compose exec db psql -U video -d video
+
+<span class="cm"># 動画を公開に変えた後、その動画の notified_at を見る（now() で1回だけ埋まる）</span>
+<span class="ps">video=#</span> SELECT id, status, visibility, notified_at FROM videos WHERE id = '&lt;動画ID&gt;';
+<span class="out"> status | visibility |         notified_at
+--------+------------+------------------------------
+ ready  | public     | 2026-07-16 12:30:05.12+00</span>
+
+<span class="cm"># 同じ動画を private→public と何度切り替えても、この通知は増えない</span>
+<span class="ps">video=#</span> SELECT COUNT(*) FROM notifications WHERE video_id = '&lt;動画ID&gt;' AND type = 'new_video';
+<span class="out"> count
+-------
+     3</span>  <span class="out">-- 登録者3人ぶん。何度公開し直しても3のまま</span></code></pre>
+      <p><code>notified_at</code> が <code>NULL</code> でなくなった時点で、以降の <code>MaybeFanoutNewVideo</code> は <code>WHERE notified_at IS NULL</code> で弾かれます。だから「非公開→公開」を何度繰り返しても、<code>new_video</code> 通知は増えません。</p>
+    </div>
+
+    <div class="box do"><div class="box-k">▸ 動かして確認 — 2つのブラウザでリアルタイム通知を体感する</div>
+      <p>この章のクライマックス。SSE の「押し出し」を、更新ボタンを押さずに目にします。</p>
+      <ol>
+        <li><strong>ブラウザA</strong>（例: 通常ウィンドウ）で利用者Aとしてログインし、あるチャンネルを登録する。ヘッダの通知ベル 🔔 が見える状態にしておく。</li>
+        <li><strong>ブラウザB</strong>（例: シークレットウィンドウ）で、そのチャンネルの持ち主としてログインし、動画をアップロード→変換完了を待つ→<strong>公開</strong>にする（または最初から公開でアップロードし、変換完了を待つ）。</li>
+        <li><strong>ブラウザAを一切触らずに</strong>見ていると、公開が成立した瞬間、ベルにバッジ <code>1</code> が灯る。ベルを開くと「（チャンネル名）が新しい動画を投稿しました」が最上段に現れ、タップするとその動画へ飛ぶ。</li>
+      </ol>
+      <p>ブラウザAは <code>GET</code> を一度も追加で叩いていません。ブラウザBの公開が <code>MaybeFanoutNewVideo</code> → <code>Send</code> → <code>PublishNotify</code>（Redis）→ ブラウザAの <code>handleNotificationStream</code> の <code>select</code> → <code>data:</code> 書き込み → <code>EventSource.onmessage</code> と、プロセスとネットワークを跨いで一直線に届いた結果です。これが「つながりを届ける」層の完成形です。</p>
+    </div>
+
+    <h2>つまずき FAQ</h2>
+    <details class="qa"><summary>ブラウザで通知ベルにバッジが出ない／SSE が繋がらない</summary>
+      <div class="qa-body"><p>まず開発者ツールの Network タブで <code>notifications/stream</code> のリクエストを探してください。ステータスが <code>401</code> なら <code>?token=</code> が渡っていない／期限切れです（<code>getToken()</code> が空を返していないか、ログイン状態か確認）。ステータスが <code>200</code> で「pending（保留）」のまま緑なら、SSE 接続は正常に開いています —— この場合、通知が来ないのは<strong>サーバー側で通知が生まれていない</strong>可能性が高い。<code>docker compose logs api worker | grep fanout</code> でエラーが出ていないか、そもそも「登録している」「相手が公開した」の条件が揃っているかを確認します。もう一つ多いのが、前段に nginx を挟んだ環境で <code>X-Accel-Buffering: no</code> が効かず、通知がバッファに溜まってリアルタイムに出ないケース。本書の <code>web</code> は nginx なので、SSE をプロキシする設定（<code>proxy_buffering off</code>）が要ることがあります。</p></div>
+    </details>
+    <details class="qa"><summary>同じ動画を公開し直したのに、2回目は通知が来ない。バグ?</summary>
+      <div class="qa-body"><p>バグではなく<strong>仕様</strong>です。これがまさに fanout の一本化が防いでいる「二重配布」の防止です。<code>MaybeFanoutNewVideo</code> は「<code>ready かつ public</code> が<strong>初めて</strong>揃った瞬間」に一度だけ配り、<code>notified_at</code> に時刻を刻みます。以降は <code>WHERE notified_at IS NULL</code> の条件で弾かれるので、非公開→公開を何度繰り返しても新着通知は再送されません。もし「毎回配りたい」なら <code>notified_at</code> を <code>NULL</code> に戻す運用が要りますが、通常は「登録者に同じ動画の新着通知が何通も届く」方が迷惑なので、この設計が正解です。DB で <code>SELECT notified_at FROM videos WHERE id=...</code> を見れば、一度埋まった時刻がそのまま残っているのが確認できます。</p></div>
+    </details>
+    <details class="qa"><summary>worker と PATCH の両方から fanout を呼んでいる。同時に走ったら二重に配られない?</summary>
+      <div class="qa-body"><p>配られません。ここが Step 7・8 の核心です。両方の経路が<strong>同時に</strong> <code>MaybeFanoutNewVideo</code> に入っても、中の <code>UPDATE videos SET notified_at = now() WHERE ... notified_at IS NULL ...</code> は DB が<strong>順番に</strong>処理します。先に着いた方だけが1行を更新でき（<code>RETURNING</code> で材料が返り、配布へ進む）、後から来た方はもう <code>notified_at IS NULL</code> が偽なので0行しか更新できず、<code>Scan</code> がエラーになって静かに撤退します。「判定」と「配った記録」を<strong>分けられない1文の原子的 UPDATE</strong>にしたことで、2つの呼び出しのうち「勝った1つ」だけが配る —— これが「一本化」の防御の本体です。<code>job_generation</code>（第03章）と同じ、DB の原子性で分散した書き手を整流する発想です。</p></div>
+    </details>
+
+    <h2>理解度チェック</h2>
+    <p>次の問いに<strong>自分の言葉で</strong>答えられたら、この章は卒業です。</p>
+    <details class="qa"><summary>1. なぜ通知に WebSocket ではなく SSE を選んだのか。SSE の利点と、EventSource が <code>?token=</code> を必要とする理由を説明せよ。</summary>
+      <div class="qa-body"><p>通知に必要なのは<strong>「サーバー → 画面」の一方向</strong>だけで、画面から送り返すものが無いから。WebSocket の双方向性はオーバースペックで、独自プロトコル（<code>ws://</code>）・自前の再接続・プロキシ通過の難しさといったコストを払う割に合わない。SSE は<strong>ただの HTTP レスポンスを閉じずに書き足し続ける</strong>だけなので、(1) 実装が軽く、(2) ブラウザの <code>EventSource</code> が<strong>自動で再接続</strong>してくれ、(3) 認証・プロキシなど既存の HTTP の仕組みがそのまま使える。ただし <code>EventSource</code> は <code>new EventSource(url)</code> に URL しか渡せず<strong>カスタムヘッダを付けられない</strong>ため、普段 <code>Authorization</code> ヘッダで送る JWT を、SSE では <code>?token=</code> クエリに載せるしかない。<code>currentUser</code> は「ヘッダが本命、無ければクエリで妥協」の二段構えでこれを受ける。</p></div>
+    </details>
+    <details class="qa"><summary>2. <code>MaybeFanoutNewVideo</code> はなぜ worker と PATCH の2箇所から呼ばれるのか。二重配布はどうやって防いでいるか。</summary>
+      <div class="qa-body"><p>動画が「<code>ready かつ public</code>」になる順序が2通りあるから。<strong>順序A</strong>: 先に公開設定してから変換完了（worker が最後の一手）。<strong>順序B</strong>: 先に変換完了してから公開に変更（PATCH が最後の一手）。どちらが先かは予測できないので、両方の入口から同じ関数を呼び、「両方揃った瞬間に、揃えた側が配る」ようにする。二重配布は、判定と記録を<strong>1文の原子的 UPDATE</strong>（<code>UPDATE videos SET notified_at = now() WHERE ... notified_at IS NULL AND status='ready' AND visibility='public' RETURNING ...</code>）に封じ込めることで防ぐ。同時に呼ばれても DB が順番に処理し、<strong>先に1行を更新できた「勝者」だけ</strong>が配布へ進み、後発は <code>notified_at IS NULL</code> が偽になって0行・撤退する。</p></div>
+    </details>
+    <details class="qa"><summary>3. 「押し出し（Pub/Sub）は best-effort」とはどういう意味か。なぜ <code>Send</code> は DB 記録を先に、押し出しを後にするのか。</summary>
+      <div class="qa-body"><p>「best-effort」＝<strong>届けば嬉しいが、失敗しても致命的ではない</strong>という割り切り。Redis Pub/Sub は放送なので、今 SSE で繋いでいる人にだけ届き、オフラインの人には届かず消える。それで構わないのは、<strong>通知の真実は DB の <code>notifications</code> テーブルにあり</strong>、次にログインすれば一覧（<code>handleListNotifications</code>）で必ず見えるから。だから <code>Send</code> は<strong>先に DB へ INSERT して真実を確定</strong>させ、<strong>後で押し出す</strong>。もし順序が逆だと、押し出しには成功したのに DB 記録が失敗した瞬間「画面には出たが一覧に残らない幽霊通知」が生まれる。<code>PublishNotify</code> のエラーを <code>return</code> せず <code>log.Printf</code> だけにするのも同じ思想 —— 押し出しの失敗を、確実な記録に波及させない。</p></div>
+    </details>
+
+    <h2>まとめ — 次の層へ</h2>
+    <p>この章で、動画サービスの関係が反転しました。ユーザーが聞きに来るのを待つのではなく、出来事が起きた瞬間に<strong>サーバーの側から画面へ押し出す</strong>。その道具として、双方向の WebSocket ではなく、一方向で軽い <strong>SSE</strong>を選び、<code>handleNotificationStream</code> が「HTTP レスポンスを閉じずに Redis の放送を流し続ける」中継地点になった。<code>EventSource</code> がヘッダを付けられないための <code>?token=</code>、プロセスの壁を越える <strong>Redis Pub/Sub</strong>、そして「DB が真実・押し出しは best-effort」の二層構造。</p>
+    <p>そして本章の白眉、<strong>fanout の一本化</strong>。<code>MaybeFanoutNewVideo</code> という1つの関数に判定と記録を封じ込め、<code>notified_at IS NULL</code> を賭けた原子的 UPDATE で「勝ったほうだけが配る」を保証した。おかげで、変換完了（worker）と公開設定（PATCH）という<strong>2つの入口</strong>から、どちらが「最後の一手」でも安全に —— 一度だけ、確実に —— 登録者へ新着が届く。第03章の <code>job_generation</code> と同じ「分散した書き手を DB の原子性で整流する」発想が、通知でも貫かれていました。</p>
+    <p>次の第08章では、ここまでバラバラに読んできたフロントエンドの部品 —— アップロード画面・視聴画面・チャンネル・スタジオ・そしてこの通知ベル —— を、1つの React アプリとして組み上げます。<code>App.tsx</code> のルーティング、<code>api</code> クライアント、認証の状態管理。動画が通る道の全景を、ユーザーが実際に触れる<strong>画面</strong>として仕上げます。</p>
+
+    <div class="chap-foot">
+      <a class="pager" href="06-discover.html"><span class="dir">← 前へ</span>第06章 · 見つけてもらう</a>
+      <a class="pager next" href="08-web.html"><span class="dir">次へ →</span>第08章 · 画面をつける</a>
+    </div>
+  </main>
+</div>
+</body>
+</html>

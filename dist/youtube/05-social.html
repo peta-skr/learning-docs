@@ -1,0 +1,694 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>第05章 反応をつくる — 動画サービスをつくる</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500;600&family=Source+Serif+4:opsz,wght@8..60,400;8..60,600;8..60,700&family=Noto+Serif+JP:wght@400;600;700&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<div class="shell">
+
+  <aside class="spine">
+    <a class="wordmark" href="index.html">VIDEO-STREAM · from scratch</a>
+    <div class="book-title">動画サービスを<br>つくる</div>
+    <div class="book-sub">Go と ffmpeg で presigned から HLS 配信まで</div>
+
+    <div class="legend"><span>受け取る <b>↓</b></span><span>届ける <b>↑</b></span></div>
+
+    <nav aria-label="目次">
+      <ul class="toc">
+        <li><a class="nav-item" href="index.html"><span class="nav-num">序</span><span class="nav-label">はじめに・準備<span class="nav-tag">Setup</span></span></a></li>
+        <li><a class="nav-item" href="00-setup.html"><span class="nav-num">00</span><span class="nav-label">土台をつくる<span class="nav-tag">Setup</span></span></a></li>
+        <li><a class="nav-item" href="01-auth.html"><span class="nav-num">01</span><span class="nav-label">人を扱う<span class="nav-tag">Auth</span></span></a></li>
+        <li><a class="nav-item" href="02-upload.html"><span class="nav-num">02</span><span class="nav-label">動画を受け取る<span class="nav-tag">Upload</span></span></a></li>
+        <li><a class="nav-item" href="03-transcode.html"><span class="nav-num">03</span><span class="nav-label">動画を変換する<span class="nav-tag">Transcode</span></span></a></li>
+        <li><a class="nav-item" href="04-deliver.html"><span class="nav-num">04</span><span class="nav-label">動画を届ける<span class="nav-tag">Deliver</span></span></a></li>
+        <li><a class="nav-item current" aria-current="page" href="05-social.html"><span class="nav-num">05</span><span class="nav-label">反応をつくる<span class="nav-tag">Social</span></span></a></li>
+        <li><a class="nav-item" href="06-discover.html"><span class="nav-num">06</span><span class="nav-label">見つけてもらう<span class="nav-tag">Discover</span></span></a></li>
+        <li><a class="nav-item" href="07-notify.html"><span class="nav-num">07</span><span class="nav-label">つながりを届ける<span class="nav-tag">Notify</span></span></a></li>
+        <li><a class="nav-item" href="08-web.html"><span class="nav-num">08</span><span class="nav-label">画面をつける<span class="nav-tag">Web</span></span></a></li>
+        <li><a class="nav-item" href="09-beyond.html"><span class="nav-num">09</span><span class="nav-label">仕上げと次の一歩<span class="nav-tag">Beyond</span></span></a></li>
+      </ul>
+    </nav>
+
+    <div class="spine-foot">
+      各章は動画が通る道の一区間。<br>受け取る（下）から届ける（上）へ、<br>1本の動画を最後まで運びきる。
+    </div>
+  </aside>
+
+  <main class="reading">
+    <div class="progress-tag">第05章 / 全10章 · 層: Social · 読了目安 2〜3時間</div>
+    <div class="eyebrow"><span>Social</span><span class="depth">— 動画に「反応」を返す層</span></div>
+    <h1>反応をつくる</h1>
+    <p class="lede">第04章までで、動画は受け取られ・変換され・回線に応じて届くようになりました。しかし今のところ、視聴者は動画を<strong>黙って見るだけ</strong>です。いいねも、コメントも、チャンネル登録もできない。この章では、視聴者が動画や投稿者へ<strong>反応</strong>を返す機能を作ります。主役は <code>httpapi/social.go</code> と、チャンネル登録の <code>httpapi/channels.go</code>、そしてフロントの <code>components/Comments.tsx</code>。ここで繰り返し現れる設計テーマはただ一つ —— <strong>「同じ操作を何度受けても、結果が壊れない」（冪等）</strong>です。ボタンの二度押し、通信のリトライ、再読み込み。反応の機能は「二重」との戦いであり、その武器は DB の <code>UNIQUE</code> 制約と <code>ON CONFLICT</code> だと分かります。あわせて、コメント一覧で <strong>N+1 問題</strong>をどう避けるかも、実コードで読み解きます。</p>
+
+    <div class="box goal"><div class="box-k">◈ この章のゴール</div>
+      <p>次の3つを、コードとデータベースの両方で説明できたら達成です。</p>
+      <ol>
+        <li>いいねを連打しても・チャンネル登録を二度押ししても、DB のレコードが<strong>1つに保たれる</strong>のはなぜか（<code>PRIMARY KEY</code> / <code>UNIQUE</code> と <code>ON CONFLICT</code> の役割）を説明できる。</li>
+        <li>コメント一覧で投稿者名とアイコンを<strong>1本の <code>JOIN</code></strong> で取り、コメント数だけ SQL を撃つ「N+1」を避けている箇所を <code>handleListComments</code> の中で指し示せる。</li>
+        <li>コメント投稿が、返信なら返信先へ・そうでなければ動画の持ち主へ<strong>通知を出し分ける</strong>ロジック（<code>handleCreateComment</code> の末尾）を追える。</li>
+      </ol>
+    </div>
+
+    <div class="box map"><div class="box-k">☰ この章のステップ</div>
+      <ol>
+        <li><a href="#step-1">反応を保存する3つの箱 — <code>reactions</code> / <code>comments</code> / <code>subscriptions</code></a></li>
+        <li><a href="#step-2">いいね/低評価を冪等に — <code>handleReaction</code> と <code>ON CONFLICT</code></a></li>
+        <li><a href="#step-3">反応を数える — <code>COUNT(*) FILTER</code> で1クエリ集計</a></li>
+        <li><a href="#step-4">コメント一覧で N+1 を作らない — <code>handleListComments</code> の <code>JOIN</code></a></li>
+        <li><a href="#step-5">コメントを投稿し、通知を出し分ける — <code>handleCreateComment</code></a></li>
+        <li><a href="#step-6">チャンネル登録を冪等に — <code>handleSubscribe</code> / <code>handleUnsubscribe</code></a></li>
+        <li><a href="#step-7">視聴を「連打では増やさない」で数える — <code>handlePostView</code></a></li>
+        <li><a href="#step-8">画面につなぐ — <code>Comments.tsx</code></a></li>
+      </ol>
+    </div>
+
+    <h2>なぜ「反応」の層は冪等でなければならないのか</h2>
+    <p>ここまでの章（アップロード・変換・配信）は、基本的に「1本の動画が1つの道を進む」一方向の流れでした。反応の層はそれと性格が違います。<strong>不特定多数の視聴者が、同じ動画に、何度も、同時に触りに来る</strong>のです。しかも、その触り方は行儀がいいとは限りません。</p>
+    <ul>
+      <li>いいねボタンを、反応が返る前にもう一度押す（<strong>二度押し</strong>）。</li>
+      <li>通信が不安定で、ブラウザやフロントのライブラリが同じ登録リクエストを<strong>自動でリトライ</strong>する。</li>
+      <li>動画ページを<strong>再読み込み</strong>するたびに、視聴カウントの POST が飛ぶ。</li>
+    </ul>
+    <p>これらを素朴に「来た数だけ INSERT する」と実装すると、いいねが二重に入り・登録が二重に入り・視聴が水増しされます。だから反応の層では、<strong>「同じ人が同じ対象に対してできる反応は、多くても1つ」</strong>という規則を、アプリのコードの気配りではなく <strong>データベースの構造そのもの</strong>で保証します。第00章で見た <code>reactions</code> / <code>subscriptions</code> / <code>watch_progress</code> テーブルが、いずれも「<code>(user_id, 対象_id)</code> を主キーにする」形だったのを思い出してください。あれは<strong>「二重を物理的に作れない箱」</strong>を最初から用意していた、ということです。</p>
+
+    <h2>この層が上の層に約束すること</h2>
+    <ul>
+      <li><strong>反応は冪等 —— 二度押しや自動リトライで壊れない。</strong> いいね・チャンネル登録は「あるか/ないか」の2状態しか取らず、何度同じ操作をしても状態は1つに収束する。</li>
+      <li><strong>一覧の取得は N+1 を作らない。</strong> コメント一覧のように「N件それぞれに付随情報がある」ものは、件数に比例して SQL を撃つのではなく、<code>JOIN</code> で<strong>1本にまとめて</strong>取る。</li>
+      <li><strong>反応は関係者に通知として届く。</strong> コメント・返信は、動画の持ち主や返信先の人へ通知を出す（実際に届けるのは第07章の <code>notify</code>）。ただし<strong>自分自身の反応で自分に通知は出さない</strong>。</li>
+    </ul>
+    <p>この章では <code>social.go</code>（いいね・コメント・視聴・進捗・履歴）と、テーマを共有する <code>channels.go</code> のチャンネル登録を読みます。認証（<code>requireUser</code>）と閲覧権限（<code>getViewableVideo</code>）は第01章・第04章で作った部品を、そのまま土台として使います。</p>
+
+    <h2 class="step" id="step-1"><span class="step-no">Step 1</span>反応を保存する3つの箱 — reactions / comments / subscriptions</h2>
+    <p>コードを読む前に、反応がどこに保存されるかを確認します。テーブル自体は第00章の <code>schema.sql</code> で作り済みなので、ここでは<strong>「反応の冪等性がどうスキーマに刻まれているか」</strong>という観点で3つの箱を読み直します。</p>
+
+    <div class="file-tag">internal/db/schema.sql（反応まわり・再掲）</div>
+    <pre><code><span class="cm">-- いいね/低評価: 同じ人×同じ動画は一つだけ（重複防止は主キーで担保）</span>
+<span class="kw">CREATE TABLE IF NOT EXISTS</span> reactions (
+  user_id  <span class="ty">UUID</span> <span class="kw">NOT NULL REFERENCES</span> users(id) <span class="kw">ON DELETE CASCADE</span>,
+  video_id <span class="ty">UUID</span> <span class="kw">NOT NULL REFERENCES</span> videos(id) <span class="kw">ON DELETE CASCADE</span>,
+  value    <span class="ty">SMALLINT</span> <span class="kw">NOT NULL CHECK</span> (value <span class="kw">IN</span> (<span class="st">1</span>, <span class="st">-1</span>)),
+  <span class="kw">PRIMARY KEY</span> (user_id, video_id)
+);
+
+<span class="cm">-- コメント: parent_id で返信（木構造）を表現</span>
+<span class="kw">CREATE TABLE IF NOT EXISTS</span> comments (
+  id         <span class="ty">UUID</span> <span class="kw">PRIMARY KEY DEFAULT</span> gen_random_uuid(),
+  video_id   <span class="ty">UUID</span> <span class="kw">NOT NULL REFERENCES</span> videos(id) <span class="kw">ON DELETE CASCADE</span>,
+  user_id    <span class="ty">UUID</span> <span class="kw">NOT NULL REFERENCES</span> users(id) <span class="kw">ON DELETE CASCADE</span>,
+  parent_id  <span class="ty">UUID</span> <span class="kw">REFERENCES</span> comments(id) <span class="kw">ON DELETE CASCADE</span>,
+  body       <span class="ty">TEXT</span> <span class="kw">NOT NULL</span>,
+  created_at <span class="ty">TIMESTAMPTZ</span> <span class="kw">NOT NULL DEFAULT</span> now()
+);
+<span class="kw">CREATE INDEX IF NOT EXISTS</span> idx_comments_video <span class="kw">ON</span> comments (video_id, created_at);
+
+<span class="kw">CREATE TABLE IF NOT EXISTS</span> subscriptions (
+  user_id    <span class="ty">UUID</span> <span class="kw">NOT NULL REFERENCES</span> users(id) <span class="kw">ON DELETE CASCADE</span>,
+  channel_id <span class="ty">UUID</span> <span class="kw">NOT NULL REFERENCES</span> channels(id) <span class="kw">ON DELETE CASCADE</span>,
+  created_at <span class="ty">TIMESTAMPTZ</span> <span class="kw">NOT NULL DEFAULT</span> now(),
+  <span class="kw">PRIMARY KEY</span> (user_id, channel_id)
+);
+<span class="kw">CREATE INDEX IF NOT EXISTS</span> idx_subs_channel <span class="kw">ON</span> subscriptions (channel_id);</code></pre>
+
+    <p>3つの箱を、冪等性という一点で見比べます。</p>
+    <ul>
+      <li><strong>reactions（いいね/低評価）</strong>。<code>PRIMARY KEY (user_id, video_id)</code> が要です。この<strong>複合主キー</strong>は「同じ <code>user_id</code> と同じ <code>video_id</code> の組は、テーブルに<strong>1行しか存在できない</strong>」ことを DB が物理的に保証します。だから「A さんが動画 X にいいね」は、何度実行しても最大1行。いいねと低評価の区別は <code>value</code> 列（<code>1</code>=いいね / <code>-1</code>=低評価）で、<code>CHECK</code> によって <code>1</code> か <code>-1</code> 以外は入りません。</li>
+      <li><strong>subscriptions（チャンネル登録）</strong>。同じく <code>PRIMARY KEY (user_id, channel_id)</code>。「A さんがチャンネル Y を登録」も最大1行。value に相当する列は無く、<strong>行があれば登録済み / 無ければ未登録</strong>という 2状態だけを表します。</li>
+      <li><strong>comments（コメント）</strong>。これだけ性格が違い、<code>id UUID PRIMARY KEY</code> で<strong>1コメント=1行</strong>。同じ人が同じ動画に何件でもコメントできる（=重複を防がない）ので、複合主キーにはしません。代わりに <code>parent_id</code> が自分自身（<code>comments</code>）を参照していて、これが<strong>「返信」の木構造</strong>を表します。<code>parent_id</code> が <code>NULL</code> ならトップレベルのコメント、値が入っていれば「そのコメントへの返信」。</li>
+    </ul>
+
+    <div class="gonote"><div class="box-k">実装メモ · 複合主キーが「冪等の器」になる理由</div>
+      <p><code>PRIMARY KEY (user_id, video_id)</code> は、内部的には「この2列の組に対する <code>UNIQUE</code> 制約 + <code>NOT NULL</code> + 索引」です。ポイントは <code>UNIQUE</code> です。同じ組で2行目を INSERT しようとすると、DB が<strong>一意制約違反でエラーを返す</strong>。つまり「二重を作ろうとしたら失敗する」という保険がテーブルに埋め込まれている。この保険があるからこそ、次のステップで見る <code>ON CONFLICT</code>（「衝突したらこうしろ」）が書けます。アプリ側が「まず SELECT して、無ければ INSERT する」と気を回す必要はありません。<strong>「読んでから書く」の隙間で別のリクエストに割り込まれる競合</strong>（第03章でも登場したテーマ）を、そもそも起こさない設計です。</p>
+    </div>
+
+    <h2 class="step" id="step-2"><span class="step-no">Step 2</span>いいね/低評価を冪等に — handleReaction と ON CONFLICT</h2>
+    <p>いよいよ <code>social.go</code> の最初のハンドラ、<code>handleReaction</code> です。1本の動画に対する「いいね（1）/ 低評価（-1）/ 取り消し（0）」を1つのエンドポイントで受けます。まず前半、リクエストの受け付けから。</p>
+
+    <div class="file-tag">internal/httpapi/social.go（handleReaction 前半）</div>
+    <pre><code><span class="cm">// handleReaction: いいね/低評価。1人1動画につき一つ（FR-R1、主キーで担保）。</span>
+<span class="kw">func</span> (s *<span class="ty">Server</span>) handleReaction(w http.<span class="ty">ResponseWriter</span>, r *http.<span class="ty">Request</span>) {
+	uid, ok := s.requireUser(w, r)
+	<span class="kw">if</span> !ok {
+		<span class="kw">return</span>
+	}
+	v, _, ok := s.getViewableVideo(w, r)
+	<span class="kw">if</span> !ok {
+		<span class="kw">return</span>
+	}
+	<span class="kw">var</span> req <span class="kw">struct</span> {
+		Value <span class="ty">int</span> <span class="st">`json:"value"`</span> <span class="cm">// 1=いいね, -1=低評価, 0=取り消し</span>
+	}
+	<span class="kw">if</span> err := readJSON(r, &amp;req); err != <span class="kw">nil</span> || (req.Value != <span class="st">1</span> &amp;&amp; req.Value != <span class="st">-1</span> &amp;&amp; req.Value != <span class="st">0</span>) {
+		httpError(w, http.StatusBadRequest, <span class="st">"value は 1 / -1 / 0 のいずれかです"</span>)
+		<span class="kw">return</span>
+	}</code></pre>
+
+    <p>ハンドラの入口は、この章のすべてのハンドラに共通の2つの門で守られています。</p>
+    <ol>
+      <li><code>s.requireUser(w, r)</code> —— <strong>ログイン必須</strong>の門（第01章）。トークンから利用者 ID（<code>uid</code>）を取り出し、未ログインなら 401 を返して <code>ok=false</code>。反応は「誰が反応したか」が本質なので、匿名では受け付けません。</li>
+      <li><code>s.getViewableVideo(w, r)</code> —— <strong>閲覧権限</strong>の門（第04章）。URL の <code>{id}</code> から動画を読み、その人が見てよい動画か確かめます。見られない動画（他人の非公開など）には反応できません。戻り値の <code>v</code> は動画のメタ情報（<code>videoMeta</code>）です。</li>
+    </ol>
+    <p>次に <code>readJSON</code> でリクエストボディを <code>{ "value": 1 }</code> の形に読み込みます。ここで<strong>入口での厳格な検証</strong>が効いています。<code>req.Value</code> が <code>1</code>・<code>-1</code>・<code>0</code> のどれでもなければ、DB に触れる前に 400 で弾く。第00章で <code>reactions.value</code> に <code>CHECK (value IN (1, -1))</code> を置いたのを覚えていますか。あれが最後の砦なら、この <code>if</code> は<strong>手前の砦</strong>です。「妙な値は DB まで届かせない」を二重で守っています。</p>
+
+    <p>そして本題、値に応じて DB を更新する部分です。</p>
+
+    <div class="file-tag">internal/httpapi/social.go（handleReaction 中盤・冪等な更新）</div>
+    <pre><code>	ctx := r.Context()
+	<span class="kw">var</span> err <span class="ty">error</span>
+	<span class="kw">if</span> req.Value == <span class="st">0</span> {
+		_, err = s.DB.Exec(ctx,
+			<span class="st">`DELETE FROM reactions WHERE user_id = $1 AND video_id = $2`</span>, uid, v.ID)
+	} <span class="kw">else</span> {
+		_, err = s.DB.Exec(ctx,
+			<span class="st">`INSERT INTO reactions (user_id, video_id, value) VALUES ($1, $2, $3)
+			 ON CONFLICT (user_id, video_id) DO UPDATE SET value = $3`</span>, uid, v.ID, req.Value)
+	}
+	<span class="kw">if</span> err != <span class="kw">nil</span> {
+		httpError(w, http.StatusInternalServerError, <span class="st">"更新に失敗しました"</span>)
+		<span class="kw">return</span>
+	}</code></pre>
+
+    <p>ここが<strong>冪等性の核心</strong>です。反応の操作は3種類あり、それぞれが「何度やっても同じ結果」になるよう書かれています。</p>
+    <ul>
+      <li><strong>取り消し（<code>value == 0</code>）</strong>は <code>DELETE ... WHERE user_id = $1 AND video_id = $2</code>。その人のその動画への反応を消します。<strong>もともと反応が無くても、DELETE は何も消さずに成功する</strong>（0行削除）。だから「取り消しボタンの二度押し」でエラーにならない。</li>
+      <li><strong>いいね/低評価（<code>value == 1 or -1</code>）</strong>は <code>INSERT ... ON CONFLICT (user_id, video_id) DO UPDATE SET value = $3</code>。これが PostgreSQL の <strong>UPSERT（あれば更新・無ければ挿入）</strong>です。挙動を場合分けすると:</li>
+    </ul>
+
+    <div class="ascii">INSERT ... ON CONFLICT (user_id, video_id) DO UPDATE SET value = $3
+
+  ① 初めていいね    → 衝突なし → そのまま INSERT（value=1 の行ができる）
+  ② もう一度いいね  → (user,video) が衝突 → DO UPDATE で value=1 に上書き（変化なし）
+  ③ いいね→低評価   → (user,video) が衝突 → DO UPDATE で value=-1 に上書き
+                                              ↑ 行は1つのまま、値だけ入れ替わる
+
+  どの経路でも、その人のその動画への反応は「ちょうど1行」に収束する。</div>
+
+    <p><code>ON CONFLICT (user_id, video_id)</code> の <code>(user_id, video_id)</code> は、Step 1 で見た<strong>複合主キー</strong>を名指ししています。「この組で衝突したら（=既に行があるなら）、INSERT の代わりに <code>DO UPDATE SET value = $3</code> をやれ」という指示です。おかげで —— </p>
+    <ul>
+      <li><strong>連打</strong>してもいいねは1行のまま（②）。カウントが水増しされない。</li>
+      <li><strong>いいねから低評価へ切り替え</strong>ても、行を消して作り直す必要がなく、<code>value</code> を上書きするだけ（③）。「先に DELETE してから INSERT」なら、その2文の隙間に別リクエストが割り込む余地がありますが、UPSERT は<strong>1文で原子的</strong>なのでその隙間がありません。</li>
+    </ul>
+    <p>もしこの UPSERT を使わず「まず SELECT で反応の有無を調べ、無ければ INSERT・あれば UPDATE」と3手で書いたらどうなるか。SELECT の直後に、同じ人の二度押しリクエストが割り込んで両方が「無い」と判定し、両方が INSERT に進む —— そして2行目の INSERT が主キー違反で 500 エラーになる。<code>ON CONFLICT</code> は、この「読んでから書く」競合を<strong>DB に肩代わりさせる</strong>ための道具です。第03章の状態遷移でも「読んで判定して UPDATE」ではなく「条件つき UPDATE 1文」を選んだのと、同じ思想の別の現れ方です。</p>
+
+    <div class="box hazard"><div class="box-k">⚠ 落とし穴 — DELETE と INSERT を「取り消し=削除」で分ける設計判断</div>
+      <p>いいねの取り消しを、<code>value = 0</code> という「第3の状態」として <code>reactions</code> に保存する手もあり得ます。しかしこの実装は<strong>取り消し = 行を消す（DELETE）</strong>を選びました。理由は2つ。第一に、Step 1 の <code>CHECK (value IN (1, -1))</code> が示す通り、テーブルには<strong>「いいね」か「低評価」しか存在しない</strong>——「反応が無い」状態を <code>value=0</code> の行で表すのではなく、<strong>行の不在</strong>で表す方が、Step 3 の集計（<code>COUNT</code>）が素直になる。第二に、取り消した反応の履歴を残す要件が無いから、消してよい。もし「いつ取り消したか」まで追う要件が出てきたら、この判断は見直しになります。要件が設計を決める好例です。</p>
+    </div>
+
+    <h2 class="step" id="step-3"><span class="step-no">Step 3</span>反応を数える — COUNT(*) FILTER で1クエリ集計</h2>
+    <p>反応を保存したら、更新後の集計値をクライアントに返します。<code>handleReaction</code> の末尾です。</p>
+
+    <div class="file-tag">internal/httpapi/social.go（handleReaction 末尾・集計と応答）</div>
+    <pre><code>	<span class="kw">var</span> likes, dislikes <span class="ty">int64</span>
+	s.DB.QueryRow(ctx,
+		<span class="st">`SELECT COUNT(*) FILTER (WHERE value = 1), COUNT(*) FILTER (WHERE value = -1)
+		 FROM reactions WHERE video_id = $1`</span>, v.ID).Scan(&amp;likes, &amp;dislikes)
+	writeJSON(w, http.StatusOK, map[<span class="ty">string</span>]<span class="kw">any</span>{
+		<span class="st">"likeCount"</span>: likes, <span class="st">"dislikeCount"</span>: dislikes, <span class="st">"myReaction"</span>: req.Value,
+	})
+}</code></pre>
+
+    <p>ここで注目したいのが <code>COUNT(*) FILTER (WHERE ...)</code> という PostgreSQL の<strong>集約フィルタ</strong>です。1回のクエリで、いいね数と低評価数を<strong>別々に</strong>数えています。</p>
+    <ul>
+      <li><code>COUNT(*) FILTER (WHERE value = 1)</code> —— <code>value = 1</code>（いいね）の行だけ数える。</li>
+      <li><code>COUNT(*) FILTER (WHERE value = -1)</code> —— <code>value = -1</code>（低評価）の行だけ数える。</li>
+    </ul>
+    <p>両方とも <code>WHERE video_id = $1</code> で「この動画の反応」に絞ったうえで、<code>FILTER</code> がさらに「そのうちいいねだけ / 低評価だけ」に切り分けます。もしこれを2本のクエリ（<code>SELECT COUNT(*) ... WHERE value = 1</code> と <code>... WHERE value = -1</code>）に分けたら、DB に2往復することになります。<code>FILTER</code> なら<strong>テーブルを1度なめるだけで両方を数え終える</strong>。反応のたびに走る処理なので、この1往復化は地味に効きます。</p>
+    <p>応答の <code>myReaction</code> には、いま受け付けた <code>req.Value</code> をそのまま返します。フロントは「自分は今この動画にいいね(1)/低評価(-1)/無反応(0) している」をこの値で即座に反映できる（Step 8）。<code>QueryRow(...).Scan(...)</code> は「1行だけ返るクエリの結果を、変数に流し込む」pgx の定石です。</p>
+
+    <div class="gonote"><div class="box-k">実装メモ · FILTER と CASE、どちらでもよいが FILTER が読みやすい</div>
+      <p><code>COUNT(*) FILTER (WHERE value = 1)</code> は、標準 SQL で <code>COUNT(CASE WHEN value = 1 THEN 1 END)</code> と書くのと同じ結果になります（<code>COUNT</code> は <code>NULL</code> を数えないので、条件に合わない行を <code>CASE</code> で <code>NULL</code> にすれば除外できる、という古典的な技法）。PostgreSQL の <code>FILTER</code> 句は、この意図を<strong>「何を数えているか」がひと目で分かる</strong>形に書けるのが利点です。「動画ごとの<strong>正味スコア</strong>（いいね−低評価）」が欲しければ <code>SUM(value)</code> でも取れますが、この実装は「いいね数」と「低評価数」を別々に表示したいので、<code>FILTER</code> で2つに分けて数えています。要件（何を画面に出したいか）が SQL の形を決めています。</p>
+    </div>
+
+    <h2 class="step" id="step-4"><span class="step-no">Step 4</span>コメント一覧で N+1 を作らない — handleListComments の JOIN</h2>
+    <p>この章の<strong>もう一つの山場</strong>、コメント一覧の取得です。ここには、動画サービスに限らずあらゆる Web アプリで踏みがちな <strong>N+1 問題</strong>と、その回避が現れます。</p>
+
+    <div class="file-tag">internal/httpapi/social.go（handleListComments）</div>
+    <pre><code><span class="kw">type</span> <span class="ty">commentJSON</span> <span class="kw">struct</span> {
+	ID        <span class="ty">string</span>     <span class="st">`json:"id"`</span>
+	ParentID  *<span class="ty">string</span>    <span class="st">`json:"parentId"`</span>
+	Body      <span class="ty">string</span>     <span class="st">`json:"body"`</span>
+	CreatedAt time.<span class="ty">Time</span>  <span class="st">`json:"createdAt"`</span>
+	Author    <span class="ty">ChannelRef</span> <span class="st">`json:"author"`</span>
+}
+
+<span class="kw">func</span> (s *<span class="ty">Server</span>) handleListComments(w http.<span class="ty">ResponseWriter</span>, r *http.<span class="ty">Request</span>) {
+	v, _, ok := s.getViewableVideo(w, r)
+	<span class="kw">if</span> !ok {
+		<span class="kw">return</span>
+	}
+	<span class="cm">// 投稿者情報はまとめて一度に取る（N+1を作らない）</span>
+	rows, err := s.DB.Query(r.Context(),
+		<span class="st">`SELECT cm.id, cm.parent_id, cm.body, cm.created_at, ch.id, ch.name, ch.icon_key
+		 FROM comments cm JOIN channels ch ON ch.user_id = cm.user_id
+		 WHERE cm.video_id = $1 ORDER BY cm.created_at ASC LIMIT 500`</span>, v.ID)
+	<span class="kw">if</span> err != <span class="kw">nil</span> {
+		httpError(w, http.StatusInternalServerError, <span class="st">"取得に失敗しました"</span>)
+		<span class="kw">return</span>
+	}
+	<span class="kw">defer</span> rows.Close()
+	comments := []<span class="ty">commentJSON</span>{}
+	<span class="kw">for</span> rows.Next() {
+		<span class="kw">var</span> c <span class="ty">commentJSON</span>
+		<span class="kw">var</span> iconKey <span class="ty">string</span>
+		<span class="kw">if</span> err := rows.Scan(&amp;c.ID, &amp;c.ParentID, &amp;c.Body, &amp;c.CreatedAt,
+			&amp;c.Author.ID, &amp;c.Author.Name, &amp;iconKey); err != <span class="kw">nil</span> {
+			httpError(w, http.StatusInternalServerError, <span class="st">"取得に失敗しました"</span>)
+			<span class="kw">return</span>
+		}
+		<span class="kw">if</span> iconKey != <span class="st">""</span> {
+			c.Author.IconURL = <span class="st">"/api/channels/"</span> + c.Author.ID + <span class="st">"/image/icon"</span>
+		}
+		comments = append(comments, c)
+	}
+	writeJSON(w, http.StatusOK, map[<span class="ty">string</span>]<span class="kw">any</span>{<span class="st">"comments"</span>: comments})
+}</code></pre>
+
+    <p>まずコメント1件を表すのに、DB の <code>comments</code> 行そのままではなく <code>commentJSON</code> という<strong>API 応答専用の型</strong>を定義しています。DB のコメントは投稿者を <code>user_id</code>（UUID）でしか持ちませんが、画面には<strong>投稿者の名前とアイコン</strong>が要る。だから <code>Author ChannelRef</code>（ID・名前・アイコン URL）を持たせて、コメントと投稿者情報を1つにまとめて返します。ここで問題になるのが「その投稿者情報をどう集めるか」です。</p>
+
+    <p><strong>素朴に書くと N+1 問題が起きます。</strong>「まずコメントを N 件取る。次にそれぞれの投稿者を1件ずつ引く」——これだと SQL が <strong>1 + N 回</strong>走ります。</p>
+
+    <div class="ascii">悪い設計: N+1 問題（コメント100件なら SQL が 101 回）
+
+  ① SELECT ... FROM comments WHERE video_id = $1      ← 1回（コメント100件取得）
+  ② SELECT name, icon_key FROM channels WHERE ...      ← 100回（1件ずつ投稿者を引く）
+     …コメントの数だけ DB へ往復する。100件なら 1+100=101 クエリ。
+
+  良い設計: JOIN で1回にまとめる（コメント何件でも SQL は 1 回）
+
+  ① SELECT cm.*, ch.name, ch.icon_key
+       FROM comments cm JOIN channels ch ON ch.user_id = cm.user_id
+       WHERE cm.video_id = $1                          ← 1回で投稿者ごと取り切る</div>
+
+    <p>この実装は<strong>1本の <code>JOIN</code></strong> で N+1 を回避しています。核心はこの1行です —— <code>FROM comments cm JOIN channels ch ON ch.user_id = cm.user_id</code>。コメント（<code>comments</code>）を投稿者のチャンネル（<code>channels</code>）に、<strong>「コメントした人 = そのチャンネルの持ち主」</strong>という条件（<code>ch.user_id = cm.user_id</code>）で結合します。第00章で <code>channels.user_id</code> に <code>UNIQUE</code> を付けたので、1ユーザーにチャンネルはちょうど1つ。だから各コメントは投稿者チャンネルと1対1で結ばれ、<strong>SELECT が返す各行に「コメント + その投稿者の名前・アイコン」が最初からそろっている</strong>。DB への往復は、コメントが何件あっても<strong>ちょうど1回</strong>です。</p>
+
+    <p>残りは行を読む定石です。<code>rows.Next()</code> でループし、<code>rows.Scan(...)</code> で各列を <code>commentJSON</code> の各フィールドへ流し込む。<code>SELECT</code> の列の並び（<code>cm.id, cm.parent_id, ..., ch.id, ch.name, ch.icon_key</code>）と <code>Scan</code> の引数の並びが<strong>1対1で対応</strong>していることに注意してください。ここがずれると、名前の列を ID に入れてしまうような取り違えが起きます。</p>
+
+    <p>アイコンについては一工夫あります。DB が持つのは <code>icon_key</code>(ストレージ上の鍵）で、そのままではブラウザは画像を出せません。そこで <code>iconKey != ""</code> なら <code>/api/channels/&lt;ID&gt;/image/icon</code> という<strong>配信 URL</strong> を組み立てて <code>Author.IconURL</code> に入れます。アイコン未設定（<code>icon_key</code> が空）なら URL を作らず、フロント側で頭文字アバターにフォールバックします（Step 8）。<code>ORDER BY cm.created_at ASC</code> で古い順、<code>LIMIT 500</code> で1動画あたり最大500件に上限を切っているのは、際限なく返さないための安全弁です。</p>
+
+    <div class="box hazard"><div class="box-k">⚠ 落とし穴 — N+1 は「ORM だと気づかないうちに生まれる」</div>
+      <p>本書は生 SQL を書いているので N+1 が目に見えますが、ORM（オブジェクト関係マッピング）を使うと <code>comment.author.name</code> と書いた<strong>その瞬間に</strong>裏で投稿者を引く SQL がこっそり走り、ループの中で N 回発行される —— という形で N+1 が忍び込みます。「一覧を出すたびにやたら遅い」の典型的な原因です。対策は本章と同じ「関連を <code>JOIN</code> で先読みする」（ORM では eager loading / preload と呼ばれる）。<strong>一覧 API を書くときは常に「この処理で SQL は何回走るか」を数える</strong>癖をつけると、N+1 は自然に避けられます。この <code>handleListComments</code> のコメント <code>// 投稿者情報はまとめて一度に取る（N+1を作らない）</code> は、まさにその意図を明示した注意書きです。</p>
+    </div>
+
+    <h2 class="step" id="step-5"><span class="step-no">Step 5</span>コメントを投稿し、通知を出し分ける — handleCreateComment</h2>
+    <p>コメントの投稿は、この章でいちばん手続きが多いハンドラです。3つの局面 —— <strong>検証</strong> → <strong>保存</strong> → <strong>通知</strong> —— に分けて読みます。まず検証まで。</p>
+
+    <div class="file-tag">internal/httpapi/social.go（handleCreateComment 前半・検証）</div>
+    <pre><code><span class="kw">func</span> (s *<span class="ty">Server</span>) handleCreateComment(w http.<span class="ty">ResponseWriter</span>, r *http.<span class="ty">Request</span>) {
+	uid, ok := s.requireUser(w, r)
+	<span class="kw">if</span> !ok {
+		<span class="kw">return</span>
+	}
+	v, _, ok := s.getViewableVideo(w, r)
+	<span class="kw">if</span> !ok {
+		<span class="kw">return</span>
+	}
+	<span class="kw">var</span> req <span class="kw">struct</span> {
+		Body     <span class="ty">string</span>  <span class="st">`json:"body"`</span>
+		ParentID *<span class="ty">string</span> <span class="st">`json:"parentId"`</span>
+	}
+	<span class="kw">if</span> err := readJSON(r, &amp;req); err != <span class="kw">nil</span> {
+		httpError(w, http.StatusBadRequest, <span class="st">"リクエストが不正です"</span>)
+		<span class="kw">return</span>
+	}
+	req.Body = strings.TrimSpace(req.Body)
+	<span class="kw">if</span> req.Body == <span class="st">""</span> || len(req.Body) &gt; <span class="st">3000</span> {
+		httpError(w, http.StatusBadRequest, <span class="st">"コメントは1〜1000文字にしてください"</span>)
+		<span class="kw">return</span>
+	}
+
+	ctx := r.Context()
+	<span class="kw">var</span> replyToUserID <span class="ty">string</span>
+	<span class="kw">if</span> req.ParentID != <span class="kw">nil</span> {
+		<span class="cm">// 返信先が同じ動画のコメントであることを確認する</span>
+		err := s.DB.QueryRow(ctx,
+			<span class="st">`SELECT user_id FROM comments WHERE id = $1 AND video_id = $2`</span>,
+			*req.ParentID, v.ID).Scan(&amp;replyToUserID)
+		<span class="kw">if</span> err != <span class="kw">nil</span> {
+			httpError(w, http.StatusBadRequest, <span class="st">"返信先のコメントが見つかりません"</span>)
+			<span class="kw">return</span>
+		}
+	}</code></pre>
+
+    <p>入口は Step 2 と同じ2つの門（<code>requireUser</code> + <code>getViewableVideo</code>）です。リクエストは <code>body</code>（本文）と <code>parentId</code>（返信先。トップレベルなら <code>null</code>）を受けます。<code>ParentID *string</code> が<strong>ポインタ型</strong>なのは、「<code>null</code>（返信ではない）」と「空文字」を区別するためです。JSON に <code>parentId</code> が無い/<code>null</code> なら <code>nil</code> になります。</p>
+    <p><code>strings.TrimSpace</code> で前後の空白を落としてから、<strong>空でない・長すぎない</strong>を検証します。<code>len(req.Body) &gt; 3000</code> の <code>len</code> は<strong>バイト数</strong>で、日本語は1文字3バイト前後なので、およそ1000文字ぶんを上限にしている実装です（エラーメッセージが「1〜1000文字」なのはこの意図）。</p>
+    <p>そして<strong>返信の検証</strong>。<code>parentId</code> が指定されているとき、その親コメントが<strong>本当に同じ動画（<code>video_id = $2</code>）のコメントか</strong>を確かめます。この <code>AND video_id = $2</code> が地味に重要で、これが無いと「動画 A のページから、動画 B のコメントに返信する」ような不整合や、他人の動画のコメント木への横入りを許してしまう。同時に、この SELECT で<strong>返信先の投稿者 ID（<code>replyToUserID</code>）</strong>も手に入れており、これが後の通知の宛先になります。返信先が見つからなければ 400 で弾きます。</p>
+
+    <p>次に、コメントを保存し、応答用に投稿者情報を組み立てます。</p>
+
+    <div class="file-tag">internal/httpapi/social.go（handleCreateComment 中盤・保存）</div>
+    <pre><code>	<span class="kw">var</span> c <span class="ty">commentJSON</span>
+	c.Body, c.ParentID = req.Body, req.ParentID
+	err := s.DB.QueryRow(ctx,
+		<span class="st">`INSERT INTO comments (video_id, user_id, parent_id, body)
+		 VALUES ($1, $2, $3, $4) RETURNING id, created_at`</span>,
+		v.ID, uid, req.ParentID, req.Body).Scan(&amp;c.ID, &amp;c.CreatedAt)
+	<span class="kw">if</span> err != <span class="kw">nil</span> {
+		httpError(w, http.StatusInternalServerError, <span class="st">"投稿に失敗しました"</span>)
+		<span class="kw">return</span>
+	}
+	<span class="kw">var</span> iconKey <span class="ty">string</span>
+	s.DB.QueryRow(ctx,
+		<span class="st">`SELECT id, name, icon_key FROM channels WHERE user_id = $1`</span>, uid).
+		Scan(&amp;c.Author.ID, &amp;c.Author.Name, &amp;iconKey)
+	<span class="kw">if</span> iconKey != <span class="st">""</span> {
+		c.Author.IconURL = <span class="st">"/api/channels/"</span> + c.Author.ID + <span class="st">"/image/icon"</span>
+	}</code></pre>
+
+    <p><code>INSERT ... RETURNING id, created_at</code> が pgx らしい書き方です。PostgreSQL の <code>RETURNING</code> 句は、INSERT した<strong>その行の値をそのまま返す</strong>ので、「挿入 → 生成された ID を別クエリで取り直す」という2手が要りません。<code>id</code>（<code>gen_random_uuid()</code> で自動生成）と <code>created_at</code>（<code>now()</code> 既定）を、挿入と同時に受け取って <code>commentJSON</code> に詰めます。</p>
+    <p>続く SELECT で、投稿者（<code>uid</code>）自身のチャンネル名とアイコンを取り、応答用の <code>Author</code> を埋めます。Step 4 の一覧では <code>JOIN</code> でまとめて取りましたが、ここは<strong>コメント1件を返すだけ</strong>なので、投稿者1人ぶんを素直に引くだけ。N+1 は「ループの中で N 回引く」問題であって、「1件につき1回引く」のは何の問題もありません。</p>
+
+    <p>最後が、この章のハイライトの一つ、<strong>通知の出し分け</strong>です。</p>
+
+    <div class="file-tag">internal/httpapi/social.go（handleCreateComment 末尾・通知）</div>
+    <pre><code>	<span class="cm">// 通知: 返信なら返信先の人へ、そうでなければ動画の持ち主へ（FR-N2）</span>
+	snippet := req.Body
+	<span class="kw">if</span> len([]<span class="ty">rune</span>(snippet)) &gt; <span class="st">50</span> {
+		snippet = string([]<span class="ty">rune</span>(snippet)[:<span class="st">50</span>]) + <span class="st">"…"</span>
+	}
+	<span class="kw">if</span> replyToUserID != <span class="st">""</span> &amp;&amp; replyToUserID != uid {
+		notify.Send(ctx, s.DB, s.Q, replyToUserID, <span class="st">"reply"</span>,
+			c.Author.Name+<span class="st">" があなたのコメントに返信しました"</span>, snippet, &amp;v.ID)
+	} <span class="kw">else if</span> replyToUserID == <span class="st">""</span> &amp;&amp; v.OwnerID != uid {
+		notify.Send(ctx, s.DB, s.Q, v.OwnerID, <span class="st">"comment"</span>,
+			c.Author.Name+<span class="st">" が「"</span>+v.Title+<span class="st">"」にコメントしました"</span>, snippet, &amp;v.ID)
+	}
+	writeJSON(w, http.StatusCreated, c)
+}</code></pre>
+
+    <p>まず <code>snippet</code>。本文の先頭50文字を通知の抜粋にします。ここで <code>[]rune(snippet)</code> と<strong>ルーン（文字）に変換してから</strong>50個で切っているのが要点です。もし <code>snippet[:50]</code> とバイトで切ると、日本語（1文字=複数バイト）の途中でぶつ切りになり、文字化けした半端なバイト列になります。<code>[]rune</code> で「文字単位」にしてから切れば、マルチバイト文字が壊れません。50文字を超える場合だけ末尾に <code>…</code> を足します。</p>
+
+    <p>そして通知の<strong>出し分け</strong>。<code>if / else if</code> の2分岐が「誰に通知するか」を決めます。</p>
+
+    <div class="ascii">コメント投稿時、誰に通知するか
+
+  返信（parentId あり）              トップレベル（parentId なし）
+   replyToUserID != ""               replyToUserID == ""
+        │                                  │
+        ▼                                  ▼
+  返信先の人へ "reply" 通知          動画の持ち主へ "comment" 通知
+   ただし返信先 == 自分 なら出さない   ただし持ち主 == 自分 なら出さない
+   （replyToUserID != uid）           （v.OwnerID != uid）</div>
+
+    <ul>
+      <li><strong>返信のとき</strong>（<code>replyToUserID != ""</code>）は、Step 前半で取った<strong>返信先の投稿者</strong>へ「◯◯ があなたのコメントに返信しました」と <code>"reply"</code> 通知を送る。</li>
+      <li><strong>トップレベルのコメント</strong>（<code>replyToUserID == ""</code>）は、<strong>動画の持ち主（<code>v.OwnerID</code>）</strong>へ「◯◯ が『タイトル』にコメントしました」と <code>"comment"</code> 通知を送る。</li>
+    </ul>
+    <p>両分岐に共通して効いている条件が <strong>「宛先 != 自分（<code>uid</code>）」</strong>です。<code>replyToUserID != uid</code> と <code>v.OwnerID != uid</code>。これが無いと、<strong>自分のコメントに自分で返信したり、自分の動画に自分でコメントしたときに、自分あての通知が飛ぶ</strong>という不快な挙動になります。「自分の行動で自分に通知しない」は、通知機能の基本マナーです。実際に通知を DB に書き・リアルタイムに配るのは <code>notify.Send</code>（第07章）の仕事で、ここは<strong>「誰に・どんな文面で」だけを決めて手渡している</strong>。関心の分離がきれいに効いています。</p>
+    <p>最後に <code>writeJSON(w, http.StatusCreated, c)</code> で、作ったコメント（<code>commentJSON</code>）を <strong>201 Created</strong> で返します。フロントはこの応答を受け取って、再取得せずに画面へ即座に差し込めます（Step 8 の <code>onPosted</code>）。</p>
+
+    <div class="gonote"><div class="box-k">実装メモ · notify.Send の署名を確認しておく</div>
+      <p><code>notify.Send</code> の実体は <code>internal/notify/notify.go</code> にあり、署名は <code>func Send(ctx context.Context, pool *pgxpool.Pool, q *queue.Queue, userID, ntype, title, body string, videoID *string) error</code> です。<code>userID</code>（宛先）・<code>ntype</code>（<code>"reply"</code> / <code>"comment"</code> など種別）・<code>title</code>・<code>body</code>・関連動画 <code>videoID</code> を受け取り、通知テーブルへの記録と Redis Pub/Sub での配信を行います。本章では文面を組み立てて渡すところまでを見て、配信の中身（DB 保存と SSE への push）は第07章に譲ります。第07章の「新着通知 fanout」も同じ <code>notify</code> パッケージの仲間で、あちらは <code>notified_at</code> の原子的 UPDATE で二重配布を防ぐ設計でした —— この章のコメント通知も、根っこは同じ「一度きり・冪等」の思想の上にあります。</p>
+    </div>
+
+    <h2 class="step" id="step-6"><span class="step-no">Step 6</span>チャンネル登録を冪等に — handleSubscribe / handleUnsubscribe</h2>
+    <p>チャンネル登録（購読）は、テーマ的に反応の仲間ですが、実装は <code>httpapi/channels.go</code> にあります（チャンネルに紐づく操作なので）。いいねと<strong>そっくりな冪等パターン</strong>が、少し違う道具（<code>ON CONFLICT DO NOTHING</code>）で現れます。まず登録から。</p>
+
+    <div class="file-tag">internal/httpapi/channels.go（handleSubscribe）</div>
+    <pre><code><span class="kw">func</span> (s *<span class="ty">Server</span>) handleSubscribe(w http.<span class="ty">ResponseWriter</span>, r *http.<span class="ty">Request</span>) {
+	uid, ok := s.requireUser(w, r)
+	<span class="kw">if</span> !ok {
+		<span class="kw">return</span>
+	}
+	channelID := r.PathValue(<span class="st">"id"</span>)
+	<span class="kw">var</span> ownerID <span class="ty">string</span>
+	<span class="kw">if</span> err := s.DB.QueryRow(r.Context(),
+		<span class="st">`SELECT user_id FROM channels WHERE id = $1`</span>, channelID).Scan(&amp;ownerID); err != <span class="kw">nil</span> {
+		httpError(w, http.StatusNotFound, <span class="st">"チャンネルが見つかりません"</span>)
+		<span class="kw">return</span>
+	}
+	<span class="kw">if</span> ownerID == uid {
+		httpError(w, http.StatusBadRequest, <span class="st">"自分のチャンネルは登録できません"</span>)
+		<span class="kw">return</span>
+	}
+	<span class="cm">// 二重登録は主キーで弾かれる。ON CONFLICT で「すでに登録済み」も成功扱いに</span>
+	<span class="kw">if</span> _, err := s.DB.Exec(r.Context(),
+		<span class="st">`INSERT INTO subscriptions (user_id, channel_id) VALUES ($1, $2) ON CONFLICT DO NOTHING`</span>,
+		uid, channelID); err != <span class="kw">nil</span> {
+		httpError(w, http.StatusInternalServerError, <span class="st">"登録に失敗しました"</span>)
+		<span class="kw">return</span>
+	}
+	s.respondSubscription(w, r, uid, channelID)
+}</code></pre>
+
+    <p>ログイン必須の門を通ったあと、URL の <code>{id}</code>（<code>r.PathValue("id")</code>）でチャンネルを特定します。2つの検証があります。</p>
+    <ul>
+      <li><strong>チャンネルの実在確認</strong> —— <code>SELECT user_id FROM channels WHERE id = $1</code>。見つからなければ 404。ついでにそのチャンネルの持ち主 <code>ownerID</code> を取ります。</li>
+      <li><strong>自分登録の禁止</strong> —— <code>ownerID == uid</code> なら「自分のチャンネルは登録できません」で 400。自分で自分を購読するのは意味がないので弾きます。</li>
+    </ul>
+    <p>そして冪等の核心 —— <code>INSERT ... ON CONFLICT DO NOTHING</code>。いいねの UPSERT（<code>DO UPDATE</code>）と対で覚えてください。登録は「あるか/ないか」の2状態しかなく、更新すべき列（value のようなもの）がありません。だから衝突したら<strong>何もしない（<code>DO NOTHING</code>）</strong>でいい。挙動はこうです。</p>
+
+    <div class="ascii">INSERT INTO subscriptions ... ON CONFLICT DO NOTHING
+
+  ① 初めて登録    → 衝突なし → INSERT（登録される）
+  ② もう一度登録  → (user,channel) が主キー衝突 → DO NOTHING（黙って成功）
+                                                    ↑ エラーにならない = 冪等
+
+  DO UPDATE（いいね）との違い: 更新すべき値が無いので「何もしない」で十分。</div>
+
+    <p><code>ON CONFLICT</code> が無ければ、二度目の登録は<strong>主キー違反で 500 エラー</strong>になり、フロントに「失敗」が返ってしまう。ユーザーからすれば「もう登録済みなのだから、成功でいいはず」。<code>DO NOTHING</code> は、その<strong>「すでにその状態なら、成功扱い」</strong>を実現します。二度押しでも通信リトライでも、結果は常に「登録されている」1状態に収束する —— これが Step 2 と同じ冪等性です。<code>ON CONFLICT DO NOTHING</code> はターゲット列（<code>(user_id, channel_id)</code>）を省略していますが、このテーブルの一意制約は主キーだけなので、それが暗黙のターゲットになります。</p>
+
+    <p>解除は、いいねの取り消しと同じく <code>DELETE</code> です。</p>
+
+    <div class="file-tag">internal/httpapi/channels.go（handleUnsubscribe と respondSubscription）</div>
+    <pre><code><span class="kw">func</span> (s *<span class="ty">Server</span>) handleUnsubscribe(w http.<span class="ty">ResponseWriter</span>, r *http.<span class="ty">Request</span>) {
+	uid, ok := s.requireUser(w, r)
+	<span class="kw">if</span> !ok {
+		<span class="kw">return</span>
+	}
+	channelID := r.PathValue(<span class="st">"id"</span>)
+	<span class="kw">if</span> _, err := s.DB.Exec(r.Context(),
+		<span class="st">`DELETE FROM subscriptions WHERE user_id = $1 AND channel_id = $2`</span>, uid, channelID); err != <span class="kw">nil</span> {
+		httpError(w, http.StatusInternalServerError, <span class="st">"解除に失敗しました"</span>)
+		<span class="kw">return</span>
+	}
+	s.respondSubscription(w, r, uid, channelID)
+}
+
+<span class="kw">func</span> (s *<span class="ty">Server</span>) respondSubscription(w http.<span class="ty">ResponseWriter</span>, r *http.<span class="ty">Request</span>, uid, channelID <span class="ty">string</span>) {
+	<span class="kw">var</span> subscribed <span class="ty">bool</span>
+	<span class="kw">var</span> count <span class="ty">int64</span>
+	s.DB.QueryRow(r.Context(),
+		<span class="st">`SELECT EXISTS (SELECT 1 FROM subscriptions WHERE user_id = $1 AND channel_id = $2),
+		        (SELECT COUNT(*) FROM subscriptions WHERE channel_id = $2)`</span>,
+		uid, channelID).Scan(&amp;subscribed, &amp;count)
+	writeJSON(w, http.StatusOK, map[<span class="ty">string</span>]<span class="kw">any</span>{<span class="st">"isSubscribed"</span>: subscribed, <span class="st">"subscriberCount"</span>: count})
+}</code></pre>
+
+    <p>解除の <code>DELETE ... WHERE user_id = $1 AND channel_id = $2</code> は、Step 2 のいいね取り消しと同じ形。<strong>登録していなくても、0行削除で成功</strong>するので、解除の二度押しでもエラーになりません。登録・解除どちらも、最後は共通の <code>respondSubscription</code> を呼びます。</p>
+    <p>この <code>respondSubscription</code> が気が利いています。<strong>1本のクエリで「自分は今このチャンネルを登録しているか」と「総登録者数」を同時に取っています</strong>。</p>
+    <ul>
+      <li><code>EXISTS (SELECT 1 FROM subscriptions WHERE user_id = $1 AND channel_id = $2)</code> —— 自分の登録の有無を <code>true/false</code> で。<code>EXISTS</code> は「1行でもあれば真」を効率よく判定する（全部数えずに済む）ので、有無の確認に向いています。</li>
+      <li><code>(SELECT COUNT(*) FROM subscriptions WHERE channel_id = $2)</code> —— このチャンネルの総登録者数。</li>
+    </ul>
+    <p>これを2本のクエリに分けず1本にまとめるのは、Step 3 の <code>FILTER</code> と同じ「DB への往復を減らす」発想です。応答は <code>{ "isSubscribed": true, "subscriberCount": 42 }</code> の形。フロントは登録ボタンを押した直後に、ボタンの表示と登録者数を<strong>サーバの真実に合わせて</strong>更新できます。</p>
+
+    <div class="box do"><div class="box-k">▸ 動かして確認 — いいねと登録が冪等か、DB で確かめる</div>
+      <p>スタックを起動し、動画を1本 ready まで持っていった状態で（第00〜03章）、いいねと登録を<strong>2回ずつ</strong>叩き、DB の行数が増えないことを見ます。<code>&lt;TOKEN&gt;</code>・<code>&lt;VIDEO_ID&gt;</code>・<code>&lt;CHANNEL_ID&gt;</code> は自分の環境の値に置き換えてください。</p>
+      <pre class="term"><code><span class="cm"># いいねを2回連打（value=1）</span>
+<span class="ps">$</span> curl -s -X POST localhost:8080/api/videos/&lt;VIDEO_ID&gt;/reaction \
+       -H <span class="st">"Authorization: Bearer &lt;TOKEN&gt;"</span> -d <span class="st">'{"value":1}'</span>
+<span class="out">{"dislikeCount":0,"likeCount":1,"myReaction":1}</span>
+<span class="ps">$</span> curl -s -X POST localhost:8080/api/videos/&lt;VIDEO_ID&gt;/reaction \
+       -H <span class="st">"Authorization: Bearer &lt;TOKEN&gt;"</span> -d <span class="st">'{"value":1}'</span>
+<span class="out">{"dislikeCount":0,"likeCount":1,"myReaction":1}  ← 2回目でも likeCount は 1 のまま</span>
+
+<span class="cm"># DB でも reactions は 1 行だけ</span>
+<span class="ps">$</span> docker compose exec db psql -U video -d video \
+       -c <span class="st">"SELECT COUNT(*) FROM reactions WHERE video_id='&lt;VIDEO_ID&gt;';"</span>
+<span class="out"> count
+-------
+     1</span>
+
+<span class="cm"># チャンネル登録も2回 → subscriberCount は増えない</span>
+<span class="ps">$</span> curl -s -X POST localhost:8080/api/channels/&lt;CHANNEL_ID&gt;/subscription \
+       -H <span class="st">"Authorization: Bearer &lt;TOKEN&gt;"</span>
+<span class="out">{"isSubscribed":true,"subscriberCount":1}</span>
+<span class="ps">$</span> curl -s -X POST localhost:8080/api/channels/&lt;CHANNEL_ID&gt;/subscription \
+       -H <span class="st">"Authorization: Bearer &lt;TOKEN&gt;"</span>
+<span class="out">{"isSubscribed":true,"subscriberCount":1}  ← 二度押しでも 1</span></code></pre>
+      <p>2回目でもカウントが 1 のまま・DB の行数も 1 —— これが <code>ON CONFLICT</code> による冪等性の目に見える姿です。</p>
+    </div>
+
+    <h2 class="step" id="step-7"><span class="step-no">Step 7</span>視聴を「連打では増やさない」で数える — handlePostView</h2>
+    <p>反応の親戚として、<strong>視聴カウント</strong>も見ておきます。いいねや登録が「DB の主キーで二重を防ぐ」のに対し、視聴は<strong>Redis を使って「一定時間内の重複」を弾く</strong>という別のアプローチを取ります。</p>
+
+    <div class="file-tag">internal/httpapi/social.go（handlePostView）</div>
+    <pre><code><span class="cm">// handlePostView: 視聴のカウント。連打・再読み込みでは増えない（重複チェック）。</span>
+<span class="kw">func</span> (s *<span class="ty">Server</span>) handlePostView(w http.<span class="ty">ResponseWriter</span>, r *http.<span class="ty">Request</span>) {
+	v, uid, ok := s.getViewableVideo(w, r)
+	<span class="kw">if</span> !ok {
+		<span class="kw">return</span>
+	}
+	viewerKey := uid
+	<span class="kw">if</span> viewerKey == <span class="st">""</span> {
+		viewerKey = <span class="st">"ip:"</span> + clientIP(r)
+	}
+	ctx := r.Context()
+	first, err := s.Q.MarkViewed(ctx, v.ID, viewerKey, <span class="st">30</span>*time.Minute)
+	<span class="kw">if</span> err != <span class="kw">nil</span> {
+		httpError(w, http.StatusInternalServerError, <span class="st">"記録に失敗しました"</span>)
+		<span class="kw">return</span>
+	}
+	<span class="kw">if</span> first {
+		<span class="cm">// 表示用カウントは一時置き場に溜め、トレンド用イベントはDBへ残す</span>
+		s.Q.BufferView(ctx, v.ID)
+		<span class="kw">var</span> userID *<span class="ty">string</span>
+		<span class="kw">if</span> uid != <span class="st">""</span> {
+			userID = &amp;uid
+		}
+		s.DB.Exec(ctx, <span class="st">`INSERT INTO view_events (video_id, user_id) VALUES ($1, $2)`</span>, v.ID, userID)
+	}
+	writeJSON(w, http.StatusOK, map[<span class="ty">string</span>]<span class="ty">bool</span>{<span class="st">"counted"</span>: first})
+}</code></pre>
+
+    <p>まず視聴は<strong>ログイン不要</strong>です（<code>getViewableVideo</code> だけで <code>requireUser</code> が無い）。匿名の視聴者も数えたいから。そこで「誰が見たか」の代わりに <strong><code>viewerKey</code></strong> を作ります。ログイン済みなら利用者 ID、匿名なら <code>"ip:" + IPアドレス</code>。これが「この視聴者」を識別する鍵です。</p>
+    <p>重複を弾くのが <code>s.Q.MarkViewed(ctx, v.ID, viewerKey, 30*time.Minute)</code>。これは Redis に「この動画×この視聴者は視聴済み」という印を<strong>30分の有効期限つき</strong>で立て、<strong>初めてなら <code>first=true</code>、既にあれば <code>false</code></strong> を返す実装です（中身は第03章・第06章のキュー側で扱います）。だから —— </p>
+    <ul>
+      <li><strong>初回視聴</strong>（<code>first=true</code>）だけカウントに進む。</li>
+      <li>同じ視聴者が30分以内に<strong>再読み込みや連打</strong>しても <code>first=false</code> になり、カウントされない。</li>
+    </ul>
+    <p>いいね（永続的な1行で「今後ずっと二重を防ぐ」）と違い、視聴は<strong>「30分という時間窓での重複」だけを防ぐ</strong>。同じ人が翌日また見たら、それは正当な2回目の視聴として数えます。「二重を防ぐ」の粒度が、対象の性質（永続的な意思表示 vs 時間で更新される行動）で変わるのが面白いところです。</p>
+    <p>初回のときだけ、2つの記録を残します。<code>s.Q.BufferView</code> は<strong>表示用のカウントを Redis の一時置き場に溜める</strong>（第00章の <code>FlushViewsLoop</code> が10秒ごとにまとめて <code>videos.view_count</code> へ流す —— 視聴のたびに DB を UPDATE せず、書き込みをまとめる工夫）。<code>INSERT INTO view_events</code> は<strong>トレンド計算用の生イベントを DB に残す</strong>（第06章の時間減衰スコアの元データ）。<code>userID *string</code> をポインタにして匿名なら <code>nil</code>（=DB では <code>NULL</code>）を入れているのは、<code>view_events.user_id</code> が <code>NULL</code> 許容だからです（第00章のスキーマ）。応答の <code>{ "counted": true/false }</code> で、フロントは「今回カウントされたか」を知れます。</p>
+
+    <div class="gonote"><div class="box-k">実装メモ · なぜ視聴カウントだけ Redis を使うのか（書き込み頻度）</div>
+      <p>いいね・登録は「たまに」しか起きませんが、視聴は<strong>桁違いに頻繁</strong>に発生します。もし視聴のたびに <code>UPDATE videos SET view_count = view_count + 1</code> を直接叩くと、人気動画では同じ行への UPDATE が殺到し、行ロックの競合で詰まります。そこでこの実装は「<strong>重複判定と一時カウントは Redis（速い・使い捨てでよい）</strong>、<strong>正式な集計は10秒ごとにまとめて DB へ</strong>」と役割を分けています。第00章で「Redis は消えても致命傷にならないデータに使う」と言った割り切りが、ここで具体化しています。反応の種類ごとに「主キーで防ぐ / 時間窓で防ぐ」「即 DB / バッファしてまとめて DB」を使い分ける —— 頻度と重要度に応じた設計の引き出しを、この章は見せてくれます。</p>
+    </div>
+
+    <h2 class="step" id="step-8"><span class="step-no">Step 8</span>画面につなぐ — Comments.tsx</h2>
+    <p>最後に、ここまで作った反応 API を<strong>画面</strong>につなぎます。コメントの表示・投稿・返信を担うのが <code>frontend/src/components/Comments.tsx</code>。バックエンドの <code>commentJSON</code> と対になる TypeScript の型から見ます。</p>
+
+    <div class="file-tag">frontend/src/types.ts（Comment / ChannelRef・抜粋）</div>
+    <pre><code><span class="kw">export interface</span> <span class="ty">ChannelRef</span> {
+  id: <span class="ty">string</span>;
+  name: <span class="ty">string</span>;
+  iconUrl?: <span class="ty">string</span>;
+}
+
+<span class="kw">export interface</span> <span class="ty">Comment</span> {
+  id: <span class="ty">string</span>;
+  parentId: <span class="ty">string</span> | <span class="kw">null</span>;
+  body: <span class="ty">string</span>;
+  createdAt: <span class="ty">string</span>;
+  author: <span class="ty">ChannelRef</span>;
+}</code></pre>
+
+    <p>Go の <code>commentJSON</code>（<code>id</code> / <code>parentId</code> / <code>body</code> / <code>createdAt</code> / <code>author</code>）と<strong>フィールドが一致</strong>しているのが分かります。Go の <code>ChannelRef</code> と TS の <code>ChannelRef</code> も同じ形。JSON を挟んで、サーバとフロントが同じ「コメント」の姿を共有しています。<code>parentId: string | null</code> が Go の <code>*string</code>（nil 可）に対応します。</p>
+
+    <p>コメント投稿フォームの中核、<code>CommentForm</code> を読みます。</p>
+
+    <div class="file-tag">frontend/src/components/Comments.tsx（CommentForm・抜粋）</div>
+    <pre><code><span class="kw">function</span> CommentForm({
+  videoId,
+  parentId,
+  onPosted,
+  onCancel,
+}: {
+  videoId: <span class="ty">string</span>;
+  parentId?: <span class="ty">string</span>;
+  onPosted: (c: <span class="ty">Comment</span>) =&gt; <span class="kw">void</span>;
+  onCancel?: () =&gt; <span class="kw">void</span>;
+}) {
+  <span class="kw">const</span> [body, setBody] = useState(<span class="st">""</span>);
+  <span class="kw">const</span> [error, setError] = useState(<span class="st">""</span>);
+  <span class="kw">const</span> submit = <span class="kw">async</span> (e: <span class="ty">React</span>.<span class="ty">FormEvent</span>) =&gt; {
+    e.preventDefault();
+    <span class="kw">if</span> (!body.trim()) <span class="kw">return</span>;
+    <span class="kw">try</span> {
+      <span class="kw">const</span> c = <span class="kw">await</span> api.post&lt;<span class="ty">Comment</span>&gt;(<span class="st">`/api/videos/${videoId}/comments`</span>, {
+        body,
+        parentId: parentId ?? <span class="kw">null</span>,
+      });
+      setBody(<span class="st">""</span>);
+      setError(<span class="st">""</span>);
+      onPosted(c);
+      onCancel?.();
+    } <span class="kw">catch</span> (err) {
+      setError((err <span class="kw">as</span> <span class="ty">Error</span>).message);
+    }
+  };</code></pre>
+
+    <p>この <code>CommentForm</code> は、トップレベルのコメント欄と返信欄を<strong>1つの部品で兼ねます</strong>。<code>parentId</code> が渡されていれば返信フォーム、無ければ通常のコメント欄です。<code>submit</code> の中身が Step 5 のバックエンドと呼応します。</p>
+    <ul>
+      <li><code>if (!body.trim()) return;</code> —— 空投稿を<strong>フロントでも</strong>弾く。バックエンドの <code>strings.TrimSpace</code> + 空チェック（Step 5）と同じ防御を、UX のために手前でも行います（サーバの検証は消さない —— フロントの検証は迂回できるので、DB 直前の砦は必ず残す）。</li>
+      <li><code>api.post&lt;Comment&gt;(\`/api/videos/${videoId}/comments\`, { body, parentId: parentId ?? null })</code> —— Step 5 の <code>handleCreateComment</code> を叩く。<code>parentId ?? null</code> は「返信なら親 ID、そうでなければ <code>null</code>」で、Go 側の <code>ParentID *string</code>（nil 可）にきれいに対応します。<code>api.post&lt;Comment&gt;</code> のジェネリクスで、返り値が <code>Comment</code> 型だと分かります。</li>
+      <li>投稿成功後、<code>onPosted(c)</code> で<strong>親コンポーネントへ作られたコメントを手渡す</strong>。サーバが 201 で返した <code>commentJSON</code>（ID・投稿者情報つき）がそのまま <code>c</code> なので、<strong>一覧を再取得せずに</strong>画面へ差し込めます。これが Step 5 で「作ったコメントを返す」設計にした狙いです。</li>
+      <li>失敗したら <code>catch</code> で <code>error</code> state に入れ、フォーム下にメッセージを出す。</li>
+    </ul>
+
+    <p>コメントの<strong>木構造</strong>（トップレベルと返信）を組み立てるのが、トップの <code>Comments</code> コンポーネントです。</p>
+
+    <div class="file-tag">frontend/src/components/Comments.tsx（Comments 本体）</div>
+    <pre><code><span class="kw">export function</span> Comments({ videoId, comments, onPosted }: <span class="ty">Props</span>) {
+  <span class="kw">const</span> { user } = useAuth();
+  <span class="kw">const</span> topLevel = comments.filter((c) =&gt; !c.parentId);
+  <span class="kw">const</span> repliesOf = (id: <span class="ty">string</span>) =&gt; comments.filter((c) =&gt; c.parentId === id);
+  <span class="kw">return</span> (
+    &lt;section className=<span class="st">"comments"</span>&gt;
+      &lt;h3&gt;{comments.length} 件のコメント&lt;/h3&gt;
+      {user ? (
+        &lt;CommentForm videoId={videoId} onPosted={onPosted} /&gt;
+      ) : (
+        &lt;p className=<span class="st">"empty"</span>&gt;
+          コメントするには&lt;Link to=<span class="st">"/login"</span>&gt;ログイン&lt;/Link&gt;してください
+        &lt;/p&gt;
+      )}
+      {topLevel.map((c) =&gt; (
+        &lt;CommentItem key={c.id} comment={c} replies={repliesOf(c.id)} videoId={videoId} onPosted={onPosted} /&gt;
+      ))}
+    &lt;/section&gt;
+  );
+}</code></pre>
+
+    <p>サーバは Step 4 で見たとおり、コメントを<strong>フラットな配列</strong>（親も返信も混ざった一列）で返します。木に組み直すのはフロントの仕事です。</p>
+    <ul>
+      <li><code>topLevel = comments.filter((c) =&gt; !c.parentId)</code> —— <code>parentId</code> が <code>null</code> のものだけ = トップレベルのコメント。</li>
+      <li><code>repliesOf(id) = comments.filter((c) =&gt; c.parentId === id)</code> —— ある親 ID に対する返信を集める。</li>
+    </ul>
+    <p>Step 4 のクエリが <code>ORDER BY cm.created_at ASC</code> で<strong>時系列に並べて</strong>返すので、フロントは <code>filter</code> で親と子に振り分けるだけで正しい順序の木ができます。<code>CommentItem</code> に「そのコメント本体」と「その返信たち」を渡して1階層ぶんを描く。この設計だと<strong>返信の返信（2階層以上）は表示上フラットになる</strong>（1階層の木）——学習用の割り切りですが、多くのコメント欄はこの「1階層返信」で足りています。</p>
+    <p>ログイン状態（<code>useAuth</code>）による出し分けにも注目。ログイン済みなら投稿フォーム、未ログインなら「ログインしてください」を出す。これは Step 5 のバックエンドが <code>requireUser</code> で 401 を返すことと<strong>UI 側で呼応</strong>しています。サーバが弾く操作を、そもそもフロントでは見せない —— サーバの認可とフロントの表示は、いつもこうしてペアで設計します。</p>
+
+    <div class="gonote"><div class="box-k">実装メモ · アイコン URL とフォールバック（CommentItem）</div>
+      <p><code>CommentItem</code> は、Step 4 でサーバが組み立てた <code>author.iconUrl</code> を使ってアバターを出します。実コードでは <code>comment.author.iconUrl ? &lt;img ... src={mediaSrc(comment.author.iconUrl)} /&gt; : &lt;span className="avatar avatar-fallback"&gt;{comment.author.name[0]}&lt;/span&gt;</code> と、<strong>アイコンがあれば画像・無ければ名前の頭文字</strong>を出し分けています。Step 4 で「<code>icon_key</code> が空なら <code>IconURL</code> を作らない」と決めたサーバ側の判断が、ここで「頭文字アバターへのフォールバック」として画面に現れます。<code>mediaSrc</code> は相対 URL に API のベースを足すヘルパで、認証が要る画像には <code>?token=</code> を付ける役目もあります（第04章で見た「<code>&lt;img&gt;</code> はヘッダを付けられないから <code>?token=</code>」の実践）。</p>
+    </div>
+
+    <h2>つまずき FAQ</h2>
+    <details class="qa"><summary>いいねを <code>ON CONFLICT DO UPDATE</code>、登録を <code>ON CONFLICT DO NOTHING</code> にしているのはなぜ? 揃えなくていいの?</summary>
+      <div class="qa-body"><p>対象が持つ「状態の数」が違うからです。いいねは <strong>いいね(1) / 低評価(-1)</strong> という<strong>更新すべき値</strong>を持つので、既にある行の <code>value</code> を<strong>書き換える</strong>必要がある → <code>DO UPDATE SET value = $3</code>。一方チャンネル登録は「登録済み/未登録」の2状態しかなく、行があること自体が「登録済み」を意味するので、二度目は<strong>何もしなくていい</strong> → <code>DO NOTHING</code>。もし登録に更新したい列（例: 通知設定）が増えたら、そのときは <code>DO UPDATE</code> に変わります。「衝突したとき何をすべきか」は対象の状態モデルが決めます。</p></div>
+    </details>
+    <details class="qa"><summary>コメント一覧の N+1 回避を、<code>JOIN</code> ではなく「IN 句でまとめて引く」でやってもいい?</summary>
+      <div class="qa-body"><p>やれます。「コメントを取る → 出てきた <code>user_id</code> を集めて <code>SELECT ... FROM channels WHERE user_id IN (...)</code> で投稿者をまとめて引く → メモリで突き合わせる」という2クエリ方式でも、SQL は<strong>2回</strong>（N+1 ではない）で済みます。本章が <code>JOIN</code> を選んだのは、投稿者とコメントが <code>channels.user_id</code> の <code>UNIQUE</code> で<strong>1対1</strong>に定まり、1本の SQL で自然に取り切れるから。多対多や、付随データが巨大で JOIN すると行が膨らむ場合は、IN 句方式（またはアプリ側マップ）の方が有利なこともあります。<strong>どちらも「件数に比例して SQL を撃たない」が肝</strong>で、そこさえ守れば N+1 は避けられます。</p></div>
+    </details>
+    <details class="qa"><summary>コメント投稿で「自分の動画に自分でコメント」したら通知は飛ぶ?</summary>
+      <div class="qa-body"><p>飛びません。Step 5 の分岐に <code>v.OwnerID != uid</code>（トップレベル）と <code>replyToUserID != uid</code>（返信）という条件が入っていて、<strong>宛先が自分自身のときは <code>notify.Send</code> を呼びません</strong>。もしこの条件が無いと、自分の動画にメモ代わりにコメントするたびに自分あて通知が来る、返信を自分でぶら下げると自分に通知が来る、という鬱陶しい挙動になります。「自分の行動で自分に通知しない」は通知設計の基本で、この2つの不等号がそれを担保しています。</p></div>
+    </details>
+
+    <h2>理解度チェック</h2>
+    <p>次の問いに<strong>自分の言葉で</strong>答えられたら、この章は卒業です。</p>
+    <details class="qa"><summary>1. いいねの二度押しやチャンネル登録の二度押しで、DB のレコードが1つに保たれる仕組みを、<code>reactions</code> / <code>subscriptions</code> のスキーマと SQL の両面から説明せよ。</summary>
+      <div class="qa-body"><p>まずスキーマ側で、両テーブルとも <code>PRIMARY KEY (user_id, video_id)</code> / <code>PRIMARY KEY (user_id, channel_id)</code> の<strong>複合主キー</strong>を持ち、「同じ人×同じ対象」の組は<strong>物理的に1行しか作れない</strong>（内部的には <code>UNIQUE</code> 制約）。その上で SQL 側が、いいねは <code>INSERT ... ON CONFLICT (user_id, video_id) DO UPDATE SET value = $3</code>（衝突したら値を上書き）、登録は <code>INSERT ... ON CONFLICT DO NOTHING</code>（衝突したら何もしない）。どちらも「二度目の操作でエラーにならず、状態は1つに収束する」= 冪等。取り消し/解除は <code>DELETE</code> で、行が無くても0行削除で成功するので、これも二度押しに耐える。「読んでから書く」の隙間の競合を DB に肩代わりさせている。</p></div>
+    </details>
+    <details class="qa"><summary>2. N+1 問題とは何か。<code>handleListComments</code> がそれをどう回避しているか、具体的な SQL を挙げて説明せよ。</summary>
+      <div class="qa-body"><p>N+1 問題とは、一覧の N 件それぞれに付随情報（ここでは投稿者名・アイコン）を<strong>1件ずつ別クエリで引く</strong>ことで、SQL が <code>1 + N</code> 回発行され、件数に比例して遅くなる問題。<code>handleListComments</code> は <code>FROM comments cm JOIN channels ch ON ch.user_id = cm.user_id WHERE cm.video_id = $1</code> と、コメントを投稿者のチャンネルに <code>JOIN</code> し、<strong>1本のクエリで「コメント + 投稿者情報」を取り切る</strong>ことで回避している。<code>channels.user_id</code> が <code>UNIQUE</code>（1ユーザー1チャンネル）なので、各コメントは投稿者と1対1に結ばれ、SELECT の各行に投稿者名・アイコンが最初からそろう。DB への往復はコメントが何件でも1回。</p></div>
+    </details>
+    <details class="qa"><summary>3. 視聴カウント（<code>handlePostView</code>）は、いいねと違って主キーで重複を防いでいない。どうやって「連打・再読み込みでは増やさない」を実現し、なぜそのやり方を選んだのか。</summary>
+      <div class="qa-body"><p><code>viewerKey</code>（ログイン済みは利用者 ID、匿名は <code>"ip:"+IP</code>）を作り、<code>s.Q.MarkViewed(ctx, v.ID, viewerKey, 30*time.Minute)</code> で <strong>Redis に「この動画×この視聴者は視聴済み」の印を30分の有効期限つきで立て、初回だけ <code>first=true</code></strong> を返させる。<code>first</code> のときだけカウント（Redis の一時バッファ <code>BufferView</code> と、トレンド用の <code>view_events</code> INSERT）に進むので、30分以内の再読み込み・連打は数えない。いいねが「永続的に二重を防ぐ」1行なのに対し、視聴は<strong>時間窓での重複だけを防げばよく</strong>（翌日また見たら正当な2回目）、かつ発生頻度が桁違いに高いので、行ロックが競合する DB の UPDATE を避け、速くて使い捨てでよい Redis を使う。書き込みは10秒ごとに <code>FlushViewsLoop</code> がまとめて DB へ流す。</p></div>
+    </details>
+
+    <h2>まとめ — 次の層へ</h2>
+    <p>この章で、黙って見るだけだった動画に<strong>反応</strong>が返るようになりました。いいね・低評価・チャンネル登録は、<code>PRIMARY KEY</code> と <code>ON CONFLICT</code>（<code>DO UPDATE</code> / <code>DO NOTHING</code>）で<strong>二度押しや自動リトライに壊れない冪等</strong>な操作になり、コメント一覧は <code>JOIN</code> で <strong>N+1 を避けて</strong>投稿者情報ごと1クエリで取り、コメント投稿は返信先や動画の持ち主へ<strong>通知を出し分け</strong>（自分自身には出さない）、視聴は Redis の時間窓で<strong>連打を弾いて</strong>数える。反応の層を貫くのは「<strong>同じ操作を何度受けても結果が壊れない</strong>」という一貫した思想でした。これは第03章の状態遷移（条件つき UPDATE）・第07章の通知 fanout（<code>notified_at</code> の原子的 UPDATE）と地続きの、本書全体を流れるテーマです。</p>
+    <p>次の第06章では、反応が集まった動画たちを<strong>「見つけてもらう」</strong>層を作ります。<code>discover.go</code> で、あいまい検索（第00章で仕込んだ <code>pg_trgm</code>）・時間減衰トレンド（この章で溜めた <code>view_events</code>）・関連動画・登録チャンネル込みのおすすめを組み立てる。反応というデータが、こんどは「発見」の材料になります。</p>
+
+    <div class="chap-foot">
+      <a class="pager" href="04-deliver.html"><span class="dir">← 前へ</span>第04章 · 動画を届ける</a>
+      <a class="pager next" href="06-discover.html"><span class="dir">次へ →</span>第06章 · 見つけてもらう</a>
+    </div>
+  </main>
+</div>
+</body>
+</html>

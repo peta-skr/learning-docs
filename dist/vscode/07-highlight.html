@@ -1,0 +1,598 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>第07章 色をつける — ゼロから作るテキストエディタ</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500;600&family=Source+Serif+4:opsz,wght@8..60,400;8..60,600;8..60,700&family=Noto+Serif+JP:wght@400;600;700&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<div class="shell">
+
+  <aside class="spine">
+    <a class="wordmark" href="index.html">MINT EDITOR · from scratch</a>
+    <div class="book-title">ゼロから作る<br>テキストエディタ</div>
+    <div class="book-sub">TypeScript と Canvas で mint editor を組む</div>
+
+    <div class="legend"><span>読む <b>↓</b></span><span>組む <b>↑</b></span></div>
+
+    <nav aria-label="目次">
+      <ul class="toc">
+        <li><a class="nav-item" href="index.html"><span class="nav-num">序</span><span class="nav-label">はじめに・準備<span class="nav-tag">Setup</span></span></a></li>
+        <li><a class="nav-item" href="00-overview.html"><span class="nav-num">00</span><span class="nav-label">文字を打てる箱の正体<span class="nav-tag">Overview</span></span></a></li>
+        <li><a class="nav-item" href="01-buffer.html"><span class="nav-num">01</span><span class="nav-label">テキストを持つ<span class="nav-tag">Buffer</span></span></a></li>
+        <li><a class="nav-item" href="02-document.html"><span class="nav-num">02</span><span class="nav-label">行とカーソル<span class="nav-tag">Doc</span></span></a></li>
+        <li><a class="nav-item" href="03-history.html"><span class="nav-num">03</span><span class="nav-label">編集と取り消し<span class="nav-tag">Undo</span></span></a></li>
+        <li><a class="nav-item" href="04-view.html"><span class="nav-num">04</span><span class="nav-label">画面に描く<span class="nav-tag">Canvas</span></span></a></li>
+        <li><a class="nav-item" href="05-input.html"><span class="nav-num">05</span><span class="nav-label">入力を受ける<span class="nav-tag">Input</span></span></a></li>
+        <li><a class="nav-item" href="06-search.html"><span class="nav-num">06</span><span class="nav-label">複数カーソルと検索<span class="nav-tag">Multi</span></span></a></li>
+        <li><a class="nav-item current" aria-current="page" href="07-highlight.html"><span class="nav-num">07</span><span class="nav-label">色をつける<span class="nav-tag">Syntax</span></span></a></li>
+        <li><a class="nav-item" href="08-ime.html"><span class="nav-num">08</span><span class="nav-label">日本語を打つ<span class="nav-tag">IME</span></span></a></li>
+        <li><a class="nav-item" href="09-assemble.html"><span class="nav-num">09</span><span class="nav-label">開いて保存する・組み立て<span class="nav-tag">Assemble</span></span></a></li>
+      </ul>
+    </nav>
+
+    <div class="spine-foot">
+      各章は一つの部品・機能。<br>下（バッファ）から上（UI）へ<br>積み上げて動かしていく。
+    </div>
+  </aside>
+
+  <main class="reading">
+    <div class="progress-tag">第07章 / 全10章 · 層: SYNTAX · 読了目安 2〜2.5時間</div>
+    <div class="eyebrow"><span>SYNTAX</span><span class="depth">— 字句解析とトークンキャッシュ</span></div>
+    <h1>色をつける</h1>
+    <p class="lede">エディタでコードを開くと、キーワードは緑、文字列は別の色、コメントは沈んだグレー——文字が意味ごとに塗り分けられます。この「色つけ（シンタックスハイライト）」は、実は2つの独立した仕事に分かれています。1つは、<strong>1行の文字列を意味のかたまり（トークン）に切り分ける</strong>字句解析。もう1つは、その結果を<strong>行ごとにキャッシュして再描画を速くする</strong>仕組みです。この章で作る <code>tokenizer.ts</code> と <code>highlighter.ts</code> は、たった240行ほど。ですがその中に、「複数行にまたがる構文をどう扱うか」「編集のたびに何行を捨てるか」という、意外に奥の深い設計判断が詰まっています。ちなみに——いまあなたが読んでいるこのページのコードの色つけも、まさに同じ考え方でできています。</p>
+
+    <div class="box goal"><div class="box-k">◈ この章のゴール</div>
+      <p>次の 3 つを、自分の目と手で確認できたら達成です。</p>
+      <ol>
+        <li><code>tokenizeLine</code> が「行単位の状態機械」として、キーワード・文字列・コメント・数値・関数名をどう切り分けるかを読み、<strong>なぜ「行末の状態(endState)」を返すのか</strong>を自分の言葉で言える。</li>
+        <li><code>Highlighter</code> が「何行目まで計算済みか(<code>validLines</code>)」だけでキャッシュを管理し、<strong>編集行以降をまるごと捨てる</strong>理由——なぜ部分再利用が危険か——を説明できる。</li>
+        <li><code>npx vitest run src/core/tokenizer.test.ts</code> で、トークナイザの7件のテストが PASS する。行またぎのブロックコメント・テンプレート文字列・数値の境界が正しく解けていることを目視する。</li>
+      </ol>
+    </div>
+
+    <div class="box map"><div class="box-k">☰ この章のステップ</div>
+      <ol>
+        <li><a href="#step-1">なぜ「行ごとの状態機械」なのか</a></li>
+        <li><a href="#step-2">トークンの語彙を決める（<code>core/tokenizer.ts</code> 前半）</a></li>
+        <li><a href="#step-3">1行を舐める — tokenizeLine のメインループ</a></li>
+        <li><a href="#step-4">識別子・キーワード・数値・関数名を見分ける</a></li>
+        <li><a href="#step-5">文字列とテンプレートの終端を探す2つのヘルパー</a></li>
+        <li><a href="#step-6">Highlighter — 行トークンをキャッシュする（<code>core/highlighter.ts</code>）</a></li>
+        <li><a href="#step-7">編集が来たら「以降を捨てる」— invalidateFrom の落とし穴</a></li>
+        <li><a href="#step-8">動かして確認する</a></li>
+      </ol>
+    </div>
+
+    <h2>色つけは「切る」と「覚える」の2部品</h2>
+    <p>シンタックスハイライトと聞くと、正規表現をずらりと並べた複雑な機械を想像するかもしれません。ですが本書のそれは、拍子抜けするほど素直な2部品でできています。</p>
+    <ul>
+      <li><strong>切る（tokenizer）</strong> — 1行の文字列を受け取り、「ここからここまではキーワード」「ここは文字列」というトークンの列に切り分ける。純粋な関数です。文字列を入れればトークンが出る、それだけ。</li>
+      <li><strong>覚える（highlighter）</strong> — 切った結果を<strong>行ごとにキャッシュ</strong>する。描画のたびに全行を切り直していたら遅いので、一度切った行は覚えておき、編集で変わった行だけ捨てて計算し直す。</li>
+    </ul>
+    <p>この2つを分けておくのが勘所です。<code>tokenizer.ts</code> は「どう色を塗るか」の知識を一手に引き受け、状態も持たない純粋関数の集まりにする。<code>highlighter.ts</code> は「いつ計算し、いつ捨てるか」というキャッシュの都合だけを引き受ける。役割がきれいに割れているので、片方を読むときにもう片方を気にせずに済みます。第00章で引いた「境界を小さく保つ」という作法が、ここでも効いています。</p>
+    <p>そして本書の色つけには、大きな制約が1つあります。<strong>1行ずつしか見ない</strong>ということ。エディタは10万行のファイルでも軽くあるべきで、そのために描画は「見えている数十行だけ」を相手にします（第04章）。色つけも同じで、見えている行のトークンだけをその場で計算します。ところが——コードには<strong>複数行にまたがる構文</strong>があります。<code>/* … */</code> のブロックコメントや、バッククォートで囲むテンプレート文字列は、1行では閉じないことがある。「1行しか見ない」と「行をまたぐ構文がある」——この2つをどう両立させるか。それが Step 1 の主題です。</p>
+
+    <h2 class="step" id="step-1"><span class="step-no">Step 1</span>なぜ「行ごとの状態機械」なのか</h2>
+    <p>次のコードを、色つけする側の気持ちで見てください。</p>
+
+    <div class="ascii">1行しか見えないトークナイザにとって、これは難問
+
+  10:  const url = "https://example.com"; /* この行から
+  11:  複数行のコメントが
+  12:  ここまで続く */ const y = 2;</div>
+
+    <p>11行目だけを単独で渡されたら、トークナイザはこの行を<strong>コメントとして塗るべきか、コードとして塗るべきか</strong>、判断できません。答えは「10行目でブロックコメントが開いたまま閉じていない」という、<strong>前の行の事情</strong>に依存しているからです。同じ11行目の文字列でも、上に <code>/*</code> があればコメント、なければただの識別子の並び。1行だけを見ても決まらないのです。</p>
+    <p>そこで本書が採るのが<strong>「行単位の状態機械」</strong>という方式です。考え方はこうです。</p>
+    <ol>
+      <li>各行を解析するとき、<strong>「前の行を解析し終えた時点の状態」</strong>を一緒に受け取る。ここでいう状態とは「いまブロックコメントの途中か?」「いまテンプレート文字列の途中か?」という2つの真偽値です。</li>
+      <li>その状態を出発点にして1行を舐め、トークンの列を作る。</li>
+      <li>行を舐め終えたら、<strong>「この行を解析し終えた時点の状態」</strong>を返す。これが次の行の入力になります。</li>
+    </ol>
+    <p>状態を数珠つなぎに引き継いでいくことで、「1行ずつしか見ない」を守りながら「行をまたぐ構文」を解けます。10行目の解析結果として「ブロックコメント中=true」が出て、それが11行目に渡り、11行目も「まだコメント中」と分かる。12行目で <code>*/</code> を見つけて「コメント終了」に切り替わる。バケツリレーです。</p>
+
+    <div class="gonote"><div class="box-k">TS メモ · 状態機械（ステートマシン）という言葉</div>
+      <p><strong>状態機械</strong>とは、「いまどのモードにいるか（状態）」を持ち、入力を1つずつ食べながら状態を移り変わらせていく仕組みのことです。信号機（赤→青→黄→赤）が身近な例です。本書のトークナイザは、状態が「通常」「ブロックコメント中」「テンプレート文字列中」の3つ（正確には2つの真偽値の組み合わせ）で、文字を1つずつ食べながらトークンを吐き、行末で状態を確定させます。字句解析（レキサ / トークナイザ）は、コンパイラの教科書の第一歩でもあり、状態機械の最も実用的な題材の1つです。</p>
+    </div>
+
+    <p>この方式には、キャッシュにとって嬉しいご褒美もあります。<strong>ある行を編集しても、その行の endState（行末の状態）が前と変わらなければ、後続の行を解析し直す必要がない</strong>のです。たとえばコメントでもテンプレートでもない普通の行のなかで <code>x</code> を <code>y</code> に打ち替えても、行末の状態は「通常のまま」で変わらないので、次の行以降は前と同じ結果になる——だから再計算しなくていい。この性質が、Step 6・7 のキャッシュ設計の土台になります。まずは状態そのものを型として定義しましょう。</p>
+
+    <h2 class="step" id="step-2"><span class="step-no">Step 2</span>トークンの語彙を決める</h2>
+    <p>作るファイルは <code>core/tokenizer.ts</code>。最初に、この字句解析器が扱う「言葉」——トークンの種類、トークンの形、行の状態、そしてキーワード辞書——を定義します。まずファイル冒頭の設計コメントと、型の宣言から。</p>
+
+    <div class="file-tag">core/tokenizer.ts</div>
+    <pre><code><span class="cm">/**
+ * トークナイザ — JavaScript / TypeScript の1行を意味のかたまりに分ける。
+ *
+ * 方式は「行単位の状態機械」:
+ * - 各行は前の行から引き継いだ LineState（ブロックコメント中か / テンプレート文字列中か）
+ *   を受け取り、トークン列と「行末時点の状態」を返す。
+ * - 複数行コメントのような行またぎの構文は、この endState の引き継ぎで解決する。
+ * - ある行を編集しても、その行の endState が変わらなければ後続の再解析は不要。
+ */</span>
+
+<span class="kw">export type</span> <span class="ty">TokenType</span> =
+  | <span class="st">"kw"</span> <span class="cm">// キーワード</span>
+  | <span class="st">"str"</span> <span class="cm">// 文字列</span>
+  | <span class="st">"cm"</span> <span class="cm">// コメント</span>
+  | <span class="st">"num"</span> <span class="cm">// 数値</span>
+  | <span class="st">"fn"</span> <span class="cm">// 関数名（直後に "(" が来る識別子）</span>
+  | <span class="st">"id"</span> <span class="cm">// 識別子</span>
+  | <span class="st">"pn"</span>; <span class="cm">// 記号</span>
+
+<span class="kw">export interface</span> <span class="ty">Token</span> {
+  start: <span class="ty">number</span>;
+  end: <span class="ty">number</span>;
+  type: <span class="ty">TokenType</span>;
+}
+
+<span class="kw">export interface</span> <span class="ty">LineState</span> {
+  inBlockComment: <span class="ty">boolean</span>;
+  inTemplate: <span class="ty">boolean</span>;
+}
+
+<span class="kw">export const</span> INITIAL_STATE: <span class="ty">LineState</span> = { inBlockComment: <span class="kw">false</span>, inTemplate: <span class="kw">false</span> };
+
+<span class="kw">export function</span> sameState(a: <span class="ty">LineState</span>, b: <span class="ty">LineState</span>): <span class="ty">boolean</span> {
+  <span class="kw">return</span> a.inBlockComment === b.inBlockComment &amp;&amp; a.inTemplate === b.inTemplate;
+}</code></pre>
+
+    <p>上から順に見ます。<code>TokenType</code> は<strong>トークンの種類の一覧</strong>で、7つの文字列リテラルのユニオン型です。<code>"kw"</code>（キーワード）、<code>"str"</code>（文字列）、<code>"cm"</code>（コメント）、<code>"num"</code>（数値）、<code>"fn"</code>（関数名）、<code>"id"</code>（普通の識別子）、<code>"pn"</code>（記号・パンクチュエーション）。この短い略号が、あとで描画側で「この種類のトークンは何色で塗る」というルックアップの鍵になります。種類を増やしたければ、ここに1つ足すだけです。</p>
+    <p><code>Token</code> は<strong>1つのトークンの形</strong>で、たった3つのフィールドしかありません。<code>start</code> と <code>end</code>（行内での開始・終了位置。半開区間 <code>[start, end)</code>）、それに <code>type</code>。注目すべきは、トークンが<strong>文字列そのものを持たない</strong>ことです。「ここからここまで」という位置だけを持ち、実際の文字は元の行から <code>text.slice(start, end)</code> で取り出せばいい。文字列を複製せず位置だけを指すのは、第00章の <code>slice</code>／半開区間の思想そのままで、メモリも節約できます。</p>
+    <p>そして <code>LineState</code>。Step 1 で語った「前の行から引き継ぐ状態」の正体が、この2つの真偽値です。<code>inBlockComment</code>（<code>/* … */</code> の途中か）と <code>inTemplate</code>（バッククォート文字列の途中か）。行をまたぐ構文はこの2つだけなので、状態はこの2フラグで足ります。<code>INITIAL_STATE</code> は「どちらでもない=通常」で、文書の1行目（前の行がない行）はこれを出発点にします。</p>
+    <p><code>sameState</code> は2つの状態が等しいかを比べる小さな関数です。2つのフラグがどちらも一致すれば <code>true</code>。Step 1 で予告した「行末の状態が変わらなければ後続は再計算不要」という<strong>部分再利用の最適化</strong>を書くなら、この判定が入口になります。</p>
+    <div class="box hazard"><div class="box-k">⚠ 落とし穴 — <code>sameState</code> は、実は<strong>どこからも呼ばれていない</strong></div>
+      <p>正直に書きます。<code>sameState</code> は <code>export</code> されているのに、<strong>本書の実装では一度も使われません</strong>（<code>grep</code> しても定義の1件しか出ません）。「使えるヘルパー」として用意したものの、<strong>出番が無かった</strong>関数です。</p>
+      <p>理由は Step 7 で明かされます。この章の結論は「行末の状態を見て賢く部分再利用する」ではなく、<strong>「編集行以降は一律に捨てる」</strong>——つまり <code>sameState</code> が想定していた最適化そのものを<strong>採用しなかった</strong>のです。捨てて遅延評価で埋め直すほうが、単純で、速くて、壊れにくかった。</p>
+      <p>ではなぜ消さずに残してあるのか。<strong>将来この最適化を入れるときの足がかり</strong>だからです。第06章では <code>mapOffset</code> という関数を「<strong>あえて置かなかった</strong>」——コメントだけ残して実体を書かない——という判断をしましたが、こちらは逆に「<strong>書いたが使わなかった</strong>」。どちらも「検討した末に採らなかった道」の記録という点では同じです。読み進めるときは「この関数を待っていればいつか使われる」とは思わずに、<strong>「採らなかった道の入口が置いてある」</strong>と読んでください。Step 7 で、なぜその道を採らなかったのかが分かります。</p>
+    </div>
+
+    <div class="gonote"><div class="box-k">TS メモ · 文字列リテラルのユニオン型</div>
+      <p><code>type TokenType = "kw" | "str" | …</code> は、<strong>取りうる値を特定の文字列だけに限定する</strong>型です。ただの <code>string</code> なら何でも入りますが、この書き方なら <code>"kw"</code> か <code>"str"</code> か…の7つ<strong>以外は代入できない</strong>とコンパイラが保証します。<code>type = "keyword"</code>（綴りミス）と書けば、その場でエラー。列挙型（<code>enum</code>）に似ていますが、実行時には単なる文字列なので軽く、<code>switch</code> の分岐で「全パターンを尽くしたか」もコンパイラが見てくれます。トークンの種類のように「決まった数の選択肢」を表すのに最適です。</p>
+    </div>
+
+    <p>続いて、キーワードの辞書と、識別子を判定する正規表現です。同じファイルの続き。</p>
+
+    <div class="file-tag">core/tokenizer.ts（つづき）</div>
+    <pre><code><span class="kw">const</span> KEYWORDS = <span class="kw">new</span> <span class="ty">Set</span>(
+  (
+    <span class="st">"abstract as async await break case catch class const continue debugger default delete do else enum export extends "</span> +
+    <span class="st">"false finally for from function get if implements import in instanceof interface let new null of private protected "</span> +
+    <span class="st">"public readonly return set static super switch this throw true try type typeof undefined var void while with yield"</span>
+  ).split(<span class="st">" "</span>),
+);
+
+<span class="kw">const</span> ID_START = <span class="st">/[A-Za-z_$]/</span>;
+<span class="kw">const</span> ID_PART = <span class="st">/[A-Za-z0-9_$]/</span>;</code></pre>
+
+    <p><code>KEYWORDS</code> は、JavaScript / TypeScript の予約語を集めた <code>Set</code> です。長い文字列を3つに分けて <code>+</code> で連結し、スペースで <code>split</code> して配列にし、それを <code>Set</code> に入れています。なぜ配列（<code>Array</code>）でなく <code>Set</code> なのか——<strong>「この単語はキーワードか?」という所属判定を高速にするため</strong>です。配列だと <code>includes</code> が先頭から順に探すので語数に比例した時間がかかりますが、<code>Set.has</code> はほぼ一定時間で答えます。識別子を1つ切り出すたびに <code>KEYWORDS.has(word)</code> を呼ぶので、この差が効いてきます。</p>
+    <p><code>ID_START</code> と <code>ID_PART</code> は、識別子（変数名・関数名など）を構成できる文字を表す正規表現です。<code>ID_START</code>（<code>[A-Za-z_$]</code>）は識別子の<strong>先頭に来られる文字</strong>——英字・アンダースコア・ドル記号。<code>ID_PART</code>（<code>[A-Za-z0-9_$]</code>）は<strong>2文字目以降に来られる文字</strong>で、先頭の条件に数字を足したものです。これが2つに分かれているのには理由があります。JavaScript の識別子は<strong>数字で始まれない</strong>（<code>2foo</code> は不正）が、<strong>2文字目以降には数字を含められる</strong>（<code>foo2</code> は正当）から。「先頭」と「途中」で許す文字を分けることで、この規則をそのまま表現しています。</p>
+
+    <div class="box hazard"><div class="box-k">⚠ 落とし穴 — これは「本物のパーサ」ではない、と割り切る</div>
+      <p>本書のトークナイザは、正規表現1つでコード全体を舐めるようなものではなく、かといって完全な JS/TS の文法を実装したものでもありません。<strong>「色をつけるのに十分な精度」で意図的に手を抜いた</strong>字句解析器です。たとえば <code>KEYWORDS</code> には <code>true</code>/<code>false</code>/<code>null</code>/<code>undefined</code> のようなリテラルも「キーワード扱い」で混ぜてあり、文法的には厳密でありません。正規表現リテラル（<code>/foo/g</code>）とゼロ除算の <code>/</code> を区別する、といった難所も踏み込みません。<strong>それでいいのです。</strong>目的は syntax highlight であって、コンパイルでも実行でもない。多少色がずれても実害は「見た目」だけ。ここでも「必要十分な最小限」に絞る本書の一貫した姿勢が出ています。完璧な文法解析が要るなら TypeScript コンパイラ本体を使えばよく、それは本書の学びの対象ではありません。</p>
+    </div>
+
+    <h2 class="step" id="step-3"><span class="step-no">Step 3</span>1行を舐める — tokenizeLine のメインループ</h2>
+    <p>いよいよ心臓部、<code>tokenizeLine</code> です。この関数は「1行のテキスト」と「前の行から来た状態」を受け取り、「トークンの列」と「行末の状態」を返します。まず前半——関数の骨組みと、前の行から続くコメント／テンプレートの処理です。</p>
+
+    <div class="file-tag">core/tokenizer.ts（tokenizeLine・前半）</div>
+    <pre><code><span class="kw">export function</span> tokenizeLine(text: <span class="ty">string</span>, state: <span class="ty">LineState</span>): { tokens: <span class="ty">Token</span>[]; endState: <span class="ty">LineState</span> } {
+  <span class="kw">const</span> tokens: <span class="ty">Token</span>[] = [];
+  <span class="kw">let</span> i = <span class="st">0</span>;
+  <span class="kw">let</span> inBlockComment = state.inBlockComment;
+  <span class="kw">let</span> inTemplate = state.inTemplate;
+  <span class="kw">const</span> n = text.length;
+
+  <span class="kw">while</span> (i &lt; n) {
+    <span class="cm">// 前の行から続くブロックコメント</span>
+    <span class="kw">if</span> (inBlockComment) {
+      <span class="kw">const</span> close = text.indexOf(<span class="st">"*/"</span>, i);
+      <span class="kw">const</span> end = close === <span class="st">-1</span> ? n : close + <span class="st">2</span>;
+      tokens.push({ start: i, end, type: <span class="st">"cm"</span> });
+      i = end;
+      <span class="kw">if</span> (close !== <span class="st">-1</span>) inBlockComment = <span class="kw">false</span>;
+      <span class="kw">continue</span>;
+    }
+    <span class="cm">// 前の行から続くテンプレート文字列</span>
+    <span class="kw">if</span> (inTemplate) {
+      <span class="kw">const</span> end = scanTemplateBody(text, i);
+      tokens.push({ start: i, end: end.pos, type: <span class="st">"str"</span> });
+      i = end.pos;
+      <span class="kw">if</span> (end.closed) inTemplate = <span class="kw">false</span>;
+      <span class="kw">continue</span>;
+    }
+
+    <span class="kw">const</span> c = text[i];
+
+    <span class="kw">if</span> (c === <span class="st">" "</span> || c === <span class="st">"\t"</span>) {
+      i++;
+      <span class="kw">continue</span>;
+    }</code></pre>
+
+    <p>関数の頭で、作業用の変数を4つ用意します。<code>tokens</code> は結果を溜める配列。<code>i</code> は「いま行のどこを見ているか」を指すカーソル（<code>0</code> から始めて右へ進める）。そして肝が <code>inBlockComment</code> と <code>inTemplate</code> ——受け取った <code>state</code> から<strong>コピーして</strong>ローカル変数にしています。この2つを行を舐めながら書き換えていき、最後に <code>endState</code> として返す。<code>n</code> は行の長さで、ループの終端です。</p>
+    <p><code>while (i &lt; n)</code> のループが本体です。<code>i</code> が行末に届くまで、位置を進めながら1トークンずつ切り出します。ここで<strong>ループの先頭に置かれた2つの <code>if</code> が、Step 1 で語った「状態の引き継ぎ」の実装</strong>です。</p>
+    <ul>
+      <li><strong>前の行から続くブロックコメント</strong>（<code>if (inBlockComment)</code>）: いまコメントの途中で行が始まったなら、この行のどこかに閉じ <code>*/</code> があるかを <code>indexOf("*/", i)</code> で探します。見つかれば（<code>close !== -1</code>）そこまでをコメントトークンにして、状態を <code>inBlockComment = false</code> に戻す。見つからなければ（<code>close === -1</code>）行末 <code>n</code> までまるごとコメントにして、<code>inBlockComment</code> は <code>true</code> のまま——つまり<strong>次の行もコメントの続き</strong>だと伝わります。<code>end</code> の計算 <code>close === -1 ? n : close + 2</code> の <code>+2</code> は、<code>*/</code> の2文字ぶんを<strong>コメントに含める</strong>ためです。</li>
+      <li><strong>前の行から続くテンプレート文字列</strong>（<code>if (inTemplate)</code>）: 同じ発想を <code>`…`</code> に適用します。終端探しは少し複雑（エスケープに対応するため）なので <code>scanTemplateBody</code> というヘルパーに任せ（Step 5）、その戻り値の <code>closed</code> で「この行で閉じたか」を判断して状態を更新します。</li>
+    </ul>
+    <p>この2つの <code>if</code> を通り抜けたら、ようやく「通常モード」の解析です。<code>const c = text[i]</code> でいまの1文字を取り出し、まず空白の処理。スペースかタブなら、トークンは作らず <code>i</code> だけ進めて <code>continue</code>。空白は色をつける対象ではないので、単に読み飛ばします。</p>
+
+    <div class="box hazard"><div class="box-k">⚠ 落とし穴 — 状態は「コピーしてから」いじる</div>
+      <p><code>let inBlockComment = state.inBlockComment;</code> と、<strong>引数の <code>state</code> を直接書き換えずローカルにコピー</strong>しているのが地味に重要です。もし <code>state.inBlockComment = false</code> のように引数のオブジェクトを直接いじると、<strong>呼び出し側が持っている「前の行の endState」を破壊</strong>してしまいます。Step 6 の <code>Highlighter</code> は各行の endState を配列に保存して使い回すので、そこを書き換えたら別の行の状態が壊れる——追いにくいバグの温床です。「渡されたものは変えない、新しいものを返す」——純粋関数の作法を、状態フラグでも守っています。返り値の <code>endState</code> も <code>{ inBlockComment, inTemplate }</code> と<strong>新しいオブジェクト</strong>にしているのはこのためです（Step 4 の末尾で確認します）。</p>
+    </div>
+
+    <p>空白の次は、コメント・文字列・数値・識別子を見分ける <code>if</code> の連なりです。まずコメントとクォート文字列から。</p>
+
+    <div class="file-tag">core/tokenizer.ts（tokenizeLine・中盤）</div>
+    <pre><code>    <span class="kw">if</span> (c === <span class="st">"/"</span> &amp;&amp; text[i + <span class="st">1</span>] === <span class="st">"/"</span>) {
+      tokens.push({ start: i, end: n, type: <span class="st">"cm"</span> });
+      <span class="kw">break</span>;
+    }
+
+    <span class="kw">if</span> (c === <span class="st">"/"</span> &amp;&amp; text[i + <span class="st">1</span>] === <span class="st">"*"</span>) {
+      <span class="kw">const</span> close = text.indexOf(<span class="st">"*/"</span>, i + <span class="st">2</span>);
+      <span class="kw">const</span> end = close === <span class="st">-1</span> ? n : close + <span class="st">2</span>;
+      tokens.push({ start: i, end, type: <span class="st">"cm"</span> });
+      i = end;
+      <span class="kw">if</span> (close === <span class="st">-1</span>) inBlockComment = <span class="kw">true</span>;
+      <span class="kw">continue</span>;
+    }
+
+    <span class="kw">if</span> (c === <span class="st">'"'</span> || c === <span class="st">"'"</span>) {
+      <span class="kw">const</span> end = scanString(text, i + <span class="st">1</span>, c);
+      tokens.push({ start: i, end, type: <span class="st">"str"</span> });
+      i = end;
+      <span class="kw">continue</span>;
+    }
+
+    <span class="kw">if</span> (c === <span class="st">"`"</span>) {
+      <span class="kw">const</span> end = scanTemplateBody(text, i + <span class="st">1</span>);
+      tokens.push({ start: i, end: end.pos, type: <span class="st">"str"</span> });
+      i = end.pos;
+      <span class="kw">if</span> (!end.closed) inTemplate = <span class="kw">true</span>;
+      <span class="kw">continue</span>;
+    }</code></pre>
+
+    <p>4つの <code>if</code> は、いずれも「いまの文字が何かの始まりか?」を先読み1〜2文字で見分けています。</p>
+    <ul>
+      <li><strong>行コメント <code>//</code></strong>: いまの文字が <code>/</code> で、次の文字も <code>/</code> なら行コメントの始まり。行コメントは<strong>必ず行末まで</strong>続くので、<code>start: i, end: n</code>（現在位置から行末まで）をまるごとコメントにして、<code>break</code> でループを打ち切ります。この行にこれ以上のトークンはないからです。<code>continue</code> ではなく <code>break</code> なのがポイント。</li>
+      <li><strong>ブロックコメント <code>/*</code></strong>: <code>/</code> の次が <code>*</code> なら開始。<code>indexOf("*/", i + 2)</code> で同じ行内の閉じを探し（<code>+2</code> は開いた <code>/*</code> の直後から探すため）、見つかればそこまで、なければ行末までをコメントに。そして<strong>同じ行で閉じなかったとき（<code>close === -1</code>）だけ <code>inBlockComment = true</code></strong> にして、次の行へ状態を渡します。ループ先頭の <code>if (inBlockComment)</code> と対になる処理です。</li>
+      <li><strong>クォート文字列 <code>"…"</code> / <code>'…'</code></strong>: シングル/ダブルどちらのクォートでも、終端探しを <code>scanString</code> に任せます。開きクォートの<strong>次</strong>（<code>i + 1</code>）から探し始め、閉じクォート（同じ <code>c</code>）を探すよう <code>c</code> を渡しているのに注目。クォート文字列は行内で必ず閉じる扱いなので、状態フラグには触れません（エスケープ対応は Step 5）。</li>
+      <li><strong>テンプレート文字列 <code>`…`</code></strong>: バッククォートは複数行にまたがれるので、<code>scanTemplateBody</code> の戻り値 <code>closed</code> を見て、<strong>この行で閉じなかったら <code>inTemplate = true</code></strong> にして次行へ引き継ぎます。ブロックコメントとまったく同じ骨格です。</li>
+    </ul>
+
+    <div class="gonote"><div class="box-k">TS メモ · <code>'"'</code> と <code>"'"</code> — クォートの中のクォート</div>
+      <p><code>c === '"'</code> は「<code>c</code> がダブルクォート1文字と等しいか」、<code>c === "'"</code> は「<code>c</code> がシングルクォート1文字と等しいか」を比べています。文字列リテラルの中に別種のクォートを入れたいときは、<strong>外側と違う種類のクォートで囲む</strong>のが手軽です。ダブルクォート1文字を表すには <code>'"'</code>（シングルで囲む）、シングルクォート1文字を表すには <code>"'"</code>（ダブルで囲む）。エスケープ（<code>"\""</code>）を使わずに済み、読みやすくなります。字句解析器のようにクォート自体を扱うコードでは、この使い分けが頻出します。</p>
+    </div>
+
+    <h2 class="step" id="step-4"><span class="step-no">Step 4</span>識別子・キーワード・数値・関数名を見分ける</h2>
+    <p>残るは、数字で始まるもの（数値）と、英字で始まるもの（識別子・キーワード・関数名）、そしてそれ以外（記号）です。<code>tokenizeLine</code> の後半、ループの残りと関数の締めくくりを見ます。</p>
+
+    <div class="file-tag">core/tokenizer.ts（tokenizeLine・後半・これで tokenizeLine 全文）</div>
+    <pre><code>    <span class="kw">if</span> (c &gt;= <span class="st">"0"</span> &amp;&amp; c &lt;= <span class="st">"9"</span>) {
+      <span class="kw">let</span> j = i + <span class="st">1</span>;
+      <span class="kw">while</span> (j &lt; n &amp;&amp; <span class="st">/[0-9a-fA-FxXbBoO_.eE+-]/</span>.test(text[j])) {
+        <span class="cm">// 数値リテラルのゆるい読み取り。"1+2" を1トークンにしないよう、</span>
+        <span class="cm">// +/- は直前が指数表記の e/E のときだけ数値の続きとみなす。</span>
+        <span class="kw">if</span> ((text[j] === <span class="st">"+"</span> || text[j] === <span class="st">"-"</span>) &amp;&amp; !<span class="st">/[eE]/</span>.test(text[j - <span class="st">1</span>])) <span class="kw">break</span>;
+        j++;
+      }
+      tokens.push({ start: i, end: j, type: <span class="st">"num"</span> });
+      i = j;
+      <span class="kw">continue</span>;
+    }
+
+    <span class="kw">if</span> (ID_START.test(c)) {
+      <span class="kw">let</span> j = i + <span class="st">1</span>;
+      <span class="kw">while</span> (j &lt; n &amp;&amp; ID_PART.test(text[j])) j++;
+      <span class="kw">const</span> word = text.slice(i, j);
+      <span class="kw">let</span> type: <span class="ty">TokenType</span>;
+      <span class="kw">if</span> (KEYWORDS.has(word)) {
+        type = <span class="st">"kw"</span>;
+      } <span class="kw">else</span> {
+        <span class="cm">// 次の非空白が "(" なら関数名として塗る</span>
+        <span class="kw">let</span> k = j;
+        <span class="kw">while</span> (k &lt; n &amp;&amp; (text[k] === <span class="st">" "</span> || text[k] === <span class="st">"\t"</span>)) k++;
+        type = text[k] === <span class="st">"("</span> ? <span class="st">"fn"</span> : <span class="st">"id"</span>;
+      }
+      tokens.push({ start: i, end: j, type });
+      i = j;
+      <span class="kw">continue</span>;
+    }
+
+    tokens.push({ start: i, end: i + <span class="st">1</span>, type: <span class="st">"pn"</span> });
+    i++;
+  }
+
+  <span class="kw">return</span> { tokens, endState: { inBlockComment, inTemplate } };
+}</code></pre>
+
+    <p><strong>数値</strong>（<code>c &gt;= "0" &amp;&amp; c &lt;= "9"</code>）から。数字で始まったら、<code>j</code> を進めながら「数値の続きに見える文字」を食べ続けます。許す文字は <code>[0-9a-fA-FxXbBoO_.eE+-]</code> と広め——<code>0x</code>（16進）、<code>0b</code>（2進）、<code>0o</code>（8進）、<code>_</code>（桁区切り <code>1_000</code>）、<code>.</code>（小数）、<code>e/E</code>（指数）まで1つの数値として拾うためです。ここが本書の言う「ゆるい読み取り」で、厳密な数値文法を実装せず<strong>色をつけるのに十分な範囲</strong>をまとめて飲み込みます。</p>
+    <p>ただし1か所だけ賢い判断があります。<code>+</code> と <code>-</code> の扱いです。素朴に許すと <code>1+2</code> が「1つの数値トークン」になってしまう（<code>+</code> を数値の続きと見て食べてしまう）。それを防ぐのが <code>if ((text[j] === "+" || text[j] === "-") &amp;&amp; !/[eE]/.test(text[j - 1])) break;</code> の1行です。「<code>+</code>/<code>-</code> は、<strong>直前の文字が <code>e</code>/<code>E</code>（指数表記）のときだけ</strong>数値の一部とみなし、それ以外では数値を打ち切る」。つまり <code>1.5e+10</code> の <code>+</code> は指数の符号として食べる（<code>e</code> の直後だから）が、<code>1+2</code> の <code>+</code> は演算子として手放す（<code>1</code> の直後だから）。この分岐こそ、テスト「1+2 が1つの数値にならない」と「指数表記の数値」の両方を通すための急所です。</p>
+    <p><strong>識別子</strong>（<code>ID_START.test(c)</code>）は3段階です。まず <code>ID_PART</code> が続く限り <code>j</code> を進めて単語を切り出し、<code>word</code> に取る。次にその単語の正体を判定します。</p>
+    <ol>
+      <li><code>KEYWORDS.has(word)</code> が真なら <strong><code>"kw"</code>（キーワード）</strong>。<code>const</code>、<code>function</code>、<code>interface</code> などがここに落ちます。</li>
+      <li>そうでなければ、<strong>単語の直後（空白を飛ばした先）を覗いて</strong>、<code>(</code> があるかを見ます。<code>k</code> を単語の末尾 <code>j</code> から進めてスペース／タブを読み飛ばし、その次が <code>(</code> なら <strong><code>"fn"</code>（関数名）</strong>、そうでなければ <strong><code>"id"</code>（普通の識別子）</strong>。<code>foo(</code> の <code>foo</code> は関数呼び出しっぽいので色を変える、というヒューリスティックです。</li>
+    </ol>
+    <p>どのカテゴリにも当てはまらない1文字——括弧、演算子、セミコロンなど——は最後の <code>tokens.push({ start: i, end: i + 1, type: "pn" })</code> で<strong>記号（<code>"pn"</code>）</strong>として1文字ぶん切り、<code>i</code> を1つ進めます。ここに落ちてくるものは幅1のトークンです。</p>
+    <p>そしてループを抜けたら <code>return { tokens, endState: { inBlockComment, inTemplate } }</code>。溜めたトークン列と、<strong>この行を舐め終えた時点の状態</strong>を返します。行の途中で <code>/*</code> を開いたまま終われば <code>inBlockComment: true</code> が、テンプレートを開いたまま終われば <code>inTemplate: true</code> が乗って出ていき、次の行の入力になる——Step 1 のバケツリレーが、この <code>return</code> で1区間ぶん完了します。</p>
+
+    <div class="gonote"><div class="box-k">TS メモ · 三項演算子とデータ駆動の分岐</div>
+      <p><code>type = text[k] === "(" ? "fn" : "id";</code> は<strong>三項演算子</strong>で、「条件 ? 真のときの値 : 偽のときの値」を1行で書けます。<code>if/else</code> で <code>type</code> に代入するのと同じですが、こうして<strong>値を選ぶだけ</strong>の分岐は三項演算子のほうが意図が明快です。<code>close === -1 ? n : close + 2</code> も同じパターンで、本書のトークナイザは「位置や種類を計算して変数に入れる」タイプの分岐が多く、三項演算子と相性が良いのです。ネストしすぎると読みにくくなるので、1段までに留めるのが目安です。</p>
+    </div>
+
+    <div class="box do"><div class="box-k">▸ 動かして確認 — 見分けのテスト</div>
+      <p>ここまでで <code>tokenizeLine</code> の本体が完成です。「キーワード・関数・数値・文字列を見分ける」テストは、まさにこの Step の内容を検証します。走らせてみましょう。</p>
+      <pre class="term"><code><span class="ps">$</span> cd src
+<span class="ps">$</span> npx vitest run src/core/tokenizer.test.ts -t <span class="st">"見分ける"</span>
+<span class="out">✓ src/core/tokenizer.test.ts (7 tests | 6 skipped) 2ms
+ Test Files  1 passed (1)
+      Tests  1 passed | 6 skipped (7)</span></code></pre>
+      <p>このテストは <code>const x = foo(42) + "hi";</code> という1行を渡し、<code>const</code> が <code>"kw"</code>、<code>foo</code> が <code>"fn"</code>（直後に <code>(</code> があるから）、<code>42</code> が <code>"num"</code>、<code>"hi"</code> が <code>"str"</code> になることを確かめます。<code>-t</code> はテスト名の部分一致でフィルタするオプション。この章のコードが、いまあなたが読んでいるページの色つけと同じ判断をしていると実感できるはずです。</p>
+    </div>
+
+    <h2 class="step" id="step-5"><span class="step-no">Step 5</span>文字列とテンプレートの終端を探す2つのヘルパー</h2>
+    <p>Step 3 で後回しにした2つのヘルパー、<code>scanString</code> と <code>scanTemplateBody</code> です。どちらも「開いたクォートに対応する<strong>閉じの位置</strong>を探す」小さな関数で、エスケープ（<code>\</code>）を正しく飛ばすのが仕事です。これで <code>tokenizer.ts</code> は全文になります。</p>
+
+    <div class="file-tag">core/tokenizer.ts（つづき・これで tokenizer.ts 全文）</div>
+    <pre><code><span class="cm">/** クォート文字列の終端を探す（エスケープ対応、行末で強制終了） */</span>
+<span class="kw">function</span> scanString(text: <span class="ty">string</span>, from: <span class="ty">number</span>, quote: <span class="ty">string</span>): <span class="ty">number</span> {
+  <span class="kw">let</span> i = from;
+  <span class="kw">while</span> (i &lt; text.length) {
+    <span class="kw">if</span> (text[i] === <span class="st">"\\"</span>) {
+      i += <span class="st">2</span>;
+      <span class="kw">continue</span>;
+    }
+    <span class="kw">if</span> (text[i] === quote) <span class="kw">return</span> i + <span class="st">1</span>;
+    i++;
+  }
+  <span class="kw">return</span> text.length;
+}
+
+<span class="cm">/** テンプレート文字列の本体。閉じバッククォートがあれば closed=true */</span>
+<span class="kw">function</span> scanTemplateBody(text: <span class="ty">string</span>, from: <span class="ty">number</span>): { pos: <span class="ty">number</span>; closed: <span class="ty">boolean</span> } {
+  <span class="kw">let</span> i = from;
+  <span class="kw">while</span> (i &lt; text.length) {
+    <span class="kw">if</span> (text[i] === <span class="st">"\\"</span>) {
+      i += <span class="st">2</span>;
+      <span class="kw">continue</span>;
+    }
+    <span class="kw">if</span> (text[i] === <span class="st">"`"</span>) <span class="kw">return</span> { pos: i + <span class="st">1</span>, closed: <span class="kw">true</span> };
+    i++;
+  }
+  <span class="kw">return</span> { pos: text.length, closed: <span class="kw">false</span> };
+}</code></pre>
+
+    <p><code>scanString</code> は、開きクォートの<strong>次</strong>の位置 <code>from</code> と、閉じに使うべきクォート文字 <code>quote</code> を受け取ります。1文字ずつ進みながら、次の2つを見ます。</p>
+    <ul>
+      <li><strong>バックスラッシュ <code>\</code> に出会ったら、2文字まとめて飛ばす</strong>（<code>i += 2</code>）。これがエスケープ対応の核心です。<code>"a\"b"</code> の中の <code>\"</code> は「エスケープされたダブルクォート=文字列を閉じない」。<code>\</code> を見たら次の1文字を<strong>無条件でスキップ</strong>することで、<code>\"</code> の <code>"</code> を「閉じクォート」と誤認しなくなります。</li>
+      <li><strong>クォート <code>quote</code> に出会ったら、その次の位置（<code>i + 1</code>）を返して終了</strong>。閉じクォート自身をトークンに含めるので <code>+1</code> します。</li>
+    </ul>
+    <p>行末まで走っても閉じが見つからなければ <code>text.length</code>（行末）を返します。コメントで説明されている「行末で強制終了」です。クォート文字列は本来1行で閉じるべきなので、閉じ忘れは行末で打ち切って次行に状態を持ち越さない——テンプレートとの違いはここです。</p>
+    <p><code>scanTemplateBody</code> は骨格はそっくりですが、<strong>戻り値が <code>{ pos, closed }</code> の2つ組</strong>なのが違いです。バッククォート文字列は行をまたげるので、呼び出し側（Step 3）は「終わった位置」だけでなく「<strong>この行で閉じたのか、次行へ続くのか</strong>」を知る必要があります。閉じバッククォートを見つけたら <code>{ pos: i + 1, closed: true }</code>、行末まで見つからなければ <code>{ pos: text.length, closed: false }</code>。この <code>closed</code> が <code>false</code> のとき、呼び出し側が <code>inTemplate = true</code> にして次の行へ状態を渡すわけです。エスケープ処理（<code>\</code> で2文字飛ばす）は <code>scanString</code> と共通の作法です。</p>
+
+    <div class="box hazard"><div class="box-k">⚠ 落とし穴 — <code>i += 2</code> が行末をまたいでも壊れない</div>
+      <p>エスケープ処理の <code>i += 2</code> は、<strong>行の最後の文字がバックスラッシュ</strong>のときに <code>i</code> を <code>text.length</code> を1つ超える位置へ飛ばすことがあります（例: <code>"abc\</code> で終わる行）。一見バグに見えますが、直後の <code>while (i &lt; text.length)</code> の条件で即座にループを抜けるので、配列外アクセスにはなりません（<code>text[i]</code> は評価されない）。JavaScript の <code>while</code> は条件を先に判定するので安全に止まります。「1つ超えても次のループ条件が受け止める」——半開区間と同じで、<strong>終端を1つ超えても壊れない</strong>ように書けているかは、この種のスキャナで常に確認すべき点です。テスト「エスケープされた引用符で文字列が終わらない」が、まさにこのエスケープ処理を検証しています。</p>
+    </div>
+
+    <h2 class="step" id="step-6"><span class="step-no">Step 6</span>Highlighter — 行トークンをキャッシュする</h2>
+    <p>トークナイザは「1行を切る純粋関数」でした。ですが描画のたびに全行を切り直すのは無駄です。100行の画面を60回/秒で描くたびに100行×60回のトークン化——しかもほとんどの行は前フレームから変わっていません。そこで<strong>行ごとにトークンをキャッシュする</strong>のが <code>Highlighter</code> の役目です。作るファイルは <code>core/highlighter.ts</code>。まず設計コメントと、キャッシュの本体・無効化メソッドから。</p>
+
+    <div class="file-tag">core/highlighter.ts</div>
+    <pre><code><span class="kw">import type</span> { <span class="ty">TextDocument</span> } <span class="kw">from</span> <span class="st">"./document"</span>;
+<span class="kw">import type</span> { <span class="ty">LineState</span>, <span class="ty">Token</span> } <span class="kw">from</span> <span class="st">"./tokenizer"</span>;
+<span class="kw">import</span> { INITIAL_STATE, tokenizeLine } <span class="kw">from</span> <span class="st">"./tokenizer"</span>;
+
+<span class="cm">/**
+ * Highlighter — 行ごとのトークンキャッシュ。
+ *
+ * tokenizeLine は「前の行の endState」を必要とするので、
+ * n 行目のトークンを得るには 0..n-1 行の状態が確定している必要がある。
+ * そこで「何行目まで計算済みか(validLines)」を持ち、要求された行まで
+ * 順に埋める。編集されたら、その行以降のキャッシュを捨てるだけ。
+ */</span>
+<span class="kw">export class</span> <span class="ty">Highlighter</span> {
+  <span class="kw">private</span> doc: <span class="ty">TextDocument</span>;
+  <span class="kw">private</span> tokens: <span class="ty">Token</span>[][] = [];
+  <span class="kw">private</span> endStates: <span class="ty">LineState</span>[] = [];
+  <span class="kw">private</span> validLines = <span class="st">0</span>;
+  <span class="kw">private</span> docVersion = <span class="st">-1</span>;
+  enabled = <span class="kw">true</span>;
+
+  <span class="kw">constructor</span>(doc: <span class="ty">TextDocument</span>) {
+    <span class="kw">this</span>.doc = doc;
+  }
+
+  <span class="cm">/**
+   * 編集があったら editor から呼ぶ。line 以降のキャッシュを無効化する。
+   * 行の挿入・削除で以降の行番号がずれるため、部分再利用はせず切り捨てる
+   * （必要な行まで再計算するだけなので、実際に払うコストは可視範囲まで）。
+   */</span>
+  invalidateFrom(line: <span class="ty">number</span>): <span class="ty">void</span> {
+    <span class="kw">const</span> keep = <span class="ty">Math</span>.max(<span class="st">0</span>, <span class="ty">Math</span>.min(line, <span class="kw">this</span>.validLines));
+    <span class="kw">this</span>.tokens.length = <span class="ty">Math</span>.min(<span class="kw">this</span>.tokens.length, keep);
+    <span class="kw">this</span>.endStates.length = <span class="ty">Math</span>.min(<span class="kw">this</span>.endStates.length, keep);
+    <span class="kw">this</span>.validLines = keep;
+    <span class="kw">this</span>.docVersion = <span class="kw">this</span>.doc.version;
+  }</code></pre>
+
+    <p>フィールドを見れば、このクラスが何を覚えているか一目で分かります。</p>
+    <ul>
+      <li><code>tokens: Token[][]</code> — <strong>行ごとのトークン列</strong>。<code>tokens[i]</code> が <code>i</code> 行目のトークン配列です。配列の配列（2次元）。</li>
+      <li><code>endStates: LineState[]</code> — <strong>行ごとの endState</strong>。<code>endStates[i]</code> が <code>i</code> 行目を舐め終えた時点の状態。次の行を解析するときの入力になります。Step 1 のバケツリレーを、この配列が保持します。</li>
+      <li><code>validLines</code> — <strong>「何行目まで計算済みか」</strong>。ここが設計の要です。<code>0</code> から <code>validLines - 1</code> までは <code>tokens</code>/<code>endStates</code> が正しく埋まっている、それ以降は未計算、という<strong>1本の境界線</strong>でキャッシュ状態を表します。</li>
+      <li><code>docVersion</code> — 文書のバージョン番号のスナップショット。「キャッシュを取った時点の文書」と「いまの文書」がずれていないかを照合する保険です（次の Step で使います）。<code>-1</code> は「まだ何も見ていない」初期値。</li>
+      <li><code>enabled</code> — 色つけのオン/オフ。ユーザーが無効化したら <code>false</code> にして、トークンを空で返せます。</li>
+    </ul>
+    <p><strong><code>invalidateFrom(line)</code> が、この章でいちばん大事なメソッド</strong>です。編集が起きたとき、エディタ本体がこれを呼んで「<code>line</code> 行目以降のキャッシュはもう信用できない」と伝えます。やることは単純——<code>keep = min(line, validLines)</code> を「保持する行数」として、<code>tokens</code> と <code>endStates</code> の配列を <code>keep</code> の長さに<strong>切り詰める</strong>（<code>.length = keep</code> で末尾を捨てる）。そして <code>validLines</code> も <code>keep</code> に下げる。<code>Math.max(0, …)</code> は行番号が負にならない安全弁です。</p>
+    <p>やっていることは「<strong>編集行から先を、まるごと忘れる</strong>」だけ。部分的に手直しするのではなく、境界線 <code>validLines</code> を編集行まで引き戻すのです。なぜこんな乱暴に見える捨て方をするのか——それが次の Step の主題であり、CLAUDE.md にも記された過去に踏んだ落とし穴です。</p>
+
+    <div class="gonote"><div class="box-k">TS メモ · <code>arr.length = k</code> で配列を縮める</div>
+      <p>JavaScript / TypeScript では、配列の <code>length</code> プロパティに<strong>小さい値を代入すると、その長さまで末尾が切り捨てられます</strong>。<code>const a = [1,2,3,4,5]; a.length = 2;</code> で <code>a</code> は <code>[1,2]</code> になる。<code>splice</code> や <code>slice</code> で作り直すより速く、既存の配列をその場で縮められます。<code>Math.min(this.tokens.length, keep)</code> と現在長との <code>min</code> を取っているのは、<strong>キャッシュが <code>keep</code> より短いときに誤って伸ばさない</strong>ため（<code>length</code> に大きい値を入れると <code>undefined</code> 埋めで伸びてしまう）。地味ですが、配列長を直接いじるときの定石です。<code>import type</code> は「型としてしか使わない import」で、コンパイル後に消え、実行時の依存を増やしません。</p>
+    </div>
+
+    <p>残りは、トークンを取り出す <code>getTokens</code> と、要求行まで埋める <code>ensure</code> です。<code>highlighter.ts</code> はこれで全文になります。</p>
+
+    <div class="file-tag">core/highlighter.ts（つづき・これで全文）</div>
+    <pre><code>  getTokens(line: <span class="ty">number</span>): <span class="ty">Token</span>[] {
+    <span class="kw">if</span> (!<span class="kw">this</span>.enabled) <span class="kw">return</span> [];
+    <span class="kw">if</span> (<span class="kw">this</span>.docVersion !== <span class="kw">this</span>.doc.version) {
+      <span class="cm">// 呼び忘れ対策: 版がずれていたら全捨て</span>
+      <span class="kw">this</span>.tokens.length = <span class="st">0</span>;
+      <span class="kw">this</span>.endStates.length = <span class="st">0</span>;
+      <span class="kw">this</span>.validLines = <span class="st">0</span>;
+      <span class="kw">this</span>.docVersion = <span class="kw">this</span>.doc.version;
+    }
+    <span class="kw">this</span>.ensure(line);
+    <span class="kw">return</span> <span class="kw">this</span>.tokens[line] ?? [];
+  }
+
+  <span class="kw">private</span> ensure(line: <span class="ty">number</span>): <span class="ty">void</span> {
+    <span class="kw">const</span> count = <span class="kw">this</span>.doc.lineCount;
+    <span class="kw">if</span> (line &gt;= count) <span class="kw">return</span>;
+    <span class="kw">while</span> (<span class="kw">this</span>.validLines &lt;= line) {
+      <span class="kw">const</span> i = <span class="kw">this</span>.validLines;
+      <span class="kw">const</span> prevState = i === <span class="st">0</span> ? INITIAL_STATE : <span class="kw">this</span>.endStates[i - <span class="st">1</span>];
+      <span class="kw">const</span> { tokens, endState } = tokenizeLine(<span class="kw">this</span>.doc.getLine(i), prevState);
+      <span class="kw">this</span>.tokens[i] = tokens;
+      <span class="kw">this</span>.endStates[i] = endState;
+      <span class="kw">this</span>.validLines = i + <span class="st">1</span>;
+    }
+  }
+}</code></pre>
+
+    <p><code>getTokens(line)</code> は描画側が呼ぶ入口です。「<code>line</code> 行目のトークンをくれ」に答えます。3段構え。</p>
+    <ol>
+      <li>色つけが無効（<code>!this.enabled</code>）なら空配列を返して即終了。</li>
+      <li><strong>版ずれチェック</strong>: <code>this.docVersion !== this.doc.version</code> なら、<code>invalidateFrom</code> の呼び忘れがあったとみなして<strong>全キャッシュを捨てます</strong>。本来は編集のたびに <code>invalidateFrom</code> が呼ばれるはずですが、万一呼び漏れても「文書のバージョンが進んでいるのにキャッシュが古い」ことは検知できる。そのときは安全側に倒して全部作り直す——正しさを速さより優先する保険です。</li>
+      <li><code>ensure(line)</code> で要求行まで計算を埋め、<code>this.tokens[line] ?? []</code> を返す。<code>?? []</code> は、範囲外などで <code>undefined</code> のときに空配列を返すガードです。</li>
+    </ol>
+    <p><code>ensure(line)</code> が計算の本体です。<strong><code>validLines</code> が <code>line</code> を超えるまで、1行ずつ順に埋めていく</strong>ループ。ここで Step 1 の「前の行の状態が要る」という制約が効きます。<code>i</code> 行目を解析するには <code>i-1</code> 行目の endState が必要——だから飛ばして <code>line</code> 行目だけを計算することはできず、<code>validLines</code> から <code>line</code> まで<strong>連続して</strong>埋めるしかありません。</p>
+    <ul>
+      <li><code>prevState</code> は、<code>i === 0</code>（先頭行）なら <code>INITIAL_STATE</code>、そうでなければ <code>endStates[i - 1]</code>（1つ前の行の行末状態）。バケツリレーの受け取り口です。</li>
+      <li><code>tokenizeLine(this.doc.getLine(i), prevState)</code> でその行を切り、返ってきた <code>tokens</code> と <code>endState</code> をそれぞれの配列の <code>i</code> 番目に保存。</li>
+      <li><code>validLines = i + 1</code> で境界線を1つ前進。次のループでは次の行を埋めます。</li>
+    </ul>
+    <p>この設計の美しいところは、<strong>「必要な行まで、必要になったときに、順に埋める」</strong>という遅延評価になっている点です。10万行のファイルを開いても、最初に見えている数十行しか <code>getTokens</code> を呼ばれないので、そこまでしか計算しません。スクロールして下に進めば、その都度 <code>validLines</code> が伸びていく。「見えている範囲しか計算しない」という第04章の描画哲学が、キャッシュにも貫かれています。</p>
+
+    <h2 class="step" id="step-7"><span class="step-no">Step 7</span>編集が来たら「以降を捨てる」— invalidateFrom の落とし穴</h2>
+    <p>Step 6 で「編集行から先をまるごと忘れる」と書きました。ここが本章の山場です。<strong>なぜ部分的に再利用せず、全部捨てるのか。</strong>「編集した行だけ計算し直して、その下の行のキャッシュはそのまま使えばいいのでは?」——この一見賢い最適化が、なぜ危険なのか。理由は2つあります。</p>
+
+    <h3>理由1 — 行の挿入・削除で行番号がずれる</h3>
+    <p>キャッシュは <code>tokens[i]</code> という<strong>行番号をキー</strong>にして引きます。ところが編集は行を増やしたり減らしたりします。5行目で Enter を押して改行すれば、それまでの6行目は7行目に、7行目は8行目に……と、<strong>下の行が全部1つずつ後ろへずれる</strong>。すると <code>tokens[6]</code> に入っている「元・6行目のトークン」は、いまや7行目の中身とは食い違います。行を消せば逆に前へ詰まる。<strong>行番号でキャッシュを引く以上、編集行より下のキャッシュは行番号がずれた瞬間にすべて無効</strong>なのです。位置をずらして詰め替えることも理屈上は可能ですが、それは複雑さに見合いません。</p>
+
+    <div class="ascii">5行目で改行を入れると、下のキャッシュの行番号が全部ずれる
+
+  編集前            編集後（5行目で改行）
+  ┌───────────┐    ┌───────────┐
+  4 │ const a = 1 │    4 │ const a = 1 │  ← ここまでは無傷
+  5 │ foo(bar)    │    5 │ foo(        │  ← 編集された行
+  6 │ const b = 2 │    6 │ bar)        │  ← 新しく生えた行
+  7 │ baz()       │    7 │ const b = 2 │  ← 元6行目がここへずれた
+                        8 │ baz()       │  ← 元7行目がここへずれた
+
+  tokens[6] は「元 const b = 2」のまま → いまの6行目「bar)」と食い違う</div>
+
+    <h3>理由2 — 複数行にまたがる状態が波及する</h3>
+    <p>こちらがより本質的で、Step 1 の状態機械が生む落とし穴です。ある行を編集すると、その行の <strong>endState が変わることがある</strong>。すると、その状態変化は<strong>下へ下へと連鎖</strong>します。</p>
+    <p>具体例を見ましょう。次のコードの3行目の行頭に <code>/*</code> を1つ打ち込んだとします。</p>
+
+    <div class="ascii">3行目に /* を足すと、色の意味が下へ雪崩れる
+
+  編集前                         編集後（3行目頭に /* を追加）
+  1  const a = 1;                1  const a = 1;
+  2  const b = 2;                2  const b = 2;
+  3  doSomething();              3  /* doSomething();     ← ここでコメント開始
+  4  const c = 3;                4  const c = 3;          ← コメントの中身に!
+  5  const d = 4;                5  const d = 4;          ← まだコメントの中!
+  6  finish(); // done           6  finish(); // done     ← まだ…（*/ が無い限り続く）</div>
+
+    <p>3行目で <code>/*</code> を開くと、その endState は <code>inBlockComment: true</code> になります。すると4行目は「コメントの続き」として解析され、色が変わる。4行目の endState もまだ <code>true</code> なので5行目も、6行目も……<strong><code>*/</code> が現れるまで、ずっと下の行の色が変わり続ける</strong>。編集したのは3行目1か所なのに、意味の変化は文書の末尾まで波及しうるのです。テンプレート文字列（<code>`</code>）でもまったく同じことが起きます。</p>
+    <p>もし「編集行だけ計算し直して下はキャッシュ流用」としていたら、4行目以降は<strong>古い色（コードとして塗った結果）のまま残り</strong>、コメントなのにキーワードが緑に光る、という壊れた表示になります。これは実際にありがちなハイライトのバグです。</p>
+
+    <div class="box hazard"><div class="box-k">⚠ 落とし穴（CLAUDE.md 記載）— 部分再利用はしない。編集行以降は捨てる</div>
+      <p>Highlighter のキャッシュは、<strong>行挿入・削除で行番号がずれる</strong>（理由1）うえに、<strong>複数行にまたがる文字列/コメントの状態が下へ波及する</strong>（理由2）。この2つがあるため、「編集行より下を部分的に再利用する」最適化は<strong>正しく書くのが極めて難しく、壊れやすい</strong>。だから本書は <code>invalidateFrom(line)</code> で<strong>編集行以降を一律に捨てる</strong>という、単純で確実な方針を採ります。「捨てすぎでは?」と思うかもしれませんが——実際に払うコストは、次に <code>getTokens</code> が呼ばれる<strong>可視範囲まで</strong>。画面に見えている数十行を切り直すだけで、その下の何万行は「要求されるまで計算しない」（Step 6 の遅延評価）。だから捨てても実害はほぼない。<strong>「安全に全部捨てる × 必要な分だけ遅延で埋める」</strong>の組み合わせが、正しさと速さを同時に成立させています。賢い部分再利用より、単純な全捨て＋遅延評価のほうが、速くて正しいのです。</p>
+    </div>
+
+    <div class="box do"><div class="box-k">▸ 動かして確認 — 行またぎの状態伝播</div>
+      <p>理由2で語った「状態が下へ波及する」性質を、テストが直接検証しています。行またぎのブロックコメントとテンプレート文字列の2件を走らせましょう。</p>
+      <pre class="term"><code><span class="ps">$</span> npx vitest run src/core/tokenizer.test.ts -t <span class="st">"またぐ"</span>
+<span class="out">✓ src/core/tokenizer.test.ts (7 tests | 5 skipped) 2ms
+ Test Files  1 passed (1)
+      Tests  2 passed | 5 skipped (7)</span></code></pre>
+      <p>通ったのは「ブロックコメントが行をまたぐと endState に伝わる」と「テンプレート文字列が行をまたぐ」の2本。<code>-t</code> は<strong>テスト名の部分一致でフィルタ</strong>するオプションで、マッチしなかった5本は <code>skipped</code> として数えられます（<code>7 tests</code> のうち <code>2 passed | 5 skipped</code>、という読み方です）。<strong>もし <code>2 passed</code> ではなく <code>7 skipped</code> と出たら、絞り込み文字列がどのテスト名にも一致していません</strong>——打ち間違いを疑ってください。テストが落ちたわけではないので、エラーが出ず気づきにくい失敗です。</p>
+      <p>「ブロックコメントが行をまたぐと endState に伝わる」は、<code>tokenizeLine("code /* comment", INITIAL_STATE)</code> の endState が <code>inBlockComment: true</code> になり、その状態を次の行 <code>"still comment */ after"</code> に渡すと今度は <code>false</code> に戻ること、そして最初のトークンが <code>*/</code> までコメントになることを確かめます。まさに Highlighter の <code>endStates</code> 配列が担う<strong>バケツリレー</strong>そのものです。この伝播があるからこそ、編集行以降を捨てる判断が正当化されます。</p>
+    </div>
+
+    <h2 class="step" id="step-8"><span class="step-no">Step 8</span>動かして確認する</h2>
+    <p>この章で書いた <code>tokenizer.ts</code> の全体を、テストで通しましょう。トークナイザには7件のテストがあり、キーワード判定・行コメント・行またぎ2種・エスケープ・数値の境界2種を網羅しています。</p>
+
+    <div class="box do"><div class="box-k">▸ トークナイザの全テスト</div>
+      <p><code>src/</code> ディレクトリで、トークナイザのテストファイルだけを走らせます。</p>
+      <pre class="term"><code><span class="ps">$</span> cd src
+<span class="ps">$</span> npx vitest run src/core/tokenizer.test.ts
+<span class="out">✓ src/core/tokenizer.test.ts (7 tests)
+   ✓ tokenizeLine &gt; キーワード・関数・数値・文字列を見分ける
+   ✓ tokenizeLine &gt; 行コメントは行末まで
+   ✓ tokenizeLine &gt; ブロックコメントが行をまたぐと endState に伝わる
+   ✓ tokenizeLine &gt; テンプレート文字列が行をまたぐ
+   ✓ tokenizeLine &gt; エスケープされた引用符で文字列が終わらない
+   ✓ tokenizeLine &gt; 1+2 が1つの数値にならない
+   ✓ tokenizeLine &gt; 指数表記の数値
+ Test Files  1 passed (1)
+      Tests  7 passed (7)</span></code></pre>
+      <p>7件それぞれが、この章のどの判断に対応するかを対にして読んでみてください。「行コメントは行末まで」は Step 3 の <code>break</code>、「エスケープされた引用符で…」は Step 5 の <code>i += 2</code>、「1+2 が1つの数値にならない」と「指数表記の数値」は Step 4 の <code>+</code>/<code>-</code> 分岐。テストが章の設計そのものの索引になっています。</p>
+    </div>
+
+    <div class="box do"><div class="box-k">▸ 全テストもついでに</div>
+      <p>他の章のコードも <code>src/</code> にそろっていれば、全 70 件を通しておきましょう。</p>
+      <pre class="term"><code><span class="ps">$</span> npm test
+<span class="out"> Test Files  7 passed (7)
+      Tests  70 passed (70)</span></code></pre>
+      <p>そして——せっかくなので <code>npm run dev</code> でブラウザを開き、<code>.ts</code> ファイルを貼り付けてみてください。この章のコードが、キーワードを緑に、文字列を、コメントを塗り分けるのを目で見られます。いまあなたが読んでいるこのページのコード表示も、発想は完全に同じです。</p>
+    </div>
+
+    <div class="gonote"><div class="box-k">TS メモ · このページの色つけと mint editor の色つけ</div>
+      <p>あなたが読んでいるこのチュートリアルの各コードブロックは、手で <code>&lt;span class="kw"&gt;const&lt;/span&gt;</code> のようにタグを付けて色を分けています（<code>kw</code>=キーワード緑、<code>ty</code>=型、<code>st</code>=文字列/数値、<code>cm</code>=コメント）。これは <code>tokenizeLine</code> が返す <code>type</code>（<code>"kw"</code>/<code>"str"</code>/<code>"cm"</code>…）を CSS クラスに対応させたのと、まったく同じ仕組みです。違いは「切る作業を人間がやったか、トークナイザがやったか」だけ。<code>Token { start, end, type }</code> の <code>type</code> を色に写像する——シンタックスハイライトの正体は、突き詰めればこれだけなのだと、このページ自身が実例になっています。</p>
+    </div>
+
+    <h2>つまずき FAQ</h2>
+    <details class="qa"><summary>なぜトークンは文字列（<code>text</code>）を持たず、<code>start</code>/<code>end</code> の位置だけなの?</summary>
+      <div class="qa-body"><p>元の行がすでに文字列として存在するので、トークンが文字を複製するのは無駄だからです。実際の文字が要るときは <code>line.slice(token.start, token.end)</code> でいつでも取り出せます。位置だけ持てばメモリが軽く、1行に何十個もトークンができても文字列コピーが発生しません。これは第00章の <code>slice</code>／半開区間 <code>[start, end)</code> の思想と同じで、「持ち方は最小限、必要なときに切り出す」という本書の一貫した方針です。描画側も、行の文字列とトークンの位置さえあれば <code>fillText</code> で色付きに描けます。</p></div>
+    </details>
+    <details class="qa"><summary>「編集行以降を全部捨てる」のは、大きなファイルで遅くならない?</summary>
+      <div class="qa-body"><p>なりません。捨てるのは配列の <code>length</code> を縮めるだけ（ほぼ一瞬）で、<strong>捨てた行を即座に計算し直すわけではない</strong>からです。実際の再計算は、次に <code>getTokens</code> がその行を要求したときに初めて走ります（Step 6 の遅延評価）。そして要求されるのは<strong>画面に見えている数十行だけ</strong>。10万行のファイルで先頭を編集しても、切り直すのはビューに映っている範囲まで。スクロールして下へ行けば、そのとき <code>validLines</code> が伸びて必要な行が埋まります。「安全に全捨て」と「必要な分だけ遅延計算」を組み合わせているから、捨てても速いのです。</p>
+      <p><strong>ただし「必要な分」の数え方に注意が要ります。</strong> <code>ensure(line)</code> は <code>while (this.validLines &lt;= line)</code> で <code>validLines</code> から要求行まで<strong>1行ずつ連続で</strong>埋めます。飛ばせないのは、各行のトークン化に<strong>前の行の <code>endState</code></strong> が要るから（理由2の波及）。つまり画面が3行しか映っていなくても、<strong>その3行が9万行目なら、0行目から9万行を舐める</strong>ことになります。実測すると10万行の文書で末尾へ一気にジャンプした初回は<strong>約115ms</strong>。2回目以降はキャッシュが効いて<strong>0ms</strong>です。「見えている範囲まで」が正確に意味するのは<strong>「0行目から、見えている範囲の終わりまで」</strong>——普通のスクロールなら少しずつ伸びるので体感できませんが、<code>Ctrl+End</code> で末尾へ飛ぶような操作では初回だけ引っかかります。前の行の状態を引き継ぐ設計を選んだ以上、これは避けられない代償です。</p></div>
+    </details>
+    <details class="qa"><summary><code>getTokens</code> の中の「版ずれチェック（<code>docVersion !==</code>）」は、<code>invalidateFrom</code> があれば要らないのでは?</summary>
+      <div class="qa-body"><p>正常系では確かに要りません。あれは<strong>呼び忘れ対策の保険</strong>です。本来、文書を編集したエディタ本体は必ず <code>invalidateFrom</code> を呼ぶ約束ですが、実装ミスでその呼び出しが漏れると、キャッシュが古いまま古い色を描き続けてしまいます。文書には <code>version</code>（編集のたびに増える番号）があるので、「キャッシュを取ったときの版」と「いまの版」がずれていたら、<code>invalidateFrom</code> が漏れたと判断して全捨てします。速さより正しさを優先する安全弁で、こういう「呼ばれ忘れても致命傷にならない」二重化は、状態を持つキャッシュを堅牢にする定石です。</p></div>
+    </details>
+
+    <h2>理解度チェック</h2>
+    <p>次の問いに<strong>自分の言葉で</strong>答えられたら、この章は卒業です。</p>
+    <details class="qa"><summary>1. トークナイザが「1行ずつしか見ない」のに <code>/* … */</code> の複数行コメントを正しく塗れるのはなぜか。仕組みを説明せよ。</summary>
+      <div class="qa-body"><p><strong>行単位の状態機械</strong>だから。<code>tokenizeLine</code> は「前の行の <code>LineState</code>（<code>inBlockComment</code>／<code>inTemplate</code>）」を受け取って解析し、「行末時点の状態(endState)」を返す。ある行で <code>/*</code> を開いたまま閉じなければ endState は <code>inBlockComment: true</code> になり、それが次の行の入力になる。次の行はループ先頭の <code>if (inBlockComment)</code> で「コメントの続き」として塗り、<code>*/</code> を見つけたら <code>false</code> に戻す。状態をバケツリレーで引き継ぐことで、1行ずつしか見なくても行またぎの構文が解ける。<code>Highlighter</code> はこの endState を <code>endStates[]</code> 配列に保存して数珠つなぎにする。</p></div>
+    </details>
+    <details class="qa"><summary>2. <code>invalidateFrom</code> が「編集行以降を部分再利用せず全部捨てる」のはなぜか。2つの理由を挙げよ。</summary>
+      <div class="qa-body"><p><strong>理由1（行番号のずれ）</strong>: キャッシュは <code>tokens[i]</code> と行番号をキーに引くが、行の挿入・削除で編集行より下の行番号がすべてずれる。すると保存済みトークンと実際の行が食い違い、下のキャッシュは一律に無効になる。<strong>理由2（状態の波及）</strong>: 編集で行の endState が変わると（例: <code>/*</code> を足す）、その変化は <code>*/</code> が現れるまで下の行へ連鎖し、色の意味が末尾まで変わりうる。部分再利用だと古い色が残って壊れる。この2つがあるため全捨てが確実で、しかも再計算は可視範囲までの遅延評価なので実害がない。</p></div>
+    </details>
+    <details class="qa"><summary>3. <code>const x = foo(42) + "hi";</code> を <code>tokenizeLine</code> に通すと、<code>const</code>・<code>foo</code>・<code>42</code>・<code>"hi"</code> はそれぞれ何 type になり、なぜそう判定されるか。</summary>
+      <div class="qa-body"><p><code>const</code> は <strong><code>"kw"</code></strong>: 識別子として切り出したあと <code>KEYWORDS.has("const")</code> が真だから。<code>foo</code> は <strong><code>"fn"</code></strong>: キーワードでなく、単語の直後（空白を飛ばした先）が <code>(</code> なので関数名と判定。<code>42</code> は <strong><code>"num"</code></strong>: 数字で始まり、続く文字が数値パターンだから。<code>"hi"</code> は <strong><code>"str"</code></strong>: <code>"</code> で始まり、<code>scanString</code> が閉じ <code>"</code> までを文字列として切るから。<code>+</code> は直前が数字（<code>e</code>/<code>E</code> でない）なので数値に食われず、<code>"pn"</code>（記号）になる。</p></div>
+    </details>
+
+    <h2>まとめ — 次の層へ</h2>
+    <p>この章で、コードに色がつきました。仕組みは2部品——<strong>切る（tokenizer）</strong>と<strong>覚える（highlighter）</strong>。切る側は「行単位の状態機械」で、<code>LineState</code> を前の行から受け取り、行末の <code>endState</code> を次の行へ渡すバケツリレーによって、1行ずつしか見なくても <code>/* … */</code> やテンプレート文字列のような行またぎの構文を解きました。覚える側は <code>validLines</code> という1本の境界線でキャッシュを管理し、編集が来たら <code>invalidateFrom</code> で<strong>編集行以降を潔く全部捨て</strong>、必要な行を必要になったとき遅延で埋める。「賢い部分再利用より、単純な全捨て＋遅延評価のほうが速くて正しい」——この章のいちばんの教訓です。そして、いまあなたが読んでいるこのページの色つけ自体が、その実例でした。</p>
+    <p>次の第08章は、エディタ体験を仕上げる最後のピース——<strong>日本語入力（IME）</strong>です。「にほんご」と打って変換候補が浮かび、確定して初めて文字が文書に入る。あの独特の手触りの裏で、未確定文字列をどう扱い、変換候補の窓をどこに出すのか。文字を「打つ」ことの、いちばん奥にある難所へ潜ります。</p>
+
+    <div class="chap-foot">
+      <a class="pager" href="06-search.html"><span class="dir">← 前へ</span>第06章 · 複数カーソルと検索</a>
+      <a class="pager next" href="08-ime.html"><span class="dir">次へ →</span>第08章 · 日本語を打つ</a>
+    </div>
+  </main>
+</div>
+</body>
+</html>

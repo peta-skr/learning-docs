@@ -1,0 +1,601 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>第00章 返事をするサーバ — Redis をつくる</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500;600&family=Source+Serif+4:opsz,wght@8..60,400;8..60,600;8..60,700&family=Noto+Serif+JP:wght@400;600;700&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<div class="shell">
+
+  <aside class="spine">
+    <a class="wordmark" href="index.html">MINI-REDIS · from scratch</a>
+    <div class="book-title">Redis を<br>つくる</div>
+    <div class="book-sub">Go で RESP から Sorted Set まで</div>
+
+    <div class="legend"><span>読む <b>↓</b></span><span>組む <b>↑</b></span></div>
+
+    <nav aria-label="目次">
+      <ul class="toc">
+        <li><a class="nav-item" href="index.html"><span class="nav-num">序</span><span class="nav-label">はじめに・準備<span class="nav-tag">Setup</span></span></a></li>
+        <li><a class="nav-item current" aria-current="page" href="00-server.html"><span class="nav-num">00</span><span class="nav-label">返事をするサーバ<span class="nav-tag">RESP</span></span></a></li>
+        <li><a class="nav-item" href="01-keyspace.html"><span class="nav-num">01</span><span class="nav-label">キーと値<span class="nav-tag">Store</span></span></a></li>
+        <li><a class="nav-item" href="02-expire.html"><span class="nav-num">02</span><span class="nav-label">有効期限<span class="nav-tag">Expire</span></span></a></li>
+        <li><a class="nav-item" href="03-string.html"><span class="nav-num">03</span><span class="nav-label">数としての文字列<span class="nav-tag">String</span></span></a></li>
+        <li><a class="nav-item" href="04-list.html"><span class="nav-num">04</span><span class="nav-label">List<span class="nav-tag">List</span></span></a></li>
+        <li><a class="nav-item" href="05-hash.html"><span class="nav-num">05</span><span class="nav-label">Hash<span class="nav-tag">Hash</span></span></a></li>
+        <li><a class="nav-item" href="06-set.html"><span class="nav-num">06</span><span class="nav-label">Set とエンコーディング<span class="nav-tag">Set</span></span></a></li>
+        <li><a class="nav-item" href="07-zset.html"><span class="nav-num">07</span><span class="nav-label">Sorted Set と skiplist<span class="nav-tag">ZSet</span></span></a></li>
+        <li><a class="nav-item" href="08-pubsub.html"><span class="nav-num">08</span><span class="nav-label">Pub/Sub<span class="nav-tag">PubSub</span></span></a></li>
+        <li><a class="nav-item" href="09-finish.html"><span class="nav-num">09</span><span class="nav-label">仕上げと設計判断<span class="nav-tag">Finish</span></span></a></li>
+      </ul>
+    </nav>
+
+    <div class="spine-foot">
+      各章は一つのデータ型・機能。<br>下（RESP）から上（Sorted Set）へ<br>積み上げて動かしていく。
+    </div>
+  </aside>
+
+  <main class="reading">
+    <div class="progress-tag">第00章 / 全10章 · 層: RESP · 読了目安 2〜3時間</div>
+    <div class="eyebrow"><span>RESP</span><span class="depth">— 最下層</span></div>
+    <h1>返事をするサーバ</h1>
+    <p class="lede">Redis の底には、TCP でバイト列を受け取り、それを<strong>コマンドの配列</strong>として解釈し、<strong>応答のバイト列</strong>を書き返す小さな口があります。この章では、その口 — <code>RESP</code> を話すサーバの骨格 — を作ります。全部で 300 行ほど。終えたとき、本物の <code>redis-cli</code> があなたの書いたサーバに <code>PING</code> と話しかけ、<code>PONG</code> という返事を受け取ります。</p>
+
+    <div class="box goal"><div class="box-k">◈ この章のゴール</div>
+      <p>次の 2 つを、自分の目と手で確認できたら達成です。</p>
+      <ol>
+        <li><code>go test -run TestServerEndToEnd -v</code> で、<code>PING → PONG</code>・未知コマンドでも接続が生き続けることが PASS する。</li>
+        <li>（<code>redis-cli</code> がある人は）<code>redis-cli -p 6380 ping</code> が <code>PONG</code> を返す。本物のクライアントが、自作サーバと握手できることを目視する。</li>
+      </ol>
+    </div>
+
+    <div class="box map"><div class="box-k">☰ この章のステップ</div>
+      <ol>
+        <li><a href="#step-1">RESP という言葉を知る — 5 つの記号</a></li>
+        <li><a href="#step-2">コマンドを読む — <code>resp.go</code></a></li>
+        <li><a href="#step-3">応答を組み立てる — <code>reply.go</code></a></li>
+        <li><a href="#step-4">コマンドを振り分ける — <code>command.go</code></a></li>
+        <li><a href="#step-5">TCP で待ち受け、接続を捌く — <code>main.go</code></a></li>
+        <li><a href="#step-6">テストを読む — 「握手」を機械で確かめる</a></li>
+        <li><a href="#step-7">演習: telnet で生の RESP を打ち込む</a></li>
+      </ol>
+    </div>
+
+    <h2>なぜ「プロトコル」から始めるのか</h2>
+    <p>Redis で最初に作るべきものは、<code>SET</code> でも辞書でもありません。<strong>クライアントと言葉が通じること</strong>です。どんなに賢いデータ構造を積んでも、クライアントの言葉を聞き取れず、応答を返せなければ、それは誰にも使われない置物です。だからこの本は、一番下の「通信」の層から始めます。</p>
+    <p>その言葉が <strong>RESP</strong>（REdis Serialization Protocol）です。名前は仰々しいですが、実体は<strong>行区切りのテキスト</strong>にすぎません。HTTP を読んだことがあれば、あれよりずっと簡単です。RESP のうれしさは3つ。人間が目で読める、実装が単純、そして<strong>長さを先に送るのでバイナリセーフ</strong>（値の中に改行が入っていても壊れない）。この章のコードが小さく済むのは、プロトコルがこれだけ素直だからです。</p>
+
+    <h2>この層が上の層に約束すること</h2>
+    <p>この章で作る層（RESP サーバ）が周囲に約束するのは、たったこれだけです。</p>
+    <ul>
+      <li>TCP で届いたバイト列を、<code>["SET", "k", "v"]</code> という<strong>文字列の配列</strong>にして上に渡す。</li>
+      <li>上が返した応答（<code>"+OK\r\n"</code> のような RESP 文字列）を、<strong>そのまま接続に書き出す</strong>。</li>
+      <li>壊れた入力や未知コマンドが来ても<strong>サーバを落とさない</strong>。エラーを返して、接続はできるだけ生かす。</li>
+    </ul>
+    <p>逆に、この層が<strong>やらない</strong>ことをはっきりさせておきます。<code>SET</code> が何をするか、値をどこにしまうか — そういう意味づけは一切しません。この層から見れば、コマンドはただの文字列の配列で、応答はただのバイト列です。「通信」と「処理」を分ける。この規律が、10 章ぶんの積み上げを可能にします。</p>
+
+    <h2 class="step" id="step-1"><span class="step-no">Step 1</span>RESP という言葉を知る — 5 つの記号</h2>
+    <p>コードを書く前に、これから読み書きする言葉を目で覚えます。RESP では、<strong>行の1文字目（プレフィックス）が、その行の種類を決めます</strong>。本書で使うのは次の5種類だけです。</p>
+
+    <table>
+      <tr><th>記号</th><th>種類</th><th>例（<code>\r\n</code> は改行）</th></tr>
+      <tr><td><code>+</code></td><td>単純文字列（Simple String）</td><td><code>+OK\r\n</code></td></tr>
+      <tr><td><code>-</code></td><td>エラー（Error）</td><td><code>-ERR unknown command\r\n</code></td></tr>
+      <tr><td><code>:</code></td><td>整数（Integer）</td><td><code>:42\r\n</code></td></tr>
+      <tr><td><code>$</code></td><td>Bulk String（長さ + 本体）</td><td><code>$5\r\nhello\r\n</code></td></tr>
+      <tr><td><code>*</code></td><td>配列（要素数 + 各要素）</td><td><code>*2\r\n$3\r\nfoo\r\n$3\r\nbar\r\n</code></td></tr>
+    </table>
+
+    <p>クライアントがコマンドを送るとき、実はこの中の <strong><code>*</code>（配列）</strong>と <strong><code>$</code>（Bulk String）</strong>の2つだけを使います。<code>redis-cli</code> で <code>SET k hello</code> と打つと、ネットワークにはこう流れます。</p>
+
+    <div class="ascii">redis-cli> SET k hello    が送るバイト列
+
+  *3\r\n          ← これから 3 個の要素が来る（配列）
+  $3\r\n         ← 次の Bulk は 3 バイト
+  SET\r\n        ← 本体 "SET"
+  $1\r\n         ← 次の Bulk は 1 バイト
+  k\r\n          ← 本体 "k"
+  $5\r\n         ← 次の Bulk は 5 バイト
+  hello\r\n      ← 本体 "hello"
+
+  ＝ 文字列の配列 ["SET", "k", "hello"] に読み解ける</div>
+
+    <p>ここで <strong><code>$5</code> の「5」</strong>に注目してください。本体 <code>hello</code> を送る前に、「これから5バイト来るよ」と<strong>長さを先に宣言</strong>しています。読む側は「改行が来るまで読む」のではなく「きっかり5バイト読む」で本体を取れる。だから本体の中に <code>\r\n</code> が混ざっていても、長さで区切るので絶対に壊れません。これが RESP のバイナリセーフの正体で、Step 2 のコードの心臓になります。</p>
+    <p>サーバが返す応答は、逆に <code>+</code> <code>-</code> <code>:</code> <code>$</code> <code>*</code> の全部を使い分けます。<code>PING</code> には <code>+PONG\r\n</code>、<code>GET</code> の結果は <code>$5\r\nhello\r\n</code>、<code>DEL</code> の削除件数は <code>:1\r\n</code> という具合です。この「送りは配列 + Bulk、返しは5種類」という非対称を頭に置いて、コードへ進みます。</p>
+
+    <h2 class="step" id="step-2"><span class="step-no">Step 2</span>コマンドを読む — resp.go</h2>
+    <p>最初のステップは、TCP から届くバイト列を <code>["SET","k","hello"]</code> という配列に読み解く関数 <code>readCommand</code> です。作るファイルは <code>resp.go</code>。この章でいちばん神経を使う場所ですが、Step 1 の絵がそのままコードになるだけです。まず前半、定数とヘルパーから。</p>
+
+    <div class="file-tag">resp.go</div>
+    <pre><code><span class="kw">package</span> main
+
+<span class="kw">import</span> (
+	<span class="st">"bufio"</span>
+	<span class="st">"errors"</span>
+	<span class="st">"fmt"</span>
+	<span class="st">"io"</span>
+	<span class="st">"strconv"</span>
+	<span class="st">"strings"</span>
+)
+
+<span class="cm">// errProtocol はクライアントの入力が RESP として壊れていることを表す。</span>
+<span class="cm">// これを受けた側はエラー応答を返して接続を閉じる（本家と同じ振る舞い）。</span>
+<span class="kw">var</span> errProtocol = errors.New(<span class="st">"protocol error"</span>)
+
+<span class="kw">const</span> (
+	maxArrayLen = <span class="st">1024</span> * <span class="st">1024</span>       <span class="cm">// コマンドの最大要素数（保険）</span>
+	maxBulkLen  = <span class="st">512</span> * <span class="st">1024</span> * <span class="st">1024</span> <span class="cm">// Bulk String の最大長。本家の proto-max-bulk-len と同じ</span>
+)
+
+<span class="kw">func</span> protoErr(format <span class="ty">string</span>, a ...<span class="ty">any</span>) <span class="ty">error</span> {
+	<span class="kw">return</span> fmt.Errorf(<span class="st">"%w: %s"</span>, errProtocol, fmt.Sprintf(format, a...))
+}
+
+<span class="cm">// readLine は CRLF 終端の1行を読み、末尾の改行を落として返す。</span>
+<span class="kw">func</span> readLine(r *bufio.<span class="ty">Reader</span>) (<span class="ty">string</span>, <span class="ty">error</span>) {
+	line, err := r.ReadString(<span class="st">'\n'</span>)
+	<span class="kw">if</span> err != <span class="kw">nil</span> {
+		<span class="kw">return</span> <span class="st">""</span>, err
+	}
+	<span class="kw">return</span> strings.TrimRight(line, <span class="st">"\r\n"</span>), <span class="kw">nil</span>
+}</code></pre>
+
+    <p>上から見ます。<code>errProtocol</code> は「入力が壊れている」ことを表す<strong>番兵エラー</strong>です。ただのエラー文字列ではなく <code>var</code> で1個だけ作った値にしているのは、あとで <code>errors.Is(err, errProtocol)</code> という形で「これはプロトコル違反か?」を判定するためです（Step 5 で接続を切るかどうかの分岐に使います）。</p>
+    <p>2つの定数 <code>maxArrayLen</code> / <code>maxBulkLen</code> は<strong>暴走を防ぐ保険</strong>です。もし壊れた（あるいは悪意ある）クライアントが「これから 10 億要素の配列が来る」と宣言したら、素直に信じると巨大なメモリを確保して死にます。上限を決めておき、超えたら受け付けません。<code>maxBulkLen</code> の 512MB は本家 Redis の <code>proto-max-bulk-len</code> の既定値に合わせています。</p>
+    <p><code>protoErr</code> は「<code>errProtocol</code> を土台に、具体的な理由を添えたエラーを作る」ヘルパーです。<code>%w</code>（wrap）で <code>errProtocol</code> を包むので、出来上がったエラーは「<code>protocol error: invalid bulk length</code>」のように読めて、かつ <code>errors.Is</code> で <code>errProtocol</code> と判定できる — メッセージの親切さと判定のしやすさを両立させる Go の定石です。</p>
+    <p><code>readLine</code> は <code>bufio.Reader</code> から <code>\n</code> までの1行を読み、末尾の <code>\r\n</code> を落として返すだけの小道具。RESP は行区切りなので、この「1行読む」がコマンド読み取りの最小単位になります。</p>
+
+    <div class="gonote"><div class="box-k">GO メモ · 番兵エラーと %w / errors.Is</div>
+      <p>Go では「特定の種類のエラー」を、<code>var errFoo = errors.New("...")</code> と<strong>1個だけ作った値</strong>で表すのが定番です（番兵エラー）。それを <code>fmt.Errorf("%w: 詳細", errFoo)</code> で<strong>包む</strong>と、詳細メッセージを足しつつ中に <code>errFoo</code> を保持したエラーになります。受け取った側は <code>errors.Is(err, errFoo)</code> で「これは errFoo 由来か?」を、メッセージ文字列を照合することなく判定できます。「エラーの種類で分岐したいが、文字列比較はしたくない」ときの標準的なやり方です。</p>
+    </div>
+
+    <p>いよいよ本体、<code>readCommand</code> です。RESP の配列を1つ読んで <code>["SET","k","v"]</code> にします。</p>
+
+    <div class="file-tag">resp.go（つづき・これで全文）</div>
+    <pre><code><span class="cm">// readCommand は RESP の配列を1つ読み、["SET","k","v"] の形にして返す。</span>
+<span class="cm">// '*' で始まらない行はインライン形式（telnet 用の生テキスト）として扱う。</span>
+<span class="kw">func</span> readCommand(r *bufio.<span class="ty">Reader</span>) ([]<span class="ty">string</span>, <span class="ty">error</span>) {
+	line, err := readLine(r)
+	<span class="kw">if</span> err != <span class="kw">nil</span> {
+		<span class="kw">return</span> <span class="kw">nil</span>, err
+	}
+	<span class="kw">if</span> len(line) == <span class="st">0</span> {
+		<span class="kw">return</span> <span class="kw">nil</span>, <span class="kw">nil</span> <span class="cm">// 空行は無視（呼び出し側でスキップ）</span>
+	}
+	<span class="kw">if</span> line[<span class="st">0</span>] != <span class="st">'*'</span> {
+		<span class="cm">// インライン形式: "PING" や "SET k v" をそのまま空白で割る</span>
+		<span class="kw">return</span> strings.Fields(line), <span class="kw">nil</span>
+	}
+
+	n, err := strconv.Atoi(line[<span class="st">1</span>:])
+	<span class="kw">if</span> err != <span class="kw">nil</span> || n &lt; <span class="st">0</span> || n &gt; maxArrayLen {
+		<span class="kw">return</span> <span class="kw">nil</span>, protoErr(<span class="st">"invalid multibulk length"</span>)
+	}
+
+	args := <span class="kw">make</span>([]<span class="ty">string</span>, <span class="st">0</span>, n)
+	<span class="kw">for</span> i := <span class="st">0</span>; i &lt; n; i++ {
+		hdr, err := readLine(r)
+		<span class="kw">if</span> err != <span class="kw">nil</span> {
+			<span class="kw">return</span> <span class="kw">nil</span>, err
+		}
+		<span class="kw">if</span> len(hdr) == <span class="st">0</span> || hdr[<span class="st">0</span>] != <span class="st">'$'</span> {
+			<span class="kw">return</span> <span class="kw">nil</span>, protoErr(<span class="st">"expected '$', got '%.1s'"</span>, hdr)
+		}
+		length, err := strconv.Atoi(hdr[<span class="st">1</span>:])
+		<span class="kw">if</span> err != <span class="kw">nil</span> || length &lt; <span class="st">0</span> || length &gt; maxBulkLen {
+			<span class="kw">return</span> <span class="kw">nil</span>, protoErr(<span class="st">"invalid bulk length"</span>)
+		}
+		buf := <span class="kw">make</span>([]<span class="ty">byte</span>, length+<span class="st">2</span>) <span class="cm">// 本体 + \r\n</span>
+		<span class="kw">if</span> _, err := io.ReadFull(r, buf); err != <span class="kw">nil</span> {
+			<span class="kw">return</span> <span class="kw">nil</span>, err
+		}
+		<span class="kw">if</span> buf[length] != <span class="st">'\r'</span> || buf[length+<span class="st">1</span>] != <span class="st">'\n'</span> {
+			<span class="kw">return</span> <span class="kw">nil</span>, protoErr(<span class="st">"expected CRLF after bulk payload"</span>)
+		}
+		args = append(args, string(buf[:length]))
+	}
+	<span class="kw">return</span> args, <span class="kw">nil</span>
+}</code></pre>
+
+    <p>Step 1 の絵と見比べながら追います。まず1行目を読み、<strong>1文字目で枝分かれ</strong>します。空行なら「コマンドなし」として <code>nil, nil</code>（呼び出し側が読み飛ばす）。<code>*</code> でなければ<strong>インライン形式</strong> — <code>telnet</code> で <code>PING</code> と生打ちしたときのための救済で、<code>strings.Fields</code>（空白で分割）でお茶を濁します。本題は <code>*</code> で始まる正規の配列です。</p>
+    <p><code>*3</code> の <code>3</code> を <code>strconv.Atoi(line[1:])</code>（1文字目 <code>*</code> を飛ばして数値化）で取り、これが要素数 <code>n</code>。負や上限超えは <code>protoErr</code> で門前払いです。</p>
+    <p>あとは <code>n</code> 回ループして Bulk String を1つずつ読みます。各要素は必ず「<code>$長さ</code> の行 → 本体 + <code>\r\n</code>」の2段構え。ヘッダ行を読んで <code>$</code> を確認し、<code>length</code> を取ります。そして<strong>この章で最も大事な1行</strong>——</p>
+    <pre><code>buf := <span class="kw">make</span>([]<span class="ty">byte</span>, length+<span class="st">2</span>)   <span class="cm">// 本体 + \r\n の 2 バイト</span>
+io.ReadFull(r, buf)               <span class="cm">// きっかり length+2 バイト読む</span></code></pre>
+    <p><code>io.ReadFull</code> は「指定したバイト数を<strong>きっかり</strong>読み、足りなければエラー」を保証します。Step 1 で強調した「長さで区切るからバイナリセーフ」が、この行に凝縮されています。もし <code>readLine</code>（改行まで読む）で本体を読んでいたら、値の中に <code>\r\n</code> があった瞬間に途中で切れて壊れます。<code>length+2</code> の <code>+2</code> は末尾の <code>\r\n</code> のぶん。読んだあと <code>buf[length]</code> と <code>buf[length+1]</code> が本当に <code>\r</code> <code>\n</code> かを確かめることで、「宣言した長さと実際がズレていないか」まで検査しています。最後に本体部分 <code>buf[:length]</code> を文字列にして <code>args</code> へ積む。<code>n</code> 個そろえば <code>["SET","k","v"]</code> の完成です。</p>
+
+    <div class="box hazard"><div class="box-k">⚠ 落とし穴 — 行区切りで Bulk を読むと壊れる</div>
+      <p>「<code>$</code> の長さを無視して、次の1行を本体として読めばいいのでは?」と思うかもしれません。しかしそれは<strong>バグの温床</strong>です。<code>ECHO "a\r\nb"</code> のように値の中に改行を含むコマンドを送られると、行区切りでは <code>a</code> で切れてしまい、残りの <code>b</code> が次のコマンドとして誤読されます。テスト <code>TestReadCommand</code> はまさにこれ（<code>$4\r\na\r\nb\r\n</code> が <code>"a\r\nb"</code> に読めること）を検証しています。<strong>Bulk は必ず長さで読む</strong> — RESP を実装するとき最初に踏む地雷です。</p>
+    </div>
+
+    <div class="gonote"><div class="box-k">GO メモ · io.ReadFull</div>
+      <p><code>bufio.Reader</code> の <code>Read</code> は「今すぐ読めるぶんだけ」読むので、頼んだバイト数より少なく返ることがあります（ネットワークは細切れに届く）。<code>io.ReadFull(r, buf)</code> は「<code>len(buf)</code> バイト<strong>全部</strong>そろうまで読み続け、途中で切れたらエラー」を保証してくれるラッパーです。「N バイトきっかり欲しい」ときは <code>Read</code> ではなく <code>io.ReadFull</code> を使う、と覚えておけば RESP に限らず役立ちます。</p>
+    </div>
+
+    <div class="box do"><div class="box-k">▸ 動かして確認</div>
+      <p><code>resp.go</code> だけでも、読み取りのテストが通ります。正常系・インライン・壊れた入力の3本をまとめて走らせます。</p>
+      <pre class="term"><code><span class="ps">$</span> go test -run 'TestReadCommand' -v
+<span class="out">=== RUN   TestReadCommand
+--- PASS: TestReadCommand (0.00s)
+=== RUN   TestReadCommandInline
+--- PASS: TestReadCommandInline (0.00s)
+=== RUN   TestReadCommandProtocolErrors
+--- PASS: TestReadCommandProtocolErrors (0.00s)
+PASS</span></code></pre>
+      <p><code>TestReadCommandProtocolErrors</code> は「配列長が数字でない」「長さ詐称」など6種類の壊れた入力を投げ、すべてが <code>errProtocol</code> として弾かれることを確認しています。壊れた入力を<strong>正しく壊れていると判定できる</strong>のも、立派な機能です。</p>
+    </div>
+
+    <h2 class="step" id="step-3"><span class="step-no">Step 3</span>応答を組み立てる — reply.go</h2>
+    <p>読み取りができたので、次は逆向き — サーバからの<strong>応答を組み立てる</strong>側です。Step 1 の表の5記号を、そのまま関数にします。作るのは <code>reply.go</code>。驚くほど短いですが、この本のサーバが返す応答は<strong>すべてこの数個の関数の組み合わせ</strong>で書けます。</p>
+
+    <div class="file-tag">reply.go</div>
+    <pre><code><span class="kw">package</span> main
+
+<span class="kw">import</span> (
+	<span class="st">"strconv"</span>
+	<span class="st">"strings"</span>
+)
+
+<span class="cm">// RESP2 の応答を組み立てる小さなヘルパー群。</span>
+<span class="cm">// サーバからの応答はこの5種類（+配列）だけで全部書ける。</span>
+
+<span class="kw">func</span> simpleString(s <span class="ty">string</span>) <span class="ty">string</span> { <span class="kw">return</span> <span class="st">"+"</span> + s + <span class="st">"\r\n"</span> }
+<span class="kw">func</span> errorMsg(s <span class="ty">string</span>) <span class="ty">string</span>     { <span class="kw">return</span> <span class="st">"-"</span> + s + <span class="st">"\r\n"</span> }
+<span class="kw">func</span> bulkString(s <span class="ty">string</span>) <span class="ty">string</span>   { <span class="kw">return</span> <span class="st">"$"</span> + strconv.Itoa(len(s)) + <span class="st">"\r\n"</span> + s + <span class="st">"\r\n"</span> }
+<span class="kw">func</span> nullBulk() <span class="ty">string</span>             { <span class="kw">return</span> <span class="st">"$-1\r\n"</span> }
+<span class="kw">func</span> integer(n <span class="ty">int</span>) <span class="ty">string</span>         { <span class="kw">return</span> <span class="st">":"</span> + strconv.Itoa(n) + <span class="st">"\r\n"</span> }
+<span class="kw">func</span> integer64(n <span class="ty">int64</span>) <span class="ty">string</span>     { <span class="kw">return</span> <span class="st">":"</span> + strconv.FormatInt(n, <span class="st">10</span>) + <span class="st">"\r\n"</span> }
+
+<span class="cm">// array は「すでに RESP 形式になっている部品」を束ねて配列にする。</span>
+<span class="cm">// 部品が Bulk でも Integer でも構わない（subscribe 応答などで混ざる）。</span>
+<span class="kw">func</span> array(parts ...<span class="ty">string</span>) <span class="ty">string</span> {
+	<span class="kw">var</span> b strings.<span class="ty">Builder</span>
+	b.WriteString(<span class="st">"*"</span>)
+	b.WriteString(strconv.Itoa(len(parts)))
+	b.WriteString(<span class="st">"\r\n"</span>)
+	<span class="kw">for</span> _, p := <span class="kw">range</span> parts {
+		b.WriteString(p)
+	}
+	<span class="kw">return</span> b.String()
+}
+
+<span class="cm">// bulkArray は文字列の一覧を「Bulk String の配列」にする。KEYS や LRANGE 用。</span>
+<span class="kw">func</span> bulkArray(items []<span class="ty">string</span>) <span class="ty">string</span> {
+	parts := <span class="kw">make</span>([]<span class="ty">string</span>, len(items))
+	<span class="kw">for</span> i, s := <span class="kw">range</span> items {
+		parts[i] = bulkString(s)
+	}
+	<span class="kw">return</span> array(parts...)
+}</code></pre>
+
+    <p>上の6つの1行関数は、Step 1 の表そのままです。<code>simpleString("PONG")</code> は <code>"+PONG\r\n"</code>、<code>integer(1)</code> は <code>":1\r\n"</code>、<code>bulkString("hello")</code> は <code>"$5\r\nhello\r\n"</code>。ここで <code>bulkString</code> が<strong>長さを自分で数えて前置している</strong>（<code>strconv.Itoa(len(s))</code>）ことに注目してください。Step 2 で読む側が「長さで区切る」なら、書く側は「長さを正しく付ける」。この対称性が RESP を成立させています。</p>
+    <p><code>nullBulk</code> の <code>"$-1\r\n"</code> は特別で、<strong>「値が無い」を表す nil</strong> です。長さ <code>-1</code> は「本体は続かない」の意味。<code>GET</code> で存在しないキーを引いたときにこれを返すと、<code>redis-cli</code> は <code>(nil)</code> と表示します。「空文字列（<code>$0\r\n\r\n</code>）」と「値が無い（<code>$-1\r\n</code>）」は別物だ、というのが Redis の大事な約束です。</p>
+    <p><code>integer</code> と <code>integer64</code> が分かれているのは Go の型の都合です。要素数のような小さい数は <code>int</code>、<code>INCR</code> の結果のような大きくなりうる数は <code>int64</code> で扱うため、両方を用意しています。</p>
+    <p>最後の <code>array</code> / <code>bulkArray</code> が配列の組み立てです。<code>array</code> は<strong>すでに RESP 形式になった部品</strong>（<code>bulkString(...)</code> の結果など）を受け取り、先頭に <code>*要素数\r\n</code> を付けて連結するだけ。<code>bulkArray</code> はその特化版で、ただの文字列スライスを全部 <code>bulkString</code> でくるんでから <code>array</code> に渡します。<code>KEYS</code> や <code>LRANGE</code> の「文字列の一覧を返す」がこれ一発で書けます。</p>
+
+    <div class="gonote"><div class="box-k">GO メモ · strings.Builder と可変長引数 ...string</div>
+      <p><code>strings.Builder</code> は、文字列を少しずつ継ぎ足して最後に1本にまとめるための道具です。<code>s += ...</code> を繰り返すと毎回コピーが走って遅くなりますが、<code>Builder</code> は内部バッファに追記していくので効率的です。<br>
+      <code>func array(parts ...string)</code> の <code>...string</code> は<strong>可変長引数</strong>で、<code>array("a", "b", "c")</code> のように任意個の文字列を受け取れます。逆に、スライスを可変長引数に「展開して」渡すときは <code>array(parts...)</code> と末尾に <code>...</code> を付けます（<code>bulkArray</code> の最終行がそれです）。</p>
+    </div>
+
+    <div class="box do"><div class="box-k">▸ 動かして確認</div>
+      <p>この2つのステップ（読み <code>resp.go</code> ＋ 書き <code>reply.go</code>）だけで、RESP の「往復」の部品が揃いました。まだコマンドの中身は空なので、単体で動かすより次のステップでまとめて確認します。ここでは<strong>書いたコードに文法エラーが無いこと</strong>だけ見ておきましょう。</p>
+      <pre class="term"><code><span class="ps">$</span> go vet .
+<span class="out">（何も表示されなければ成功です）</span></code></pre>
+    </div>
+
+    <div class="box hazard"><div class="box-k">⚠ 落とし穴 — 写経派はまだ <code>go build</code> が通らない</div>
+      <p>ここで <code>go build .</code> ではなく <code>go vet .</code> を打つのには理由があります。<strong>写経派</strong>（自分で <code>resp.go</code> と <code>reply.go</code> を打った人）がこの時点で <code>go build .</code> を実行すると、<strong>必ずこう落ちます</strong>。</p>
+      <pre class="term"><code><span class="ps">$</span> go build .
+<span class="out"># redisclone
+runtime.main_main·f: function main is undeclared in the main package</span></code></pre>
+      <p><strong>これは写経の失敗ではなく、正常な結果です。</strong> <code>package main</code> のプログラムをビルドするには <code>func main()</code> が要りますが、それを作るのは <strong>Step 5</strong>（<code>main.go</code>）だからです。まだ「部品」しか無い段階では、実行ファイルは組み立てられません。</p>
+      <p>一方 <code>go vet .</code> は、実行ファイルを作らずに<strong>型チェックと静的解析だけ</strong>を行うので、<code>func main()</code> が無くても通ります。「部品の途中まで書いた状態が、文法的・型的に正しいか」を確かめたいこの段階には、こちらが正しい道具です。<code>go build</code> が通るようになるのは Step 5 で <code>main.go</code> を作ってからで、そこで改めて確認します。</p>
+      <p>（<strong>読む派</strong>——<code>src/</code> の完成版を開いて読んでいる人——は全ファイルが揃っているので、<code>go build .</code> も最初から通ります。落ちるのは写経派だけです。）</p>
+    </div>
+
+    <h2 class="step" id="step-4"><span class="step-no">Step 4</span>コマンドを振り分ける — command.go</h2>
+    <p>読めて、書ける。あとは真ん中——「読んだコマンドを見て、対応する処理を呼び、応答を返す」交通整理が要ります。それが <code>dispatch</code> 関数です。作るファイルは <code>command.go</code>。この関数は<strong>全10章を通じてずっと育っていく</strong>本書の背骨で、章が進むたびに <code>case</code> が増えます。この章では、まず接続・汎用コマンドの枠だけ作ります。</p>
+
+    <div class="file-tag">command.go（この章で作る骨格）</div>
+    <pre><code><span class="kw">package</span> main
+
+<span class="kw">import</span> <span class="st">"strings"</span>
+
+<span class="kw">func</span> upper(s <span class="ty">string</span>) <span class="ty">string</span> { <span class="kw">return</span> strings.ToUpper(s) }
+
+<span class="cm">// dispatch はコマンド名で処理を振り分ける。戻り値は RESP 形式の応答。</span>
+<span class="cm">// Pub/Sub 系は自前で書き込むので "" を返す（第08章）。</span>
+<span class="kw">func</span> dispatch(srv *<span class="ty">server</span>, c *<span class="ty">client</span>, args []<span class="ty">string</span>) <span class="ty">string</span> {
+	<span class="kw">if</span> len(args) == <span class="st">0</span> {
+		<span class="kw">return</span> errorMsg(<span class="st">"ERR empty command"</span>)
+	}
+	name := upper(args[<span class="st">0</span>])
+	<span class="cm">// …（実物にはここに s := srv.store と、購読モード中のコマンド制限がある。第08章）</span>
+
+	<span class="kw">switch</span> name {
+	<span class="cm">// --- 接続・汎用 ---</span>
+	<span class="kw">case</span> <span class="st">"PING"</span>:
+		<span class="kw">if</span> len(args) &gt; <span class="st">2</span> {
+			<span class="kw">return</span> errorMsg(<span class="st">"ERR wrong number of arguments for 'ping' command"</span>)
+		}
+		<span class="kw">if</span> len(args) == <span class="st">2</span> {
+			<span class="kw">return</span> bulkString(args[<span class="st">1</span>])
+		}
+		<span class="kw">return</span> simpleString(<span class="st">"PONG"</span>)
+	<span class="kw">case</span> <span class="st">"ECHO"</span>:
+		<span class="kw">if</span> len(args) != <span class="st">2</span> {
+			<span class="kw">return</span> errorMsg(<span class="st">"ERR wrong number of arguments for 'echo' command"</span>)
+		}
+		<span class="kw">return</span> bulkString(args[<span class="st">1</span>])
+	<span class="kw">case</span> <span class="st">"QUIT"</span>:
+		<span class="kw">return</span> simpleString(<span class="st">"OK"</span>)
+	<span class="kw">case</span> <span class="st">"COMMAND"</span>: <span class="cm">// redis-cli が起動時に投げてくるので、空応答だけ返す</span>
+		<span class="kw">return</span> array()
+
+	<span class="cm">// --- 各データ型のコマンドは、後の章でここに case を足していく ---</span>
+
+	<span class="kw">default</span>:
+		<span class="kw">return</span> errorMsg(<span class="st">"ERR unknown command '"</span> + args[<span class="st">0</span>] + <span class="st">"'"</span>)
+	}
+}</code></pre>
+
+    <p><code>dispatch</code> の形はシンプルです。コマンド名（<code>args[0]</code>）を大文字に正規化し（Redis のコマンドは大文字小文字を区別しないので <code>ping</code> も <code>PING</code> も同じ）、あとは巨大な <code>switch</code> で振り分けるだけ。それぞれの <code>case</code> が、Step 3 で作った応答ヘルパーで RESP 文字列を返します。</p>
+    <p>この章で入れる4つを見ておきます。<code>PING</code> は引数なしなら <code>+PONG</code>、引数ありならそれをそのまま Bulk で返す（<code>redis-cli</code> の <code>PING hello</code> が <code>"hello"</code> を返すのはこれ）。<code>ECHO</code> は受けた文字列をそのまま返すだけ。<code>QUIT</code> は <code>+OK</code>（実際に接続を切るのは Step 5 の呼び出し側の仕事）。<code>COMMAND</code> は少し不思議な存在で、<code>redis-cli</code> は<strong>起動直後に勝手に <code>COMMAND</code> を送ってくる</strong>（全コマンドの一覧を取得しようとする）ので、空配列 <code>*0\r\n</code> を返して黙らせています。これを実装しないと <code>redis-cli</code> が接続時にエラーを出します。</p>
+    <p>そして最後の <code>default</code> が<strong>この本の安全網</strong>です。知らないコマンドが来ても、<code>panic</code> せず <code>-ERR unknown command</code> を返す。要件 NFR-6「未知コマンドでサーバが落ちない」は、この1行で守られます。各 <code>case</code> の引数チェック（<code>len(args) != 2</code> でエラー）も同じ思想で、<strong>クライアントの誤りでサーバは死なない</strong>を徹底しています。</p>
+
+    <div class="box hazard"><div class="box-k">⚠ 落とし穴 — dispatch の引数 srv / c は、いまは使わない</div>
+      <p><code>dispatch(srv *server, c *client, ...)</code> と、まだ使っていない引数を2つ受け取っています。これは第08章の Pub/Sub への布石です。Pub/Sub だけは「どの接続が購読しているか」（<code>c</code>）と「全接続の購読レジストリ」（<code>srv</code>）を知る必要があり、応答も <code>dispatch</code> の戻り値ではなく直接接続に書き込みます（だから戻り値 <code>""</code> の説明がコメントにあります）。<strong>いまは「後で使う穴」として素通りしてよい</strong>のですが、最初から引数に入れておくことで、第08章で関数シグネチャを変えずに済みます。実物の <code>command.go</code> には購読モード中のコマンド制限もありますが、それも第08章で解説します。</p>
+    </div>
+
+    <h2 class="step" id="step-5"><span class="step-no">Step 5</span>TCP で待ち受け、接続を捌く — main.go</h2>
+    <p>部品が出そろいました。最後に、それらを<strong>TCP の上で動かす</strong>骨格を組みます。作るのは <code>main.go</code>。ここには2つの主役がいます — 全接続で共有する <code>server</code> と、接続1本ぶんの状態 <code>client</code>、そして「読む→振り分ける→書く」を回すループです。</p>
+
+    <div class="file-tag">main.go（前半・型と main）</div>
+    <pre><code><span class="kw">package</span> main
+
+<span class="kw">import</span> (
+	<span class="st">"bufio"</span>
+	<span class="st">"errors"</span>
+	<span class="st">"flag"</span>
+	<span class="st">"fmt"</span>
+	<span class="st">"io"</span>
+	<span class="st">"net"</span>
+	<span class="st">"strings"</span>
+	<span class="st">"sync"</span>
+)
+
+<span class="cm">// server はストアと Pub/Sub レジストリを束ねる。全接続で共有される。</span>
+<span class="kw">type</span> <span class="ty">server</span> <span class="kw">struct</span> {
+	store  *<span class="ty">Store</span>   <span class="cm">// キースペース（第01章で作る）</span>
+	pubsub *<span class="ty">PubSub</span>  <span class="cm">// 購読レジストリ（第08章で作る）</span>
+}
+
+<span class="kw">func</span> newServer() *<span class="ty">server</span> {
+	<span class="kw">return</span> &amp;<span class="ty">server</span>{
+		store:  NewStore(),
+		pubsub: NewPubSub(),
+	}
+}
+
+<span class="cm">// client は接続1本ぶんの状態。購読中チャネルと、応答書き込みの直列化を持つ。</span>
+<span class="kw">type</span> <span class="ty">client</span> <span class="kw">struct</span> {
+	w     io.<span class="ty">Writer</span>
+	wmu   sync.<span class="ty">Mutex</span>
+	subs  <span class="kw">map</span>[<span class="ty">string</span>]<span class="kw">struct</span>{} <span class="cm">// SUBSCRIBE 中のチャネル（第08章）</span>
+	psubs <span class="kw">map</span>[<span class="ty">string</span>]<span class="kw">struct</span>{} <span class="cm">// PSUBSCRIBE 中のパターン（第08章）</span>
+}
+
+<span class="kw">func</span> newClient(w io.<span class="ty">Writer</span>) *<span class="ty">client</span> {
+	<span class="kw">return</span> &amp;<span class="ty">client</span>{
+		w:     w,
+		subs:  <span class="kw">make</span>(<span class="kw">map</span>[<span class="ty">string</span>]<span class="kw">struct</span>{}),
+		psubs: <span class="kw">make</span>(<span class="kw">map</span>[<span class="ty">string</span>]<span class="kw">struct</span>{}),
+	}
+}
+
+<span class="cm">// send は接続への書き込みを直列化する。Pub/Sub で他 goroutine からも書くため。</span>
+<span class="kw">func</span> (c *<span class="ty">client</span>) send(s <span class="ty">string</span>) {
+	c.wmu.Lock()
+	<span class="kw">defer</span> c.wmu.Unlock()
+	io.WriteString(c.w, s)
+}
+
+<span class="kw">func</span> (c *<span class="ty">client</span>) subCount() <span class="ty">int</span> { <span class="kw">return</span> len(c.subs) + len(c.psubs) }
+
+<span class="kw">func</span> main() {
+	port := flag.Int(<span class="st">"port"</span>, <span class="st">6380</span>, <span class="st">"listen port"</span>)
+	flag.Parse()
+
+	srv := newServer()
+	<span class="kw">go</span> srv.store.activeExpireLoop(<span class="kw">nil</span>) <span class="cm">// Active 失効（第02章）</span>
+
+	ln, err := net.Listen(<span class="st">"tcp"</span>, fmt.Sprintf(<span class="st">":%d"</span>, *port))
+	<span class="kw">if</span> err != <span class="kw">nil</span> {
+		panic(err)
+	}
+	fmt.Printf(<span class="st">"listening on :%d\n"</span>, *port)
+	<span class="kw">for</span> {
+		conn, err := ln.Accept()
+		<span class="kw">if</span> err != <span class="kw">nil</span> {
+			<span class="kw">continue</span>
+		}
+		<span class="kw">go</span> srv.handle(conn) <span class="cm">// 接続ごとに goroutine</span>
+	}
+}</code></pre>
+
+    <p>2つの型から。<code>server</code> は<strong>全接続で共有</strong>する状態で、キースペース <code>store</code> と購読レジストリ <code>pubsub</code> を持ちます（中身は後の章で作るので、いまは名前だけ）。<code>client</code> は<strong>接続1本ごと</strong>の状態で、書き込み先 <code>w</code>、書き込みを守る <code>wmu</code>、購読情報 <code>subs</code>/<code>psubs</code> を持ちます。この「共有は server、個別は client」という分け方が、複数接続を捌く設計の土台です。</p>
+    <p><code>main</code> は3行で言えます。ポートを決め（既定 6380）、サーバを作り、<strong>ひたすら <code>Accept</code> して接続ごとに goroutine を起こす</strong>。<code>net.Listen("tcp", ":6380")</code> で TCP の待ち受けを開き、<code>ln.Accept()</code> が新しい接続を1本返すたびに <code>go srv.handle(conn)</code>。この <code>go</code> が肝で、1接続の処理が終わるのを待たずに次の <code>Accept</code> へ戻れるので、何本でも同時に相手にできます。<code>go srv.store.activeExpireLoop(nil)</code> は第02章の失効ループの起動で、いまは素通りで構いません。</p>
+
+    <div class="gonote"><div class="box-k">GO メモ · net.Listen / Accept と goroutine</div>
+      <p><code>net.Listen("tcp", ":6380")</code> は「ポート 6380 で TCP 接続を待ち受ける」宣言で、返り値 <code>ln</code> は受付窓口です。<code>ln.Accept()</code> はクライアントが1本つなぐまで<strong>待ち</strong>、つながったらその接続（<code>net.Conn</code>）を返します。ここで <code>go srv.handle(conn)</code> と goroutine で処理を始めるのが Go の定番の並行サーバの形です。<code>go f()</code> は「<code>f</code> を別の軽量スレッドで走らせ、自分はすぐ次へ進む」。だから <code>Accept</code> のループは1本の接続に足止めされず、回り続けます。</p>
+    </div>
+
+    <p>最後に、接続1本の一生を担う <code>handle</code> です。</p>
+
+    <div class="file-tag">main.go（後半・接続ループ）</div>
+    <pre><code><span class="cm">// handle は接続1本の読み書きループ。読む → 振り分ける → 書く、を繰り返す。</span>
+<span class="kw">func</span> (srv *<span class="ty">server</span>) handle(conn net.<span class="ty">Conn</span>) {
+	c := newClient(conn)
+	<span class="kw">defer</span> <span class="kw">func</span>() {
+		srv.pubsub.dropClient(c) <span class="cm">// 切断したら購読も消える（第08章）</span>
+		conn.Close()
+	}()
+	r := bufio.NewReader(conn)
+	<span class="kw">for</span> {
+		args, err := readCommand(r)
+		<span class="kw">if</span> err != <span class="kw">nil</span> {
+			<span class="cm">// プロトコル違反はエラーを返してから切る。それ以外（EOF等）は黙って切る。</span>
+			<span class="kw">if</span> errors.Is(err, errProtocol) {
+				c.send(errorMsg(<span class="st">"ERR Protocol error: "</span> + err.Error()))
+			}
+			<span class="kw">return</span>
+		}
+		<span class="kw">if</span> len(args) == <span class="st">0</span> {
+			<span class="kw">continue</span> <span class="cm">// 空のインライン行は読み飛ばす</span>
+		}
+		reply := dispatch(srv, c, args)
+		<span class="kw">if</span> reply != <span class="st">""</span> {
+			c.send(reply)
+		}
+		<span class="kw">if</span> strings.EqualFold(args[<span class="st">0</span>], <span class="st">"QUIT"</span>) {
+			<span class="kw">return</span>
+		}
+	}
+}</code></pre>
+
+    <p>これがサーバの心拍です。無限ループの中で、<strong>読む（<code>readCommand</code>）→ 振り分ける（<code>dispatch</code>）→ 書く（<code>c.send</code>）</strong>を延々と繰り返します。Step 2〜4 で作った部品が、ここで初めて1つのリズムに組み上がります。</p>
+    <p>エラー処理に本書の思想が出ています。<code>readCommand</code> がエラーを返したとき、それが <code>errProtocol</code>（壊れた入力）なら<strong>エラー応答を返してから</strong>切断し、そうでなければ（クライアントが単に接続を閉じた <code>EOF</code> など）黙って <code>return</code>。「プロトコル違反は行儀よく叱ってから切る、正常な切断は静かに送り出す」という区別です。Step 2 で <code>errProtocol</code> を番兵エラーにしておいたのが、この <code>errors.Is</code> の分岐でようやく効きました。</p>
+    <p>先頭の <code>defer</code> は接続の後始末で、「この関数を抜けるとき（どんな理由でも）必ず購読を消してから接続を閉じる」を予約します。<code>dispatch</code> が空文字列を返したとき（<code>reply != ""</code> の分岐）書き込みを飛ばすのは、Step 4 の落とし穴で触れた Pub/Sub のためです。<code>QUIT</code> が来たらループを抜けて接続を閉じます。</p>
+
+    <div class="box hazard"><div class="box-k">⚠ 落とし穴 — 応答の書き込みはなぜ c.send（Mutex 付き）なのか</div>
+      <p><code>c.send</code> は中で <code>wmu.Lock()</code> して書き込みます。この章の範囲では、1接続の処理は1つの goroutine の中で直列に動くので、ロックは一見不要に見えます。しかし第08章で Pub/Sub を足すと、<strong>他人が <code>PUBLISH</code> したメッセージを、別の goroutine から同じ接続へ書き込む</strong>場面が生まれます。そのとき「自分のコマンドへの応答」と「他人からの配信」が同時に同じ接続に書かれると、バイト列が混ざって RESP が壊れます。<code>c.send</code> の Mutex は、その混線を最初から防いでおくための備えです。いま入れておけば、第08章で慌てずに済みます。</p>
+    </div>
+
+    <div class="box do"><div class="box-k">▸ 動かして確認</div>
+      <p>（<code>redis-cli</code> がある人向け）サーバを起動して、本物のクライアントで握手してみましょう。ただし <code>store</code>/<code>pubsub</code> は次章以降で実装するため、この時点で <code>go build</code> を通すには第01章・第08章の空実装が要ります。まずはテスト（Step 6）で確認するのが確実です。<code>redis-cli</code> で試すのは、全章を終えて完成させたあとでも構いません。</p>
+      <pre class="term"><code><span class="ps">$</span> go run . -port 6380
+<span class="out">listening on :6380</span>
+
+<span class="cm"># 別ターミナル</span>
+<span class="ps">$</span> redis-cli -p 6380 ping
+<span class="out">PONG</span>
+<span class="ps">$</span> redis-cli -p 6380 echo "hi"
+<span class="out">"hi"</span></code></pre>
+    </div>
+
+    <h2 class="step" id="step-6"><span class="step-no">Step 6</span>テストを読む — 「握手」を機械で確かめる</h2>
+    <p>この章の受け入れ基準は「本物のクライアントと RESP で会話できる」こと。それを機械で確かめるのが <code>server_test.go</code> です。このテストは <code>redis-cli</code> の代役として、RESP を直接話す小さなクライアントを内蔵しています。まずその代役を見ます。</p>
+
+    <div class="file-tag">server_test.go（テスト用クライアント・抜粋）</div>
+    <pre><code><span class="cm">// sendCmd は redis-cli と同じ「Bulk String の配列」でコマンドを送る。</span>
+<span class="kw">func</span> (c *<span class="ty">testClient</span>) sendCmd(args ...<span class="ty">string</span>) {
+	<span class="kw">var</span> b strings.<span class="ty">Builder</span>
+	fmt.Fprintf(&amp;b, <span class="st">"*%d\r\n"</span>, len(args))
+	<span class="kw">for</span> _, a := <span class="kw">range</span> args {
+		fmt.Fprintf(&amp;b, <span class="st">"$%d\r\n%s\r\n"</span>, len(a), a)
+	}
+	c.conn.Write([]<span class="ty">byte</span>(b.String()))
+}</code></pre>
+
+    <p>見覚えのある形です。<code>*要素数</code> を書き、各引数を <code>$長さ</code> + 本体で送る — Step 1 の絵、そのままです。<code>redis-cli</code> が内部でやっていることが、この10行に凝縮されています。「クライアントとは、この形式でバイトを書き、返ってきたバイトを読む者」だと分かれば、<code>redis-cli</code> はもう魔法ではありません。</p>
+    <p>受け入れ基準そのものであるテスト本体を読みます。</p>
+
+    <div class="file-tag">server_test.go（TestServerEndToEnd）</div>
+    <pre><code><span class="kw">func</span> TestServerEndToEnd(t *testing.<span class="ty">T</span>) {
+	addr := startTestServer(t)  <span class="cm">// 空きポートでサーバ起動</span>
+	c := dial(t, addr)          <span class="cm">// RESP を話すクライアントで接続</span>
+
+	<span class="kw">if</span> got := c.do(t, <span class="st">"PING"</span>); got != <span class="st">"+PONG"</span> {
+		t.Errorf(<span class="st">"PING = %q"</span>, got)
+	}
+	<span class="kw">if</span> got := c.do(t, <span class="st">"SET"</span>, <span class="st">"greeting"</span>, <span class="st">"こんにちは"</span>); got != <span class="st">"+OK"</span> {
+		t.Errorf(<span class="st">"SET = %q"</span>, got)
+	}
+	<span class="kw">if</span> got := c.do(t, <span class="st">"GET"</span>, <span class="st">"greeting"</span>); got != <span class="st">"こんにちは"</span> {
+		t.Errorf(<span class="st">"GET = %q"</span>, got)
+	}
+	<span class="cm">// 未知コマンドでも接続は生きている（NFR-6）</span>
+	<span class="kw">if</span> got := c.do(t, <span class="st">"NOSUCHCMD"</span>); !strings.HasPrefix(got, <span class="st">"-ERR unknown command"</span>) {
+		t.Errorf(<span class="st">"unknown = %q"</span>, got)
+	}
+	<span class="kw">if</span> got := c.do(t, <span class="st">"PING"</span>); got != <span class="st">"+PONG"</span> {
+		t.Errorf(<span class="st">"PING after error = %q"</span>, got)  <span class="cm">// エラーの後も生きている</span>
+	}
+	<span class="cm">// …（このあと WRONGTYPE の検証が続く。型の話は第01章以降なので、ここでは省略）</span>
+}</code></pre>
+
+    <p>このテストは「握手できる」を4段階で確かめます（実物にはもう1段階、<code>LPUSH</code> したキーに <code>GET</code> して <code>-WRONGTYPE</code> が返る検証が続きますが、型の話は第01章以降なのでここでは省いています）。<code>PING</code> に <code>+PONG</code> が返る（この章で作った部分）。<code>SET</code>/<code>GET</code> が往復する（第01・03章の内容ですが、通信の土台がなければ動きません）。そして本書がとくに大事にする2つ——<strong>未知コマンド <code>NOSUCHCMD</code> にエラーが返り、その直後の <code>PING</code> がまた <code>+PONG</code> を返す</strong>。つまり「間違ったコマンドでサーバが死なない」を、エラーの後にもう一度 <code>PING</code> を通すことで証明しています。日本語 <code>"こんにちは"</code> を値に使っているのも芸で、Step 2 の <code>io.ReadFull</code>（長さでバイナリセーフに読む）が、マルチバイト文字でも正しく動くことをさりげなく検証しています。</p>
+
+    <div class="box do"><div class="box-k">▸ 動かして確認</div>
+      <p>この章のクライマックスです。完成した実装で実行します（<code>SET</code>/<code>GET</code> を含むので全ファイルがそろってから通ります）。</p>
+      <pre class="term"><code><span class="ps">$</span> go test -run TestServerEndToEnd -v
+<span class="out">=== RUN   TestServerEndToEnd
+--- PASS: TestServerEndToEnd (0.01s)
+PASS
+ok  	redisclone	0.312s</span></code></pre>
+      <p>PASS は「本物のクライアントと RESP で会話し、エラーがあっても倒れない」の機械による証明です。この土台の上に、次章からデータ構造を積んでいきます。</p>
+    </div>
+
+    <h2 class="step" id="step-7"><span class="step-no">Step 7</span>演習: telnet で生の RESP を打ち込む</h2>
+    <p>ここまでの話 — 「コマンドは <code>*</code> と <code>$</code> のバイト列にすぎない」— を、<code>redis-cli</code> 越しではなく<strong>裸眼で</strong>確認します。<code>telnet</code>（または <code>nc</code>）でサーバに直につなぎ、RESP を手で打ち込みます。</p>
+    <p>まずサーバを起動しておき（完成後）、別ターミナルで <code>telnet</code> でつなぎます。<code>telnet</code> は改行区切りの生テキストを送るので、Step 2 で用意した<strong>インライン形式</strong>の出番です。</p>
+    <pre class="term"><code><span class="ps">$</span> telnet 127.0.0.1 6380
+<span class="out">Connected to 127.0.0.1.</span>
+<span class="ps">PING</span>
+<span class="out">+PONG</span>
+<span class="ps">SET foo bar</span>
+<span class="out">+OK</span>
+<span class="ps">GET foo</span>
+<span class="out">$3
+bar</span></code></pre>
+    <p>あなたが打った <code>GET foo</code> に、サーバが <code>$3\r\nbar\r\n</code> — 「これから3バイト」「bar」— と返しているのが生で見えます。<code>redis-cli</code> はこの <code>$3</code> を解釈して <code>"bar"</code> と整形表示していただけ。プロトコルの実体は、この目に見えるテキストのやり取りだったのです。</p>
+    <div class="box do"><div class="box-k">▸ さらに手を動かすなら</div>
+      <p>余力があれば、次を試してみてください。答えは自分の目で確かめられます。</p>
+      <ol>
+        <li>存在しないキーを <code>GET nokey</code> してみる。返る <code>$-1</code>（= nil）が <code>redis-cli</code> では <code>(nil)</code> と表示される対応を確認する。</li>
+        <li>でたらめなコマンド <code>HOGE</code> を打っても接続が切れないこと、続けて <code>PING</code> が通ることを確認する。</li>
+        <li>（応用）<code>printf '*1\r\n$4\r\nPING\r\n' | nc 127.0.0.1 6380</code> で、<strong>正規の RESP を生バイトで</strong>送って <code>+PONG</code> が返るのを見る。<code>redis-cli</code> が送っているのと全く同じバイト列です。</li>
+      </ol>
+    </div>
+
+    <h2>つまずき FAQ</h2>
+    <details class="qa"><summary>RESP は <code>\r\n</code>（CRLF）必須? <code>\n</code> だけではダメ?</summary>
+      <div class="qa-body"><p>正規の RESP（<code>*</code> 始まり）は CRLF が仕様です。本書の <code>readLine</code> は <code>strings.TrimRight(line, "\r\n")</code> で両方落とすので緩めに読めますが、Bulk 本体の末尾は <code>buf[length]=='\r' && buf[length+1]=='\n'</code> と<strong>厳密に CRLF を要求</strong>しています。手打ちで試すなら、<code>telnet</code> のインライン形式（<code>\n</code> 区切りで可）を使うのが楽です。</p></div>
+    </details>
+    <details class="qa"><summary>なぜ <code>dispatch</code> は応答を「書き込まず」に文字列で返すの?</summary>
+      <div class="qa-body"><p>「応答を組み立てる」役と「接続に書き込む」役を分けているからです。<code>dispatch</code> は RESP 文字列を作って返すだけで、実際に <code>conn</code> へ書くのは <code>handle</code> の <code>c.send</code>。こうしておくと、<code>dispatch</code> をテストするときに本物の接続が要らず、戻り値の文字列だけを検証できます。例外が Pub/Sub で、あれだけは他 goroutine から直接書くため <code>dispatch</code> が <code>""</code> を返します（第08章）。</p></div>
+    </details>
+    <details class="qa"><summary>1接続1 goroutine だと、接続が1万本来たら goroutine も1万個? 大丈夫?</summary>
+      <div class="qa-body"><p>Go の goroutine は OS スレッドより桁違いに軽い（初期スタック数KB）ので、数千〜数万本でも実用になります。本家 Redis は「単一スレッド + イベントループ」という別のモデルですが、本書は「1接続1 goroutine + 共有データを Mutex で保護」という Go らしい形を選びました。この2つの設計の違いと選定理由は、最終章（第09章「仕上げと設計判断」）でじっくり比較します。</p></div>
+    </details>
+
+    <h2>理解度チェック</h2>
+    <p>次の問いに<strong>自分の言葉で</strong>答えられたら、この章は卒業です。</p>
+    <details class="qa"><summary>1. Bulk String を「改行まで読む」のではなく「長さぶん読む」のはなぜか。</summary>
+      <div class="qa-body"><p>値の中に <code>\r\n</code> が含まれていても壊れないため（バイナリセーフ）。改行で区切ると、値に改行を含むコマンド（例 <code>ECHO "a\r\nb"</code>）で途中で切れ、残りが次のコマンドとして誤読される。だから <code>$</code> で長さを先に受け取り、<code>io.ReadFull</code> できっかりそのバイト数を読む。</p></div>
+    </details>
+    <details class="qa"><summary>2. 未知コマンドや壊れた入力が来たとき、サーバはそれぞれどう振る舞うか。</summary>
+      <div class="qa-body"><p><strong>未知コマンド</strong>: <code>dispatch</code> の <code>default</code> が <code>-ERR unknown command</code> を返し、<strong>接続は維持</strong>する。<strong>壊れた入力（プロトコル違反）</strong>: <code>readCommand</code> が <code>errProtocol</code> を返し、<code>handle</code> が <code>errors.Is</code> でそれを見分けて、<strong>エラー応答を返してから接続を切る</strong>。どちらの場合もサーバ全体は落ちない（NFR-6）。</p></div>
+    </details>
+    <details class="qa"><summary>3. <code>server</code> と <code>client</code> は、それぞれ何を持ち、なぜ分かれているか。</summary>
+      <div class="qa-body"><p><code>server</code> は<strong>全接続で共有</strong>する状態（キースペース <code>store</code>・購読レジストリ <code>pubsub</code>）。<code>client</code> は<strong>接続1本ごと</strong>の状態（書き込み先とそれを守る Mutex・自分の購読情報）。共有データは全 goroutine から触られるので Mutex で保護が要り、個別データは接続に紐づくので client に持たせる。この分離が、複数接続を安全に捌く設計の骨格になる。</p></div>
+    </details>
+
+    <h2>まとめ — 次の層へ</h2>
+    <p>この章で、Redis の一番下——<strong>クライアントと言葉が通じる口</strong>——ができました。TCP でバイト列を受け取り、RESP の配列に読み解き、5種類の記号で応答を返し、壊れた入力でも倒れない。まだ <code>SET</code> も辞書もありませんが、<strong>本物の <code>redis-cli</code> が握手してくれる土台</strong>は、もう手の中にあります。</p>
+    <p>次の第01章では、この口の奥に<strong>キースペース</strong> — キーと値をしまう大きな辞書 — を置きます。<code>dispatch</code> の <code>switch</code> に <code>SET</code>/<code>GET</code>/<code>DEL</code> の <code>case</code> が加わり、いま素通りした <code>store</code> が実体を持ちます。Redis が「データを覚えている」最初の一歩です。</p>
+
+    <div class="chap-foot">
+      <a class="pager" href="index.html"><span class="dir">← 前へ</span>序章 · はじめに・準備</a>
+      <a class="pager next" href="01-keyspace.html"><span class="dir">次へ →</span>第01章 · キーと値</a>
+    </div>
+  </main>
+</div>
+</body>
+</html>

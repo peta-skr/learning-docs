@@ -1,0 +1,855 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>第03章 動画を変換する — 動画サービスをつくる</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500;600&family=Source+Serif+4:opsz,wght@8..60,400;8..60,600;8..60,700&family=Noto+Serif+JP:wght@400;600;700&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<div class="shell">
+
+  <aside class="spine">
+    <a class="wordmark" href="index.html">VIDEO-STREAM · from scratch</a>
+    <div class="book-title">動画サービスを<br>つくる</div>
+    <div class="book-sub">Go と ffmpeg で presigned から HLS 配信まで</div>
+
+    <div class="legend"><span>受け取る <b>↓</b></span><span>届ける <b>↑</b></span></div>
+
+    <nav aria-label="目次">
+      <ul class="toc">
+        <li><a class="nav-item" href="index.html"><span class="nav-num">序</span><span class="nav-label">はじめに・準備<span class="nav-tag">Setup</span></span></a></li>
+        <li><a class="nav-item" href="00-setup.html"><span class="nav-num">00</span><span class="nav-label">土台をつくる<span class="nav-tag">Setup</span></span></a></li>
+        <li><a class="nav-item" href="01-auth.html"><span class="nav-num">01</span><span class="nav-label">人を扱う<span class="nav-tag">Auth</span></span></a></li>
+        <li><a class="nav-item" href="02-upload.html"><span class="nav-num">02</span><span class="nav-label">動画を受け取る<span class="nav-tag">Upload</span></span></a></li>
+        <li><a class="nav-item current" aria-current="page" href="03-transcode.html"><span class="nav-num">03</span><span class="nav-label">動画を変換する<span class="nav-tag">Transcode</span></span></a></li>
+        <li><a class="nav-item" href="04-deliver.html"><span class="nav-num">04</span><span class="nav-label">動画を届ける<span class="nav-tag">Deliver</span></span></a></li>
+        <li><a class="nav-item" href="05-social.html"><span class="nav-num">05</span><span class="nav-label">反応をつくる<span class="nav-tag">Social</span></span></a></li>
+        <li><a class="nav-item" href="06-discover.html"><span class="nav-num">06</span><span class="nav-label">見つけてもらう<span class="nav-tag">Discover</span></span></a></li>
+        <li><a class="nav-item" href="07-notify.html"><span class="nav-num">07</span><span class="nav-label">つながりを届ける<span class="nav-tag">Notify</span></span></a></li>
+        <li><a class="nav-item" href="08-web.html"><span class="nav-num">08</span><span class="nav-label">画面をつける<span class="nav-tag">Web</span></span></a></li>
+        <li><a class="nav-item" href="09-beyond.html"><span class="nav-num">09</span><span class="nav-label">仕上げと次の一歩<span class="nav-tag">Beyond</span></span></a></li>
+      </ul>
+    </nav>
+
+    <div class="spine-foot">
+      各章は動画が通る道の一区間。<br>受け取る（下）から届ける（上）へ、<br>1本の動画を最後まで運びきる。
+    </div>
+  </aside>
+
+  <main class="reading">
+    <div class="progress-tag">第03章 / 全10章 · 層: Transcode · 読了目安 3〜4時間</div>
+    <div class="eyebrow"><span>Transcode</span><span class="depth">— 心臓部 · 非同期変換</span></div>
+    <h1>動画を変換する</h1>
+    <p class="lede">ここが本書の白眉です。第02章で保管庫に届いた元動画は、まだ<strong>そのままでは配信できません</strong>。回線に応じて画質を切り替えるには、1本の動画を <strong>360p / 720p / 1080p の3画質</strong>に、しかも<strong>4秒ごとの短い断片（セグメント）</strong>に刻み直す必要がある。この変換は ffmpeg で<strong>分単位</strong>かかるので、受付（API）が同期でやったら窓口が塞がってしまう。だから注文票を <strong>Redis の注文箱</strong>に積み、別プロセスの職人（Worker）が黙々と ffmpeg を回す —— <strong>非同期変換</strong>です。そしてこの章の真の主役は、分散した職人と<strong>at-least-once なキュー</strong>が引き起こす競合 —— ゾンビ職人・二重配送・停滞ジョブ —— を、<code>job_generation</code> という世代番号と、実行ごとに一意なストレージの置き場で封じ込める設計です。この3つの防具は、机上ではなく実際にバグを踏んで（Codex のレビューで指摘されて）足されました。</p>
+
+    <div class="box goal"><div class="box-k">◈ この章のゴール</div>
+      <p>次の4つを、コードと自分の目で確認できたら達成です。</p>
+      <ol>
+        <li><code>transcode.Process</code> が「変換中の宣言 → ffmpeg で3画質 HLS 化 → ready 宣言」の一連を、<strong>すべて <code>AND job_generation = $N</code> の柵つき UPDATE</strong> で行っていることを読み取る。</li>
+        <li>成果物が <code>hls/&lt;id&gt;/g&lt;世代&gt;-&lt;乱数hex&gt;/</code> という<strong>実行ごとに一意な場所</strong>へ書かれ、「どれを配信するか」は ready 宣言と<strong>同じ1文</strong>で <code>media_prefix</code> に確定することを理解する。</li>
+        <li>ffmpeg の <code>-var_stream_map</code> と <code>-hls_time 4</code> が、画質別の目次とセグメントを生み、<strong>総目次（master.m3u8）だけは Go の <code>writeMaster</code> が書く</strong>理由を説明できる。</li>
+        <li>動画を1本アップロードして、MinIO コンソールに <code>master.m3u8</code> と各画質の <code>seg000.ts</code> … が並び、DB の <code>status</code> が <code>ready</code> になるのを見る。</li>
+      </ol>
+    </div>
+
+    <div class="box map"><div class="box-k">☰ この章のステップ</div>
+      <ol>
+        <li><a href="#step-1">なぜ非同期か — 注文箱と職人という設計</a></li>
+        <li><a href="#step-2">注文箱を作る — <code>queue.go</code> の Redis リスト</a></li>
+        <li><a href="#step-3">職人のループ — <code>cmd/worker/main.go</code> 再訪</a></li>
+        <li><a href="#step-4">1件を処理する骨格 — <code>Process</code> と再挑戦</a></li>
+        <li><a href="#step-5">「変換中」を柵つきで宣言する — fencing token の第一関門</a></li>
+        <li><a href="#step-6">ffmpeg を呼ぶ — 3画質 × 4秒セグメントの HLS</a></li>
+        <li><a href="#step-7">総目次は自前で書く — <code>writeMaster</code></a></li>
+        <li><a href="#step-8">実行ごとに一意な置き場 — ストレージ側の fencing</a></li>
+        <li><a href="#step-9">「視聴可能」を確定する — ready 宣言と <code>media_prefix</code></a></li>
+        <li><a href="#step-10">停滞ジョブを救う — <code>status_changed_at</code> と retry</a></li>
+        <li><a href="#step-11">立ち上げて、1本を変換する</a></li>
+      </ol>
+    </div>
+
+    <h2>なぜ「変換」がこの本のいちばん難しいのか</h2>
+    <p>ここまでの章は、比較的まっすぐでした。人を登録し（第01章）、大きなファイルを受付を通さず保管庫へ直接上げる（第02章）。どちらも「1つの HTTP リクエストの中で、始まって終わる」処理です。ところが変換はまったく違う性質を持ちます。</p>
+    <ul>
+      <li><strong>時間がかかる</strong> —— ffmpeg で1本の動画を3画質に変換するのは、数十秒から数分。HTTP リクエストの中でやったら、投稿者はその間ずっと画面が固まったまま待たされます。序章のテーマ「投稿ボタンを押した瞬間に応答が返る」を守るには、変換を<strong>リクエストの外</strong>へ追い出すしかない。</li>
+      <li><strong>失敗する</strong> —— ffmpeg は壊れたファイルや未対応の形式で普通にコケます。失敗したら再挑戦したいし、何度やってもダメなら「なぜ失敗したか」を投稿者に見せたい。</li>
+      <li><strong>途中で職人が消える</strong> —— 変換の最中にワーカーがクラッシュ・再起動すると、そのジョブは宙に浮きます。誰かが救い出さないと、動画は永遠に <code>processing</code> のまま。</li>
+      <li><strong>やり直すと世界が二重になる</strong> —— 停滞した動画を投稿者が「やり直す」と、新しい職人が走り始める。ところが、消えたはずの<strong>古い職人が生き返って</strong>同じ動画を触りに来ることがある（キューの二重配送、クラッシュ後の再開）。このゾンビが新しい成果を上書きしたら、視聴中の動画が壊れます。</li>
+    </ul>
+    <p>この章の前半（Step 1〜4）は「時間がかかる」への対処 —— <strong>注文箱＋職人による非同期化</strong>。中盤（Step 5〜9）は ffmpeg での実際の変換と、その成果を<strong>安全に確定する</strong>方法。そして後半（Step 10）が、この本でいちばん頭を使う<strong>「途中で消える／やり直すと二重になる」への対処</strong>です。難しいですが、分散システムで「同じ仕事を複数の担い手が争う」ときの定石が凝縮されているので、腰を据えて読む価値があります。</p>
+
+    <h2>この層が上の層に約束すること</h2>
+    <p>この章の「変換」層が、配信（第04章）以降に約束するのは次の3つです。</p>
+    <ul>
+      <li><strong>ready の動画は、必ず配信可能な成果物を持つ</strong> —— <code>status = 'ready'</code> になった動画は、<code>media_prefix</code> が指す場所に <code>master.m3u8</code> と各画質のセグメントが完全に揃っている。配信側は状態だけ見て安心して配れる。</li>
+      <li><strong>配信するのは「勝った実行」の成果物ただ一つ</strong> —— 何人の職人が同じ動画を触ろうと、<code>media_prefix</code> が指す1つの場所からしか配信しない。ゾンビや二重配送の成果物は、どこにあっても配信に混ざらない。</li>
+      <li><strong>止まった動画は救い出せる</strong> —— 職人が倒れて宙に浮いた動画も、投稿者が Studio からやり直せる。しかも、動いている職人と二重にならないよう安全に。</li>
+    </ul>
+
+    <h2 class="step" id="step-1"><span class="step-no">Step 1</span>なぜ非同期か — 注文箱と職人という設計</h2>
+    <p>まず全体像を、動画1本が変換される道として掴みます。第02章の終わりで、投稿者のブラウザは動画本体を MinIO へ直接 <code>PUT</code> し終え、受付に「上げ終わった（complete）」と告げました。そこからが本章です。</p>
+
+    <div class="ascii">動画1本が変換される道（非同期変換）
+
+  ［受付 API］                     ［注文箱 Redis］          ［職人 Worker（別プロセス）］
+   complete を受ける
+     │
+     │ ①status=uploaded に。世代 +1
+     │ ②注文票を積む（LPush）─────────▶ jobs:transcode
+     │                                    [ {videoId, gen} ]
+     ▼ 即・応答（0.01秒）
+   投稿者は待たされない                       ③覗く（BRPop）──────────▶ job を1件取得
+                                                                      │
+                                              ④status=processing 宣言 │（世代フェンス付き）
+                                              ⑤ffmpeg で3画質HLS化    │ ══ 分単位 ══
+                                              ⑥成果物を一意な場所へ  │
+                                              ⑦status=ready 宣言＋    │
+                                                media_prefix 確定      ▼
+                                                              変換完了・配信可能に</div>
+
+    <p>肝は<strong>①②で受付の仕事が終わる</strong>ことです。受付は「状態を <code>uploaded</code> にして、注文票を1枚 Redis に積む」だけ。ffmpeg には一切触れません（そもそも受付コンテナには ffmpeg が入っていない —— 第00章の Dockerfile を思い出してください）。分単位の変換は、注文箱を覗いている職人が③以降で引き受ける。この分離こそが「投稿ボタンを押した瞬間に応答が返る」体験を支えています。</p>
+
+    <p>ここで①②の実物を、受付側の <code>videos.go</code> から確認しておきます（このハンドラ自体は第02章の管轄ですが、注文票がどう生まれるかを見ておくと、この章の職人側が立体的に読めます）。</p>
+
+    <div class="file-tag">internal/httpapi/videos.go（handleUploadComplete の後半 — 注文票を積む）</div>
+    <pre><code>	<span class="cm">// 注文の世代（fencing token）を上げ、その世代を注文票に載せる</span>
+	<span class="kw">var</span> gen <span class="ty">int</span>
+	err = s.DB.QueryRow(r.Context(),
+		<span class="st">`UPDATE videos SET status = 'uploaded', status_changed_at = now(),
+		        job_generation = job_generation + 1
+		 WHERE id = $1 AND status = 'uploading' RETURNING job_generation`</span>, v.ID).Scan(&amp;gen)
+	<span class="kw">if</span> err != <span class="kw">nil</span> {
+		httpError(w, http.StatusConflict, <span class="st">"この動画はすでに処理が進んでいます"</span>)
+		<span class="kw">return</span>
+	}
+	<span class="cm">// ここで受付の仕事は終わり。変換は職人に任せる</span>
+	<span class="kw">if</span> err := s.Q.EnqueueTranscode(r.Context(), queue.<span class="ty">TranscodeJob</span>{VideoID: v.ID, Generation: gen}); err != <span class="kw">nil</span> {
+		httpError(w, http.StatusInternalServerError, <span class="st">"変換の依頼に失敗しました"</span>)
+		<span class="kw">return</span>
+	}
+	writeJSON(w, http.StatusOK, <span class="kw">map</span>[<span class="ty">string</span>]<span class="ty">string</span>{<span class="st">"status"</span>: <span class="st">"uploaded"</span>})</code></pre>
+
+    <p>2つのことが起きています。1つ目、<code>UPDATE ... job_generation = job_generation + 1 ... RETURNING job_generation</code> —— <strong>注文を出すたびに世代番号を1つ進め、その値を受け取っています</strong>。この世代番号こそが、後半で主役になる <strong>fencing token（柵をつくる合図）</strong>です。いまは「注文には毎回、通し番号が振られる」とだけ覚えてください。2つ目、その世代を <code>queue.TranscodeJob{VideoID, Generation}</code> に載せて <code>EnqueueTranscode</code> で注文箱に積む。受付はこれで終わり、即座に応答を返します。</p>
+
+    <div class="gonote"><div class="box-k">実装メモ · なぜ「読んでから更新」ではなく1文の条件つき UPDATE か</div>
+      <p>この <code>UPDATE</code> は <code>WHERE ... status = 'uploading'</code> という条件を持ち、その条件を満たしたときだけ状態を進めます。「<code>SELECT</code> で今の状態を読んで、Go 側で <code>if status == "uploading"</code> と判定して、それから <code>UPDATE</code>」ではありません。なぜか —— <strong>読んでから書くまでの隙間</strong>に、他の誰か（別のリクエスト、あるいは職人）が状態を変えるかもしれないからです。1文の条件つき UPDATE なら、条件判定と書き込みが DB の中で<strong>不可分（アトミック）</strong>に起き、隙間が生まれません。この「遷移条件を WHERE に入れて、成否は <code>RowsAffected</code>（Go では <code>RETURNING</code> の有無や <code>tag.RowsAffected()</code>）で判定する」型は、この章で何度も繰り返し登場する、状態遷移の背骨です。</p>
+    </div>
+
+    <h2 class="step" id="step-2"><span class="step-no">Step 2</span>注文箱を作る — queue.go の Redis リスト</h2>
+    <p>受付が積み、職人が取り出す「注文箱」の実装、<code>internal/queue/queue.go</code> の変換ジョブ部分を読みます。Redis を<strong>キュー（待ち行列）</strong>として使う、教科書的で最小の実装です。</p>
+
+    <div class="file-tag">internal/queue/queue.go（冒頭・型定義）</div>
+    <pre><code><span class="cm">// Package queue は注文箱（Redis）を触る処理を一箇所にまとめる。</span>
+<span class="cm">// 変換ジョブのキュー、通知の押し出し（Pub/Sub）、視聴数の一時置き場、レート制限を担う。</span>
+<span class="kw">package</span> queue
+
+<span class="kw">import</span> (
+	<span class="st">"context"</span>
+	<span class="st">"encoding/json"</span>
+	<span class="st">"errors"</span>
+	<span class="st">"time"</span>
+
+	<span class="st">"github.com/redis/go-redis/v9"</span>
+)
+
+<span class="kw">const</span> transcodeList = <span class="st">"jobs:transcode"</span>
+
+<span class="kw">var</span> ErrEmpty = errors.New(<span class="st">"queue: empty"</span>)
+
+<span class="kw">type</span> <span class="ty">TranscodeJob</span> <span class="kw">struct</span> {
+	VideoID <span class="ty">string</span> <span class="st">`json:"videoId"`</span>
+	Attempt <span class="ty">int</span>    <span class="st">`json:"attempt"`</span>
+	<span class="cm">// 注文を出した時点の videos.job_generation（fencing token）。</span>
+	<span class="cm">// 職人はこの世代が現在も有効なときだけ動画に書き込める</span>
+	Generation <span class="ty">int</span> <span class="st">`json:"generation"`</span>
+}
+
+<span class="kw">type</span> <span class="ty">Queue</span> <span class="kw">struct</span> {
+	R *redis.<span class="ty">Client</span>
+}
+
+<span class="kw">func</span> New(addr <span class="ty">string</span>) *<span class="ty">Queue</span> {
+	<span class="kw">return</span> &amp;<span class="ty">Queue</span>{R: redis.NewClient(&amp;redis.<span class="ty">Options</span>{Addr: addr})}
+}</code></pre>
+
+    <p>注文票の正体は <code>TranscodeJob</code> という小さな構造体です。持っているのはたった3つ。<code>VideoID</code>（どの動画を変換するか）、<code>Attempt</code>（何回目の挑戦か）、そして <code>Generation</code>（注文を出した時点の世代番号）。ジョブ本体は Redis に <strong>JSON 文字列として</strong>積まれます（<code>json:"videoId"</code> のタグがその変換の指定）。動画データそのものは注文票に載りません —— 職人は <code>VideoID</code> を頼りに、後で DB と保管庫から元動画を引きます。注文票は「どの仕事をやれ」という指示書だけで、荷物は運びません。</p>
+
+    <p><code>transcodeList = "jobs:transcode"</code> が注文箱の名前（Redis のキー）です。この1本のリストに、全動画の変換注文が積まれます。</p>
+
+    <div class="file-tag">internal/queue/queue.go（変換ジョブの積み下ろし）</div>
+    <pre><code><span class="cm">// ---- 変換ジョブ（注文箱） ----</span>
+
+<span class="kw">func</span> (q *<span class="ty">Queue</span>) EnqueueTranscode(ctx context.<span class="ty">Context</span>, job <span class="ty">TranscodeJob</span>) <span class="ty">error</span> {
+	b, err := json.Marshal(job)
+	<span class="kw">if</span> err != <span class="kw">nil</span> {
+		<span class="kw">return</span> err
+	}
+	<span class="kw">return</span> q.R.LPush(ctx, transcodeList, b).Err()
+}
+
+<span class="cm">// DequeueTranscode は注文を1件取り出す。無ければ少し待って ErrEmpty を返す。</span>
+<span class="kw">func</span> (q *<span class="ty">Queue</span>) DequeueTranscode(ctx context.<span class="ty">Context</span>) (<span class="ty">TranscodeJob</span>, <span class="ty">error</span>) {
+	res, err := q.R.BRPop(ctx, <span class="st">5</span>*time.Second, transcodeList).Result()
+	<span class="kw">if</span> err == redis.Nil {
+		<span class="kw">return</span> <span class="ty">TranscodeJob</span>{}, ErrEmpty
+	}
+	<span class="kw">if</span> err != <span class="kw">nil</span> {
+		<span class="kw">return</span> <span class="ty">TranscodeJob</span>{}, err
+	}
+	<span class="kw">var</span> job <span class="ty">TranscodeJob</span>
+	<span class="kw">if</span> err := json.Unmarshal([]<span class="ty">byte</span>(res[<span class="st">1</span>]), &amp;job); err != <span class="kw">nil</span> {
+		<span class="kw">return</span> <span class="ty">TranscodeJob</span>{}, err
+	}
+	<span class="kw">return</span> job, <span class="kw">nil</span>
+}</code></pre>
+
+    <p>積む側 <code>EnqueueTranscode</code> は、注文票を JSON にして <code>LPush</code> —— リストの<strong>左端（先頭）に押し込む</strong>だけ。取り出す側 <code>DequeueTranscode</code> は <code>BRPop</code> で<strong>右端（末尾）から取り出す</strong>。左から入れて右から出す、つまり<strong>先に積まれた注文が先に処理される FIFO（先入れ先出し）</strong>のキューが、Redis のリスト操作2つで完成しています。これが「注文箱」の実体です。</p>
+
+    <p><code>BRPop</code> の <strong>B は Blocking（待つ）</strong>の意味です。<code>BRPop(ctx, 5*time.Second, ...)</code> は「注文箱に何か入るのを最大5秒待ち、入ったら取り出す。5秒経っても空なら諦める」という動作。空で諦めたとき Redis は <code>redis.Nil</code> を返すので、それを <code>ErrEmpty</code> という自前のエラーに変換して返しています。この <code>ErrEmpty</code> を、次のステップで職人のループが「空だったのでもう一度覗きに行く」合図として使います。</p>
+
+    <div class="gonote"><div class="box-k">実装メモ · なぜ「ただの RPop」ではなく「BRPop（待つ）」なのか</div>
+      <p>もし待たない <code>RPop</code> を使うと、注文箱が空のときも即座に「空だよ」と返ってくるので、職人のループは<strong>1秒に何万回も</strong>「空か? 空か?」と Redis を叩き続けます（ビジーループ）。CPU も Redis も無駄に消費する。<code>BRPop</code> は「注文が来るまで（最大5秒）そこで静かに待つ」ので、空のあいだ職人は寝ていられます。注文が積まれた瞬間に <code>BRPop</code> が起きて即座に取り出すので、反応も速い。<code>5*time.Second</code> という上限を付けているのは、永遠に待ちっぱなしにせず、定期的にループの先頭へ戻して「まだ生きているか」を確認できるようにするためです。これは学習用としては十分に実用的なジョブキューで、本格的な用途では専用のジョブキュー基盤（可視性タイムアウト・デッドレターキュー付き）を使います。</p>
+    </div>
+
+    <div class="box hazard"><div class="box-k">⚠ 落とし穴 — このキューは at-least-once であって exactly-once ではない</div>
+      <p>この単純なリストキューには、頭に入れておくべき性質が2つあります。1つ目、<code>BRPop</code> で取り出した瞬間に注文票は Redis から消えます。だから<strong>職人が変換の途中でクラッシュすると、その注文は失われます</strong>（宙に浮いた動画は <code>processing</code> のまま止まる —— Step 10 で救済します）。2つ目、逆に<strong>同じ注文が二重に配送される</strong>こともあります。たとえば retry で新しい注文を積んだのに、何らかの理由で古い注文もまだ箱に残っていた場合、2人の職人が同じ動画を同時に変換し始める。こうした「1回以上は配られる（けど、ちょうど1回とは限らない）」という性質を <strong>at-least-once</strong> と呼びます。この章の後半（Step 5・8・9）で組む fencing の仕組みは、まさにこの at-least-once を前提に「二重に走っても壊れない」ことを保証するためのものです。「キューは信用できない」という前提から設計が始まる —— これが分散システムの実感です。</p>
+    </div>
+
+    <h2 class="step" id="step-3"><span class="step-no">Step 3</span>職人のループ — cmd/worker/main.go 再訪</h2>
+    <p>注文箱ができたので、それを覗く職人へ。<code>cmd/worker/main.go</code> は第00章で全文を読みましたが、この章では<strong>ジョブループ</strong>の部分を主役として読み直します。</p>
+
+    <div class="file-tag">cmd/worker/main.go（ジョブループ部）</div>
+    <pre><code>	q := queue.New(cfg.RedisAddr)
+	deps := transcode.<span class="ty">Deps</span>{DB: pool, St: st, Q: q}
+
+	log.Println(<span class="st">"worker started, waiting for jobs"</span>)
+	<span class="kw">for</span> {
+		job, err := q.DequeueTranscode(ctx)
+		<span class="kw">if</span> errors.Is(err, queue.ErrEmpty) {
+			<span class="kw">continue</span>
+		}
+		<span class="kw">if</span> err != <span class="kw">nil</span> {
+			log.Printf(<span class="st">"dequeue: %v"</span>, err)
+			time.Sleep(<span class="st">2</span> * time.Second)
+			<span class="kw">continue</span>
+		}
+		transcode.Process(ctx, deps, job)
+	}</code></pre>
+
+    <p>職人の心臓は、この <code>for { ... }</code> の無限ループです。中身は3択の分岐だけ。</p>
+    <ul>
+      <li><code>q.DequeueTranscode(ctx)</code> で注文箱を覗く（最大5秒、注文が来るのを待つ）。</li>
+      <li>結果が <code>queue.ErrEmpty</code>（5秒待っても空）なら、<code>continue</code> でループの先頭に戻り、また覗きに行く。何も起きなかっただけなので、静かにやり直します。</li>
+      <li>それ以外のエラー（Redis 自体との通信障害など）なら、ログに残して <code>time.Sleep(2*time.Second)</code> で少し間を置いてから <code>continue</code>。Redis が一時的に不調でも、2秒おきに再挑戦して回復を待ちます。<code>ErrEmpty</code> と違い、<strong>本当の異常なので慌てて叩き直さず一呼吸置く</strong>のがポイント。</li>
+      <li>無事に注文を取り出せたら、<code>transcode.Process(ctx, deps, job)</code> に手渡す。ここからが変換の本体です。</li>
+    </ul>
+    <p><code>errors.Is(err, queue.ErrEmpty)</code> という書き方に注目してください。Go では「このエラーは、あの決まったエラーか?」を <code>==</code> ではなく <code>errors.Is</code> で確かめるのが作法です（エラーが別のエラーに包まれていても中身を辿って判定できるため）。<code>deps</code> は職人が変換に使う道具箱 —— DB・保管庫（<code>St</code>）・注文箱（<code>Q</code>）を1つにまとめたもので、<code>Process</code> に渡されます。</p>
+
+    <div class="gonote"><div class="box-k">実装メモ · Process の中でパニックしても職人は死なせたくない</div>
+      <p>このループには、あえて素朴なところがあります。<code>transcode.Process</code> は内部でエラーを自分で処理し、値を返しません（後述）。つまり「1件の変換が失敗しても、職人のループは止まらず次の注文へ進む」設計です。もし <code>Process</code> の中で予期せぬ <code>panic</code> が起きると、この単純なループでは職人プロセスごと落ちてしまいますが、Docker が再起動してくれるので、次に立ち上がった職人が注文箱の続きを処理します。本格的には <code>recover</code> でパニックを捕まえてループを守りますが、学習用としては「1プロセス1職人、落ちたら Docker が起こす」で割り切っています。<strong>職人を増やしたければ <code>docker compose up --scale worker=2</code></strong> で、この同じループを回すプロセスが2つになり、注文箱を2人で分担します（<code>BRPop</code> はどちらか1人にしか同じ注文を渡さないので、二重処理にはならない —— ただし retry 由来の二重配送は別問題で、それは fencing が守ります）。</p>
+    </div>
+
+    <h2 class="step" id="step-4"><span class="step-no">Step 4</span>1件を処理する骨格 — Process と再挑戦</h2>
+    <p>いよいよ変換の本体、<code>internal/transcode/transcode.go</code> です。まずファイルの入口 —— どんな道具立てで、何画質に変換するのか。</p>
+
+    <div class="file-tag">internal/transcode/transcode.go（冒頭・画質の梯子）</div>
+    <pre><code><span class="cm">// Package transcode は職人（Worker）の中核。</span>
+<span class="cm">// 元動画を「複数画質 × 短い断片（セグメント）＋目次（プレイリスト）」に作り替える。</span>
+<span class="kw">package</span> transcode
+
+<span class="cm">// …（import は省略）</span>
+
+<span class="kw">const</span> maxAttempts = <span class="st">3</span>
+
+<span class="kw">type</span> <span class="ty">rendition</span> <span class="kw">struct</span> {
+	Name    <span class="ty">string</span> <span class="cm">// 360p など。出力ディレクトリ名にもなる</span>
+	Height  <span class="ty">int</span>
+	Width   <span class="ty">int</span>    <span class="cm">// マスタープレイリストの解像度ヒント</span>
+	Bitrate <span class="ty">string</span> <span class="cm">// 映像ビットレート</span>
+	BandKbs <span class="ty">int</span>    <span class="cm">// マスタープレイリストの帯域ヒント(kbps)</span>
+}
+
+<span class="kw">var</span> ladder = []<span class="ty">rendition</span>{
+	{Name: <span class="st">"360p"</span>, Height: <span class="st">360</span>, Width: <span class="st">640</span>, Bitrate: <span class="st">"800k"</span>, BandKbs: <span class="st">1000</span>},
+	{Name: <span class="st">"720p"</span>, Height: <span class="st">720</span>, Width: <span class="st">1280</span>, Bitrate: <span class="st">"2500k"</span>, BandKbs: <span class="st">3000</span>},
+	{Name: <span class="st">"1080p"</span>, Height: <span class="st">1080</span>, Width: <span class="st">1920</span>, Bitrate: <span class="st">"5000k"</span>, BandKbs: <span class="st">6000</span>},
+}
+
+<span class="kw">type</span> <span class="ty">Deps</span> <span class="kw">struct</span> {
+	DB *pgxpool.<span class="ty">Pool</span>
+	St *storage.<span class="ty">Storage</span>
+	Q  *queue.<span class="ty">Queue</span>
+}</code></pre>
+
+    <p><code>ladder</code>（梯子）が、この動画サービスが作る画質の一覧です。<strong>360p / 720p / 1080p の3段</strong>。それぞれに、縦横のサイズ・映像ビットレート（1秒あたりのデータ量）・帯域ヒントが決まっています。「梯子」と呼ぶのは、回線が細ければ下の段（360p、軽い）、太ければ上の段（1080p、綺麗）へと、視聴側が段を上り下りできるからです。この段の切り替えを<strong>自動でやる</strong>のが第04章の適応配信（hls.js）で、そのためには<strong>同じ動画を複数画質で用意しておく</strong>必要がある —— それがこの章の仕事です。<code>maxAttempts = 3</code> は「変換を最大3回まで再挑戦する」の上限です。</p>
+
+    <p>次に、注文1件を処理する司令塔 <code>Process</code>。この関数が「1回やってみて、失敗したら再挑戦、諦めたら理由を記録」という<strong>再挑戦のロジック</strong>を握り、実際の変換は下請けの <code>run</code> に任せます。</p>
+
+    <div class="file-tag">internal/transcode/transcode.go（Process — 再挑戦の司令塔）</div>
+    <pre><code><span class="cm">// Process は注文票1件ぶんの変換を行う。失敗したら再挑戦し、上限を超えたら「失敗」を記録する。</span>
+<span class="cm">// 動画への書き込みはすべて job.Generation（fencing token）で柵囲いされている:</span>
+<span class="cm">// 停滞リトライで世代が進むと、古い注文・生き返った古い職人は一切書き込めない。</span>
+<span class="kw">func</span> Process(ctx context.<span class="ty">Context</span>, d <span class="ty">Deps</span>, job queue.<span class="ty">TranscodeJob</span>) {
+	log.Printf(<span class="st">"transcode start: video=%s attempt=%d gen=%d"</span>, job.VideoID, job.Attempt, job.Generation)
+	err := run(ctx, d, job)
+	<span class="kw">if</span> err == <span class="kw">nil</span> {
+		log.Printf(<span class="st">"transcode done: video=%s gen=%d"</span>, job.VideoID, job.Generation)
+		<span class="kw">return</span>
+	}
+	log.Printf(<span class="st">"transcode error: video=%s gen=%d: %v"</span>, job.VideoID, job.Generation, err)
+	<span class="kw">if</span> job.Attempt+<span class="st">1</span> &lt; maxAttempts {
+		<span class="cm">// やり直せる形で注文箱に戻す（同じ世代のまま。世代が進むのは持ち主の retry のみ）</span>
+		d.DB.Exec(ctx,
+			<span class="st">`UPDATE videos SET attempts = $2
+			 WHERE id = $1 AND job_generation = $3 AND status = 'processing'`</span>,
+			job.VideoID, job.Attempt+<span class="st">1</span>, job.Generation)
+		<span class="kw">if</span> qerr := d.Q.EnqueueTranscode(ctx, queue.<span class="ty">TranscodeJob</span>{
+			VideoID: job.VideoID, Attempt: job.Attempt + <span class="st">1</span>, Generation: job.Generation,
+		}); qerr != <span class="kw">nil</span> {
+			log.Printf(<span class="st">"requeue failed: %v"</span>, qerr)
+		}
+		<span class="kw">return</span>
+	}
+	<span class="cm">// 諦める。ただし「なぜ失敗したか」を投稿者が確認できるよう残す（NFR-4）。</span>
+	<span class="cm">// 世代が一致し、かつ「まだ変換中」のときだけ——並行する別の職人が先に完成させていたり、</span>
+	<span class="cm">// 持ち主のリトライで世代が進んでいたら、遅れて失敗したこちらは何も書かない</span>
+	tag, uerr := d.DB.Exec(ctx,
+		<span class="st">`UPDATE videos SET status = 'failed', error_message = $2, status_changed_at = now()
+		 WHERE id = $1 AND job_generation = $3 AND status = 'processing'`</span>,
+		job.VideoID, err.Error(), job.Generation)
+	<span class="kw">if</span> uerr == <span class="kw">nil</span> &amp;&amp; tag.RowsAffected() == <span class="st">0</span> {
+		log.Printf(<span class="st">"transcode failure not recorded (video=%s gen=%d is superseded or no longer processing)"</span>,
+			job.VideoID, job.Generation)
+	}
+}</code></pre>
+
+    <p><code>Process</code> の流れは3段構えです。</p>
+    <ol>
+      <li><strong>まず1回やってみる</strong> —— <code>err := run(ctx, d, job)</code>。実際の変換（ffmpeg 実行から成果物のアップロードまで）は <code>run</code> が全部やります。成功（<code>err == nil</code>）なら、ログを出して終わり。</li>
+      <li><strong>失敗したが、まだ挑戦の余地があるなら再挑戦</strong> —— <code>job.Attempt+1 &lt; maxAttempts</code>（3回未満）なら、<code>attempts</code> を DB に記録してから、<code>Attempt</code> を1つ増やした<strong>同じ注文を注文箱に積み直す</strong>。次に空いた職人（自分かもしれないし別の職人かもしれない）が拾って、もう一度やります。</li>
+      <li><strong>3回やってもダメなら諦めて理由を記録</strong> —— <code>status = 'failed'</code> にして、<code>error_message</code> に失敗理由を残す。投稿者はこれを Studio で見て、原因を知り、必要なら手動でやり直せます（Step 10）。</li>
+    </ol>
+
+    <p>ここで<strong>この章のいちばん大事な観察</strong>をしてください。<code>Process</code> の中の DB への書き込み <code>UPDATE</code> は<strong>すべて</strong>、こう終わっています ——</p>
+    <div class="ascii">... WHERE id = $1 AND job_generation = $N AND status = 'processing'
+                        ^^^^^^^^^^^^^^^^^^^^^^^^ 世代の柵（fencing）
+                                                ^^^^^^^^^^^^^^^^^^^^^ 状態の柵</div>
+    <p>再挑戦のための <code>attempts</code> 更新も、諦めの <code>failed</code> 宣言も、必ず <code>AND job_generation = $3</code>（自分が持ってきた注文の世代）と <code>AND status = 'processing'</code> の2つの条件が付いています。「自分の注文の世代がまだ現役で、かつ、まだ変換中のときだけ書く」。これが本章の背骨 —— <strong>fencing token による柵囲い</strong>です。なぜこれが要るのか、次のステップで <code>run</code> の中に入って、最初の関門から順に体験します。</p>
+
+    <div class="gonote"><div class="box-k">実装メモ · なぜ再挑戦は「世代を進めない」のか</div>
+      <p>再挑戦のとき、<code>Process</code> は <code>Generation: job.Generation</code> と<strong>同じ世代のまま</strong>注文を積み直します。世代を進めるのは受付側の <code>complete</code> と <code>retry</code>（投稿者の操作）だけ、という役割分担です。理由は、世代は「投稿者がやり直しを意図した回数」を数えるものだから。職人の自動リトライは同じ「注文」の中の出来事なので、世代は据え置く。もし自動リトライで世代を進めてしまうと、後述する「古い職人の締め出し」の判定が、正常な自動リトライまで巻き込んで締め出してしまいます。<strong>世代 = 投稿者由来のやり直しの通し番号</strong>、と割り切るのがこの設計の肝です。</p>
+    </div>
+
+    <h2 class="step" id="step-5"><span class="step-no">Step 5</span>「変換中」を柵つきで宣言する — fencing token の第一関門</h2>
+    <p><code>run</code> の入口を読みます。ffmpeg を回す前に、職人はまず<strong>「この動画は私が今から変換します」を DB に宣言</strong>します。この宣言そのものが、最初の関門 —— 古い注文を締め出す柵です。</p>
+
+    <div class="file-tag">internal/transcode/transcode.go（run の前半 — 変換中の柵つき宣言）</div>
+    <pre><code><span class="kw">func</span> run(ctx context.<span class="ty">Context</span>, d <span class="ty">Deps</span>, job queue.<span class="ty">TranscodeJob</span>) <span class="ty">error</span> {
+	videoID := job.VideoID
+	<span class="kw">var</span> originalKey, status <span class="ty">string</span>
+	err := d.DB.QueryRow(ctx,
+		<span class="st">`SELECT original_key, status FROM videos WHERE id = $1`</span>, videoID).
+		Scan(&amp;originalKey, &amp;status)
+	<span class="kw">if</span> err != <span class="kw">nil</span> {
+		<span class="kw">return</span> fmt.Errorf(<span class="st">"load video: %w"</span>, err)
+	}
+	<span class="kw">if</span> status == <span class="st">"ready"</span> {
+		<span class="kw">return</span> <span class="kw">nil</span> <span class="cm">// すでに完了（重複注文は無害に流す）</span>
+	}
+	<span class="cm">// 「変換中」の宣言は、注文の世代が現在も有効で、かつ ready を追い越さない条件つき。</span>
+	<span class="cm">// 古い世代の注文（リトライで置き換え済み）はここで弾かれ、何も起こさない</span>
+	tag, err := d.DB.Exec(ctx,
+		<span class="st">`UPDATE videos SET status = 'processing', status_changed_at = now()
+		 WHERE id = $1 AND job_generation = $2 AND status &lt;&gt; 'ready'`</span>, videoID, job.Generation)
+	<span class="kw">if</span> err != <span class="kw">nil</span> {
+		<span class="kw">return</span> err
+	}
+	<span class="kw">if</span> tag.RowsAffected() == <span class="st">0</span> {
+		log.Printf(<span class="st">"transcode skipped: video=%s gen=%d is stale or already ready"</span>, videoID, job.Generation)
+		<span class="kw">return</span> <span class="kw">nil</span>
+	}</code></pre>
+
+    <p>順に読みます。まず <code>SELECT original_key, status</code> で、変換すべき元動画の在り処と現在の状態を引く。<code>if status == "ready"</code> —— すでに誰かが変換を終えていたら、<strong>何もせず正常終了</strong>します。二重配送で自分が2人目の職人だった場合、これで無駄働きを避けられる。「重複注文は無害に流す」の一行です。</p>
+
+    <p>本題は次の <code>UPDATE ... status = 'processing' ... WHERE id = $1 AND job_generation = $2 AND status &lt;&gt; 'ready'</code> です。この1文が「変換中」の宣言であり、同時に<strong>3つの条件を満たしたときだけ通す関門</strong>になっています。</p>
+    <ul>
+      <li><code>id = $1</code> —— 当然、この動画。</li>
+      <li><code>job_generation = $2</code> —— <strong>自分の注文の世代が、DB の現在の世代と一致するときだけ</strong>。ここが fencing token の第一関門。もし投稿者が「やり直し」をして世代が進んでいたら、古い世代を持つ職人はこの条件で<strong>弾かれます</strong>。</li>
+      <li><code>status &lt;&gt; 'ready'</code> —— まだ <code>ready</code> になっていないときだけ（<code>&lt;&gt;</code> は「等しくない」）。並行する別の職人が一瞬先に完成させていたら、追い越して未完成へ引き戻すのを防ぐ。</li>
+    </ul>
+    <p>そして <code>tag.RowsAffected() == 0</code> の判定。この <code>UPDATE</code> が<strong>1行も変えなかった</strong>なら、それは「条件のどれかを満たさなかった」= 自分は古い世代か、もう ready になっている、ということ。だから<strong>何もせず静かに終了</strong>します（<code>return nil</code>）。<strong>ここが古い職人（ゾンビ）の締め出しの入口</strong>です。ゾンビは <code>processing</code> の宣言すらできず、この時点で仕事を諦める。</p>
+
+    <div class="box hazard"><div class="box-k">⚠ 落とし穴 — 世代の柵がないと、ゾンビ職人が新しい成果を壊す</div>
+      <p>この <code>AND job_generation = $2</code> は、机上の理屈ではなく<strong>実際にバグを踏んで（Codex のレビューで指摘されて）足された</strong>柵です。世代の柵が無く、<code>status</code> の条件だけだった頃、次の悲劇が起きえました ——</p>
+      <div class="ascii">世代の柵がなかった頃の悲劇（ゾンビ職人）
+
+  ① 職人A が動画Xの変換を開始（status=processing）
+  ② 職人A が固まる（ネットワーク断・GCで長時間停止など。死んではいない）
+  ③ 10分経過。投稿者が Studio で「やり直し」→ status=uploaded、新しい注文を投入
+  ④ 職人B が新しい注文を拾い、変換を完了（status=ready、正しい動画が見られる）
+  ⑤ ここで職人A が息を吹き返す！
+  ⑥ 職人A「変換に失敗したから failed にしよう」
+     → status の条件（processing→failed）だけでは A を止められない
+     → 見られていた動画が、いきなり failed に！（新しい成果を壊した）</div>
+      <p>この⑤⑥のゾンビ書き込みを、<code>AND job_generation = $N</code> が封じます。職人A が持っているのは<strong>古い世代</strong>の注文票。やり直しで DB の世代は進んでいるので、A のどの <code>UPDATE</code>（processing 宣言も、failed 宣言も、attempts 更新も）も <code>job_generation</code> の条件で弾かれ、<strong>1行も変えられない</strong>。A は自分がもう用済みだと知らずに動いても、DB には指一本触れられません。<strong>「状態の条件だけでは、生き返った古い職人と新しい世代の職人を区別できない」</strong> —— これが世代番号（fencing token）が必要な、たった一つの理由です。fencing token とは元々「古くなった担い手が共有資源に書き込むのを、単調増加する番号で締め出す」分散システムの定番技法で、ここではその番号を DB の1列（<code>job_generation</code>）で実現しています。</p>
+    </div>
+
+    <h2 class="step" id="step-6"><span class="step-no">Step 6</span>ffmpeg を呼ぶ — 3画質 × 4秒セグメントの HLS</h2>
+    <p>柵を通り、晴れて「変換中」を宣言できた職人は、いよいよ ffmpeg を回します。<code>run</code> の中盤 —— 元動画を落として調べ、変換する部分です。</p>
+
+    <div class="file-tag">internal/transcode/transcode.go（run の中盤 — 取得・調査・変換）</div>
+    <pre><code>	work, err := os.MkdirTemp(<span class="st">""</span>, <span class="st">"transcode-"</span>+videoID[:<span class="st">8</span>]+<span class="st">"-"</span>)
+	<span class="kw">if</span> err != <span class="kw">nil</span> {
+		<span class="kw">return</span> err
+	}
+	<span class="kw">defer</span> os.RemoveAll(work)
+
+	<span class="cm">// 1. 元動画を保管庫から取る</span>
+	src := filepath.Join(work, <span class="st">"original"</span>+filepath.Ext(originalKey))
+	<span class="kw">if</span> err := d.St.Download(ctx, originalKey, src); err != <span class="kw">nil</span> {
+		<span class="kw">return</span> fmt.Errorf(<span class="st">"download original: %w"</span>, err)
+	}
+
+	<span class="cm">// 2. 中身を調べる（縦横・音声の有無・長さ）</span>
+	info, err := probe(ctx, src)
+	<span class="kw">if</span> err != <span class="kw">nil</span> {
+		<span class="kw">return</span> fmt.Errorf(<span class="st">"probe: %w"</span>, err)
+	}
+
+	<span class="cm">// 3. 変換: 元の高さを超える画質は作らない（最低1段は必ず作る）</span>
+	rends := pickRenditions(info.Height)
+	outDir := filepath.Join(work, <span class="st">"out"</span>)
+	<span class="kw">for</span> _, r := <span class="kw">range</span> rends {
+		<span class="kw">if</span> err := os.MkdirAll(filepath.Join(outDir, r.Name), <span class="st">0o755</span>); err != <span class="kw">nil</span> {
+			<span class="kw">return</span> err
+		}
+	}
+	<span class="kw">if</span> err := runFFmpeg(ctx, src, outDir, rends, info.HasAudio); err != <span class="kw">nil</span> {
+		<span class="kw">return</span> fmt.Errorf(<span class="st">"ffmpeg: %w"</span>, err)
+	}</code></pre>
+
+    <p>4つの動きがあります。</p>
+    <ul>
+      <li><strong>作業場を作る</strong> —— <code>os.MkdirTemp</code> で一時ディレクトリを掘り、<code>defer os.RemoveAll(work)</code> で「<code>run</code> を抜けるとき（成功でも失敗でも）必ず掃除する」を予約。変換の中間ファイルはローカルの作業場に置き、終わったら跡形もなく消します。</li>
+      <li><strong>元動画を落とす</strong> —— <code>d.St.Download</code> で保管庫（MinIO）から元動画を作業場へダウンロード。職人はここで初めて動画の実物に触れます（注文票には <code>VideoID</code> しか載っていなかったことを思い出してください）。</li>
+      <li><strong>中身を調べる</strong> —— <code>probe</code> で <code>ffprobe</code> を呼び、動画の高さ・音声の有無・長さを調べます（詳細は下記）。</li>
+      <li><strong>作る画質を決める</strong> —— <code>pickRenditions(info.Height)</code> で、元動画の高さを超える画質は作りません。360p の動画を無理に 1080p に引き伸ばしても画質は上がらず、容量が無駄なだけだから。ただし「最低1段は必ず作る」ので、極端に小さい動画でも 360p は生成されます。</li>
+    </ul>
+
+    <p><code>probe</code> と <code>pickRenditions</code> の中身も見ておきましょう。</p>
+
+    <div class="file-tag">internal/transcode/transcode.go（probe / pickRenditions）</div>
+    <pre><code><span class="kw">func</span> pickRenditions(srcHeight <span class="ty">int</span>) []<span class="ty">rendition</span> {
+	<span class="kw">var</span> out []<span class="ty">rendition</span>
+	<span class="kw">for</span> _, r := <span class="kw">range</span> ladder {
+		<span class="kw">if</span> srcHeight &gt;= r.Height {
+			out = append(out, r)
+		}
+	}
+	<span class="kw">if</span> len(out) == <span class="st">0</span> {
+		out = []<span class="ty">rendition</span>{ladder[<span class="st">0</span>]}
+	}
+	<span class="kw">return</span> out
+}
+
+<span class="kw">func</span> probe(ctx context.<span class="ty">Context</span>, path <span class="ty">string</span>) (<span class="ty">mediaInfo</span>, <span class="ty">error</span>) {
+	out, err := exec.CommandContext(ctx, <span class="st">"ffprobe"</span>,
+		<span class="st">"-v"</span>, <span class="st">"error"</span>, <span class="st">"-print_format"</span>, <span class="st">"json"</span>,
+		<span class="st">"-show_format"</span>, <span class="st">"-show_streams"</span>, path).Output()
+	<span class="kw">if</span> err != <span class="kw">nil</span> {
+		<span class="kw">return</span> <span class="ty">mediaInfo</span>{}, fmt.Errorf(<span class="st">"%w: %s"</span>, err, stderrOf(err))
+	}
+	<span class="cm">// …（JSON をパースして高さ・音声の有無・長さを取り出す。省略）</span>
+	<span class="kw">if</span> info.Height == <span class="st">0</span> {
+		<span class="kw">return</span> info, fmt.Errorf(<span class="st">"映像ストリームが見つかりません（動画ファイルではない可能性）"</span>)
+	}
+	<span class="kw">return</span> info, <span class="kw">nil</span>
+}</code></pre>
+
+    <p><code>pickRenditions</code> は <code>ladder</code>（3段）を上から見て、元動画の高さ以下の段だけ選びます。720p の動画なら 360p と 720p の2段、1080p 以上なら3段全部。<code>len(out) == 0</code>（元がとても小さい）なら最低の 360p だけ作る。<code>probe</code> は <code>ffprobe</code>（ffmpeg 付属の解析ツール）を <code>-print_format json</code> で呼び、出力の JSON から高さ・音声・長さを読みます。もし映像ストリームが1つも無ければ（画像や壊れたファイル）、<code>info.Height == 0</code> のチェックで「動画ファイルではない可能性」とエラーにして、変換をここで止めます。</p>
+
+    <p>そして変換の心臓、<code>runFFmpeg</code>。ここで <code>[0:v]split</code> のフィルタと <code>-var_stream_map</code> を組み立てて、1回の ffmpeg 実行で全画質の HLS を吐かせます。</p>
+
+    <div class="file-tag">internal/transcode/transcode.go（runFFmpeg）</div>
+    <pre><code><span class="cm">// runFFmpeg は1本の動画を複数画質のHLS（断片＋画質別目次）へ変換する。</span>
+<span class="kw">func</span> runFFmpeg(ctx context.<span class="ty">Context</span>, src, outDir <span class="ty">string</span>, rends []<span class="ty">rendition</span>, hasAudio <span class="ty">bool</span>) <span class="ty">error</span> {
+	<span class="cm">// [0:v] を画質数ぶんに分けて、それぞれ縮小する</span>
+	<span class="kw">var</span> filters []<span class="ty">string</span>
+	<span class="kw">var</span> splitOuts []<span class="ty">string</span>
+	<span class="kw">for</span> i := <span class="kw">range</span> rends {
+		splitOuts = append(splitOuts, fmt.Sprintf(<span class="st">"[vin%d]"</span>, i))
+	}
+	filters = append(filters, fmt.Sprintf(<span class="st">"[0:v]split=%d%s"</span>, len(rends), strings.Join(splitOuts, <span class="st">""</span>)))
+	<span class="kw">for</span> i, r := <span class="kw">range</span> rends {
+		filters = append(filters, fmt.Sprintf(<span class="st">"[vin%d]scale=-2:%d[v%d]"</span>, i, r.Height, i))
+	}
+
+	args := []<span class="ty">string</span>{<span class="st">"-y"</span>, <span class="st">"-i"</span>, src, <span class="st">"-filter_complex"</span>, strings.Join(filters, <span class="st">";"</span>)}
+	<span class="kw">var</span> streamMap []<span class="ty">string</span>
+	<span class="kw">for</span> i, r := <span class="kw">range</span> rends {
+		args = append(args, <span class="st">"-map"</span>, fmt.Sprintf(<span class="st">"[v%d]"</span>, i))
+		entry := fmt.Sprintf(<span class="st">"v:%d"</span>, i)
+		<span class="kw">if</span> hasAudio {
+			args = append(args, <span class="st">"-map"</span>, <span class="st">"0:a:0"</span>)
+			entry += fmt.Sprintf(<span class="st">",a:%d"</span>, i)
+		}
+		streamMap = append(streamMap, entry+<span class="st">",name:"</span>+r.Name)
+		args = append(args, fmt.Sprintf(<span class="st">"-b:v:%d"</span>, i), r.Bitrate)
+	}
+	args = append(args, <span class="st">"-c:v"</span>, <span class="st">"libx264"</span>, <span class="st">"-preset"</span>, <span class="st">"veryfast"</span>)
+	<span class="kw">if</span> hasAudio {
+		args = append(args, <span class="st">"-c:a"</span>, <span class="st">"aac"</span>, <span class="st">"-b:a"</span>, <span class="st">"128k"</span>, <span class="st">"-ac"</span>, <span class="st">"2"</span>)
+	}
+	args = append(args,
+		<span class="st">"-f"</span>, <span class="st">"hls"</span>,
+		<span class="st">"-hls_time"</span>, <span class="st">"4"</span>,
+		<span class="st">"-hls_playlist_type"</span>, <span class="st">"vod"</span>,
+		<span class="st">"-hls_segment_filename"</span>, filepath.Join(outDir, <span class="st">"%v"</span>, <span class="st">"seg%03d.ts"</span>),
+		<span class="st">"-var_stream_map"</span>, strings.Join(streamMap, <span class="st">" "</span>),
+		filepath.Join(outDir, <span class="st">"%v"</span>, <span class="st">"playlist.m3u8"</span>),
+	)
+	cmd := exec.CommandContext(ctx, <span class="st">"ffmpeg"</span>, args...)
+	out, err := cmd.CombinedOutput()
+	<span class="kw">if</span> err != <span class="kw">nil</span> {
+		<span class="kw">return</span> fmt.Errorf(<span class="st">"%w: %s"</span>, err, tail(string(out), <span class="st">800</span>))
+	}
+	<span class="kw">return</span> <span class="kw">nil</span>
+}</code></pre>
+
+    <p>このコードは、最終的に長い ffmpeg のコマンドライン引数（<code>args</code>）を組み立てて実行しているだけです。組み立ての意図が分かれば怖くありません。2段階に分けて読みます。</p>
+    <p><strong>フィルタ（<code>-filter_complex</code>）の組み立て</strong>。元動画の映像 <code>[0:v]</code> を、<code>split=N</code> で画質の数だけ複製し（例: <code>[vin0][vin1][vin2]</code>）、それぞれを <code>scale=-2:H</code> で目標の高さ H に縮小します（<code>-2</code> は「高さに合わせて幅を自動計算し、かつ2の倍数に丸める」の意味 —— 動画の幅は2の倍数でないとエンコードで嫌われるため）。結果、<code>[v0][v1][v2]</code> という3本の縮小済み映像ができます。</p>
+    <p><strong>出力の割り当て（<code>-map</code> と <code>-var_stream_map</code>）</strong>。縮小した各映像 <code>[vN]</code> を出力に <code>-map</code> し、音声があれば <code>0:a:0</code>（元の音声）も割り当て、各画質のビットレート <code>-b:v:N</code> を指定します。<code>-var_stream_map</code> は「どの映像＋音声を、どの名前の画質としてまとめるか」の対応表で、<code>v:0,a:0,name:360p</code> のような文字列になります。この <code>name:360p</code> が、出力パスの <code>%v</code>（variant = 画質）に展開され、<code>out/360p/</code>・<code>out/720p/</code> …というディレクトリに分かれて書き出される仕組みです。</p>
+    <p>そして最後の HLS 指定に、この章の要となる2つがあります。</p>
+    <ul>
+      <li><code>-f hls</code> —— 出力形式を HLS（HTTP Live Streaming）に。動画を「短い断片（<code>.ts</code> セグメント）＋その目次（<code>.m3u8</code> プレイリスト）」の形に切り出す方式です。第04章で、これがなぜ配信に都合が良いかを扱います。</li>
+      <li><code>-hls_time 4</code> —— <strong>1つのセグメントを約4秒</strong>にする。動画は4秒ごとの <code>.ts</code> ファイルに刻まれます（<code>seg000.ts</code>, <code>seg001.ts</code> …）。4秒という長さは「短すぎるとファイル数・リクエスト数が増える／長すぎると画質切り替えの反応が鈍る」のバランスの定番値です。</li>
+      <li><code>-hls_playlist_type vod</code> —— これは生放送ではなく<strong>完結した動画（VOD）</strong>だと宣言。プレイリストに「これで全部（終端）」の印が付き、プレイヤーは全体の長さを把握してシークできます。</li>
+      <li><code>-c:v libx264 -preset veryfast</code> —— 映像コーデックは H.264、エンコード速度は <code>veryfast</code>（学習用なので画質より速さ優先）。音声があれば <code>-c:a aac -b:a 128k</code> で AAC 128kbps に。</li>
+    </ul>
+
+    <div class="gonote"><div class="box-k">実装メモ · exec.CommandContext と CombinedOutput —— 外部プロセスを安全に呼ぶ</div>
+      <p>ffmpeg は Go のプログラムではなく<strong>別の実行ファイル</strong>なので、<code>exec.CommandContext</code> で外部プロセスとして起動します。第一引数の <code>ctx</code>（コンテキスト）が効いていて、もし処理が打ち切られたら（サーバ終了など）ffmpeg も一緒に止められます。<code>CombinedOutput()</code> は「標準出力と標準エラーを1つにまとめて受け取る」呼び方で、ffmpeg が失敗したとき、その<strong>エラーメッセージ（末尾800文字）を <code>tail</code> で切り出して</strong>エラーに含めています。この末尾のログが、最終的に <code>error_message</code> として投稿者に見える失敗理由になります。引数を <code>[]string</code> で1つずつ渡している（シェルの文字列連結ではない）のも大事で、これにより<strong>シェルインジェクション</strong>（ファイル名に細工した悪意ある文字が混ざる攻撃）を原理的に防げます。</p>
+    </div>
+
+    <h2 class="step" id="step-7"><span class="step-no">Step 7</span>総目次は自前で書く — writeMaster</h2>
+    <p>ffmpeg は、各画質のプレイリスト（<code>360p/playlist.m3u8</code> など）とセグメントを吐きました。でも、視聴側がまず読む<strong>総目次（マスタープレイリスト）</strong>—— 「この動画には 360p / 720p / 1080p があり、それぞれの目次はここ」を束ねる1枚 —— は、ffmpeg に任せず Go で書きます。</p>
+
+    <div class="file-tag">internal/transcode/transcode.go（writeMaster）</div>
+    <pre><code><span class="cm">// writeMaster は「どの画質があるか」を束ねる総目次を書き出す。</span>
+<span class="kw">func</span> writeMaster(outDir <span class="ty">string</span>, rends []<span class="ty">rendition</span>) <span class="ty">error</span> {
+	<span class="kw">var</span> b strings.<span class="ty">Builder</span>
+	b.WriteString(<span class="st">"#EXTM3U\n#EXT-X-VERSION:3\n"</span>)
+	<span class="kw">for</span> _, r := <span class="kw">range</span> rends {
+		fmt.Fprintf(&amp;b, <span class="st">"#EXT-X-STREAM-INF:BANDWIDTH=%d,RESOLUTION=%dx%d\n%s/playlist.m3u8\n"</span>,
+			r.BandKbs*<span class="st">1000</span>, r.Width, r.Height, r.Name)
+	}
+	<span class="kw">return</span> os.WriteFile(filepath.Join(outDir, <span class="st">"master.m3u8"</span>), []<span class="ty">byte</span>(b.String()), <span class="st">0o644</span>)
+}</code></pre>
+
+    <p><code>writeMaster</code> が生成するのは、こういうテキストファイル（<code>master.m3u8</code>）です。</p>
+    <div class="ascii">master.m3u8（3画質そろった場合）
+
+  #EXTM3U
+  #EXT-X-VERSION:3
+  #EXT-X-STREAM-INF:BANDWIDTH=1000000,RESOLUTION=640x360
+  360p/playlist.m3u8
+  #EXT-X-STREAM-INF:BANDWIDTH=3000000,RESOLUTION=1280x720
+  720p/playlist.m3u8
+  #EXT-X-STREAM-INF:BANDWIDTH=6000000,RESOLUTION=1920x1080
+  1080p/playlist.m3u8</div>
+    <p>各画質について「帯域の目安（BANDWIDTH）」「解像度（RESOLUTION）」と、その画質の目次への相対パス（<code>360p/playlist.m3u8</code>）を1組ずつ並べているだけ。プレイヤー（第04章の hls.js）は、この総目次をまず読み、<strong>視聴者の回線速度に見合う BANDWIDTH の画質を選び</strong>、そのプレイリストを取りに行きます。回線が細れば下の段、太ければ上の段 —— これが適応配信の入口です。<code>ladder</code> の <code>BandKbs</code>（kbps）を <code>*1000</code> して bps に直しているのは、HLS の仕様が BANDWIDTH を bps で書くことを求めるからです。</p>
+
+    <div class="box hazard"><div class="box-k">⚠ 落とし穴 — なぜ master.m3u8 を ffmpeg 任せにしないのか</div>
+      <p>ffmpeg にも「マスタープレイリストを一緒に吐く」オプション（<code>-master_pl_name</code>）はあります。ではなぜ手書きするのか。理由は<strong>出力先の挙動がバージョン依存で曖昧</strong>だからです（CLAUDE.md にも明記されています）。ffmpeg のバージョンによって、マスターが出るディレクトリや、その中に書かれる各画質へのパスの綴りが微妙に変わることがあり、「バージョンを上げたら急に配信が404になる」といった罠を踏みやすい。総目次はたった数行のテキストで、中身も HLS の仕様どおりに素直です。だったら<strong>自分で書いて、置き場も内容も完全に握った方が、壊れにくく学びも大きい</strong> —— という判断です。ffmpeg には「重くて複雑なセグメント化」だけ任せ、「単純だが壊れると致命的な総目次」は自分で持つ、という役割分担になっています。<code>strings.Builder</code> は文字列を効率よく継ぎ足していく Go の定番の道具で、<code>fmt.Fprintf(&amp;b, ...)</code> で1画質ずつ追記しています。</p>
+    </div>
+
+    <h2 class="step" id="step-8"><span class="step-no">Step 8</span>実行ごとに一意な置き場 — ストレージ側の fencing</h2>
+    <p>変換が済み、作業場には <code>master.m3u8</code>・各画質のプレイリスト・セグメント・サムネイルが揃いました。これを保管庫（MinIO）へ上げます。<strong>どこへ上げるか</strong>が、この章の2つ目の要です。</p>
+
+    <div class="file-tag">internal/transcode/transcode.go（run の終盤前 — サムネイルと成果物のアップロード）</div>
+    <pre><code>	<span class="cm">// 4. 総目次（マスタープレイリスト）は自前で書く。中身が見える方が学びも大きい</span>
+	<span class="kw">if</span> err := writeMaster(outDir, rends); err != <span class="kw">nil</span> {
+		<span class="kw">return</span> err
+	}
+
+	<span class="cm">// 5. サムネイル</span>
+	thumb := filepath.Join(work, <span class="st">"thumbnail.jpg"</span>)
+	<span class="kw">if</span> err := makeThumbnail(ctx, src, thumb, info.Duration); err != <span class="kw">nil</span> {
+		<span class="kw">return</span> fmt.Errorf(<span class="st">"thumbnail: %w"</span>, err)
+	}
+
+	<span class="cm">// 6. 成果物を保管庫へ。置き場は「この実行だけ」の一意な場所にする（ストレージ側の fencing）。</span>
+	<span class="cm">// 世代だけで分けると、同一世代のジョブが二重に配送されたとき（at-least-once な</span>
+	<span class="cm">// キューでは普通に起きる）に同じ場所へ並行書き込みできてしまう。</span>
+	<span class="cm">// 実行ごとに一意なら誰とも衝突せず、どれを配信するかは ready 宣言（世代フェンス付き）が</span>
+	<span class="cm">// media_prefix で一意に決める。負けた実行の成果物はゴミとして残り、動画削除時に掃除される</span>
+	runID, err := randomID()
+	<span class="kw">if</span> err != <span class="kw">nil</span> {
+		<span class="kw">return</span> err
+	}
+	prefix := fmt.Sprintf(<span class="st">"hls/%s/g%d-%s/"</span>, videoID, job.Generation, runID)
+	<span class="kw">if</span> err := uploadDir(ctx, d.St, outDir, prefix); err != <span class="kw">nil</span> {
+		<span class="kw">return</span> fmt.Errorf(<span class="st">"upload outputs: %w"</span>, err)
+	}
+	<span class="kw">if</span> err := d.St.UploadFile(ctx, prefix+<span class="st">"thumbnail.jpg"</span>, thumb, <span class="st">"image/jpeg"</span>); err != <span class="kw">nil</span> {
+		<span class="kw">return</span> fmt.Errorf(<span class="st">"upload thumbnail: %w"</span>, err)
+	}</code></pre>
+
+    <p>核心は <code>prefix := fmt.Sprintf("hls/%s/g%d-%s/", videoID, job.Generation, runID)</code> の1行です。成果物の置き場（プレフィックス）を、こう組み立てています ——</p>
+    <div class="ascii">      hls / &lt;動画ID&gt; / g &lt;世代&gt; - &lt;128bit乱数hex&gt; /
+                              │        │
+                     job.Generation    randomID()（実行ごとに毎回変わる）
+
+  例:  hls/8f3a…d21/g2-3b9c7f1a4e0d8266b5a1c9f2e7d40b13/</div>
+    <p>ポイントは <code>runID</code>（<code>randomID()</code> が返す128ビットの乱数）を混ぜていること。同じ動画・同じ世代でも、<strong>変換を実行するたびに置き場が変わります</strong>。なぜここまでするのか —— 前ステップまでの世代の柵（DB 側の fencing）だけでは足りない穴が、ストレージ側にあるからです。</p>
+
+    <div class="box hazard"><div class="box-k">⚠ 落とし穴 — 世代だけで分けると、二重配送で同じ場所に並行書き込みしてしまう</div>
+      <p>「置き場を <code>hls/&lt;id&gt;/g&lt;世代&gt;/</code> にすればいいのでは?」と思うかもしれません。世代が違えば場所も違うので、ゾンビ（古い世代）とは衝突しない。ところが<strong>同じ世代の注文が二重に配送される</strong>ケースが残ります。Step 2 の落とし穴で見た通り、このキューは at-least-once。retry で積んだ注文が二重に箱に入っていたり、自動リトライのタイミングが噛み合ったりすると、<strong>同じ世代を持つ2人の職人</strong>が、<strong>同時に同じ動画を変換</strong>し始めることがある。もし置き場が世代までしか区別しなければ、この2人は <code>hls/&lt;id&gt;/g2/</code> という<strong>同じ場所へ並行して書き込みます</strong>。片方が <code>seg005.ts</code> を書いている途中に、もう片方が同じ <code>seg005.ts</code> を上書きしたら —— 半分だけ書き換わった壊れたセグメントが残り、視聴時に映像が乱れます。</p>
+      <p>そこで <code>runID</code>（実行ごとの乱数）を混ぜます。<strong>2人の職人は必ず別々の乱数を引く</strong>ので、書き込み先が <code>g2-3b9c…/</code> と <code>g2-a71f…/</code> に分かれ、<strong>絶対に衝突しません</strong>。各職人は「自分専用の作業結果置き場」に、誰にも邪魔されず全ファイルを書ける。これがこの一意プレフィックスの意味です。「じゃあ、どっちの職人の成果を配信するの?」—— その決着は次の Step 9 の ready 宣言が付けます。DB の柵（世代）とストレージの柵（一意プレフィックス）は<strong>別々の穴を塞ぐ、二段構えの fencing</strong>で、これも Codex のレビューで穴を指摘されて足された設計です。<code>randomID</code> が128ビット（32桁の16進）なのは、UUIDv4 と同等の広さで実用上ぶつからないため（コメントにある通り、32ビットでは誕生日衝突の保証が弱い）。</p>
+    </div>
+
+    <p>アップロードの下請け <code>uploadDir</code> と、乱数 <code>randomID</code> も見ておきます。</p>
+
+    <div class="file-tag">internal/transcode/transcode.go（uploadDir / randomID）</div>
+    <pre><code><span class="kw">func</span> uploadDir(ctx context.<span class="ty">Context</span>, st *storage.<span class="ty">Storage</span>, dir, prefix <span class="ty">string</span>) <span class="ty">error</span> {
+	<span class="kw">return</span> filepath.WalkDir(dir, <span class="kw">func</span>(path <span class="ty">string</span>, d os.<span class="ty">DirEntry</span>, err <span class="ty">error</span>) <span class="ty">error</span> {
+		<span class="kw">if</span> err != <span class="kw">nil</span> || d.IsDir() {
+			<span class="kw">return</span> err
+		}
+		rel, err := filepath.Rel(dir, path)
+		<span class="kw">if</span> err != <span class="kw">nil</span> {
+			<span class="kw">return</span> err
+		}
+		key := prefix + filepath.ToSlash(rel)
+		ct := <span class="st">"application/octet-stream"</span>
+		<span class="kw">switch</span> filepath.Ext(path) {
+		<span class="kw">case</span> <span class="st">".m3u8"</span>:
+			ct = <span class="st">"application/vnd.apple.mpegurl"</span>
+		<span class="kw">case</span> <span class="st">".ts"</span>:
+			ct = <span class="st">"video/mp2t"</span>
+		}
+		<span class="kw">return</span> st.UploadFile(ctx, key, path, ct)
+	})
+}
+
+<span class="cm">// randomID は保存先を実行ごとに一意にするための128ビット乱数（32桁の16進）を返す。</span>
+<span class="cm">// UUIDv4 と同等の空間で、実用上衝突しない（32ビットでは誕生日衝突の保証が弱い）。</span>
+<span class="kw">func</span> randomID() (<span class="ty">string</span>, <span class="ty">error</span>) {
+	<span class="kw">var</span> b [<span class="st">16</span>]<span class="ty">byte</span>
+	<span class="kw">if</span> _, err := rand.Read(b[:]); err != <span class="kw">nil</span> {
+		<span class="kw">return</span> <span class="st">""</span>, fmt.Errorf(<span class="st">"random id: %w"</span>, err)
+	}
+	<span class="kw">return</span> hex.EncodeToString(b[:]), <span class="kw">nil</span>
+}</code></pre>
+
+    <p><code>uploadDir</code> は作業場のディレクトリを <code>filepath.WalkDir</code> で丸ごと歩き、ファイルを1つずつ保管庫へ上げます。このとき<strong>拡張子から Content-Type を決める</strong>のが地味に重要です。<code>.m3u8</code> には <code>application/vnd.apple.mpegurl</code>、<code>.ts</code> には <code>video/mp2t</code>。これを正しく付けておかないと、第04章でブラウザがプレイリストやセグメントを「動画の一部」と認識できず、再生できません。<code>filepath.ToSlash</code> は、Windows のパス区切り（<code>\</code>）を URL 用の <code>/</code> に直す配慮です。<code>randomID</code> は <code>crypto/rand</code> で16バイト（128ビット）の乱数を作り、16進文字列にして返すだけ。<code>rand.Read</code> は暗号的に安全な乱数源なので、予測されにくく、衝突もしません。</p>
+
+    <h2 class="step" id="step-9"><span class="step-no">Step 9</span>「視聴可能」を確定する — ready 宣言と media_prefix</h2>
+    <p>成果物が「自分専用の一意な場所」に全部上がりました。最後に<strong>「この動画は視聴可能です。配信するのはこの場所の成果物です」</strong>を、DB に確定します。これが変換の締めであり、<strong>DB とストレージ両方の fencing が1つに合流する</strong>瞬間です。</p>
+
+    <div class="file-tag">internal/transcode/transcode.go（run の終盤 — ready 宣言）</div>
+    <pre><code>	<span class="cm">// 7. 状態を「視聴可能」に。記録の状態こそが唯一の真実（NFR-5, NFR-10）。</span>
+	<span class="cm">// ここも世代つき——完成の宣言すら、自分の注文がまだ有効なときにしか許されない。</span>
+	<span class="cm">// どの世代の成果物を配信するかも、この1文で同時に確定する（media_prefix）</span>
+	tag, err = d.DB.Exec(ctx,
+		<span class="st">`UPDATE videos SET status = 'ready', status_changed_at = now(), duration_sec = $2, error_message = '',
+		        media_prefix = $3,
+		        thumbnail_key = CASE WHEN thumbnail_key = '' THEN $4 ELSE thumbnail_key END,
+		        published_at = COALESCE(published_at, now())
+		 WHERE id = $1 AND job_generation = $5`</span>,
+		videoID, int(info.Duration), prefix, prefix+<span class="st">"thumbnail.jpg"</span>, job.Generation)
+	<span class="kw">if</span> err != <span class="kw">nil</span> {
+		<span class="kw">return</span> err
+	}
+	<span class="kw">if</span> tag.RowsAffected() == <span class="st">0</span> {
+		log.Printf(<span class="st">"transcode result discarded: video=%s gen=%d was superseded"</span>, videoID, job.Generation)
+		<span class="kw">return</span> <span class="kw">nil</span> <span class="cm">// 世代が進んでいた。成果は捨て、通知も出さない</span>
+	}
+
+	<span class="cm">// 8. 「視聴可能かつ公開」になっていれば登録者へ新着通知を配る（配りも裏でやる）。</span>
+	<span class="cm">// 変換中に投稿者が公開範囲を設定するため、公開になるのが先か後かは分からない。</span>
+	<span class="cm">// 判定は MaybeFanoutNewVideo 側に集約されている（PATCH時にも同じ関数が呼ばれる）</span>
+	<span class="kw">if</span> err := notify.MaybeFanoutNewVideo(ctx, d.DB, d.Q, videoID); err != <span class="kw">nil</span> {
+		log.Printf(<span class="st">"fanout: %v"</span>, err)
+	}
+	<span class="kw">return</span> <span class="kw">nil</span>
+}</code></pre>
+
+    <p>この <code>UPDATE</code> が、この章のすべてを1文に凝縮しています。5つのことを<strong>不可分に</strong>やっています。</p>
+    <ul>
+      <li><code>status = 'ready'</code> —— 視聴可能に。第04章の配信は、この状態の動画しか配りません。</li>
+      <li><code>media_prefix = $3</code> —— <strong>配信すべき成果物の在り処を、いま書いた一意プレフィックスに確定</strong>。ここが決定的です。何人の職人が別々の <code>g2-…/</code> に成果物を書こうと、<strong>この列に書かれた1つだけ</strong>が「正」になり、配信はそこからしか行われません。</li>
+      <li><code>duration_sec</code>・<code>thumbnail_key</code>・<code>published_at</code> —— 長さ、サムネイル（投稿者が自作サムネを設定済みなら上書きしない <code>CASE WHEN</code>）、公開日時（初回だけ <code>COALESCE</code> で now()）。</li>
+      <li><code>status_changed_at = now()</code> —— 状態が変わった時刻。Step 10 の停滞判定の基準になります。</li>
+      <li><code>WHERE id = $1 AND job_generation = $5</code> —— <strong>そしてまた、世代の柵</strong>。この ready 宣言すら、自分の注文の世代が現役のときにしか通りません。</li>
+    </ul>
+
+    <p>この1文が「どの実行が勝つか」を決めます。同じ世代の2人の職人が別々の場所に成果物を書き終え、両方が ready を宣言しに来たとします。しかし DB の <code>UPDATE</code> は<strong>直列に</strong>処理されるので、<strong>先に届いた方だけが <code>media_prefix</code> を書き込んで勝ち</strong>、後から来た方は…<strong>いや、後から来た方も <code>media_prefix</code> を書き換えてしまうのでは?</strong> と一瞬不安になります。ここが繊細な設計判断で、実際どちらの職人が勝っても<strong>成果物としては等価</strong>（同じ元動画を同じ設定で変換したもの）なので、どちらの一意プレフィックスが <code>media_prefix</code> に入っても、視聴者は完全な動画を見られます。負けた方の <code>g2-…/</code> はゴミとして残りますが、<strong>配信には決して混ざらない</strong>（<code>media_prefix</code> が指していないから）。そのゴミは動画削除時に <code>hls/&lt;id&gt;/</code> ごと掃除されます（第02章の <code>handleDeleteVideo</code> がやっていました）。</p>
+
+    <p><code>tag.RowsAffected() == 0</code> の分岐は、ここでも締め出しの網です。もし ready 宣言の直前に投稿者がやり直して世代が進んでいたら、この <code>UPDATE</code> は0行 —— せっかく変換した成果物を <strong><code>media_prefix</code> に載せずに捨て、通知も出さずに黙って終わります</strong>（<code>return nil</code>）。分単位かけた変換が無駄になるのは惜しいですが、「古い世代の成果を、新しい世代の世界に混ぜない」原則を最後まで貫きます。</p>
+
+    <p>最後の <code>notify.MaybeFanoutNewVideo</code> は、「視聴可能かつ公開」が初めて揃った瞬間に、登録者へ新着通知を1回だけ配る処理です。ready になったここから呼ばれますが、<strong>変換より先に投稿者が公開設定をしていた場合は PATCH（第02章の <code>handleUpdateVideo</code>）側から呼ばれる</strong>ため、「ready と public のどちらが先か」を気にせず済むよう、判定は <code>MaybeFanoutNewVideo</code> の中に一本化されています。詳しくは第07章で扱うので、ここでは「変換の締めに通知の起点が1つある」とだけ。</p>
+
+    <div class="gonote"><div class="box-k">実装メモ · なぜ「1文の UPDATE」に全部を詰め込むのか</div>
+      <p>「ready にする」「media_prefix を書く」「サムネを設定する」を別々の <code>UPDATE</code> に分けたら、その隙間でクラッシュしたとき、<strong>ready なのに media_prefix が空</strong>という壊れた状態が生まれえます。配信側は「ready なら配れる」と信じているので、空の在り処を配ろうとして404になる。1文にまとめれば、この5つは<strong>すべて成るか、すべて成らないか</strong>のどちらかしかありません（1文の UPDATE は原子的）。<strong>「ready という状態と、その状態が約束する中身は、常に一緒に確定させる」</strong> —— これが「DB の状態こそ唯一の真実」を、嘘のない真実として保つための実装上の作法です。<code>CASE WHEN thumbnail_key = ''</code> や <code>COALESCE(published_at, now())</code> のような「既にある値は上書きしない」小技も、再変換で投稿者の設定（自作サムネ・初回公開日時）を壊さないための配慮です。</p>
+    </div>
+
+    <h2 class="step" id="step-10"><span class="step-no">Step 10</span>停滞ジョブを救う — status_changed_at と retry</h2>
+    <p>ここまでで「正常に流れる変換」と「ゾンビ・二重配送への防御」を見ました。残る最後の穴は <strong>「職人が変換の途中で消えて、動画が <code>processing</code> のまま永遠に止まる」</strong>ケースです。Step 2 で触れた通り、このキューは at-least-once —— 取り出した瞬間に注文票は消えるので、処理中に職人が死ぬと注文は宙に浮きます。誰も再投入しません。動画は <code>processing</code> のまま、いつまでも待ち続ける。</p>
+    <p>これを救うのが、投稿者による<strong>手動のやり直し（retry）</strong>です。受付側の <code>videos.go</code> の <code>handleRetry</code> を読みます（この章の設計の集大成なので、ここで扱います）。</p>
+
+    <div class="file-tag">internal/httpapi/videos.go（handleRetry — 停滞ジョブの救済）</div>
+    <pre><code><span class="cm">// handleRetry: 変換をやり直す（NFR-4）。</span>
+<span class="cm">// 「失敗」のほか、職人が倒れて注文が消えた等で止まったままの動画も救い出せるようにする。</span>
+<span class="cm">// 許可の判定と状態遷移は1文の条件つきUPDATEで原子的に行う。読み取ってから判定する方式だと、</span>
+<span class="cm">// その隙に職人が完了させた場合に ready（視聴可能）を未完成へ引き戻してしまう。</span>
+<span class="cm">// やり直せるのは: failed はいつでも / uploaded は注文が届かなかった可能性があるので即時 /</span>
+<span class="cm">// processing は動いている職人と二重にならないよう10分以上停滞した場合のみ。</span>
+<span class="kw">func</span> (s *Server) handleRetry(w http.ResponseWriter, r *http.Request) {
+	v, _, ok := s.getOwnedVideo(w, r)
+	<span class="kw">if</span> !ok {
+		<span class="kw">return</span>
+	}
+	<span class="cm">// 世代（fencing token）も上げる。これで古い注文・生き返った古い職人は以後何も書けない</span>
+	<span class="kw">var</span> gen <span class="ty">int</span>
+	err := s.DB.QueryRow(r.Context(),
+		<span class="st">`UPDATE videos SET status = 'uploaded', status_changed_at = now(), attempts = 0, error_message = '',
+		        job_generation = job_generation + 1
+		 WHERE id = $1
+		   AND (status IN ('failed', 'uploaded')
+		        OR (status = 'processing' AND status_changed_at &lt; now() - interval '10 minutes'))
+		 RETURNING job_generation`</span>,
+		v.ID).Scan(&amp;gen)
+	<span class="kw">if</span> errors.Is(err, pgx.ErrNoRows) {
+		<span class="cm">// 遷移しなかった理由を、いまの状態を見て伝える</span>
+		cur, lerr := s.loadVideo(r.Context(), v.ID)
+		<span class="kw">if</span> lerr == <span class="kw">nil</span> &amp;&amp; cur.Status == <span class="st">"processing"</span> {
+			httpError(w, http.StatusConflict, <span class="st">"変換中です。10分以上進まない場合にやり直せます"</span>)
+			<span class="kw">return</span>
+		}
+		httpError(w, http.StatusConflict, <span class="st">"この状態の動画はやり直せません"</span>)
+		<span class="kw">return</span>
+	}
+	<span class="kw">if</span> err != <span class="kw">nil</span> {
+		httpError(w, http.StatusInternalServerError, <span class="st">"更新に失敗しました"</span>)
+		<span class="kw">return</span>
+	}
+	<span class="kw">if</span> err := s.Q.EnqueueTranscode(r.Context(), queue.<span class="ty">TranscodeJob</span>{VideoID: v.ID, Generation: gen}); err != <span class="kw">nil</span> {
+		httpError(w, http.StatusInternalServerError, <span class="st">"変換の依頼に失敗しました"</span>)
+		<span class="kw">return</span>
+	}
+	writeJSON(w, http.StatusOK, <span class="kw">map</span>[<span class="ty">string</span>]<span class="ty">string</span>{<span class="st">"status"</span>: <span class="st">"uploaded"</span>})</code></pre>
+
+    <p>この <code>UPDATE</code> の <code>WHERE</code> 句が、retry を許すかどうかの<strong>3つの条件</strong>です。ここに <code>status_changed_at</code> が効いてきます。</p>
+    <ul>
+      <li><code>status IN ('failed', 'uploaded')</code> —— <code>failed</code>（変換に3回失敗した）はいつでもやり直せる。<code>uploaded</code>（注文は積まれたはずだが、なぜか職人が処理を始めていない）も、注文が届かなかった可能性があるので即時やり直せる。</li>
+      <li><code>OR (status = 'processing' AND status_changed_at &lt; now() - interval '10 minutes')</code> —— <strong><code>processing</code> のまま10分以上、状態が動いていない</strong>ときだけやり直せる。ここが停滞ジョブの救済です。<code>status_changed_at</code>（最後に状態が変わった時刻）が10分より前なら、「職人が消えて止まっている」とみなして救い出す。</li>
+    </ul>
+    <p>なぜ <code>processing</code> だけ「10分」という猶予を置くのか。<strong>まだ元気に変換している職人を、二重に走らせないため</strong>です。もし <code>processing</code> を即座にやり直せてしまうと、正常に3分かけて変換中の動画を投稿者が「遅いな」と押しただけで、2人目の職人が走り出して二重変換になる（世代の柵で成果の混線は防げますが、CPU の無駄は防げません）。「10分も状態が動いていないなら、さすがに職人は死んでいるだろう」という実践的な線引きです。<code>status_changed_at</code> を状態更新のたびに <code>now()</code> で揃えて更新してきたのは、まさにこの「いつから止まっているか」を測るためでした。第00章で「status を更新する SQL では必ず <code>status_changed_at</code> も揃えて更新する」と刻んだ理由が、ここで回収されます。</p>
+
+    <div class="box hazard"><div class="box-k">⚠ 落とし穴 — 「読んでから判定して UPDATE」は ready を壊す</div>
+      <p>この retry も、<strong>1文の条件つき UPDATE で許可判定と状態遷移を同時にやる</strong>ことが本質です。もし「まず <code>SELECT</code> で状態を読み、Go で <code>if status == "failed" || 10分停滞...</code> と判定し、それから <code>UPDATE status='uploaded'</code>」と<strong>2段階</strong>に分けると、その隙間で悲劇が起きます —— 読んだ時点では <code>processing</code>（10分停滞）だったのに、Go が判定している一瞬のあいだに、実は生きていた職人が変換を完了させて <code>ready</code> にしてしまう。それに気づかず <code>UPDATE status='uploaded'</code> を投げると、<strong>視聴可能になったばかりの動画を、未完成（uploaded）へ引き戻して</strong>しまいます。これは実際に踏んだバグです（CLAUDE.md に記録あり）。1文の <code>UPDATE ... WHERE (許可条件)</code> なら、判定と書き込みが DB の中で不可分なので、この隙間が存在しません。<code>RETURNING job_generation</code> で「実際に遷移できたか（＝1行変わったか）」を <code>pgx.ErrNoRows</code> の有無で判定し、遷移できなかったときは今の状態を見て「変換中です／やり直せません」と投稿者に伝えています。</p>
+    </div>
+
+    <p>そして retry も、受付側で <code>job_generation = job_generation + 1</code> と<strong>世代を進めます</strong>。この一手で、Step 5〜9 で見た「古い注文・生き返った古い職人の締め出し」が発動します。停滞していた職人が万一息を吹き返しても、世代が進んでいるので DB に一切書けない。retry が積んだ新しい世代の注文だけが、この動画の正になります。<strong>停滞の救済（status_changed_at）</strong>と<strong>ゾンビの締め出し（job_generation）</strong>という、この章の2大テーマが、この <code>handleRetry</code> の1つの <code>UPDATE</code> で同時に成立しているのが見どころです。</p>
+
+    <div class="ascii">この章の防具まとめ — 3つの穴と、それを塞ぐもの
+
+  穴①「職人が途中で消えて processing のまま止まる」
+     → status_changed_at ＋ retry（10分停滞なら救済）           … Step 10
+
+  穴②「生き返った古い職人（ゾンビ）が新しい成果を壊す」
+     → job_generation（世代の柵）: 全 UPDATE に AND job_generation=$N  … Step 5・9
+
+  穴③「同一世代の二重配送で、同じ場所へ並行書き込みして壊れる」
+     → 実行ごとに一意な hls/&lt;id&gt;/g&lt;世代&gt;-&lt;乱数&gt;/ ＋ ready 宣言で
+        media_prefix に勝者を確定                                   … Step 8・9</div>
+
+    <h2 class="step" id="step-11"><span class="step-no">Step 11</span>立ち上げて、1本を変換する</h2>
+    <p>部品が出そろいました。実際に動画を1本上げて、変換が走り、成果物が生まれ、状態が <code>ready</code> になるのを見届けます。</p>
+
+    <div class="box do"><div class="box-k">▸ 動かして確認 — 職人が注文を待っているか</div>
+      <p>まずスタックを起動し、職人がループに入ってジョブを待っていることをログで確認します。</p>
+      <pre class="term"><code><span class="ps">$</span> cd src
+<span class="ps">$</span> docker compose up --build -d
+<span class="ps">$</span> docker compose logs worker | grep started
+<span class="out">src-worker-1  | 2026/07/16 12:00:03 worker started, waiting for jobs</span></code></pre>
+      <p>「waiting for jobs」が出ていれば、職人は <code>BRPop</code> で注文箱を覗きながら待機しています。</p>
+    </div>
+
+    <div class="box do"><div class="box-k">▸ 動かして確認 — 変換の一部始終をログで追う</div>
+      <p>Web（<code>http://localhost:3000</code>）から動画を1本アップロードし、職人のログを追いかけます。<code>Process</code> が出す3行（start → done）で、変換が世代つきで走ったことが見えます。</p>
+      <pre class="term"><code><span class="ps">$</span> docker compose logs -f worker
+<span class="out">src-worker-1  | 2026/07/16 12:03:10 transcode start: video=8f3a… attempt=0 gen=1
+src-worker-1  | 2026/07/16 12:03:41 transcode done: video=8f3a… gen=1</span></code></pre>
+      <p><code>gen=1</code> が、この動画の <code>complete</code> で振られた世代番号（第02章で <code>job_generation</code> を1にしたもの）です。start と done の間の約30秒が、ffmpeg が3画質に変換していた時間です。</p>
+    </div>
+
+    <div class="box do"><div class="box-k">▸ 動かして確認 — 成果物と media_prefix を突き合わせる</div>
+      <p>DB で <code>status</code> と <code>media_prefix</code> を見て、それが指す場所に本当に成果物があるか、MinIO で確認します。</p>
+      <pre class="term"><code><span class="ps">$</span> docker compose exec db psql -U video -d video \
+    -c <span class="st">"SELECT status, media_prefix FROM videos ORDER BY created_at DESC LIMIT 1;"</span>
+<span class="out"> status | media_prefix
+--------+-------------------------------------------------
+ ready  | hls/8f3a…/g1-3b9c7f1a4e0d8266b5a1c9f2e7d40b13/</span>
+
+<span class="cm"># media_prefix が指す場所を MinIO コンソール（http://localhost:9001）で開くと:</span>
+<span class="cm">#   hls/8f3a…/g1-3b9c…/master.m3u8      ← writeMaster が書いた総目次</span>
+<span class="cm">#   hls/8f3a…/g1-3b9c…/360p/playlist.m3u8, 360p/seg000.ts, seg001.ts, …</span>
+<span class="cm">#   hls/8f3a…/g1-3b9c…/720p/…  1080p/…（元が1080p以上なら）</span>
+<span class="cm">#   hls/8f3a…/g1-3b9c…/thumbnail.jpg</span></code></pre>
+      <p><code>status</code> が <code>ready</code> になり、<code>media_prefix</code> が実行ごとの一意な場所（<code>g1-乱数/</code>）を指し、その場所に <code>master.m3u8</code> と各画質のセグメントが並んでいれば、この章のすべてが噛み合っています。この <code>master.m3u8</code> を第04章で hls.js が読み、視聴が始まります。</p>
+    </div>
+
+    <div class="box do"><div class="box-k">▸ 動かして確認 — 世代が上がるのを見る（retry）</div>
+      <p>Studio で同じ動画の「やり直し」を押す（または <code>failed</code> の動画で試す）と、世代が上がって新しい注文が走ります。</p>
+      <pre class="term"><code><span class="ps">$</span> docker compose logs -f worker
+<span class="out">src-worker-1  | 2026/07/16 12:10:22 transcode start: video=8f3a… attempt=0 gen=2</span>
+
+<span class="ps">$</span> docker compose exec db psql -U video -d video \
+    -c <span class="st">"SELECT job_generation, media_prefix FROM videos WHERE id='8f3a…';"</span>
+<span class="out"> job_generation | media_prefix
+----------------+-------------------------------------------------
+              2 | hls/8f3a…/g2-a71f…/</span></code></pre>
+      <p><code>gen=2</code> の注文が走り、<code>media_prefix</code> が新しい <code>g2-…/</code> に更新されました。もし <code>gen=1</code> の古い職人が生き返っても、世代が2に進んでいるので DB には何も書けません。これが fencing token の働きです。</p>
+    </div>
+
+    <h2>つまずき FAQ</h2>
+    <details class="qa"><summary>ゾンビ職人が「息を吹き返す」とは、具体的にどういう状況で起きるの?</summary>
+      <div class="qa-body"><p>「死んだと思われた職人が、実は死んでおらず後から書き込みに来る」状況です。典型例は3つ。(1) <strong>長時間の停止</strong>: 職人プロセスが GC や OS のスワップで数分固まり、その間に停滞リトライ（10分ルール）が発動して世代が進む。固まりが解けた職人は、自分がもう用済みだと知らずに ready や failed を書きに来る。(2) <strong>ネットワークの分断と復旧</strong>: 職人と DB の間の接続が切れて処理が止まり、投稿者が retry。接続が復旧すると、古い職人が遅れて書き込みに来る。(3) <strong>キューの二重配送</strong>: retry で積んだ注文と、消えたはずの古い注文が両方処理される。いずれも「時間の順序」だけでは新旧を区別できません。だから<strong>単調増加する世代番号（fencing token）で「あなたはもう古い」と機械的に締め出す</strong>——これが分散システムで、時刻に頼らず新旧を確定させる定石です。</p></div>
+    </details>
+    <details class="qa"><summary>DB の世代の柵があるのに、なぜストレージの一意プレフィックスも要るの? どちらか一方では足りない?</summary>
+      <div class="qa-body"><p>塞ぐ穴が違うので、両方要ります。<strong>DB の柵（<code>AND job_generation = $N</code>）</strong>が守るのは「DB の <code>videos</code> 行への書き込み」だけ。<code>status</code> や <code>media_prefix</code> は、古い世代からは書き換えられません。しかし<strong>ストレージ（MinIO）への書き込みは、DB の柵の外</strong>です。職人は ffmpeg の成果物を保管庫に <code>PutObject</code> しますが、この操作に <code>job_generation</code> の条件は付けられない（オブジェクトストレージにそんな機能はない）。だから、同一世代の2人の職人が同じ場所へ並行して書き込むと、DB は無傷でもストレージ上のファイルが半端に混ざって壊れます。これを防ぐのが<strong>実行ごとに一意なプレフィックス</strong>——各職人が別々の場所に書くので、そもそも衝突しない。そして「どの場所を配信するか」の決着だけを、DB の柵つき ready 宣言（<code>media_prefix</code>）に委ねる。<strong>DB の柵＝行の整合性を守る／ストレージの一意化＝ファイルの衝突を防ぐ</strong>、という役割分担です。</p></div>
+    </details>
+    <details class="qa"><summary><code>-hls_time 4</code> の「4秒」はどう決めるの? 短くしたり長くしたりすると何が変わる?</summary>
+      <div class="qa-body"><p>セグメント長は「短さの利点」と「短さの欠点」のトレードオフで、2〜6秒あたりが定番、この実装は4秒です。<strong>短くする（例2秒）と</strong>: 画質切り替え（第04章の適応配信）の反応が速くなる（回線が変わったとき、次のセグメントからすぐ別画質に移れる）／生放送なら遅延が減る。ただし<strong>セグメント数＝ファイル数＝リクエスト数が増える</strong>ので、サーバやCDNへの負荷、プレイリストの肥大が増します。<strong>長くする（例10秒）と</strong>: ファイル数が減って管理が楽になる一方、画質切り替えが鈍くなり、シークの粒度も粗くなる。4秒は「反応の良さとファイル数のバランスが取れた」実用的な既定値で、YouTube などの大手も概ねこの前後の値を使っています。<code>-hls_playlist_type vod</code> を付けているのは、これが生放送ではなく完結した動画（Video On Demand）だと宣言し、プレイヤーが全長を把握してシークできるようにするためです。</p></div>
+    </details>
+
+    <h2>理解度チェック</h2>
+    <p>次の問いに<strong>自分の言葉で</strong>答えられたら、この章は卒業です。</p>
+    <details class="qa"><summary>1. なぜ変換を「非同期」にするのか。受付（API）が同期で ffmpeg を呼ぶと何が起きるか。注文箱と職人はそれをどう解決するか。</summary>
+      <div class="qa-body"><p>変換は ffmpeg で<strong>分単位</strong>かかるから。もし受付が1つの HTTP リクエストの中で同期に変換すると、その数分間、受付はそのリクエストに縛られ、投稿者は画面が固まったまま待たされる（他の依頼も捌けない）。解決策は、受付は「<code>status=uploaded</code> にして注文票を Redis の注文箱（<code>jobs:transcode</code>）に <code>LPush</code> するだけ」で即座に応答を返し、別プロセスの職人（Worker）が <code>BRPop</code> で注文を取り出して裏で ffmpeg を回す、という<strong>非同期化</strong>。受付は身軽なまま依頼を受け続けられ、変換に時間がかかっても影響を受けない。職人は <code>--scale worker=2</code> で増やせる。</p></div>
+    </details>
+    <details class="qa"><summary>2. <code>job_generation</code>（fencing token）は何を防ぐのか。<code>status</code> の条件だけでは、なぜ「生き返った古い職人」を止められないのか。</summary>
+      <div class="qa-body"><p>停滞リトライ後に生き返った<strong>古い職人（ゾンビ）</strong>が、新しい世代の成果を上書きするのを防ぐ。<code>status</code> の条件だけ（例: <code>processing → failed</code>）では、「①古い職人が固まる→②retry で世代が進み新しい職人が <code>ready</code> にする→③古い職人が息を吹き返して <code>failed</code> を書く」というとき、③の職人も条件上は <code>processing</code> を見て（あるいは自分の記憶で）書き込めてしまい、見られていた動画を壊す。<code>status</code> だけでは<strong>新旧の職人を区別できない</strong>のが根本問題。そこで、注文を出すたびに単調増加する世代番号を <code>videos</code> に持ち、職人の<strong>全 UPDATE に <code>AND job_generation = $N</code></strong> を付ける。古い世代を持つゾンビは、どの書き込みも0行になり、DB に一切触れられない。時刻ではなく単調増加する番号で新旧を確定させる、分散システムの定石。</p></div>
+    </details>
+    <details class="qa"><summary>3. 成果物を <code>hls/&lt;id&gt;/g&lt;世代&gt;-&lt;乱数&gt;/</code> という実行ごとに一意な場所へ書き、配信先を <code>media_prefix</code> に確定するのはなぜか。世代だけの分離では何が足りないか。</summary>
+      <div class="qa-body"><p>at-least-once なキューでは<strong>同一世代の注文が二重配送</strong>されうる。もし置き場を <code>hls/&lt;id&gt;/g&lt;世代&gt;/</code>（世代まで）にすると、同じ世代の2人の職人が<strong>同じ場所へ並行書き込み</strong>し、片方が書いている途中のファイルをもう片方が上書きして壊れる（DB の柵はストレージの書き込みには効かない）。そこで乱数 <code>runID</code> を混ぜ、各職人が<strong>絶対に衝突しない別々の場所</strong>に全ファイルを書く。「どの実行の成果物を配信するか」は、<strong>ready 宣言（<code>AND job_generation=$N</code> の柵つき）と同じ1文で <code>media_prefix</code> に確定</strong>し、配信（第04章）は必ずこの列が指す1つの場所からのみ行う。負けた実行の成果物はゴミとして残るが配信には混ざらず、動画削除時に <code>hls/&lt;id&gt;/</code> ごと掃除される。<strong>DB の柵（行の整合性）とストレージの一意化（ファイルの衝突回避）の二段構え</strong>。</p></div>
+    </details>
+
+    <h2>まとめ — 次の層へ</h2>
+    <p>この章で、動画は初めて「見られる形」になりました。受付は注文票を Redis に積むだけで即応答し、別プロセスの職人が ffmpeg で <strong>360p / 720p / 1080p の3画質・4秒セグメントの HLS</strong> に変換する。総目次だけは Go の <code>writeMaster</code> が確実に書き、成果物は<strong>実行ごとに一意な場所</strong>へ。そして「視聴可能」の宣言は、<code>job_generation</code> の柵つき1文で <code>status=ready</code> と <code>media_prefix</code> を<strong>同時に</strong>確定する。ゾンビ職人・二重配送・停滞ジョブという3つの穴を、世代番号・一意プレフィックス・<code>status_changed_at</code> の3つの防具で塞ぎました。この防御の設計こそ、単なる「ffmpeg を呼ぶだけ」を、壊れない動画サービスに変えている核心です。</p>
+    <p>次の第04章では、いよいよ変換の成果を<strong>視聴者に届けます</strong>。<code>media.go</code> が「<code>ready</code> かつ視聴権限あり」を確かめてから <code>media_prefix</code> の成果物を配り、フロントの hls.js が総目次（<code>master.m3u8</code>）を読んで、<strong>回線に応じて画質を自動で切り替える適応配信</strong>を実現します。この章で作った梯子（3画質）を、視聴者が回線に合わせて上り下りする —— その仕組みを見にいきましょう。</p>
+
+    <div class="chap-foot">
+      <a class="pager" href="02-upload.html"><span class="dir">← 前へ</span>第02章 · 動画を受け取る</a>
+      <a class="pager next" href="04-deliver.html"><span class="dir">次へ →</span>第04章 · 動画を届ける</a>
+    </div>
+  </main>
+</div>
+</body>
+</html>

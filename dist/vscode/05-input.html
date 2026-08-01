@@ -1,0 +1,598 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>第05章 入力を受ける — ゼロから作るテキストエディタ</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500;600&family=Source+Serif+4:opsz,wght@8..60,400;8..60,600;8..60,700&family=Noto+Serif+JP:wght@400;600;700&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<div class="shell">
+
+  <aside class="spine">
+    <a class="wordmark" href="index.html">MINT EDITOR · from scratch</a>
+    <div class="book-title">ゼロから作る<br>テキストエディタ</div>
+    <div class="book-sub">TypeScript と Canvas で mint editor を組む</div>
+
+    <div class="legend"><span>読む <b>↓</b></span><span>組む <b>↑</b></span></div>
+
+    <nav aria-label="目次">
+      <ul class="toc">
+        <li><a class="nav-item" href="index.html"><span class="nav-num">序</span><span class="nav-label">はじめに・準備<span class="nav-tag">Setup</span></span></a></li>
+        <li><a class="nav-item" href="00-overview.html"><span class="nav-num">00</span><span class="nav-label">文字を打てる箱の正体<span class="nav-tag">Overview</span></span></a></li>
+        <li><a class="nav-item" href="01-buffer.html"><span class="nav-num">01</span><span class="nav-label">テキストを持つ<span class="nav-tag">Buffer</span></span></a></li>
+        <li><a class="nav-item" href="02-document.html"><span class="nav-num">02</span><span class="nav-label">行とカーソル<span class="nav-tag">Doc</span></span></a></li>
+        <li><a class="nav-item" href="03-history.html"><span class="nav-num">03</span><span class="nav-label">編集と取り消し<span class="nav-tag">Undo</span></span></a></li>
+        <li><a class="nav-item" href="04-view.html"><span class="nav-num">04</span><span class="nav-label">画面に描く<span class="nav-tag">Canvas</span></span></a></li>
+        <li><a class="nav-item current" aria-current="page" href="05-input.html"><span class="nav-num">05</span><span class="nav-label">入力を受ける<span class="nav-tag">Input</span></span></a></li>
+        <li><a class="nav-item" href="06-search.html"><span class="nav-num">06</span><span class="nav-label">複数カーソルと検索<span class="nav-tag">Multi</span></span></a></li>
+        <li><a class="nav-item" href="07-highlight.html"><span class="nav-num">07</span><span class="nav-label">色をつける<span class="nav-tag">Syntax</span></span></a></li>
+        <li><a class="nav-item" href="08-ime.html"><span class="nav-num">08</span><span class="nav-label">日本語を打つ<span class="nav-tag">IME</span></span></a></li>
+        <li><a class="nav-item" href="09-assemble.html"><span class="nav-num">09</span><span class="nav-label">開いて保存する・組み立て<span class="nav-tag">Assemble</span></span></a></li>
+      </ul>
+    </nav>
+
+    <div class="spine-foot">
+      各章は一つの部品・機能。<br>下（バッファ）から上（UI）へ<br>積み上げて動かしていく。
+    </div>
+  </aside>
+
+  <main class="reading">
+    <div class="progress-tag">第05章 / 全10章 · 層: INPUT · 読了目安 2〜3時間</div>
+    <div class="eyebrow"><span>INPUT</span><span class="depth">— キー・マウスを編集コマンドへ翻訳する</span></div>
+    <h1>入力を受ける</h1>
+    <p class="lede">第04章で、テキストは画面に「映る」ようになりました。でもまだ、こちらから触れません。キーを叩いても文字は生えず、クリックしてもカーソルは動かない。この章で作る <code>InputHandler</code> が、その最後の一手 —— <strong>キーボードとマウスの生のイベントを、第02〜03章で作った編集コマンドへ翻訳する層</strong>です。<code>ArrowLeft</code> は <code>move("char", -1)</code> に、<code>Backspace</code> は <code>backspace()</code> に、クリックは <code>offsetAtClient()</code> を通ってカーソル位置に。翻訳表を1枚引くだけ —— そう思って読み始めてください。ただし日本語入力（IME）だけは事情が特殊なので、この章では扱わず第08章にまるごと譲ります。</p>
+
+    <div class="box goal"><div class="box-k">◈ この章のゴール</div>
+      <p>次の 3 つを、自分の目と手で確認できたら達成です。</p>
+      <ol>
+        <li><code>editor/input.ts</code> の <code>onKeyDown</code> を読み、「なぜ Canvas ではなく<strong>透明な textarea</strong> に入力を受けさせるのか」「なぜ文字入力を <code>keydown</code> ではなく <code>input</code> イベントで拾うのか」を自分の言葉で言える。</li>
+        <li>キー・修飾キー・マウスボタンの組み合わせが、それぞれ <code>Editor</code> のどのコマンドに落ちるかの<strong>翻訳表</strong>を頭に描ける。</li>
+        <li><code>cd src &amp;&amp; npm run dev</code> でブラウザを開き、矢印・Shift＋矢印・Backspace・Ctrl+Z・Alt+クリック・ダブルクリックが期待どおり動くのを触って確かめる。</li>
+      </ol>
+    </div>
+
+    <div class="box map"><div class="box-k">☰ この章のステップ</div>
+      <ol>
+        <li><a href="#step-1">なぜ「透明な textarea」に入力を受けさせるのか（<code>editor/input.ts</code>）</a></li>
+        <li><a href="#step-2">コンストラクタ — イベントを配線する</a></li>
+        <li><a href="#step-3">onKeyDown の入口 — IME に譲り、修飾キーを見る</a></li>
+        <li><a href="#step-4">Ctrl 系ショートカットのディスパッチ</a></li>
+        <li><a href="#step-5">単キーの翻訳 — 移動・改行・削除</a></li>
+        <li><a href="#step-6">通常の文字入力を吸い上げる（IME は第08章）</a></li>
+        <li><a href="#step-7">マウス — クリックをカーソルへ</a></li>
+        <li><a href="#step-8">ドラッグ選択とクリップボード</a></li>
+      </ol>
+    </div>
+
+    <h2>入力層は「翻訳者」である</h2>
+    <p>ここまで作ってきた部品を思い出してください。第02章の <code>Document</code> は「オフセットと (行, 桁) の変換」と「編集の適用」を、第03章の <code>History</code> は「取り消し」を、そして <code>Editor</code>（司令塔・<code>editor/editor.ts</code>）は <code>move()</code> / <code>backspace()</code> / <code>insertText()</code> / <code>undo()</code> といった<strong>意味のある編集コマンド</strong>を提供します。これらは全部 DOM を知りません。「文字数」や「選択範囲」といった純粋な言葉だけで動きます。</p>
+    <div class="box map"><div class="box-k">☰ この章での <code>Editor</code> の扱い方</div>
+      <p><code>Editor</code> の<strong>中身</strong>——「単語の境界はどこか」「行頭インデントをどう継承するか」——は、この章ではまだ読みません。<code>editor/editor.ts</code> の全文は<strong>第09章</strong>で腰を据えて読みます。この章で扱うのは<strong>呼ぶ側</strong>だけ、つまり「<code>ArrowLeft</code> というキー名を <code>ed.move("char", -1, false)</code> という呼び出しに翻訳する」ところまでです。</p>
+      <p>「中身を知らないまま呼んでいいのか?」と思うかもしれませんが、<strong>それこそがこの章の主題</strong>です。入力層が編集の中身を知らずに済むのは、<code>Editor</code> が意味のあるコマンドとして境界を切ってくれているから。第00章の <code>TextBuffer</code> でやったのと同じ「境界を先に決める」が、ここでも効いています。</p>
+    </div>
+    <p>一方、ブラウザがくれるのは生のイベントです。<code>KeyboardEvent</code> には <code>key</code>（押されたキー名）と <code>ctrlKey</code> / <code>shiftKey</code>（修飾キーの状態）が、<code>MouseEvent</code> には <code>clientX</code> / <code>clientY</code>（ピクセル座標）と <code>detail</code>（連続クリック回数）が入っています。これらは「どのキーが押されたか」は教えてくれても、「だから何をすべきか」は教えてくれません。</p>
+    <p><code>InputHandler</code> の仕事は、この2つの世界のあいだに立つ<strong>翻訳</strong>です。<code>ArrowLeft</code> というキー名を <code>editor.move("char", -1, false)</code> という編集コマンドに、<code>(clientX, clientY)</code> というピクセル座標を <code>view.offsetAtClient()</code> 経由で<strong>文書オフセット</strong>に変換し、それを <code>editor.setSelections()</code> に渡す。翻訳が済めば、あとは <code>Editor</code> が純粋ロジックの世界で正しく処理し、<code>view</code> が描き直す。<strong>入力層自身は「編集の中身」を一切知らなくていい</strong> —— これがこの層を薄く、読みやすく保つ鍵です。</p>
+
+    <div class="ascii">入力の流れ — 生イベントを編集コマンドへ翻訳する
+
+  ブラウザ            InputHandler(この章)        Editor(司令塔)      View(第04章)
+  ┌────────┐        ┌──────────────┐        ┌──────────┐      ┌────────┐
+  │ keydown  │ ─────▶ │ key を見て       │ ─────▶ │ move()     │ ───▶ │ 描き   │
+  │ mousedown│        │ 対応コマンドへ翻訳 │        │ backspace()│      │ 直す   │
+  │ input    │        │ 座標→offset 変換 │        │ insertText()│      │(Canvas)│
+  └────────┘        └──────────────┘        └──────────┘      └────────┘
+                            │ IME(composition)は                    ▲
+                            └─ 第08章へまるごと譲る ─────────────────┘</div>
+
+    <p>この章で読む <code>input.ts</code> は、実は IME の処理も含んでいます。ですがそこは日本語入力という独立した大きなテーマなので、<strong>第08章でまるごと扱います</strong>。本章では IME 以外 —— キーバインド、通常の文字入力、マウス、クリップボード —— に集中します。IME 関連のメソッド本体が出てくる箇所は <code>// …（IME は第08章）</code> と明示して省略します。黙って消すことはしません。</p>
+
+    <h2 class="step" id="step-1"><span class="step-no">Step 1</span>なぜ「透明な textarea」に入力を受けさせるのか</h2>
+    <p>いちばん最初に、設計の急所を1つ潰しておきます。素朴に考えると、入力は <code>&lt;canvas&gt;</code> 自身の <code>keydown</code> で受ければよさそうです。ところが、これがうまくいきません。<strong>Canvas はテキスト入力を受け取れない</strong>のです。より正確に言うと、Canvas には「いま文字を入れている場所」という概念がなく、キーボードの生の <code>keydown</code> は拾えても、<strong>IME（日本語変換）やデッドキー（アクセント記号など）を経由した「確定した文字」を受け取る正規の口がありません</strong>。</p>
+    <p>そこで、実在のエディタ（VSCode/Monaco を含む）が使う定番の技があります。<strong>画面外にも見えないほど小さな <code>&lt;textarea&gt;</code> を1枚重ねておき、常にそこへフォーカスを当てておく</strong>。ユーザーはキャンバスを見て打っているつもりでも、実際にキーストロークを受けているのはこの透明な textarea です。文字が textarea に落ちたら、それを横取り（intercept）して <code>editor.insertText()</code> に流す。カーソル移動や削除などの<strong>コマンド</strong>系のキーは <code>keydown</code> の段階で捕まえて <code>preventDefault()</code> し、textarea には落とさない。この二段構えで、通常入力・IME・ショートカットのすべてを1枚の textarea で捌きます。</p>
+    <p>まずファイルの先頭。インポートと、クラスの設計コメント、そしてフィールドです。作るファイルは <code>editor/input.ts</code>。</p>
+
+    <div class="file-tag">editor/input.ts</div>
+    <pre><code><span class="kw">import type</span> { <span class="ty">Editor</span> } <span class="kw">from</span> <span class="st">"./editor"</span>;
+<span class="kw">import type</span> { <span class="ty">EditorView</span> } <span class="kw">from</span> <span class="st">"./view"</span>;
+
+<span class="cm">/**
+ * InputHandler — キーボード・IME・マウスを editor のコマンドへつなぐ。
+ *
+ * Canvas は入力を受け取れないので、画面上のカーソル位置に追従する
+ * 「透明な textarea」に常にフォーカスを当てておき、そこへの入力を横取りする。
+ *
+ * 日本語入力（IME）の要点:
+ * - 変換中の文字列はまだ文書に入れない。composition イベントで受け取り、
+ *   view が「見た目だけ」カーソル位置に描く。
+ * - compositionend で初めて、確定文字列を1つの編集として挿入する。
+ * - 変換中はすべてのキーコマンドを IME に譲る（keydown を無視する）。
+ */</span>
+<span class="kw">export class</span> <span class="ty">InputHandler</span> {
+  <span class="kw">private</span> editor: <span class="ty">Editor</span>;
+  <span class="kw">private</span> view: <span class="ty">EditorView</span>;
+  <span class="kw">private</span> textarea: <span class="ty">HTMLTextAreaElement</span>;
+  <span class="cm">/** ドラッグ選択中の anchor。null なら非ドラッグ */</span>
+  <span class="kw">private</span> dragAnchor: <span class="ty">number</span> | <span class="kw">null</span> = <span class="kw">null</span>;
+  <span class="cm">/** 変換開始時に選択範囲を削除したか（確定挿入を同じ Undo グループにするため） */</span>
+  <span class="kw">private</span> compositionReplacedSelection = <span class="kw">false</span>;
+
+  <span class="cm">/** Ctrl+O / Ctrl+S を main に委ねるためのフック */</span>
+  onRequestOpen: (() => <span class="ty">void</span>) | <span class="kw">null</span> = <span class="kw">null</span>;
+  onRequestSave: (() => <span class="ty">void</span>) | <span class="kw">null</span> = <span class="kw">null</span>;
+  onRequestFind: ((withReplace: <span class="ty">boolean</span>) => <span class="ty">void</span>) | <span class="kw">null</span> = <span class="kw">null</span>;
+  onEscape: (() => <span class="ty">boolean</span>) | <span class="kw">null</span> = <span class="kw">null</span>;</code></pre>
+
+    <p>クラスは3つの相棒を受け取ります。<code>editor</code>（司令塔・第03章〜）、<code>view</code>（描画・第04章）、そして主役の <code>textarea</code>。この3つを橋渡しするのが <code>InputHandler</code> の全仕事です。</p>
+    <p>フィールドは2つだけ。<code>dragAnchor</code> は「マウスドラッグで選択している最中の錨（固定側）」を覚えておく場所です。<code>number | null</code> という型で、<code>null</code> なら「いまドラッグしていない」を表します（Step 7・8 で使います）。もう1つの <code>compositionReplacedSelection</code> は IME 用の旗なので、この章では触れません（第08章）。</p>
+    <p>続く4つの <code>onRequestOpen</code> / <code>onRequestSave</code> / <code>onRequestFind</code> / <code>onEscape</code> は、<strong>フック（差し込み口）</strong>です。型に注目してください。<code>(() =&gt; void) | null</code> —— 「引数なしで <code>void</code> を返す関数、または <code>null</code>」。初期値は <code>null</code>。これは「Ctrl+S を押されたとき、<strong>何をするかはこの層では決めない</strong>」という設計です。ファイルを保存する具体的な処理は上位（第09章の <code>main.ts</code>）が知っていること。だから <code>InputHandler</code> は「保存が要求された」という<strong>出来事</strong>だけをフック経由で外へ通知し、中身は外が後で差し込む。入力層を「翻訳」だけに徹させ、アプリ固有の振る舞いから切り離すための工夫です。</p>
+
+    <div class="gonote"><div class="box-k">TS メモ · import type と、関数型プロパティ</div>
+      <p><code>import type { Editor } from "./editor"</code> の <code>import <strong>type</strong></code> は、「<strong>型としてだけ使う</strong>」インポートです。<code>Editor</code> クラスの実体（コンストラクタ）は使わず、型注釈にしか使わないと明示すると、コンパイル後の JavaScript からこのインポート行が<strong>まるごと消えます</strong>。実行時の依存を増やさず、循環参照も避けられるので、型だけ欲しいときの定石です。<br>
+      <code>onRequestSave: (() =&gt; void) | null</code> のように、プロパティに<strong>関数型</strong>を持たせられるのが TypeScript の強みです。<code>() =&gt; void</code> は「引数なし・戻り値なしの関数」という型。<code>| null</code> とのユニオンで「関数か、まだ未設定（null）か」を表します。呼ぶ側は <code>this.onRequestSave?.()</code> のように<strong>オプショナルチェーン</strong>（<code>?.</code>）で「入っていれば呼ぶ、null なら何もしない」と書けます（Step 4 で登場）。</p>
+    </div>
+
+    <h2 class="step" id="step-2"><span class="step-no">Step 2</span>コンストラクタ — イベントを配線する</h2>
+    <p>コンストラクタの仕事は、受け取った3つの相棒を保存し、textarea・canvas・window の各イベントに<strong>ハンドラを配線</strong>することです。ここは「どのイベントを、どのメソッドにつなぐか」の一覧表だと思って読んでください。中身の処理は後続のステップで1つずつ開けます。</p>
+
+    <div class="file-tag">editor/input.ts（つづき）</div>
+    <pre><code>  <span class="kw">constructor</span>(editor: <span class="ty">Editor</span>, view: <span class="ty">EditorView</span>, textarea: <span class="ty">HTMLTextAreaElement</span>) {
+    <span class="kw">this</span>.editor = editor;
+    <span class="kw">this</span>.view = view;
+    <span class="kw">this</span>.textarea = textarea;
+
+    <span class="cm">// カーソルに textarea を追従させる（IME 候補窓がカーソル近くに出る）</span>
+    view.onCursorViewportPos = (x, y) => {
+      <span class="kw">const</span> maxX = view.scroller.clientWidth - <span class="st">20</span>;
+      <span class="kw">const</span> maxY = view.scroller.clientHeight - <span class="st">20</span>;
+      textarea.style.left = <span class="st">`${</span><span class="ty">Math</span>.max(<span class="st">0</span>, <span class="ty">Math</span>.min(x, maxX))<span class="st">}px`</span>;
+      textarea.style.top = <span class="st">`${</span><span class="ty">Math</span>.max(<span class="st">0</span>, <span class="ty">Math</span>.min(y, maxY))<span class="st">}px`</span>;
+    };
+
+    textarea.addEventListener(<span class="st">"keydown"</span>, (e) => <span class="kw">this</span>.onKeyDown(e));
+    textarea.addEventListener(<span class="st">"input"</span>, () => <span class="kw">this</span>.onInput());
+    textarea.addEventListener(<span class="st">"compositionstart"</span>, () => <span class="kw">this</span>.onCompositionStart());
+    textarea.addEventListener(<span class="st">"compositionupdate"</span>, (e) => <span class="kw">this</span>.onCompositionUpdate(e));
+    textarea.addEventListener(<span class="st">"compositionend"</span>, (e) => <span class="kw">this</span>.onCompositionEnd(e));
+
+    textarea.addEventListener(<span class="st">"copy"</span>, (e) => <span class="kw">this</span>.onCopy(e, <span class="kw">false</span>));
+    textarea.addEventListener(<span class="st">"cut"</span>, (e) => <span class="kw">this</span>.onCopy(e, <span class="kw">true</span>));
+    textarea.addEventListener(<span class="st">"paste"</span>, (e) => <span class="kw">this</span>.onPaste(e));
+
+    textarea.addEventListener(<span class="st">"focus"</span>, () => {
+      view.focused = <span class="kw">true</span>;
+      view.restartBlink();
+      view.scheduleRender();
+    });
+    textarea.addEventListener(<span class="st">"blur"</span>, () => {
+      view.focused = <span class="kw">false</span>;
+      view.scheduleRender();
+    });
+
+    <span class="kw">const</span> canvas = view.canvas;
+    canvas.addEventListener(<span class="st">"mousedown"</span>, (e) => <span class="kw">this</span>.onMouseDown(e));
+    <span class="kw">window</span>.addEventListener(<span class="st">"mousemove"</span>, (e) => <span class="kw">this</span>.onMouseMove(e));
+    <span class="kw">window</span>.addEventListener(<span class="st">"mouseup"</span>, () => (<span class="kw">this</span>.dragAnchor = <span class="kw">null</span>));
+  }
+
+  focus(): <span class="ty">void</span> {
+    <span class="kw">this</span>.textarea.focus({ preventScroll: <span class="kw">true</span> });
+  }</code></pre>
+
+    <p>上から順に見ます。まず <code>view.onCursorViewportPos</code> —— これは第04章の <code>view</code> が「カーソルが画面上のここ（<code>x, y</code>）に来た」と教えてくれるコールバックです。ここで textarea を<strong>そのカーソル位置へ動かして</strong>います。透明な textarea なので目には見えませんが、IME の変換候補ウィンドウは「フォーカスされている textarea の位置」に出るので、これで<strong>候補窓がカーソルの真下に出る</strong>ようになります（この恩恵が効くのは第08章）。<code>Math.max(0, Math.min(x, maxX))</code> は「画面からはみ出さないよう 0〜maxX に丸める」クランプです。</p>
+    <p>続く <code>addEventListener</code> の束が配線本体です。textarea には <strong>7種類</strong>のイベントをつなぎます。</p>
+    <ul>
+      <li><code>"keydown"</code> → <code>onKeyDown</code> —— キーが押された瞬間。移動・削除・ショートカット（Step 3〜5）。</li>
+      <li><code>"input"</code> → <code>onInput</code> —— textarea の値が変わった瞬間。通常の文字入力を吸い上げる（Step 6）。</li>
+      <li><code>"compositionstart/update/end"</code> → IME の変換の開始・更新・確定（<strong>第08章</strong>）。</li>
+      <li><code>"copy" / "cut" / "paste"</code> → <code>onCopy</code> / <code>onPaste</code> —— クリップボード（Step 8）。<code>copy</code> と <code>cut</code> は同じ <code>onCopy</code> に第2引数の真偽（切り取りか否か）だけ変えて渡しているのが小技です。</li>
+      <li><code>"focus" / "blur"</code> —— textarea がフォーカスを得た/失った瞬間。<code>view.focused</code> を切り替え、カーソルの点滅（blink）を仕切り直します。エディタが「アクティブか」の見た目はこれで決まります。</li>
+    </ul>
+    <p>最後の3行がマウスです。ここで<strong>配線先が2種類ある</strong>ことに注目してください。<code>mousedown</code> は <code>canvas</code> に、<code>mousemove</code> と <code>mouseup</code> は <code>window</code> につないでいます。押し始めはキャンバスの上で起きますが、ドラッグ中にマウスがキャンバスの<strong>外へ出ても</strong>選択を伸ばし続けたい。だから移動と離しは、キャンバスに限定せず window 全体で拾うのです（Step 7 で効いてきます）。<code>mouseup</code> のハンドラは <code>this.dragAnchor = null</code> だけ —— 「ボタンが離れたらドラッグ終了」を1行で表しています。</p>
+    <p><code>focus()</code> メソッドは、外（や自分のマウス処理）から「textarea にフォーカスを戻せ」と頼むための小さな入口です。<code>preventScroll: true</code> は「フォーカスを当てるためにページを勝手にスクロールするな」という指定。透明 textarea がカーソル追従で画面端に置かれることがあるので、これを付けないと変なスクロールが起きます。地味ですが効く一手です。</p>
+
+    <div class="box hazard"><div class="box-k">⚠ 落とし穴 — mousemove / mouseup を canvas に付けると、はみ出しで選択が止まる</div>
+      <p>もし <code>mousemove</code> と <code>mouseup</code> も <code>canvas</code> にだけ付けると、ドラッグ中にカーソルがキャンバスの外（スクロールバーやツールバーの上）へ出た瞬間にイベントが来なくなり、選択が凍りつきます。さらに悪いのは、外でマウスを離すと <code>mouseup</code> を取り逃し、<code>dragAnchor</code> が <code>null</code> に戻らないまま —— つまり「ボタンを離したのにまだドラッグ中」という幽霊状態になることです。<strong>ドラッグ系（move / up）は必ず <code>window</code> に付ける</strong>。これはブラウザでドラッグ UI を書くときの鉄則です。</p>
+    </div>
+
+    <h2 class="step" id="step-3"><span class="step-no">Step 3</span>onKeyDown の入口 — IME に譲り、修飾キーを見る</h2>
+    <p>ここからが翻訳の本体、<code>onKeyDown</code> です。長いメソッドなので3つに割って読みます。まずは入口 —— 「そもそもこのキーを処理すべきか」を判断し、修飾キーの状態を1つの変数にまとめるところまで。</p>
+
+    <div class="file-tag">editor/input.ts（onKeyDown・前半）</div>
+    <pre><code>  <span class="cm">// ---------------------------------------------------------------- キーボード</span>
+
+  <span class="kw">private</span> onKeyDown(e: <span class="ty">KeyboardEvent</span>): <span class="ty">void</span> {
+    <span class="cm">// IME 変換中はすべて IME に譲る（229 は古いブラウザの合図）</span>
+    <span class="kw">if</span> (e.isComposing || e.keyCode === <span class="st">229</span>) <span class="kw">return</span>;
+
+    <span class="kw">const</span> ctrl = e.ctrlKey || e.metaKey;
+    <span class="kw">const</span> ed = <span class="kw">this</span>.editor;</code></pre>
+
+    <p>最初の1行が、この章と第08章の<strong>境界線</strong>です。</p>
+    <pre><code>    <span class="kw">if</span> (e.isComposing || e.keyCode === <span class="st">229</span>) <span class="kw">return</span>;</code></pre>
+    <p><code>e.isComposing</code> は「いま IME で変換中か」を表すブラウザ標準のフラグです。変換中なら、矢印キーもスペースも Enter も、<strong>すべて IME（変換候補の選択・確定）のもの</strong>です。エディタが横取りしてはいけません。だから変換中は問答無用で <code>return</code> —— つまり「何もしない」で抜けます。<code>e.keyCode === 229</code> は同じことの<strong>保険</strong>で、古いブラウザや一部の IME は変換中のキーを <code>keyCode 229</code>（「処理中」を表す特別な値）として送ってくるため、それも変換中とみなして譲ります。この1行があるおかげで、以降のキーバインドはすべて「IME が絡んでいない通常時」だけを考えればよくなります。IME 側の中身は第08章です。</p>
+    <p>次の2行はただの下ごしらえです。</p>
+    <pre><code>    <span class="kw">const</span> ctrl = e.ctrlKey || e.metaKey;
+    <span class="kw">const</span> ed = <span class="kw">this</span>.editor;</code></pre>
+    <p><code>ctrl</code> は「Ctrl か Cmd（Mac の ⌘）が押されているか」を1つの真偽にまとめたものです。<code>e.ctrlKey || e.metaKey</code> と OR で束ねることで、以降のコードは「Windows/Linux の Ctrl」と「Mac の Cmd」を<strong>区別せず同じもの</strong>として扱えます。Ctrl+C も Cmd+C も同じ「コピー」——このひと工夫でクロスプラットフォーム対応が1変数で済みます。<code>ed</code> は <code>this.editor</code> の短縮エイリアス。以降 <code>ed.undo()</code> のように短く書くための、ただの読みやすさ用です。</p>
+
+    <div class="gonote"><div class="box-k">TS メモ · e.key と e.keyCode の違い、そして || による「どちらか」</div>
+      <p><code>KeyboardEvent</code> には押されたキーを表すプロパティがいくつかあります。本書が主に使う <code>e.key</code> は「<strong>キーの意味</strong>」を文字列で返します（<code>"a"</code>、<code>"ArrowLeft"</code>、<code>"Enter"</code> など）。レイアウトや Shift の状態を反映した<strong>人間に読める値</strong>で、キーバインドを書くのに向いています。対して <code>e.keyCode</code> は物理キーの<strong>数値コード</strong>で、いまは非推奨ですが「IME 処理中を表す 229」だけは今も現役の慣用句です。だから本書も 229 の判定にだけ <code>keyCode</code> を残しています。<br>
+      <code>a || b</code> は「<code>a</code> が真ならそのまま、偽なら <code>b</code>」を返す演算子。真偽値どうしなら「<strong>どちらか一方でも真か</strong>」の論理和になります。<code>e.ctrlKey || e.metaKey</code> は「Ctrl か Cmd の<strong>どちらか</strong>が押されている」を表しています。</p>
+    </div>
+
+    <h2 class="step" id="step-4"><span class="step-no">Step 4</span>Ctrl 系ショートカットのディスパッチ</h2>
+    <p><code>ctrl</code> が真、つまり Ctrl（Cmd）が押されている場合の<strong>ショートカット表</strong>です。<code>e.key.toLowerCase()</code> で押されたキー名を小文字にそろえ、<code>switch</code> で対応するコマンドへ振り分けます。</p>
+
+    <div class="file-tag">editor/input.ts（onKeyDown・Ctrl 系）</div>
+    <pre><code>    <span class="kw">if</span> (ctrl) {
+      <span class="kw">switch</span> (e.key.toLowerCase()) {
+        <span class="kw">case</span> <span class="st">"a"</span>:
+          e.preventDefault();
+          ed.selectAll();
+          <span class="kw">return</span>;
+        <span class="kw">case</span> <span class="st">"z"</span>:
+          e.preventDefault();
+          <span class="kw">if</span> (e.shiftKey) ed.redo();
+          <span class="kw">else</span> ed.undo();
+          <span class="kw">return</span>;
+        <span class="kw">case</span> <span class="st">"y"</span>:
+          e.preventDefault();
+          ed.redo();
+          <span class="kw">return</span>;
+        <span class="kw">case</span> <span class="st">"d"</span>:
+          e.preventDefault();
+          ed.selectNextOccurrence();
+          <span class="kw">return</span>;
+        <span class="kw">case</span> <span class="st">"l"</span>:
+          <span class="kw">if</span> (e.shiftKey) {
+            e.preventDefault();
+            ed.selectAllOccurrences();
+          }
+          <span class="kw">return</span>;
+        <span class="kw">case</span> <span class="st">"f"</span>:
+          e.preventDefault();
+          <span class="kw">this</span>.onRequestFind?.(<span class="kw">false</span>);
+          <span class="kw">return</span>;
+        <span class="kw">case</span> <span class="st">"h"</span>:
+          e.preventDefault();
+          <span class="kw">this</span>.onRequestFind?.(<span class="kw">true</span>);
+          <span class="kw">return</span>;
+        <span class="kw">case</span> <span class="st">"o"</span>:
+          e.preventDefault();
+          <span class="kw">this</span>.onRequestOpen?.();
+          <span class="kw">return</span>;
+        <span class="kw">case</span> <span class="st">"s"</span>:
+          e.preventDefault();
+          <span class="kw">this</span>.onRequestSave?.();
+          <span class="kw">return</span>;
+        <span class="cm">// c / x / v はネイティブの copy / cut / paste イベントに任せる</span>
+      }
+    }</code></pre>
+
+    <p>これが mint editor のショートカット一覧の実物です。表にすると翻訳の全体像が見えます。</p>
+
+    <table>
+      <tr><th>キー</th><th>コマンド</th><th>意味</th></tr>
+      <tr><td><code>Ctrl+A</code></td><td><code>ed.selectAll()</code></td><td>全選択</td></tr>
+      <tr><td><code>Ctrl+Z</code></td><td><code>ed.undo()</code></td><td>取り消し（第03章）</td></tr>
+      <tr><td><code>Ctrl+Shift+Z</code> / <code>Ctrl+Y</code></td><td><code>ed.redo()</code></td><td>やり直し</td></tr>
+      <tr><td><code>Ctrl+D</code></td><td><code>ed.selectNextOccurrence()</code></td><td>次の同じ語にカーソル追加（第06章）</td></tr>
+      <tr><td><code>Ctrl+Shift+L</code></td><td><code>ed.selectAllOccurrences()</code></td><td>全出現にカーソル（第06章）</td></tr>
+      <tr><td><code>Ctrl+F</code> / <code>Ctrl+H</code></td><td><code>onRequestFind?.(...)</code></td><td>検索 / 置換バーを開く（フック）</td></tr>
+      <tr><td><code>Ctrl+O</code> / <code>Ctrl+S</code></td><td><code>onRequestOpen/Save?.()</code></td><td>開く / 保存（フック・第09章）</td></tr>
+      <tr><td><code>Ctrl+C/X/V</code></td><td>（何もしない）</td><td>ネイティブの copy/cut/paste に委譲</td></tr>
+    </table>
+
+    <p>いくつか読みどころがあります。まず <strong><code>Ctrl+Z</code> の中で <code>e.shiftKey</code> を見て分岐</strong>しているところ。<code>Ctrl+Z</code> は undo、<code>Ctrl+Shift+Z</code> は redo。同じ <code>z</code> のケースの中で修飾キーの追加をもう一段見て、undo と redo を出し分けています。redo にはもう1つ <code>Ctrl+Y</code> という定番の割り当ても用意してあり、こちらは <code>case "y"</code> として独立しています。</p>
+    <p>次に <code>case "l"</code> の形が他と少し違います。<code>Ctrl+Shift+L</code>（全出現選択）だけを拾いたいので、<strong><code>e.shiftKey</code> のときだけ <code>preventDefault</code> して処理し、Shift 無しの素の <code>Ctrl+L</code> は何もせず素通り</strong>させます。もし Shift 無しでも <code>preventDefault</code> してしまうと、ブラウザの <code>Ctrl+L</code>（アドレスバーへ移動）を意味もなく奪ってしまう。「自分が使う組み合わせだけを、確実に、最小限に奪う」——これがショートカットを書くときの行儀です。</p>
+    <p>そして各ケースの先頭にある <code>e.preventDefault()</code>。これは「<strong>このキーのブラウザ標準動作を止める</strong>」呼び出しです。<code>Ctrl+S</code> を止めなければブラウザの「ページを保存」ダイアログが出るし、<code>Ctrl+F</code> を止めなければブラウザの検索窓が出てしまう。エディタとして振る舞うには、これらの標準動作を横取りして自前の処理に置き換える必要があります。逆に、処理し終えたら必ず <code>return</code> して <code>switch</code> を抜け、以降の単キー処理（Step 5）に落ちないようにしています。</p>
+    <p>最後に、コードの一番下のコメント —— <code>// c / x / v はネイティブの copy / cut / paste イベントに任せる</code>。ここが設計の妙です。<code>Ctrl+C/X/V</code> を <code>keydown</code> で自前処理せず、<strong>あえて素通り</strong>させています。すると textarea がブラウザ標準の <code>copy</code> / <code>cut</code> / <code>paste</code> イベントを発火してくれるので、Step 2 で配線した <code>onCopy</code> / <code>onPaste</code>（Step 8）がそこで動く。キーの組み合わせを自前で覚える手間も、OS ごとの差も、ブラウザに肩代わりしてもらう賢い委譲です。</p>
+
+    <div class="gonote"><div class="box-k">TS メモ · switch/case と、オプショナルチェーン ?.()</div>
+      <p><code>switch (値) { case "a": … return; case "z": … }</code> は「値がどのケースに一致するか」で分岐する構文です。本書は各ケースの末尾で必ず <code>return</code> しているので、C 言語でおなじみの「<code>break</code> 忘れで次のケースへ落ちる（fall-through）」事故が起きません。<strong>1ケース＝1コマンド＝即 return</strong> という形に統一すると、キーバインド表がそのまま読める素直なコードになります。<br>
+      <code>this.onRequestFind?.(false)</code> の <code>?.()</code> は<strong>オプショナルチェーン呼び出し</strong>です。<code>onRequestFind</code> が関数として設定されていれば <code>onRequestFind(false)</code> を呼び、<code>null</code>（未設定）なら<strong>何もせず undefined を返す</strong>。フックが差し込まれていないうちに呼んでもクラッシュしない、という安全弁です。Step 1 で見た「フックは null 初期値」という設計と、この <code>?.()</code> はワンセットです。</p>
+    </div>
+
+    <h2 class="step" id="step-5"><span class="step-no">Step 5</span>単キーの翻訳 — 移動・改行・削除</h2>
+    <p><code>onKeyDown</code> の締めくくり、修飾キーの有無に関わらず効く<strong>単キーの翻訳表</strong>です（Ctrl 系のケースはすべて <code>return</code> 済みなので、ここへ来るのは「Ctrl 単独では割り当てのないキー」だけ）。矢印・Home/End・Enter・Backspace・Delete・Tab・Escape を、対応する編集コマンドへ落とします。</p>
+
+    <div class="file-tag">editor/input.ts（onKeyDown・単キー）</div>
+    <pre><code>    <span class="kw">switch</span> (e.key) {
+      <span class="kw">case</span> <span class="st">"ArrowLeft"</span>:
+        e.preventDefault();
+        ed.move(ctrl ? <span class="st">"word"</span> : <span class="st">"char"</span>, -<span class="st">1</span>, e.shiftKey);
+        <span class="kw">return</span>;
+      <span class="kw">case</span> <span class="st">"ArrowRight"</span>:
+        e.preventDefault();
+        ed.move(ctrl ? <span class="st">"word"</span> : <span class="st">"char"</span>, <span class="st">1</span>, e.shiftKey);
+        <span class="kw">return</span>;
+      <span class="kw">case</span> <span class="st">"ArrowUp"</span>:
+        e.preventDefault();
+        ed.moveVertical(-<span class="st">1</span>, e.shiftKey);
+        <span class="kw">return</span>;
+      <span class="kw">case</span> <span class="st">"ArrowDown"</span>:
+        e.preventDefault();
+        ed.moveVertical(<span class="st">1</span>, e.shiftKey);
+        <span class="kw">return</span>;
+      <span class="kw">case</span> <span class="st">"PageUp"</span>:
+        e.preventDefault();
+        ed.moveVertical(-<span class="kw">this</span>.view.pageLines(), e.shiftKey);
+        <span class="kw">return</span>;
+      <span class="kw">case</span> <span class="st">"PageDown"</span>:
+        e.preventDefault();
+        ed.moveVertical(<span class="kw">this</span>.view.pageLines(), e.shiftKey);
+        <span class="kw">return</span>;
+      <span class="kw">case</span> <span class="st">"Home"</span>:
+        e.preventDefault();
+        ed.move(ctrl ? <span class="st">"docBoundary"</span> : <span class="st">"lineBoundary"</span>, -<span class="st">1</span>, e.shiftKey);
+        <span class="kw">return</span>;
+      <span class="kw">case</span> <span class="st">"End"</span>:
+        e.preventDefault();
+        ed.move(ctrl ? <span class="st">"docBoundary"</span> : <span class="st">"lineBoundary"</span>, <span class="st">1</span>, e.shiftKey);
+        <span class="kw">return</span>;
+      <span class="kw">case</span> <span class="st">"Enter"</span>:
+        e.preventDefault();
+        ed.insertNewline();
+        <span class="kw">return</span>;
+      <span class="kw">case</span> <span class="st">"Backspace"</span>:
+        e.preventDefault();
+        ed.backspace();
+        <span class="kw">return</span>;
+      <span class="kw">case</span> <span class="st">"Delete"</span>:
+        e.preventDefault();
+        ed.deleteForward();
+        <span class="kw">return</span>;
+      <span class="kw">case</span> <span class="st">"Tab"</span>:
+        e.preventDefault();
+        ed.insertTab();
+        <span class="kw">return</span>;
+      <span class="kw">case</span> <span class="st">"Escape"</span>: {
+        e.preventDefault();
+        <span class="kw">const</span> handled = <span class="kw">this</span>.onEscape?.() ?? <span class="kw">false</span>;
+        <span class="kw">if</span> (!handled) ed.collapseToPrimary();
+        <span class="kw">return</span>;
+      }
+    }
+  }</code></pre>
+
+    <p>翻訳表はこうなります。ここでの主役は、Step 3 で作った <code>ctrl</code> と、各ケースで見る <code>e.shiftKey</code> の2つの修飾キーです。</p>
+
+    <table>
+      <tr><th>キー</th><th>コマンド</th><th>修飾キーの効き方</th></tr>
+      <tr><td><code>ArrowLeft/Right</code></td><td><code>ed.move("char"/"word", ±1, shift)</code></td><td>Ctrl で語単位、Shift で選択拡張</td></tr>
+      <tr><td><code>ArrowUp/Down</code></td><td><code>ed.moveVertical(±1, shift)</code></td><td>Shift で選択拡張</td></tr>
+      <tr><td><code>PageUp/Down</code></td><td><code>ed.moveVertical(±pageLines, shift)</code></td><td>1画面ぶん上下</td></tr>
+      <tr><td><code>Home/End</code></td><td><code>ed.move("lineBoundary"/"docBoundary", ±1, shift)</code></td><td>Ctrl で文書端、Shift で選択拡張</td></tr>
+      <tr><td><code>Enter</code></td><td><code>ed.insertNewline()</code></td><td>改行（前行インデント継承・第09章）</td></tr>
+      <tr><td><code>Backspace</code> / <code>Delete</code></td><td><code>ed.backspace()</code> / <code>ed.deleteForward()</code></td><td>前 / 次を削除</td></tr>
+      <tr><td><code>Tab</code></td><td><code>ed.insertTab()</code></td><td>スペース2つを挿入</td></tr>
+      <tr><td><code>Escape</code></td><td><code>onEscape?.()</code> → <code>ed.collapseToPrimary()</code></td><td>検索バー閉じ / 複数カーソル畳み</td></tr>
+    </table>
+
+    <p>翻訳の設計思想が、ここにいちばん濃く出ています。ポイントは<strong>「入力層は<em>何を</em>したいかだけを伝え、<em>どうやるか</em>は Editor に丸投げする」</strong>こと。3つの例で見ましょう。</p>
+    <p><strong>① 修飾キーは Editor への「引数」に化ける。</strong> <code>ArrowLeft</code> は常に「左へ1つ」ですが、修飾キー次第で意味が変わります。<code>ctrl ? "word" : "char"</code> —— Ctrl 押下なら語単位、無しなら1文字。第3引数の <code>e.shiftKey</code> —— Shift 押下なら選択を伸ばし、無しならカーソルを動かす。<strong>入力層は修飾キーを読み取って引数に変換するだけ</strong>で、「語の境界がどこか」「選択をどう伸ばすか」という難しい話は全部 <code>ed.move()</code>（<code>Editor</code> のメソッド。全文は第09章）が知っています。入力層は境界の計算を1行も持ちません。</p>
+    <p><strong>② Home/End も同じ骨格。</strong> <code>ed.move("lineBoundary", -1, ...)</code> が「行頭へ」、<code>docBoundary</code> なら「文書頭へ」。<code>ctrl ? "docBoundary" : "lineBoundary"</code> で、Ctrl+Home が「ファイルの一番上」になるあの挙動を表しています。矢印も Home/End も、同じ <code>ed.move(unit, dir, extend)</code> という<strong>1つの入口</strong>に、単位・方向・拡張の3引数を変えて流し込んでいるだけ。翻訳表がここまで規則的なのは、<code>Editor</code> 側のコマンド設計（第02章）が良いからです。</p>
+    <p><strong>③ Escape だけは「委譲してから自分でやる」二段構え。</strong> <code>Escape</code> のケースは少し毛色が違います。</p>
+    <pre><code>        <span class="kw">const</span> handled = <span class="kw">this</span>.onEscape?.() ?? <span class="kw">false</span>;
+        <span class="kw">if</span> (!handled) ed.collapseToPrimary();</code></pre>
+    <p>まず <code>onEscape</code> フックに「Esc を処理した?」と尋ねます。検索バーが開いていれば上位（第06章の <code>findbar</code>）がここで <code>true</code> を返して「バーを閉じる」を担当します。<code>?.() ?? false</code> は「フックが未設定、あるいは <code>undefined</code> を返したら <code>false</code> とみなす」という保険。誰も処理しなかった（<code>!handled</code>）ときだけ、<code>ed.collapseToPrimary()</code> で複数カーソルを1本に畳みます。<strong>Esc の意味は文脈で変わる</strong> —— 「まず開いている UI を閉じ、無ければカーソルを畳む」という優先順位を、フックと <code>??</code> で素直に表現しています。</p>
+
+    <div class="box hazard"><div class="box-k">⚠ 落とし穴 — preventDefault を忘れると、カーソルが二重に動く</div>
+      <p>透明 textarea は本物の <code>&lt;textarea&gt;</code> なので、<code>ArrowLeft</code> や <code>Backspace</code> を<strong>ブラウザ自身も解釈しようとします</strong>。もし <code>e.preventDefault()</code> を忘れると、あなたの <code>ed.move()</code> でカーソルが動くのに<em>加えて</em>、textarea 内部のカーソルも勝手に動き、次の入力位置がずれる、Backspace が二重に効く、といった不可解なバグになります。だから移動・編集キーは<strong>例外なく先頭で <code>preventDefault()</code></strong> しています。「自分で処理するキーは、ブラウザの標準動作を必ず止める」——透明 textarea 方式の宿命であり、鉄則です。</p>
+    </div>
+
+    <div class="box do"><div class="box-k">▸ 動かして確認 — キー→コマンドの<em>行き先</em>をテストで押さえる</div>
+      <p><code>input.ts</code> 自体は DOM（<code>KeyboardEvent</code> や textarea）に強く依存する層なので、直接の単体テストは持ちません。しかし <strong>キーが翻訳された先の <code>Editor</code> コマンドには、しっかりテストがあります</strong>。<code>editor/editor.test.ts</code> を走らせて、矢印・Shift＋移動・Backspace・Delete・Undo/Redo の「行き先」が正しいことを確かめましょう。</p>
+      <pre class="term"><code><span class="ps">$</span> cd src
+<span class="ps">$</span> npx vitest run src/editor/editor.test.ts
+<span class="out">✓ src/editor/editor.test.ts (31 tests)
+   ✓ Editor カーソル移動 &gt; Shift+移動で選択が伸びる
+   ✓ Editor カーソル移動 &gt; 単語移動
+   ✓ Editor カーソル移動 &gt; Home は非空白先頭と行頭をトグルする
+   ✓ Editor 基本編集 &gt; 行頭の Backspace は前行と結合する
+   ✓ Editor 基本編集 &gt; Delete は次の1文字を消す
+   ✓ Editor Undo / Redo &gt; 連続タイプは1回の undo で戻る
+   …（ほか25件）
+ Test Files  1 passed (1)
+      Tests  31 passed (31)</span></code></pre>
+      <p>たとえば「Shift+移動で選択が伸びる」テストは <code>ed.move("char", 1, true)</code> を2回呼んで <code>{ anchor: 0, head: 2 }</code> になることを検証しています。これはまさに、あなたが <code>ArrowRight</code> を Shift 押しで叩いたときに <code>onKeyDown</code> が投げるコマンドそのもの。<strong>入力層は「このキーはこのコマンドを呼ぶ」の対応さえ正しければよく、コマンドの正しさは Editor 側のテストが保証する</strong> —— 層を分けた恩恵が、テストのしやすさとして返ってきます。</p>
+    </div>
+
+    <h2 class="step" id="step-6"><span class="step-no">Step 6</span>通常の文字入力を吸い上げる（IME は第08章）</h2>
+    <p>ここまでは「コマンド系」のキーでした。では、ただの文字 —— <code>a</code> や <code>あ</code> —— はどこで挿入されるのでしょう。答えは <code>onKeyDown</code> では<strong>ありません</strong>。文字入力は <code>input</code> イベント（Step 2 で配線した <code>onInput</code>）で拾います。</p>
+
+    <div class="file-tag">editor/input.ts（つづき）</div>
+    <pre><code>  <span class="cm">/** IME を介さない通常入力。textarea に落ちた文字を吸い上げて挿入する */</span>
+  <span class="kw">private</span> onInput(): <span class="ty">void</span> {
+    <span class="kw">if</span> (<span class="kw">this</span>.view.composition.active) <span class="kw">return</span>;
+    <span class="kw">const</span> value = <span class="kw">this</span>.textarea.value;
+    <span class="kw">if</span> (value.length === <span class="st">0</span>) <span class="kw">return</span>;
+    <span class="kw">this</span>.textarea.value = <span class="st">""</span>;
+    <span class="kw">this</span>.editor.insertText(value);
+  }
+
+  <span class="cm">// ---------------------------------------------------------------- IME</span>
+
+  <span class="kw">private</span> onCompositionStart(): <span class="ty">void</span> {
+    <span class="cm">// …（IME は第08章）</span>
+  }
+
+  <span class="kw">private</span> onCompositionUpdate(e: <span class="ty">CompositionEvent</span>): <span class="ty">void</span> {
+    <span class="cm">// …（IME は第08章）</span>
+  }
+
+  <span class="kw">private</span> onCompositionEnd(e: <span class="ty">CompositionEvent</span>): <span class="ty">void</span> {
+    <span class="cm">// …（IME は第08章）</span>
+  }</code></pre>
+
+    <p>ここで大事な設計判断を言葉にしておきます。<strong>なぜ文字を <code>keydown</code> で作らないのか。</strong> 素朴には「<code>keydown</code> で <code>e.key</code> が <code>"a"</code> なら <code>insertText("a")</code>」とやりたくなります。でもこれは罠だらけです。Shift＋数字の記号、各国のキーボードレイアウト、アクセント付き文字を作るデッドキー、そして何より日本語の IME —— これらは「1回の <code>keydown</code> ＝ 1文字」に収まりません。<code>keydown</code> は「どの<strong>キー</strong>が押されたか」の低レベルなイベントで、「結果として<strong>どんな文字列</strong>が入力されたか」を正しくは表せないのです。</p>
+    <p>そこで方針を反転させます。<strong>文字の生成はブラウザ（textarea）に任せ、こちらは「textarea に落ちた結果の文字列」を吸い上げる</strong>。<code>input</code> イベントは「値が実際に変わった」ときに発火し、そのとき <code>textarea.value</code> には確定した入力文字列が入っています。レイアウトもデッドキーも、ブラウザが正しく解決してくれた後の値です。<code>onInput</code> は4行でそれを回収します。</p>
+    <ol>
+      <li><code>if (this.view.composition.active) return;</code> —— <strong>IME 変換中なら手を出さない</strong>。変換中の文字はまだ確定していないので、ここで挿入してはいけません（確定処理は第08章の <code>compositionend</code> が担当）。この1行が、通常入力と IME の交通整理です。</li>
+      <li><code>const value = this.textarea.value;</code> —— 落ちてきた文字列を取得。</li>
+      <li><code>if (value.length === 0) return;</code> —— 空なら何もしない（削除操作などで空の input が飛ぶことがある）。</li>
+      <li><code>this.textarea.value = "";</code> —— textarea を<strong>すぐ空に戻す</strong>。透明 textarea は「文字の受け皿」であって「文字の保管場所」ではないので、吸い上げたら即クリアして次の入力に備えます。これを忘れると、打った文字が textarea に溜まり続けて二重挿入の原因になります。</li>
+      <li><code>this.editor.insertText(value);</code> —— 回収した文字列を、<code>Editor</code> の統一経路 <code>insertText</code> へ。ここから先は純粋ロジックの世界です。</li>
+    </ol>
+    <p>そして <code>onCompositionStart</code> / <code>onCompositionUpdate</code> / <code>onCompositionEnd</code> の3メソッド。これらが日本語入力（IME）の心臓ですが、本章の主題から外れるので中身は <code>// …（IME は第08章）</code> と省略しました。ここに「変換中の文字を見た目だけ描く」「確定文字を1回の編集としてまとめて挿入する」というロジックが入る、とだけ頭の隅に置いて、第08章で正面から開けます。</p>
+
+    <div class="gonote"><div class="box-k">TS メモ · keydown / input / composition の三層構造</div>
+      <p>ブラウザのテキスト入力は、抽象度の違う3種類のイベントが重なって届きます。<strong>keydown</strong> は「物理キーが押された」低レベルの合図（矢印・Backspace などのコマンド判定に使う）。<strong>input</strong> は「値が実際に変わった」高レベルの合図（確定した文字列の回収に使う）。<strong>composition</strong>（start/update/end）は「IME で変換している最中」を表す中間層です。本書はこの3つを役割で使い分けます —— コマンドは keydown、通常文字は input、日本語は composition。1つのイベントで全部やろうとすると必ず破綻する、というのがテキスト入力実装の経験則です。「入力は1種類のイベントでは捉えきれない」——この事実を受け入れることが、堅い入力層への第一歩です。</p>
+    </div>
+
+    <h2 class="step" id="step-7"><span class="step-no">Step 7</span>マウス — クリックをカーソルへ</h2>
+    <p>キーボードが済んだら、次はマウスです。<code>onMouseDown</code> は「クリックされた画面上の点」を「文書のオフセット」に変換し、修飾キーとクリック回数に応じてカーソルや選択を組み立てます。</p>
+
+    <div class="file-tag">editor/input.ts（つづき）</div>
+    <pre><code>  <span class="cm">// ---------------------------------------------------------------- マウス</span>
+
+  <span class="kw">private</span> onMouseDown(e: <span class="ty">MouseEvent</span>): <span class="ty">void</span> {
+    e.preventDefault();
+    <span class="kw">this</span>.focus();
+    <span class="kw">const</span> offset = <span class="kw">this</span>.view.offsetAtClient(e.clientX, e.clientY);
+    <span class="kw">if</span> (e.detail &gt;= <span class="st">3</span>) {
+      <span class="kw">this</span>.editor.selectLineAt(offset);
+      <span class="kw">return</span>;
+    }
+    <span class="kw">if</span> (e.detail === <span class="st">2</span>) {
+      <span class="kw">this</span>.editor.selectWordAt(offset);
+      <span class="kw">return</span>;
+    }
+    <span class="kw">if</span> (e.altKey) {
+      <span class="kw">this</span>.editor.addCursorAt(offset);
+      <span class="kw">return</span>;
+    }
+    <span class="kw">if</span> (e.shiftKey) {
+      <span class="kw">const</span> primary = <span class="kw">this</span>.editor.selections[<span class="kw">this</span>.editor.selections.length - <span class="st">1</span>];
+      <span class="kw">this</span>.editor.setSelections([{ anchor: primary.anchor, head: offset }]);
+      <span class="kw">this</span>.dragAnchor = primary.anchor;
+      <span class="kw">return</span>;
+    }
+    <span class="kw">this</span>.editor.setSelections([{ anchor: offset, head: offset }]);
+    <span class="kw">this</span>.dragAnchor = offset;
+  }</code></pre>
+
+    <p>冒頭の2行は毎回の下ごしらえです。<code>e.preventDefault()</code> でブラウザ標準の選択挙動を止め、<code>this.focus()</code> で透明 textarea にフォーカスを戻します（クリックでキャンバスに触れたとき、キーボード入力の受け皿を確実に textarea へ戻すため）。</p>
+    <p>そして翻訳の起点、<strong>座標→オフセット変換</strong>。</p>
+    <pre><code>    <span class="kw">const</span> offset = <span class="kw">this</span>.view.offsetAtClient(e.clientX, e.clientY);</code></pre>
+    <p><code>e.clientX / clientY</code> は「ブラウザ画面上のピクセル座標」です。これを第04章の <code>view.offsetAtClient()</code> に渡すと、スクロール量・行の高さ・文字幅・ガター幅をぜんぶ考慮して「文書の何文字目か」を返してくれます。<strong>ピクセルという物理世界の座標が、ここで文字数という論理世界の座標に変わる</strong> —— マウス処理でいちばん重要な一線です。以降のすべての分岐は、この <code>offset</code> を材料に選択を組み立てます。</p>
+    <p>変換したら、あとは「どういうクリックか」で場合分けです。判定の順序に意味があります。</p>
+    <ul>
+      <li><strong><code>e.detail &gt;= 3</code>（トリプルクリック）</strong> → <code>selectLineAt(offset)</code>：その<strong>行まるごと</strong>を選択。<code>e.detail</code> は「同じ場所を連続して何回クリックしたか」の回数です。</li>
+      <li><strong><code>e.detail === 2</code>（ダブルクリック）</strong> → <code>selectWordAt(offset)</code>：その位置の<strong>単語</strong>を選択（単語境界の計算は <code>Editor</code> が持つ・第09章）。</li>
+      <li><strong><code>e.altKey</code>（Alt＋クリック）</strong> → <code>addCursorAt(offset)</code>：既存のカーソルを消さず、その位置に<strong>カーソルを1本追加</strong>する。これが複数カーソル（第06章）の入口です。</li>
+      <li><strong><code>e.shiftKey</code>（Shift＋クリック）</strong> → 現在の主カーソルの <code>anchor</code>（錨）はそのままに、<code>head</code> だけクリック位置へ。つまり<strong>今いる場所からクリック地点まで選択を伸ばす</strong>。同時に <code>dragAnchor</code> にその錨を覚えさせ、この後ドラッグでさらに伸ばせるようにします。</li>
+      <li><strong>修飾なしの単クリック</strong> → <code>setSelections([{ anchor: offset, head: offset }])</code>：<code>anchor === head</code> の<strong>幅ゼロの選択＝ただのカーソル</strong>を1本だけ置き、他は消す。<code>dragAnchor</code> をそのオフセットにして、ここからドラッグ選択が始められる状態にします。</li>
+    </ul>
+    <p>回数の多いもの（トリプル→ダブル）から先に判定しているのがポイントです。<code>e.detail</code> は 3 のとき「3回目のクリック」を意味し、Alt や Shift の判定より前に置くことで、修飾キーを押しながらの連続クリックでも「行/単語選択」を優先できます。そして修飾なしの単クリックが最後のフォールスルー。<strong>特殊な操作から順に拾い、いちばん普通のクリックを最後に置く</strong> —— 分岐の教科書どおりの並べ方です。</p>
+
+    <div class="gonote"><div class="box-k">TS メモ · e.detail と、anchor / head の使い分け（第00章の復習）</div>
+      <p><code>MouseEvent.detail</code> は同一箇所への連続クリック数です。1 なら単クリック、2 ならダブル、3 以上ならトリプル。ブラウザが短時間・近距離のクリックを数えてくれるので、自前でタイマーを持つ必要はありません。<br>
+      Shift＋クリックの行で <code>{ anchor: primary.anchor, head: offset }</code> と書けているのは、第00章で決めた <code>SelRange</code> の設計が効いているからです。<strong>anchor は「選択を始めた動かない側」、head は「いま動いている側」</strong>。Shift＋クリックは「錨は据え置き、頭だけクリック地点へ飛ばす」操作なので、この2フィールドにそのまま対応します。<code>selections[length - 1]</code> で「いちばん最後の（＝主）カーソル」を取っているのも、複数カーソルのうち直近を主役に扱う本書の約束です。</p>
+    </div>
+
+    <h2 class="step" id="step-8"><span class="step-no">Step 8</span>ドラッグ選択とクリップボード</h2>
+    <p>最後の2つ。マウスを<strong>押したまま動かす</strong>ドラッグ選択と、Step 3 で「ネイティブに委譲」したクリップボード処理です。まずドラッグ。</p>
+
+    <div class="file-tag">editor/input.ts（onMouseMove）</div>
+    <pre><code>  <span class="kw">private</span> onMouseMove(e: <span class="ty">MouseEvent</span>): <span class="ty">void</span> {
+    <span class="kw">if</span> (<span class="kw">this</span>.dragAnchor === <span class="kw">null</span>) <span class="kw">return</span>;
+    <span class="cm">// 画面外へのドラッグはスクロールしながら選択を伸ばす</span>
+    <span class="kw">const</span> rect = <span class="kw">this</span>.view.canvas.getBoundingClientRect();
+    <span class="kw">if</span> (e.clientY &lt; rect.top) <span class="kw">this</span>.view.scroller.scrollTop -= <span class="st">12</span>;
+    <span class="kw">else if</span> (e.clientY &gt; rect.bottom) <span class="kw">this</span>.view.scroller.scrollTop += <span class="st">12</span>;
+    <span class="kw">const</span> offset = <span class="kw">this</span>.view.offsetAtClient(e.clientX, e.clientY);
+    <span class="kw">this</span>.editor.setSelections([{ anchor: <span class="kw">this</span>.dragAnchor, head: offset }]);
+  }
+}</code></pre>
+
+    <p>先頭の <code>if (this.dragAnchor === null) return;</code> が<strong>門番</strong>です。<code>onMouseMove</code> は window 全体に配線されている（Step 2）ので、マウスが動くたびに <em>常に</em> 呼ばれます。でも選択を伸ばしたいのは「ボタンを押しながら動かしている」ときだけ。<code>dragAnchor</code> が <code>null</code>（＝ドラッグ中でない）ならすぐ抜けます。<code>dragAnchor</code> に値が入るのは <code>onMouseDown</code> の単クリック/Shift クリック時だけで、<code>mouseup</code> で <code>null</code> に戻る（Step 2）—— この2つが対になって「ドラッグ中か」の状態を管理しています。</p>
+    <p>真ん中の <code>if / else if</code> は、<strong>画面外へのドラッグで自動スクロール</strong>させる工夫です。<code>canvas.getBoundingClientRect()</code> でキャンバスの画面上の矩形を取り、マウスがその上端より上（<code>e.clientY &lt; rect.top</code>）なら <code>scrollTop</code> を 12px 減らして上へ、下端より下（<code>e.clientY &gt; rect.bottom</code>）なら 12px 増やして下へスクロールします。長い範囲を選ぶとき、マウスを画面の外に引っ張れば勝手にスクロールしながら選択が伸びる —— どのエディタにもあるあの挙動です。Step 2 で move/up を window に付けた伏線が、ここで回収されます（キャンバスの外でイベントを拾えないと、この自動スクロールは成立しません）。</p>
+    <p>締めの2行が選択の更新。クリック位置を <code>offset</code> に変換し、<code>{ anchor: this.dragAnchor, head: offset }</code> で「錨は押し始めの位置に固定、頭は今のマウス位置」の選択を作って <code>setSelections</code> に渡す。マウスを動かすたびにこれが呼ばれるので、頭がぐいぐい動いて選択範囲が伸び縮みします。<strong>ドラッグ選択とは「anchor 固定・head 追従」を毎フレームやり直すこと</strong> —— たった1行の <code>setSelections</code> がその実体です。</p>
+
+    <p>そしてクリップボード。Step 3 で <code>Ctrl+C/X/V</code> を「ネイティブに委譲」したので、textarea が発火する <code>copy</code> / <code>cut</code> / <code>paste</code> イベントをここで受けます。</p>
+
+    <div class="file-tag">editor/input.ts（クリップボード）</div>
+    <pre><code>  <span class="cm">// ---------------------------------------------------------------- クリップボード</span>
+
+  <span class="kw">private</span> onCopy(e: <span class="ty">ClipboardEvent</span>, isCut: <span class="ty">boolean</span>): <span class="ty">void</span> {
+    e.preventDefault();
+    <span class="kw">const</span> result = isCut ? <span class="kw">this</span>.editor.cutForClipboard() : <span class="kw">this</span>.editor.copyForClipboard();
+    e.clipboardData?.setData(<span class="st">"text/plain"</span>, result.text);
+  }
+
+  <span class="kw">private</span> onPaste(e: <span class="ty">ClipboardEvent</span>): <span class="ty">void</span> {
+    e.preventDefault();
+    <span class="kw">const</span> text = e.clipboardData?.getData(<span class="st">"text/plain"</span>) ?? <span class="st">""</span>;
+    <span class="kw">if</span> (text.length &gt; <span class="st">0</span>) <span class="kw">this</span>.editor.paste(text);
+  }</code></pre>
+
+    <p><code>onCopy</code> は copy と cut を兼ねます。第2引数 <code>isCut</code> で分岐し、切り取りなら <code>cutForClipboard()</code>（コピー＋削除）、コピーなら <code>copyForClipboard()</code> を呼んで、返ってきたテキストを <code>e.clipboardData.setData("text/plain", ...)</code> で<strong>OS のクリップボードに書き込む</strong>。ここでも「何をコピーするか」（選択が空ならカーソル行をコピー、など第03章の気の利いた挙動）は全部 <code>Editor</code> 側にあり、入力層はイベントとクリップボードのあいだを繋ぐだけです。<code>e.preventDefault()</code> は、ブラウザ標準のコピー（透明 textarea は空なので何もコピーされない）を止めて、自前の内容で上書きするためのものです。</p>
+    <p><code>onPaste</code> は逆向き。<code>e.clipboardData.getData("text/plain")</code> でクリップボードの文字列を取り出し、空でなければ <code>editor.paste(text)</code> へ渡します。<code>?? ""</code> は「clipboardData が無い・取得できないときは空文字」の保険。貼り付けの中身の解釈（複数カーソルに1行ずつ配る、など第03章）も、やはり <code>Editor</code> の仕事です。</p>
+    <p>これで <code>input.ts</code> の IME 以外がすべて出そろいました。振り返ると、<code>InputHandler</code> は一貫して<strong>「生イベントを読み取り、<code>offset</code> や引数に変換して <code>Editor</code> のコマンドを1つ呼ぶ」</strong>だけを繰り返しています。編集の中身も、単語の境界も、コピーの内容も、1つも自分では決めていない。この徹底した薄さが、入力層を読みやすく壊れにくく保っています。</p>
+
+    <div class="box do"><div class="box-k">▸ 動かして確認 — ブラウザで手触りを確かめる</div>
+      <p>入力層は DOM がすべてなので、最終確認はブラウザで実際に触るのがいちばんです。開発サーバを立ち上げて、下の表のとおりに操作し、期待挙動になるか確かめてください。</p>
+      <pre class="term"><code><span class="ps">$</span> cd src
+<span class="ps">$</span> npm run build   <span class="out"># まず型チェック（tsc）が通ることを確認</span>
+<span class="ps">$</span> npm run dev
+<span class="out">  ➜  Local:   http://localhost:5173/</span></code></pre>
+      <table>
+        <tr><th>操作</th><th>期待される挙動</th></tr>
+        <tr><td>矢印キー ←→↑↓</td><td>カーソルが1文字/1行ずつ動く</td></tr>
+        <tr><td>Ctrl＋← / →</td><td>語単位でジャンプする</td></tr>
+        <tr><td>Shift＋矢印</td><td>選択範囲が伸びる（反転表示）</td></tr>
+        <tr><td>Backspace / Delete</td><td>前 / 次の1文字が消える</td></tr>
+        <tr><td>Enter</td><td>改行し、前行のインデントを引き継ぐ</td></tr>
+        <tr><td>Ctrl+Z / Ctrl+Y</td><td>連続入力が1回でまとめて戻る / やり直せる</td></tr>
+        <tr><td>ダブルクリック / トリプルクリック</td><td>単語 / 行が選択される</td></tr>
+        <tr><td>Alt＋クリック</td><td>カーソルが増える（複数箇所で同時入力できる）</td></tr>
+        <tr><td>ドラッグ（画面外まで）</td><td>スクロールしながら選択が伸びる</td></tr>
+        <tr><td>Ctrl+C → Ctrl+V</td><td>コピーした文字が貼り付く</td></tr>
+      </table>
+      <p>1つでも期待とずれたら、対応するキー/マウスの <code>case</code> と、その先の <code>Editor</code> コマンドを見比べてください。多くの場合、原因は「<code>preventDefault</code> 忘れ」か「呼ぶコマンドの引数違い」です。日本語入力（IME をオンにして変換）は、まだ完全には動きません —— それは第08章で仕上げます。</p>
+    </div>
+
+    <div class="box hazard"><div class="box-k">⚠ 落とし穴 — 日本語を含むパスで npm run dev が落ちる（Windows）</div>
+      <p>序章でも触れましたが、この章はブラウザでの手触り確認が主役なので改めて。Windows でプロジェクトの絶対パスに全角文字が含まれると、Vite が <code>exit 0xC0000409</code> でクラッシュすることがあります。<code>npm run build</code>（型チェック）は Node 上で完結するので影響を受けませんが、<code>npm run dev</code> で触れないときは、コードを英語だけのパス（例 <code>C:\work\mint\</code>）へコピーしてから立ち上げてください。</p>
+    </div>
+
+    <h2>つまずき FAQ</h2>
+    <details class="qa"><summary>なぜ Canvas に直接 <code>keydown</code> を付けず、わざわざ透明な textarea を使うの?</summary>
+      <div class="qa-body"><p>Canvas は「文字を入力する場所」という概念を持たず、とくに <strong>IME（日本語変換）やデッドキーを経由した確定文字を受け取る正規の口がない</strong>からです。透明 textarea を1枚重ねて常にフォーカスしておけば、通常入力は <code>input</code> イベントで、IME は <code>composition</code> イベントで、コマンド系は <code>keydown</code> で —— と、ブラウザの標準的なテキスト入力の仕組みをそのまま使えます。VSCode/Monaco をはじめ Canvas 系エディタが共通して採る定番の技です。見た目はキャンバスに描き、入力は透明 textarea が受ける、という<strong>描画と入力の分離</strong>がこの方式の本質です。</p></div>
+    </details>
+    <details class="qa"><summary>文字入力を <code>keydown</code> の <code>e.key</code> で作ってはいけないのはなぜ?</summary>
+      <div class="qa-body"><p><code>keydown</code> は「どの<strong>キー</strong>が押されたか」の低レベルイベントで、「結果としてどんな<strong>文字列</strong>が入力されたか」を正しく表せないからです。キーボードレイアウトの違い、Shift＋キーの記号、アクセントを合成するデッドキー、そして複数の打鍵で1文字になる日本語 IME —— これらは「1 keydown ＝ 1文字」に収まりません。だから本書は文字生成をブラウザ（textarea）に任せ、確定した結果を <code>input</code> イベントで <code>textarea.value</code> から吸い上げます。吸い上げたら即 <code>textarea.value = ""</code> でクリアし、次の入力に備えるのがポイントです。</p></div>
+    </details>
+    <details class="qa"><summary><code>onMouseMove</code> と <code>onMouseUp</code> を canvas ではなく window に付けているのはなぜ?</summary>
+      <div class="qa-body"><p>ドラッグ選択中にマウスがキャンバスの<strong>外へ出ても</strong>、選択を伸ばし続け、正しく終了させたいからです。canvas にだけ付けると、外へ出た瞬間にイベントが来なくなって選択が凍り、外でボタンを離すと <code>mouseup</code> を取り逃して <code>dragAnchor</code> が <code>null</code> に戻らない「幽霊ドラッグ」状態になります。押し始め（<code>mousedown</code>）はキャンバス上でしか起きないので canvas に、追従と終了（<code>mousemove</code> / <code>mouseup</code>）は画面全体で拾いたいので window に —— ドラッグ UI 実装の鉄則です。この配線のおかげで、画面外ドラッグでの自動スクロールも成立します。</p></div>
+    </details>
+
+    <h2>理解度チェック</h2>
+    <p>次の問いに<strong>自分の言葉で</strong>答えられたら、この章は卒業です。</p>
+    <details class="qa"><summary>1. <code>InputHandler</code> が「翻訳者」だとはどういう意味か。<code>ArrowLeft</code> の Shift＋Ctrl 押下を例に説明せよ。</summary>
+      <div class="qa-body"><p>入力層は生イベント（キー名・修飾キー・座標）を、<code>Editor</code> の<strong>編集コマンドとその引数</strong>へ変換するだけで、編集の中身は一切決めない、という意味。<code>ArrowLeft</code> なら <code>ed.move(unit, dir, extend)</code> を呼ぶが、<code>ctrl ? "word" : "char"</code> で単位を、方向を <code>-1</code> に、<code>e.shiftKey</code> を第3引数の <code>extend</code> に渡す。つまり Ctrl＋Shift＋← は <code>ed.move("word", -1, true)</code> に翻訳される。「語の境界がどこか」「選択をどう伸ばすか」は <code>Editor</code>（第02章）が知っており、入力層は境界計算を1行も持たない。</p></div>
+    </details>
+    <details class="qa"><summary>2. コマンド系キーと通常文字で、拾うイベントを分けている理由と、それぞれのイベント名を述べよ。</summary>
+      <div class="qa-body"><p>コマンド系（矢印・Backspace・ショートカット）は「どのキーが押されたか」で判断できるので <strong><code>keydown</code></strong> で拾い、<code>preventDefault</code> でブラウザ標準動作を止める。一方、通常の文字はレイアウト・デッドキー・IME の影響で「1打鍵＝1文字」に収まらないため、ブラウザが解決した確定文字列を <strong><code>input</code></strong> イベントで <code>textarea.value</code> から吸い上げる。さらに日本語変換中は <code>composition</code> イベントの担当（第08章）で、<code>onInput</code> は <code>composition.active</code> のとき手を出さない。役割で3種類のイベントを使い分けるのが要点。</p></div>
+    </details>
+    <details class="qa"><summary>3. マウスの単クリック・Shift＋クリック・Alt＋クリックが、それぞれ <code>selections</code> をどう変えるか。<code>anchor</code>/<code>head</code> の言葉で説明せよ。</summary>
+      <div class="qa-body"><p>まず <code>view.offsetAtClient()</code> でクリック座標を文書オフセットに変換する。<strong>単クリック</strong>は <code>{ anchor: offset, head: offset }</code>（幅ゼロ＝ただのカーソル）を1本だけ置き、他を消す。<strong>Shift＋クリック</strong>は主カーソルの <code>anchor</code>（錨）を据え置き、<code>head</code> だけクリック位置へ動かして選択を伸ばす。<strong>Alt＋クリック</strong>は既存の <code>selections</code> を消さず、クリック位置に空カーソルを1本<strong>追加</strong>する（複数カーソルの入口・第06章）。単・Shift クリックは <code>dragAnchor</code> をセットし、以降のドラッグで <code>head</code> 追従による範囲拡張ができる状態にする。</p></div>
+    </details>
+
+    <h2>まとめ — 次の層へ</h2>
+    <p>この章で、mint editor はついに<strong>触れる</strong>ようになりました。<code>InputHandler</code> は、Canvas の弱点を「透明な textarea」で補い、キーボードの生イベントを <code>keydown</code>（コマンド）と <code>input</code>（文字）に振り分け、マウスの座標を <code>offsetAtClient</code> で文書オフセットへ変換し、修飾キーやクリック回数を <code>Editor</code> コマンドの引数へ翻訳しました。一貫していたのは<strong>「入力層は<em>何を</em>したいかだけを伝え、<em>どうやるか</em>は Editor に丸投げする」</strong>という徹底した薄さ。境界計算もコピー内容も1つも自前で持たないからこそ、この層は読みやすく壊れにくい。第04章の「描く」と、この章の「受ける」がそろって、エディタの心拍（入力→編集→テキスト→描画）が初めて1周しました。</p>
+    <p>残したのは日本語入力（IME）です。<code>onKeyDown</code> 冒頭の <code>if (e.isComposing …) return;</code> という一線と、<code>onInput</code> の <code>if (composition.active) return;</code>、そして <code>// …（IME は第08章）</code> と伏せた3つの composition メソッド —— これらが第08章への引き継ぎ書きです。変換中の文字を「見た目だけ」カーソル位置に描き、確定した文字列を「1回の編集」としてまとめて挿入し、Undo も1回で戻す。あの、日本語を打つときの当たり前の手触りを、次はどう組むのか。ただしその前に、第06章で<strong>複数カーソルと検索</strong>を仕上げます。この章で <code>Alt＋クリック</code> や <code>Ctrl+D</code> が呼んでいた <code>addCursorAt</code> / <code>selectNextOccurrence</code> の中身 —— カーソルが N 本あるとき編集をどう衝突なく適用するか —— が、いよいよ主役になります。</p>
+
+    <div class="chap-foot">
+      <a class="pager" href="04-view.html"><span class="dir">← 前へ</span>第04章 · 画面に描く</a>
+      <a class="pager next" href="06-search.html"><span class="dir">次へ →</span>第06章 · 複数カーソルと検索</a>
+    </div>
+  </main>
+</div>
+</body>
+</html>

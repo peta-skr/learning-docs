@@ -1,0 +1,560 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>第04章 コンテナに閉じ込める — 手を動かして作るオンラインジャッジ</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500;600&family=Source+Serif+4:opsz,wght@8..60,400;8..60,600;8..60,700&family=Noto+Serif+JP:wght@400;600;700&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<div class="shell">
+
+  <aside class="spine">
+    <a class="wordmark" href="index.html">JUDGE · from scratch</a>
+    <div class="book-title">手を動かして作る<br>オンラインジャッジ</div>
+    <div class="book-sub">Go で サンドボックスから Web まで</div>
+
+    <div class="legend"><span>読む <b>↓</b></span><span>組む <b>↑</b></span></div>
+
+    <nav aria-label="目次">
+      <ul class="toc">
+        <li><a class="nav-item" href="index.html"><span class="nav-num">序</span><span class="nav-label">はじめに・準備<span class="nav-tag">Setup</span></span></a></li>
+        <li><a class="nav-item" href="00-smallest.html"><span class="nav-num">00</span><span class="nav-label">いちばん小さいジャッジ<span class="nav-tag">Judge</span></span></a></li>
+        <li><a class="nav-item" href="01-process.html"><span class="nav-num">01</span><span class="nav-label">プロセスと標準入出力<span class="nav-tag">IO</span></span></a></li>
+        <li><a class="nav-item" href="02-verdict.html"><span class="nav-num">02</span><span class="nav-label">verdict — 判定の種類<span class="nav-tag">Verdict</span></span></a></li>
+        <li><a class="nav-item" href="03-threat.html"><span class="nav-num">03</span><span class="nav-label">なぜ他人のコードは危険か<span class="nav-tag">Threat</span></span></a></li>
+        <li><a class="nav-item current" aria-current="page" href="04-sandbox.html"><span class="nav-num">04</span><span class="nav-label">コンテナに閉じ込める<span class="nav-tag">Sandbox</span></span></a></li>
+        <li><a class="nav-item" href="05-limits.html"><span class="nav-num">05</span><span class="nav-label">時間とメモリを断ち切る<span class="nav-tag">Limits</span></span></a></li>
+        <li><a class="nav-item" href="06-lang.html"><span class="nav-num">06</span><span class="nav-label">いろんな言語で<span class="nav-tag">Lang</span></span></a></li>
+        <li><a class="nav-item" href="07-store.html"><span class="nav-num">07</span><span class="nav-label">問題とテストケースを持つ<span class="nav-tag">Store</span></span></a></li>
+        <li><a class="nav-item" href="08-queue.html"><span class="nav-num">08</span><span class="nav-label">提出を「あとで」捌く<span class="nav-tag">Queue</span></span></a></li>
+        <li><a class="nav-item" href="09-web.html"><span class="nav-num">09</span><span class="nav-label">画面をつける<span class="nav-tag">Web</span></span></a></li>
+      </ul>
+    </nav>
+
+    <div class="spine-foot">
+      各章は「実行の心臓部」から<br>始めて「Web」へ登る。<br>下（採点の核）から上（画面）へ<br>積み上げて動かしていく。
+    </div>
+  </aside>
+
+  <main class="reading">
+    <div class="progress-tag">第04章 / 全10章 · 層: SANDBOX · 読了目安 3〜4時間</div>
+    <div class="eyebrow"><span>SANDBOX</span><span class="depth">— 隔離実行・防御の心臓部</span></div>
+    <h1>コンテナに閉じ込める</h1>
+    <p class="lede">第03章で、私たちは他人のコードが何をしうるかを直視しました。無限ループ、メモリ枯渇、ファイルの破壊、ネットワーク越しの攻撃、fork 爆弾。<strong>提出コードは敵</strong>——この前提から逃げないと決めた以上、次にやるべきことはただ一つ、<strong>その敵を、逃げ場のない檻に閉じ込めてから走らせる</strong>ことです。この章では、その檻を <code>docker run</code> で組みます。第03章で並べた「脅威 → 防御 → RunSpec フィールド」の対応表を、今度は<strong>実際に動くコード</strong>で一つずつ回収します。ここが本書のセキュリティの心臓部です。</p>
+
+    <div class="box goal"><div class="box-k">◈ この章のゴール</div>
+      <p>次の 3 つを、自分の目と手で確認できたら達成です。</p>
+      <ol>
+        <li><code>RunSpec</code> の各フィールド（<code>MemoryMB</code> / <code>PidsLimit</code> / <code>ReadOnly</code> / <code>Tmpfs</code> / <code>StdoutLimit</code> …）が、第03章のどの脅威に対する防御かを、対応する <code>docker run</code> フラグとともに言える。</li>
+        <li><code>DockerSandbox.Run</code> が、<code>docker run</code> の引数をどう組み立て、<code>os/exec</code> でどう起動し、<strong>stdin に tar を流し stdout を上限つきで読む</strong>かを、コードの流れで追える。</li>
+        <li>コンテナが<strong>使い捨て</strong>であること、<code>context</code> が切れたときにコンテナを必ず後始末すること、そして stdout をなぜ<strong>無制限に読んではいけない</strong>かを、自分の言葉で説明できる。</li>
+      </ol>
+    </div>
+
+    <div class="box map"><div class="box-k">☰ この章のステップ</div>
+      <ol>
+        <li><a href="#step-1">隔離の壁として Docker を使う — なぜプロセスではなくコンテナか</a></li>
+        <li><a href="#step-2">Sandbox インターフェースと RunSpec — 防御の設定表 — <code>sandbox.go</code></a></li>
+        <li><a href="#step-3">docker run の引数を組み立てる — 各フラグ = 各防御</a></li>
+        <li><a href="#step-4">os/exec で起動し、stdin に tar を流す — <code>Run</code> の本体</a></li>
+        <li><a href="#step-5">stdout を上限つきで読む — <code>capWriter</code> と host 側 OOM 防止</a></li>
+        <li><a href="#step-6">タイムアウトと後始末 — <code>context</code> が切れたらコンテナを消す</a></li>
+        <li><a href="#step-7">コンテナは使い捨て — ライフサイクルと疎通確認・掃除</a></li>
+        <li><a href="#step-8">第03章の対応表を回収する — 脅威 → フラグ → フィールド</a></li>
+      </ol>
+    </div>
+
+    <h2>Docker を「隔離の壁」として使う</h2>
+    <p>第01章で、私たちは <code>os/exec</code> で提出コードを別プロセスとして起動し、標準入力を流し込み、標準出力を受け取る、という実行のいちばん素朴な形を作りました。あれは檻のない実行でした。プロセスは分かれていても、<strong>ホストのファイルシステムも、ネットワークも、CPU もメモリも、提出コードから丸見え・触り放題</strong>です。第03章で見た通り、それは <code>rm -rf</code> 一発でホストを壊せる状態です。</p>
+    <p>では、どうやって壁を立てるか。理屈の上では OS の機能（namespace、cgroups、seccomp、capability）を自分で組み合わせれば「隔離されたプロセス」は作れます。しかし本書はそこを<strong>手作りしません</strong>。それらを人間に使いやすくまとめ、フラグ一つで有効にできるようにした道具が、すでにあるからです——それが <strong>Docker</strong> です。<code>docker run</code> のフラグは、そのまま「namespace を分ける」「cgroups で資源を絞る」「capability を落とす」という OS の隔離機能への<strong>スイッチ</strong>になっています。私たちは、そのスイッチを<strong>正しい組み合わせで入れる</strong>ことに集中します。</p>
+    <p>本書のサンドボックスの姿を一枚の絵にすると、こうです。ホストの Go プロセス（ジャッジ）が <code>docker run</code> を起動し、その中で提出コードが走る。<strong>三段重ねのプロセス</strong>——この構図が腑に落ちれば、サンドボックスはもう魔法ではありません。</p>
+
+    <div class="ascii">サンドボックスの構図 — 三段重ねのプロセス
+
+  ┌─ ホスト（あなたのマシン） ──────────────────────────┐
+  │                                                          │
+  │  ┌─ Go プロセス（ジャッジ） ──────────────────────┐   │
+  │  │  DockerSandbox.Run(ctx, spec)                     │   │
+  │  │    exec.CommandContext(ctx, "docker", "run", …)   │   │
+  │  │        │ stdin: tar（提出物＋テストケース）        │   │
+  │  │        ▼                                           │   │
+  │  │  ┌─ docker run（隔離コンテナ／使い捨て） ──────┐ │   │
+  │  │  │  --network none   ← ネット遮断              │ │   │
+  │  │  │  --read-only+tmpfs ← FS 改変不可            │ │   │
+  │  │  │  --memory / --pids-limit / --cpus ← 資源上限 │ │   │
+  │  │  │  --cap-drop ALL / --user 65534 ← 権限剥奪   │ │   │
+  │  │  │     ┌─ 提出コードのプロセス ──────────┐    │ │   │
+  │  │  │     │ ./prog < case.in                  │    │ │   │
+  │  │  │     └────────────┬───────────────────┘    │ │   │
+  │  │  └───────────────────│ stdout（フレーム）─────┘ │   │
+  │  │        ▲             ▼                            │   │
+  │  │   capWriter で上限つきに受け取る                  │   │
+  │  └───────────────────────────────────────────────────┘   │
+  └──────────────────────────────────────────────────────────┘</div>
+
+    <h2>RunSpec = 防御の「設定表」</h2>
+    <p>第03章の最後で、私たちは「脅威 → 防御 → 対応する制限」の表を作りました。この章のコードは、その表を<strong>2つの型</strong>に落とし込みます。<code>RunSpec</code>（何をどう隔離して走らせるかの<strong>設定</strong>）と <code>RunResult</code>（走らせた<strong>結果</strong>）です。そして、その設定を受け取って実際に <code>docker run</code> を叩くのが <code>DockerSandbox.Run</code>。</p>
+    <p>設計上の要は、実行を <strong><code>Sandbox</code> というインターフェースで切っている</strong>ことです。採点ロジック（第00章）から見れば、実行機構は「<code>RunSpec</code> を渡すと <code>RunResult</code> が返ってくる箱」でしかありません。中身が「使い捨て <code>docker run</code>」でも「常駐コンテナに <code>docker exec</code>」でも、採点側は一切変わらない。この境界が、危険な実行部分（この章）を採点の芯から隔離しています。作るファイルは <code>internal/judge/sandbox.go</code> です。</p>
+
+    <h2 class="step" id="step-1"><span class="step-no">Step 1</span>隔離の壁として Docker を使う — なぜプロセスではなくコンテナか</h2>
+    <p>まず「なぜ <code>os/exec</code> で直接走らせず、間に <code>docker run</code> を挟むのか」を、第03章の脅威に即して確かめます。第01章の素朴な実行——<code>exec.Command("./solution")</code>——には、次の穴がすべて空いています。</p>
+    <ul>
+      <li><strong>ファイルシステムが共有されている。</strong> 提出コードは <code>os.Remove("/important")</code> でも <code>os.WriteFile</code> でも、ジャッジプロセスの権限が及ぶ範囲を好きに書き換えられます。</li>
+      <li><strong>ネットワークが繋がっている。</strong> 提出コードは外部にリクエストを飛ばし、答えをどこかから取ってくる（カンニング）ことも、内部ネットワークを踏み台にすることもできます。</li>
+      <li><strong>資源に上限がない。</strong> メモリを食い尽くしてホストごと巻き添えにする、プロセスを増殖させる（fork 爆弾）、CPU を全部持っていく——どれも止める手立てがありません。</li>
+    </ul>
+    <p>コンテナは、これらを<strong>まとめて塞ぐ</strong>ための隔離単位です。Linux の namespace が「別のファイルシステム・別のネットワーク・別のプロセステーブル」を提出コードに見せ、cgroups が「使えるメモリ・CPU・プロセス数」に天井を掛け、capability の剥奪が「特権的な操作」を封じる。<code>docker run</code> は、これらの OS 機能を<strong>フラグ一つずつのスイッチ</strong>にしてくれます。だから私たちがやるのは、<strong>そのスイッチを正しい組み合わせで入れて、提出コードを中で走らせるだけ</strong>。実装の主役は「どのフラグを、なぜ立てるか」です。</p>
+    <p>そしてもう一つ、コンテナには決定的な利点があります。<strong>使い捨てにできる</strong>ことです。1回の採点ごとに新しいコンテナを起動し、終わったら丸ごと捨てる。提出コードがコンテナの中でどれだけ暴れて内部を汚しても、コンテナごと消せば<strong>次の採点には何も残りません</strong>。「壊されたら捨てて作り直す」——この使い捨て前提が、防御をぐっと単純にします（Step 7 で詳しく見ます）。</p>
+
+    <div class="gonote"><div class="box-k">GO メモ · なぜ Docker SDK ではなく docker CLI を叩くのか</div>
+      <p>Go には Docker を操作する SDK もありますが、本書では <code>exec.Command("docker", "run", ...)</code> と<strong>CLI をそのまま叩きます</strong>。理由は2つ。第一に、<code>docker run</code> のフラグは自分でターミナルに打って挙動を確かめられるので、学習の透明性が高い。「<code>--network none</code> を外すと外に繋がる」を手で試せます。第二に、外部依存を増やさず標準ライブラリ（<code>os/exec</code>）中心で組める。序章で触れた「Go のプロセスが Docker のプロセスを起動し、Docker が提出コードのプロセスを起動する」という三段重ねの構図を、<code>os/exec</code> 一本で見通せるのが最大の学びです。</p>
+    </div>
+
+    <h2 class="step" id="step-2"><span class="step-no">Step 2</span>Sandbox インターフェースと RunSpec — 防御の設定表 — sandbox.go</h2>
+    <p>コードに入ります。まず <code>sandbox.go</code> の先頭——<strong>境界を定義する3つの型</strong>（インターフェース・入力・出力）を読みます。ここが読めれば、この章の骨格の半分は理解できたも同然です。</p>
+
+    <div class="file-tag">internal/judge/sandbox.go</div>
+    <pre><code><span class="kw">package</span> judge
+
+<span class="kw">import</span> (
+	<span class="st">"context"</span>
+	<span class="st">"crypto/rand"</span>
+	<span class="st">"encoding/hex"</span>
+	<span class="st">"errors"</span>
+	<span class="st">"fmt"</span>
+	<span class="st">"io"</span>
+	<span class="st">"os/exec"</span>
+	<span class="st">"strconv"</span>
+	<span class="st">"strings"</span>
+	<span class="st">"sync"</span>
+	<span class="st">"time"</span>
+)
+
+<span class="cm">// Sandbox は隔離実行の境界。現在の実装は使い捨て docker run（02_tech_stack.md 案A）。</span>
+<span class="cm">// 将来コンテナプール + exec 方式（案B）へ差し替えられるようインターフェースで切る。</span>
+<span class="kw">type</span> <span class="ty">Sandbox</span> <span class="kw">interface</span> {
+	Run(ctx context.<span class="ty">Context</span>, spec <span class="ty">RunSpec</span>) (*<span class="ty">RunResult</span>, <span class="ty">error</span>)
+}
+
+<span class="kw">type</span> <span class="ty">RunSpec</span> <span class="kw">struct</span> {
+	Image       <span class="ty">string</span>
+	Cmd         []<span class="ty">string</span>
+	Stdin       io.<span class="ty">Reader</span> <span class="cm">// tar ストリーム（提出物・テストケースの送り込み）</span>
+	MemoryMB    <span class="ty">int</span>
+	PidsLimit   <span class="ty">int</span>
+	CPUs        <span class="ty">string</span>
+	ReadOnly    <span class="ty">bool</span>
+	Tmpfs       []<span class="ty">string</span> <span class="cm">// 例 []string{"/tmp:rw,exec,size=128m"}</span>
+	WallTimeout time.<span class="ty">Duration</span>
+	StdoutLimit <span class="ty">int64</span> <span class="cm">// ホスト側で読む stdout の上限（ジャッジ側 OOM 防止, NF-06）</span>
+}
+
+<span class="kw">type</span> <span class="ty">RunResult</span> <span class="kw">struct</span> {
+	ExitCode  <span class="ty">int</span>
+	Stdout    []<span class="ty">byte</span>
+	Stderr    []<span class="ty">byte</span>
+	TimedOut  <span class="ty">bool</span> <span class="cm">// ホスト側の壁時計タイムアウトでコンテナを強制停止した</span>
+	Truncated <span class="ty">bool</span> <span class="cm">// stdout が StdoutLimit を超えて切り捨てられた</span>
+}
+
+<span class="cm">// DockerSandbox は docker CLI を os/exec で駆動する実装。</span>
+<span class="cm">// bind mount / docker cp を使わず、入力は stdin の tar、出力は stdout の</span>
+<span class="cm">// フレーミングプロトコルで受け渡す（Windows のパス変換・CRLF 問題を回避）。</span>
+<span class="kw">type</span> <span class="ty">DockerSandbox</span> <span class="kw">struct</span> {
+	DockerPath <span class="ty">string</span>
+}</code></pre>
+
+    <p><strong><code>Sandbox</code> インターフェース。</strong> メソッドはたった1つ、<code>Run(ctx, spec) (*RunResult, error)</code> です。「文脈（締め切り・中断を運ぶ <code>ctx</code>）と、実行設定（<code>spec</code>）を渡すと、結果（<code>*RunResult</code>）かエラーが返る」。これが実行機構と採点ロジックを分ける<strong>唯一の窓口</strong>です。コメントにある通り、現在の実装は「使い捨て <code>docker run</code>（案A）」ですが、将来もっと速い「コンテナを常駐させて <code>docker exec</code> で使い回す（案B）」に差し替えても、この <code>Run</code> のシグネチャさえ守れば採点側は無傷。<strong>「どう隔離するか」の実装を、インターフェース1枚の裏に閉じ込めた</strong>わけです。設計判断の記録は <code>02_tech_stack.md</code> にあります。</p>
+    <p><strong><code>RunSpec</code> — 防御の設定表。</strong> この構造体の各フィールドが、第03章で並べた防御項目に1対1で対応します。ここが<strong>この章の中核</strong>なので、フィールドの意味を先に頭に入れておきます（実際にどの <code>docker run</code> フラグになるかは Step 3 で見ます）。</p>
+    <table>
+      <tr><th>フィールド</th><th>意味</th><th>防ぐ脅威（第03章）</th></tr>
+      <tr><td><code>Image</code></td><td>使うジャッジイメージ（<code>judge-go</code> 等）</td><td>—（実行環境の指定）</td></tr>
+      <tr><td><code>Cmd</code></td><td>コンテナ内で走らせるコマンド（ランナースクリプト）</td><td>—</td></tr>
+      <tr><td><code>Stdin</code></td><td>コンテナへ流し込む tar（提出物＋テストケース）</td><td>—（資材の受け渡し）</td></tr>
+      <tr><td><code>MemoryMB</code></td><td>メモリ上限（MB）</td><td>メモリ枯渇でホスト巻き添え</td></tr>
+      <tr><td><code>PidsLimit</code></td><td>プロセス数上限</td><td>fork 爆弾</td></tr>
+      <tr><td><code>CPUs</code></td><td>CPU 割り当て（<code>"1"</code> など）</td><td>CPU 占有</td></tr>
+      <tr><td><code>ReadOnly</code></td><td>ルートファイルシステムを読み取り専用にするか</td><td>ファイルの破壊・改変</td></tr>
+      <tr><td><code>Tmpfs</code></td><td>書き込みを許す一時領域（メモリ上、サイズ上限つき）</td><td>ディスク枯渇（read-only の逃げ道）</td></tr>
+      <tr><td><code>WallTimeout</code></td><td>ホスト側の壁時計タイムアウト</td><td>無限ループ（最終防衛線）</td></tr>
+      <tr><td><code>StdoutLimit</code></td><td>ホスト側で読む stdout の上限（バイト）</td><td>巨大出力による<strong>ジャッジ側</strong>のメモリ枯渇</td></tr>
+    </table>
+    <p><strong><code>RunResult</code> — 走らせた結果。</strong> <code>ExitCode</code>（<strong>コンテナ（ランナー）自体の終了コード</strong>。通常は <code>0</code> で、コンテナごと落ちたときの<strong>フォールバック判定</strong>に使う——ケース別の verdict は後述のフレームから決めるので、<code>decideCase</code> がふだん読むのはこの値ではありません）、<code>Stdout</code> / <code>Stderr</code>（受け取った出力）、そして2つの<strong>状態フラグ</strong>——<code>TimedOut</code>（壁時計タイムアウトでこちらから強制停止した）と <code>Truncated</code>（出力が <code>StdoutLimit</code> を超えて切り捨てられた）。この2つのフラグが立ったときの扱いは、後段の判定（第00章の <code>JudgeSubmission</code>）で重要になります——特に <code>Truncated</code> が立ったときは「採点結果が不完全」なので、うっかり <code>AC</code> にしてはいけません（Step 5 で回収します）。</p>
+
+    <div class="gonote"><div class="box-k">GO メモ · なぜインターフェースで切るのか</div>
+      <p>Go の <code>interface</code> は「このメソッドさえ持っていれば、何でもこの型として扱える」という約束です。<code>Sandbox</code> インターフェースを介することで、採点ロジックは <code>DockerSandbox</code> という<strong>具体</strong>を知らずに済みます。テストのときは「Docker を起動せず、あらかじめ決めた <code>RunResult</code> を返すだけの偽物（モック）」を <code>Sandbox</code> として差し込めば、Docker なしで採点ロジックだけを検証できる——インターフェースは<strong>差し替え可能性</strong>を型で保証する道具です。<code>Judger</code> 構造体が <code>Sandbox Sandbox</code> というフィールドを持ち、具体実装ではなくインターフェースを握っているのは、このためです。</p>
+    </div>
+
+    <h2 class="step" id="step-3"><span class="step-no">Step 3</span>docker run の引数を組み立てる — 各フラグ = 各防御</h2>
+    <p>いよいよ<strong>この章の核心</strong>——防御フラグの組み立てです。<code>DockerSandbox.Run</code> の冒頭で、<code>docker</code> コマンドに渡す引数配列を組み立てます。ここに並ぶ一つひとつのフラグが、第03章の脅威に対する<strong>具体的な楯</strong>です。まず引数を組み立てる前半だけを取り出します。</p>
+
+    <div class="file-tag">internal/judge/sandbox.go（Run・引数組み立て部）</div>
+    <pre><code><span class="kw">func</span> (d *<span class="ty">DockerSandbox</span>) Run(ctx context.<span class="ty">Context</span>, spec <span class="ty">RunSpec</span>) (*<span class="ty">RunResult</span>, <span class="ty">error</span>) {
+	name := containerName()
+	args := []<span class="ty">string</span>{
+		<span class="st">"run"</span>, <span class="st">"--rm"</span>, <span class="st">"-i"</span>,
+		<span class="st">"--name"</span>, name,
+		<span class="st">"--network"</span>, <span class="st">"none"</span>,
+		<span class="st">"--memory"</span>, strconv.Itoa(spec.MemoryMB) + <span class="st">"m"</span>,
+		<span class="st">"--memory-swap"</span>, strconv.Itoa(spec.MemoryMB) + <span class="st">"m"</span>,
+		<span class="st">"--pids-limit"</span>, strconv.Itoa(spec.PidsLimit),
+		<span class="st">"--cpus"</span>, spec.CPUs,
+		<span class="st">"--cap-drop"</span>, <span class="st">"ALL"</span>,
+		<span class="st">"--security-opt"</span>, <span class="st">"no-new-privileges"</span>,
+		<span class="st">"--user"</span>, <span class="st">"65534:65534"</span>,
+	}
+	<span class="kw">if</span> spec.ReadOnly {
+		args = append(args, <span class="st">"--read-only"</span>)
+	}
+	<span class="kw">for</span> _, t := <span class="kw">range</span> spec.Tmpfs {
+		args = append(args, <span class="st">"--tmpfs"</span>, t)
+	}
+	args = append(args, spec.Image)
+	args = append(args, spec.Cmd...)
+	<span class="cm">// …（この続き＝起動と読み取りは Step 4 へ）</span></code></pre>
+
+    <p>これは、あなたがターミナルで打つとしたらこうなる、というコマンドをコードで組み立てているだけです——</p>
+    <pre class="term"><code><span class="ps">$</span> docker run --rm -i --name judge-a1b2… \
+      --network none \
+      --memory 256m --memory-swap 256m \
+      --pids-limit 64 --cpus 1 \
+      --cap-drop ALL --security-opt no-new-privileges --user 65534:65534 \
+      --read-only --tmpfs /tmp:rw,exec,size=256m \
+      judge-go /judge/loop.sh 2.000 /tmp/box/prog</code></pre>
+    <p>フラグを、防御の意味とともに1つずつ解体します。<strong>ここが第03章の対応表の回収そのもの</strong>なので、なぜ立てるかを添えながら読んでください。</p>
+    <ul>
+      <li><code>run --rm -i</code> — <code>run</code> は新しいコンテナを起動。<code>--rm</code> は<strong>終了と同時にコンテナを自動削除</strong>（＝使い捨ての要。Step 7）。<code>-i</code> は<strong>stdin を繋ぐ</strong>指定で、これがないと後で tar を流し込めません。</li>
+      <li><code>--name judge-…</code> — コンテナに一意な名前を付けます（<code>containerName()</code> がランダム生成）。<strong>context が切れて生き残ったコンテナを、名前で名指しして後始末する</strong>ために要ります（Step 6）。</li>
+      <li><code>--network none</code> → <strong>ネットワーク遮断</strong>。コンテナに<strong>外向きのネットワークインターフェースを与えません</strong>（残るのはループバック <code>lo</code> だけで、外へは出られない）。提出コードは外に <code>curl</code> も <code>fetch</code> もできず、カンニングも踏み台化も不能。第03章の「ネットワーク越しの脅威」への直接の楯です。<strong>これを忘れると檻に大穴が空く</strong>——後述の落とし穴で最重要。</li>
+      <li><code>--memory 256m --memory-swap 256m</code> → <strong>メモリ上限</strong>。<code>--memory</code> だけだと、上限を超えた分がスワップ（ディスク）に逃げて「実質もっと使える」状態になります。<code>--memory-swap</code> を <code>--memory</code> と<strong>同じ値</strong>にすることで<strong>スワップを実質ゼロ</strong>にし、「物理メモリ上限＝真の上限」を確定させます。上限を超えるとカーネルの OOM killer がプロセスを殺し、終了コード <code>137</code> になる——これが第00章 <code>decideCase</code> の MLE 判定の土台です。</li>
+      <li><code>--pids-limit 64</code> → <strong>プロセス数上限</strong>。コンテナ内で<strong>同時に存在できるプロセス数を 64 に制限</strong>します。<code>while true; do fork; done</code> のような<strong>fork 爆弾</strong>は、<strong>64 の枠を使い切ったところで <code>fork</code> が失敗</strong>して頭打ちになり、ホストを道連れにできません。なお<strong>この 64 はコンテナ全体の枠</strong>で、ランナー側（<code>sh</code>・<code>/usr/bin/time</code>・<code>timeout</code>、第05章）が常時4つほど使っています。<strong>提出コードが増やせるのは実質 60 個前後</strong>と見ておいてください。</li>
+      <li><code>--cpus 1</code> → <strong>CPU 制限</strong>。使える CPU を 1 コア分に絞ります。CPU を全部持っていって他の採点やホストを妨げる、を防ぎます。</li>
+      <li><code>--cap-drop ALL</code> → <strong>Linux capability を全部剥奪</strong>。<code>CAP_NET_ADMIN</code>（ネットワーク設定）や <code>CAP_SYS_ADMIN</code>（強い管理操作）など、特権的な操作の権限をゼロにします。「万一 root で走っても、できることを最小に」の保険です。</li>
+      <li><code>--security-opt no-new-privileges</code> → <strong>権限昇格の封じ</strong>。<code>setuid</code> バイナリ等を使って実行途中で権限を上げる経路を塞ぎます。</li>
+      <li><code>--user 65534:65534</code> → <strong>非 root で実行</strong>。<code>65534</code> は慣例的に <code>nobody</code>（何の権限も持たないユーザー）の UID/GID です。提出コードを root ではなく nobody として走らせることで、万一の穴が空いても被害を最小化します。</li>
+      <li><code>--read-only</code>（<code>spec.ReadOnly</code> が真のとき）→ <strong>ルートファイルシステムを読み取り専用</strong>に。コンテナ内であっても、ファイルの作成・改変・削除を原則すべて拒否します。<code>rm -rf /</code> も書き込みも「読み取り専用です」で弾かれる。第03章の「ファイル破壊」への楯です。</li>
+      <li><code>--tmpfs /tmp:rw,exec,size=256m</code>（<code>spec.Tmpfs</code> の各要素）→ <strong>読み取り専用の中の、限定的な書き込み許可領域</strong>。read-only を掛けると、まともなプログラムでも一時ファイルすら書けず動きません。そこで <code>/tmp</code> だけを<strong>メモリ上の tmpfs</strong>として、しかも <code>size=256m</code> と<strong>サイズ上限つき</strong>で書き込み可能にします。ディスクではなくメモリなので、コンテナを消せば消え、上限があるので<strong>ディスク（メモリ）枯渇にもならない</strong>。「read-only で締めて、必要な穴だけ有界に開ける」という設計です。</li>
+    </ul>
+    <p>最後の <code>args = append(args, spec.Image)</code> と <code>append(args, spec.Cmd...)</code> で、<strong>イメージ名</strong>と<strong>コンテナ内で走らせるコマンド</strong>を末尾に足します。<code>docker run</code> の引数は「フラグ群 → イメージ → コマンド」の順でなければならないので、防御フラグを全部並べ切ってから、最後にイメージとコマンドを置いています。</p>
+
+    <div class="box hazard"><div class="box-k">⚠ 落とし穴 — 檻は<strong>1種類ではない</strong>。コンパイル段の檻は、実行段より緩い</div>
+      <p>ここまで「提出コードは read-only の檻で走る」と読んできたはずです。ところが <code>ReadOnly</code> は <code>bool</code>、つまり<strong>切り替えられる設計</strong>になっています。<code>--network none</code> のように問答無用で固定しなかったのはなぜか。答えは、<strong>Go と TypeScript の提出は、実行の前にもう1つ別の檻をくぐるから</strong>です——<strong>コンパイル段</strong>です（第06章）。そして<strong>その檻の設定は、実行段とかなり違います</strong>。</p>
+      <div class="ascii">同じ提出が通る、2つの檻（judge.go の RunSpec 実物）
+
+              コンパイル段            実行段
+              （go build する）       （提出コードを走らせる）
+  ReadOnly    false ←緩い            true
+  MemoryMB    2048（固定）           問題ごとの設定（既定 256）← 8倍ちがう
+  PidsLimit   256                    64    ← 4倍
+  CPUs        "2"                    "1"
+  WallTimeout 120s（固定）           ケース数から算出
+  Tmpfs       /tmp:rw,exec,size=512m /tmp:rw,exec,size=256m
+  StdoutLimit 64MB                   32MB  ← host 側の読み取り上限
+  network     none（両方とも同じ）    none</div>
+      <p><strong>なぜコンパイル段だけ read-only を外すのか。</strong> <code>go build</code> はビルドキャッシュ（<code>GOCACHE</code>）をイメージ内に書きます。ここを塞ぐとコンパイルそのものが成立しません。メモリや CPU が実行段より大きいのも同じ理由で、<strong>コンパイルは採点より重い作業</strong>だからです（提出コードの実行に 256MB で足りても、コンパイラには足りません）。</p>
+      <p><strong>では緩めた分、危険になったのか。</strong> ここが多層防御の効きどころです。緩めたのは <code>--read-only</code> <strong>1枚だけ</strong>で、残りの壁——<code>--network none</code>（外部と通信できない）・<code>--cap-drop ALL</code>・<code>--security-opt no-new-privileges</code>・<code>--user 65534</code>（非 root）・メモリと pids の上限・<strong>使い捨て（<code>--rm</code>）</strong>——は<strong>1枚も落としていません</strong>。書き込めるようになったのは「どうせコンテナごと捨てるイメージ層」であって、ホストではない。<strong>「全部を一律に締める」のではなく、必要な壁だけを、必要な場所で外す」</strong>——これが、防御を<strong>固定（<code>--network none</code>）と可変（<code>ReadOnly</code>）に書き分けた</strong>理由です。</p>
+      <p>覚えておいてください。<strong>「この基盤の檻の仕様」を問われたら、答えは1つではなく2つあります。</strong> 第03章で立てた脅威モデルは、どちらの檻に対しても点検する必要があります。</p>
+    </div>
+
+    <div class="box hazard"><div class="box-k">⚠ 落とし穴 — <code>--network none</code> を忘れると、檻に大穴が空く</div>
+      <p>この章のフラグの中で、<strong>忘れると最も危険</strong>なのが <code>--network none</code> です。これを書き落とすと、コンテナはデフォルトでネットワークに繋がり、提出コードは<strong>外部と自由に通信できてしまいます</strong>。競技プログラミングの文脈なら「答えを外部サーバから取ってくるカンニング」ですが、セルフホスト環境では<strong>内部ネットワークへの横移動の踏み台</strong>になり得ます。しかもこの穴は、<strong>普通に採点している限り誰も気づきません</strong>——ネットワークを使わない提出は正しく採点され、緑が出るからです。テストでも顕在化しにくい。だからこそ、防御フラグは<strong>「無いと動かない」ではなく「無くても動くが穴が空く」</strong>という性質を持つと肝に銘じ、<code>Run</code> の引数配列を変更するときは<strong>この一行を消していないか毎回確認</strong>してください。同様に <code>--memory-swap</code> を書き忘れると、メモリ上限がスワップで骨抜きになり MLE が正しく出なくなります。</p>
+    </div>
+
+    <h2 class="step" id="step-4"><span class="step-no">Step 4</span>os/exec で起動し、stdin に tar を流す — Run の本体</h2>
+    <p>引数が組み上がりました。次は、それを <code>os/exec</code> で<strong>実際に起動</strong>し、<strong>stdin に tar を流し込み、stdout を受け取る</strong>本体です。<code>Run</code> の続きを読みます。</p>
+
+    <div class="file-tag">internal/judge/sandbox.go（Run・起動と読み取り部）</div>
+    <pre><code>	<span class="cm">// （前ページの args 組み立てのつづき）</span>
+
+	runCtx, cancel := context.WithTimeout(ctx, spec.WallTimeout)
+	<span class="kw">defer</span> cancel()
+
+	cmd := exec.CommandContext(runCtx, d.DockerPath, args...)
+	cmd.Stdin = spec.Stdin
+
+	limit := spec.StdoutLimit
+	<span class="kw">if</span> limit &lt;= <span class="st">0</span> {
+		limit = <span class="st">16</span> &lt;&lt; <span class="st">20</span>
+	}
+	stdout := newCapWriter(limit)
+	stderr := newCapWriter(<span class="st">64</span> &lt;&lt; <span class="st">10</span>)
+	cmd.Stdout = stdout
+	cmd.Stderr = stderr
+
+	err := cmd.Run()
+
+	res := &amp;<span class="ty">RunResult</span>{
+		Stdout:    stdout.Bytes(),
+		Stderr:    stderr.Bytes(),
+		Truncated: stdout.Truncated(),
+	}
+
+	<span class="cm">// context が切れて docker CLI が殺された場合、コンテナは生き残るので必ず後始末する。</span>
+	<span class="cm">// タイムアウト（DeadlineExceeded）だけでなく、クライアント切断（Canceled）も回収する。</span>
+	<span class="kw">if</span> runCtx.Err() != <span class="kw">nil</span> {
+		res.TimedOut = runCtx.Err() == context.DeadlineExceeded
+		d.forceRemove(name)
+		<span class="kw">return</span> res, <span class="kw">nil</span>
+	}
+
+	<span class="kw">if</span> err != <span class="kw">nil</span> {
+		<span class="kw">var</span> exitErr *exec.<span class="ty">ExitError</span>
+		<span class="kw">if</span> errors.As(err, &amp;exitErr) {
+			res.ExitCode = exitErr.ExitCode()
+			<span class="cm">// 125/126/127 は docker CLI 自体の失敗（イメージ欠落等）→ IE 相当</span>
+			<span class="kw">if</span> res.ExitCode == <span class="st">125</span> || res.ExitCode == <span class="st">126</span> || res.ExitCode == <span class="st">127</span> {
+				<span class="kw">return</span> res, fmt.Errorf(<span class="st">"docker run failed (exit %d): %s"</span>, res.ExitCode, string(res.Stderr))
+			}
+			<span class="kw">return</span> res, <span class="kw">nil</span>
+		}
+		<span class="kw">return</span> res, err
+	}
+	<span class="kw">return</span> res, <span class="kw">nil</span>
+}</code></pre>
+
+    <p>上から、実行の一生を追います。</p>
+    <p><strong>① 締め切りつきの context を作る。</strong> <code>context.WithTimeout(ctx, spec.WallTimeout)</code> は、渡された <code>ctx</code> に<strong>壁時計の締め切り</strong>を上乗せした新しい <code>runCtx</code> を返します。<code>spec.WallTimeout</code>（たとえば「制限時間 × ケース数 + 余裕」）が過ぎたら <code>runCtx</code> は自動で「切れた」状態になります。<code>defer cancel()</code> は<strong>関数を抜けるとき必ず後始末する</strong>ための定石で、これを忘れると context に紐づく資源が漏れます。この <code>WallTimeout</code> が、無限ループに対する<strong>ホスト側の最終防衛線</strong>です（コンテナ内の <code>timeout</code> コマンドが第一防衛線、これが第二）。</p>
+    <p><strong>② docker run プロセスを起動可能な状態にする。</strong> <code>exec.CommandContext(runCtx, d.DockerPath, args...)</code> で、「<code>docker</code> を <code>args</code> で起動する」コマンドを作ります。<code>CommandContext</code> は<strong><code>runCtx</code> が切れたら、この <code>docker</code> プロセスを自動で kill する</strong>のがミソ。つまり壁時計タイムアウトに達した瞬間、Go 側は <code>docker</code> CLI を殺しにいきます。</p>
+    <p><strong>③ stdin に tar を繋ぐ。</strong> <code>cmd.Stdin = spec.Stdin</code>。<code>spec.Stdin</code> は「提出物とテストケースを固めた tar のストリーム」です。<code>docker run -i</code>（Step 3 の <code>-i</code>）でコンテナの標準入力を開けておいたので、この tar が<strong>コンテナの stdin へそのまま流れ込み</strong>、中のランナースクリプトが <code>tar -xf -</code> で展開します。<strong>bind mount も <code>docker cp</code> も使わず、stdin の tar だけで資材を届ける</strong>——これが本書のサンドボックスの重要な設計です（次の落とし穴・GO メモで理由を説明します）。</p>
+    <p><strong>④ stdout / stderr を「上限つきの受け皿」に繋ぐ。</strong> ここが第03章の「巨大出力」への楯です。素朴に <code>cmd.Output()</code> で全部読むと、提出コードが <code>while true: print("x")</code> のように<strong>無限に出力</strong>したとき、<strong>ジャッジ側のメモリが食い尽くされて死にます</strong>（コンテナのメモリ制限は<em>コンテナの中</em>にしか効かず、それを<em>ホストで読む</em>私たちのメモリは守ってくれません）。そこで <code>newCapWriter(limit)</code> という<strong>上限つきの書き込み先</strong>を用意し、<code>cmd.Stdout</code>・<code>cmd.Stderr</code> に差します。stdout は <code>spec.StdoutLimit</code>（指定なしなら <code>16&lt;&lt;20</code>＝16MB）、stderr は <code>64&lt;&lt;10</code>＝64KB まで。中身は Step 5 で解剖します。</p>
+    <p><strong>⑤ 走らせて、待つ。</strong> <code>err := cmd.Run()</code> が、<code>docker run</code> を起動して<strong>終わるまでブロック</strong>します。この間、コンテナ内で提出コードが走り、出力が <code>capWriter</code> に溜まっていきます。<code>Run()</code> が返ったら、実行は終わり——正常終了か、異常終了か、あるいはタイムアウトで殺されたか、のいずれかです。</p>
+    <p><strong>⑥ 結果を組み立て、まず「タイムアウト・中断」を判定する。</strong> <code>stdout.Bytes()</code> と <code>stderr.Bytes()</code>（上限内で受け取った分）、<code>stdout.Truncated()</code>（溢れたか）で <code>res</code> を作ったあと、真っ先に <code>if runCtx.Err() != nil</code> を見ます。これは<strong>「context が切れていたか」</strong>の判定です。切れていたなら——壁時計タイムアウト（<code>DeadlineExceeded</code>）でも、クライアント切断（<code>Canceled</code>）でも——<code>docker</code> CLI は殺されていますが、<strong>コンテナはまだ生き残っている可能性がある</strong>。だから <code>d.forceRemove(name)</code> で名指しして始末します（Step 6 で詳解）。<code>TimedOut</code> フラグは、切れた理由が締め切り（<code>DeadlineExceeded</code>）のときだけ立てます。</p>
+    <p><strong>⑦ 通常終了の場合は、終了コードを取り出す。</strong> context が切れていない、つまり <code>docker run</code> が自力で終わった場合。<code>cmd.Run()</code> がエラーを返していたら、それが <code>*exec.ExitError</code>（＝プロセスが非0で終わった）かを <code>errors.As</code> で確かめ、<code>exitErr.ExitCode()</code> で<strong>終了コードを回収</strong>します。ここで一つ大事な分別——<strong><code>125 / 126 / 127</code> は特別扱い</strong>です。これらは提出コードの終了コードではなく、<strong>docker CLI 自身の失敗</strong>（イメージが無い、実行権限が無い、コマンドが見つからない）を表します。つまり<strong>ジャッジ側の事故</strong>なので、<code>error</code> を返して呼び出し側に <code>IE</code> として扱わせます。それ以外の非0は、終了コードを <code>res.ExitCode</code> に載せて <code>nil</code> エラーで返します。ただし<strong>ここに載るのはコンテナ（ランナー）自体の終了コード</strong>で、ふだんは <code>0</code> です——提出コードが単にクラッシュしても、ランナー（<code>loop.sh</code>）はそれをケースの結果として記録したうえで最後まで走り、<code>exit 0</code> するからです。この <code>res.ExitCode</code> が非0になるのは<strong>コンテナごと落ちたとき</strong>（OOM で <code>137</code> 等）で、そのとき<strong>ケースのフレームが途中で途切れた場合のフォールバック判定</strong>（第00章で <code>137</code>→MLE 等）に使われます。<strong>各ケースの verdict は、この値ではなく後述のフレーム（<code>___CASE___</code> が運ぶケース別の終了コード）から <code>decideCase</code> が決めます。</strong></p>
+
+    <div class="gonote"><div class="box-k">GO メモ · exec.CommandContext / cmd.Stdin=Reader / errors.As</div>
+      <p><code>exec.CommandContext(ctx, name, args...)</code> は <code>exec.Command</code> に <code>ctx</code> を紐づけたもので、<strong><code>ctx</code> が切れたらそのプロセスを自動で kill</strong>します。タイムアウトで暴走プロセスを確実に止めるための土台です。<br>
+      <code>cmd.Stdin = spec.Stdin</code> のように <code>cmd.Stdin</code> に <code>io.Reader</code> を代入すると、<strong>そのストリームがそのままプロセスの標準入力に繋がります</strong>。<code>cmd.Stdout</code> / <code>cmd.Stderr</code> に <code>io.Writer</code> を代入すれば、プロセスの出力がその Writer に書き込まれる。私たちが <code>capWriter</code>（後述、<code>Write</code> メソッドを持つ＝<code>io.Writer</code>）を差せるのはこの仕組みのおかげです。<br>
+      <code>errors.As(err, &amp;exitErr)</code> は「<code>err</code> の連鎖の中に <code>*exec.ExitError</code> 型が含まれていれば、それを <code>exitErr</code> に取り出す」。エラーを型で仕分けして、終了コードのような<strong>型特有の情報</strong>を安全に取り出すための標準的なやり方です。</p>
+    </div>
+
+    <div class="box hazard"><div class="box-k">⚠ 落とし穴 — Docker Desktop が起動していないと、この Run はすべて失敗する</div>
+      <p>この章のコードは、実行のたびに <code>docker run</code> を起動します。<strong>Docker Desktop（デーモン）が起動していないと、<code>docker</code> コマンドがそもそも繋がらず</strong>、<code>Run</code> はエラー（典型的には exit 125 相当）を返し続けます。本書のバックエンドは、これを黙って <code>IE</code> にし続けるのではなく、<strong>起動時に <code>Ping</code> で疎通を確認</strong>し（Step 7）、不通なら「Docker が動いていません」と明示的に警告します。採点が動かないときは、まずクジラのアイコンが「Running」かを疑ってください。また、初回はジャッジイメージ（<code>judge-go</code> 等）のビルドも必要です（<code>images/build.ps1</code>）——イメージが無ければ <code>docker run</code> は exit 125 で失敗し、上の⑦の分岐で <code>IE</code> になります。</p>
+    </div>
+
+    <h2 class="step" id="step-5"><span class="step-no">Step 5</span>stdout を上限つきで読む — capWriter と host 側 OOM 防止</h2>
+    <p>Step 4 で「素朴に全部読むとジャッジ側が死ぬ」と言いました。その楯が <code>capWriter</code> です。上限まで溜め、超えた分は<strong>読み捨てる</strong>——しかも<strong>読み続けはする</strong>のが肝です。全文を読みます。</p>
+
+    <div class="file-tag">internal/judge/sandbox.go（capWriter）</div>
+    <pre><code><span class="cm">// capWriter は上限つきの書き込みバッファ。上限を超えた分は読み捨てて</span>
+<span class="cm">// パイプ詰まり（＝コンテナ側のブロック）を防ぐ。</span>
+<span class="kw">type</span> <span class="ty">capWriter</span> <span class="kw">struct</span> {
+	mu        sync.<span class="ty">Mutex</span>
+	buf       []<span class="ty">byte</span>
+	limit     <span class="ty">int64</span>
+	truncated <span class="ty">bool</span>
+}
+
+<span class="kw">func</span> newCapWriter(limit <span class="ty">int64</span>) *<span class="ty">capWriter</span> { <span class="kw">return</span> &amp;<span class="ty">capWriter</span>{limit: limit} }
+
+<span class="kw">func</span> (w *<span class="ty">capWriter</span>) Write(p []<span class="ty">byte</span>) (<span class="ty">int</span>, <span class="ty">error</span>) {
+	w.mu.Lock()
+	<span class="kw">defer</span> w.mu.Unlock()
+	room := w.limit - int64(len(w.buf))
+	<span class="kw">if</span> room &gt; <span class="st">0</span> {
+		take := int64(len(p))
+		<span class="kw">if</span> take &gt; room {
+			take = room
+			w.truncated = <span class="kw">true</span>
+		}
+		w.buf = append(w.buf, p[:take]...)
+	} <span class="kw">else</span> <span class="kw">if</span> len(p) &gt; <span class="st">0</span> {
+		w.truncated = <span class="kw">true</span>
+	}
+	<span class="kw">return</span> len(p), <span class="kw">nil</span>
+}
+
+<span class="kw">func</span> (w *<span class="ty">capWriter</span>) Bytes() []<span class="ty">byte</span> {
+	w.mu.Lock()
+	<span class="kw">defer</span> w.mu.Unlock()
+	<span class="kw">return</span> w.buf
+}
+
+<span class="kw">func</span> (w *<span class="ty">capWriter</span>) Truncated() <span class="ty">bool</span> {
+	w.mu.Lock()
+	<span class="kw">defer</span> w.mu.Unlock()
+	<span class="kw">return</span> w.truncated
+}</code></pre>
+
+    <p><code>capWriter</code> は「<strong>上限までしか溜めないが、上限を超えても書き込みを受け付け続ける</strong>」Writer です。この2つの性質が、両方とも大事です。</p>
+    <p><strong>上限までしか溜めない。</strong> <code>Write</code> の中で <code>room := w.limit - len(w.buf)</code>（残り容量）を計算します。<code>room &gt; 0</code> なら、渡されたデータ <code>p</code> のうち残り容量に収まる分（<code>take</code>）だけを <code>buf</code> に追記し、はみ出したら <code>take</code> を <code>room</code> に切り詰めて <code>truncated = true</code> を立てます。もう満杯（<code>room &lt;= 0</code>）なら、以降のデータは<strong>何も溜めず捨てる</strong>だけ（ただし <code>truncated</code> は立てる）。こうして <code>buf</code> は<strong>絶対に <code>limit</code> バイトを超えません</strong>。提出コードが 100GB 出力しようが、ジャッジ側のメモリ消費は上限で頭打ちです。第03章の「巨大出力によるジャッジ側 OOM（NF-06）」への直接の楯がこれです。</p>
+    <p><strong>それでも書き込みは受け付け続ける（＝<code>return len(p), nil</code>）。</strong> ここが見落としやすい急所です。<code>Write</code> は、実際に溜めた量ではなく<strong>常に <code>len(p)</code>（渡された全量）を「書けた」と返し、エラーも返しません</strong>。もし「もう満杯だからエラー」と返してしまうと、<code>os/exec</code> は出力先が壊れたと見なして<strong>パイプの読み端を閉じます</strong>。すると書き手（コンテナ内の提出プロセス）は次の <code>write</code> で <code>EPIPE</code>（＝<code>SIGPIPE</code>）を食らって<strong>即座に死に</strong>、<code>cmd.Run()</code> 自体もそのエラーを返して<strong>採点が壊れます</strong>。逆に、エラーは返さないが<strong>データの消費を止めて（読まなくなって）</strong>しまうと、今度はパイプのバッファが埋まってコンテナ側の <code>write</code> が<strong>ブロック（詰まる）</strong>し、タイムアウトまで無駄に生きて実行時間の計測も狂う。どちらに転んでもまずい——だから <code>capWriter</code> は<strong>「受け取ったふりをして、はみ出した分は静かに捨て続ける」</strong>。読み端を閉じず、消費も止めない。この一点を最優先にしています。コメントの「上限を超えた分は読み捨ててパイプ詰まり（＝コンテナ側のブロック）を防ぐ」がまさにこれです。</p>
+    <p><strong><code>truncated</code> フラグの重み。</strong> 溢れたことを <code>Truncated()</code> で外に伝えるのは、単なる情報提供ではありません。第00章の <code>JudgeSubmission</code> は、<strong>全ケース <code>AC</code> でも <code>runRes.Truncated</code> が立っていたら <code>AC</code> にせず <code>IE</code> に倒します</strong>。出力を途中で切り捨てた＝比較に使ったデータが不完全なのだから、「甘い <code>AC</code>」を出すより「採点しきれませんでした（<code>IE</code>）」と正直に言う。第00章で立てた<strong>「疑わしいときは AC を出さない」</strong>という思想が、ここでも効いています。</p>
+    <p>なお <code>sync.Mutex</code> で全メソッドを囲っているのは、<strong>念のための保険</strong>です。この構成では stdout と stderr は<strong>別々の <code>capWriter</code> インスタンス</strong>（<code>newCapWriter</code> を2回呼んでいる）で、各インスタンスは <code>os/exec</code> の1本の goroutine からしか書かれません。仮に同じ <code>capWriter</code> を stdout と stderr の両方に差したとしても、<code>os/exec</code> はその Writer への書き込みを直列化してくれます。つまり<strong>実際には競合しない構成</strong>なのですが、あとで使い方が変わっても（別の goroutine から <code>Bytes()</code> を覗く等）壊れないよう、<strong>防御的にロックで守っている</strong>——という位置づけです。</p>
+
+    <div class="box hazard"><div class="box-k">⚠ 落とし穴 — 標準出力を「無制限に読む」と、コンテナではなくホストが死ぬ</div>
+      <p>初学者が最も見落とすのが、<strong>「コンテナのメモリ制限があるから、出力も安全だろう」</strong>という思い込みです。<code>--memory 256m</code> は<strong>コンテナの中</strong>のメモリを 256MB に絞りますが、その出力を<strong>ホスト側で受け取る私たちのメモリ</strong>には一切効きません。もし <code>cmd.Output()</code> や無制限の <code>bytes.Buffer</code> で全部読んでしまうと、提出コードが延々と出力するだけで<strong>ジャッジプロセス（ホスト）のメモリが食い潰され、採点基盤全体が落ちます</strong>。しかもこれは、たった数行の <code>for { print("x") }</code> で引き起こせる。<code>capWriter</code> のように<strong>ホスト側で読む量に必ず上限を掛ける</strong>こと——そしてその上限に達したら「詰まらせずに捨て、<code>Truncated</code> を立てて採点を <code>IE</code> に倒す」こと——が、この防御の正解です。「檻の中の資源制限」と「檻の外で読む側の資源制限」は<strong>別物</strong>で、両方が要る、と覚えてください。</p>
+    </div>
+
+    <h2 class="step" id="step-6"><span class="step-no">Step 6</span>タイムアウトと後始末 — context が切れたらコンテナを消す</h2>
+    <p>Step 4 の⑥で「context が切れたらコンテナを名指しで消す」と言いました。ここを掘ります。なぜ <code>--rm</code>（自動削除）を付けているのに、わざわざ手動の削除が要るのか?</p>
+    <p>答えは、<strong><code>--rm</code> は「コンテナが自力で終了したとき」にしか効かない</strong>からです。壁時計タイムアウトに達すると、<code>exec.CommandContext</code> は<strong><code>docker</code> CLI プロセスを kill</strong>します。しかし kill されるのは私たちが起動した <code>docker</code> という<strong>クライアント</strong>であって、その先で Docker デーモンが動かしている<strong>実際のコンテナは生き残ることがある</strong>。CLI が死んでも <code>--rm</code> は発動しないので、<strong>コンテナがゾンビとして残留</strong>します。放置すればメモリと CPU を握ったまま溜まり続け、いずれホストを圧迫する。だから<strong>名指しで確実に消す</strong>必要があります。その道具が <code>forceRemove</code> と、Step 3 で振った一意な <code>--name</code> です。</p>
+
+    <div class="file-tag">internal/judge/sandbox.go（後始末・コンテナ名生成）</div>
+    <pre><code><span class="cm">// forceRemove は名前指定でコンテナを強制削除する（context 切れ後の後始末用）。</span>
+<span class="kw">func</span> (d *<span class="ty">DockerSandbox</span>) forceRemove(name <span class="ty">string</span>) {
+	killCtx, cancel := context.WithTimeout(context.Background(), <span class="st">15</span>*time.Second)
+	<span class="kw">defer</span> cancel()
+	_ = exec.CommandContext(killCtx, d.DockerPath, <span class="st">"rm"</span>, <span class="st">"-f"</span>, name).Run()
+}
+
+<span class="kw">func</span> containerName() <span class="ty">string</span> {
+	b := <span class="kw">make</span>([]<span class="ty">byte</span>, <span class="st">8</span>)
+	_, _ = rand.Read(b)
+	<span class="kw">return</span> <span class="st">"judge-"</span> + hex.EncodeToString(b)
+}</code></pre>
+
+    <p><strong><code>forceRemove</code>。</strong> <code>docker rm -f &lt;name&gt;</code>（<code>-f</code> は「走っていても強制削除」）を、名指しで叩くだけです。ポイントは、この後始末に<strong>新しい context（<code>context.Background()</code> + 15秒タイムアウト）</strong>を使っていること。もとの <code>runCtx</code> はもう切れているので、それを使うと後始末のコマンド自体が即座に「切れてる」と弾かれてしまう。だから<strong>後始末専用の、切れていない context</strong> を立て直します。15秒の上限は「後始末が万一固まっても、そこで無限に待たない」ための保険です。返り値は <code>_ =</code> で捨てています——後始末が失敗しても採点結果は既に手元にあり、これ以上できることがないからです（残ったら Step 7 の起動時掃除が拾います）。</p>
+    <p><strong><code>containerName</code>。</strong> <code>crypto/rand</code> で8バイトの乱数を作り、16進文字列にして <code>judge-</code> を前置し、<code>judge-a1b2c3d4e5f6a7b8</code> のような<strong>一意な名前</strong>を生成します。名前が一意でないと、同時に走る複数の採点でコンテナ名が衝突し、後始末が別のコンテナを巻き込む。ランダムにすることで<strong>各コンテナを確実に名指しできる</strong>ようにしています。接頭辞 <code>judge-</code> を揃えているのは、Step 7 の「残留コンテナ掃除」がこの名前で一括検索できるようにするためです。</p>
+    <p>整理すると、無限ループへの防御は<strong>三重</strong>になっています。①コンテナ内の <code>timeout</code> コマンド（第一防衛線、exit 124 で TLE を確定）、②ホスト側の <code>WallTimeout</code>付き <code>CommandContext</code>（第二防衛線、CLI を kill）、③そこで残ったコンテナを名指しで消す <code>forceRemove</code>（後始末）。この三段があって初めて、「暴走する提出は、必ず、確実に、痕跡を残さず止まる」が保証されます。</p>
+
+    <h2 class="step" id="step-7"><span class="step-no">Step 7</span>コンテナは使い捨て — ライフサイクルと疎通確認・掃除</h2>
+    <p>この章の設計思想の核——<strong>コンテナは使い捨て</strong>——を、ライフサイクルの全体像として押さえます。1回の <code>Run</code> のたびに、コンテナは<strong>生まれて、走って、消える</strong>。</p>
+
+    <div class="ascii">コンテナ1個のライフサイクル（1 Run）
+
+  containerName()        判定は第00章の decideCase が行う
+  で一意名を採番              ▲
+      │                       │ RunResult（ExitCode / Stdout / …）
+      ▼                       │
+  docker run --rm -i …  ─(走る)─▶  正常終了 → --rm で自動削除
+   （防御フラグ全部）                     │
+      │ stdin: tar                        └─ タイムアウト → CLI kill
+      │ stdout: capWriter                        → forceRemove で名指し削除
+      ▼
+  ┌─ この間、提出コードはコンテナの中でしか生きられない ─┐
+  │  ・ネット無し ・FS 読み取り専用 ・資源上限          │
+  │  ・何を汚しても、コンテナごと消えれば残らない        │
+  └──────────────────────────────────────────────────────┘</div>
+
+    <p><strong>なぜ使い捨てが防御を単純にするのか。</strong> もしコンテナを使い回すなら、「前の提出が残したファイルやプロセスが、次の提出に影響しないか」を常に心配しなければなりません。だが使い捨てなら、その心配は消えます。提出コードがコンテナ内でファイルを書こうが（tmpfs に）、プロセスを増やそうが（pids 上限まで）、<strong>コンテナを丸ごと捨てれば、次の採点は完全にまっさらな状態から始まる</strong>。「壊されたら直す」ではなく「壊されたら捨てて作り直す」。この割り切りが、状態のリークという厄介な問題を根こそぎ無くします。<code>--rm</code>（自動削除）と <code>forceRemove</code>（取りこぼしの回収）の二段構えで、<strong>コンテナが一つも残らない</strong>ことを担保しているわけです。</p>
+    <p>ただし現実には、<strong>異常な落ち方（ジャッジ自体のクラッシュ、電源断）で <code>forceRemove</code> すら走れず、コンテナが残る</strong>ことがあります。それを次の起動時に掃除するのが <code>CleanupResidue</code> です。あわせて、起動時に Docker との疎通を確かめる <code>Ping</code>、イメージの存在を確かめる <code>HasImage</code> も読んでおきます。</p>
+
+    <div class="file-tag">internal/judge/sandbox.go（疎通確認・イメージ確認・残留掃除）</div>
+    <pre><code><span class="kw">func</span> NewDockerSandbox() *<span class="ty">DockerSandbox</span> {
+	<span class="kw">return</span> &amp;<span class="ty">DockerSandbox</span>{DockerPath: <span class="st">"docker"</span>}
+}
+
+<span class="cm">// Ping は Docker デーモンとの疎通を確認する。</span>
+<span class="kw">func</span> (d *<span class="ty">DockerSandbox</span>) Ping(ctx context.<span class="ty">Context</span>) <span class="ty">error</span> {
+	out, err := exec.CommandContext(ctx, d.DockerPath, <span class="st">"version"</span>, <span class="st">"--format"</span>, <span class="st">"{{.Server.Version}}"</span>).CombinedOutput()
+	<span class="kw">if</span> err != <span class="kw">nil</span> {
+		<span class="kw">return</span> fmt.Errorf(<span class="st">"docker not reachable: %s"</span>, string(out))
+	}
+	<span class="kw">return</span> <span class="kw">nil</span>
+}
+
+<span class="cm">// HasImage はジャッジイメージの存在を確認する（起動時 fail-fast 用）。</span>
+<span class="kw">func</span> (d *<span class="ty">DockerSandbox</span>) HasImage(ctx context.<span class="ty">Context</span>, image <span class="ty">string</span>) <span class="ty">bool</span> {
+	err := exec.CommandContext(ctx, d.DockerPath, <span class="st">"image"</span>, <span class="st">"inspect"</span>, image).Run()
+	<span class="kw">return</span> err == <span class="kw">nil</span>
+}
+
+<span class="cm">// CleanupResidue は前回異常終了で残った judge-* コンテナを掃除する（起動時に呼ぶ）。</span>
+<span class="kw">func</span> (d *<span class="ty">DockerSandbox</span>) CleanupResidue(ctx context.<span class="ty">Context</span>) {
+	out, err := exec.CommandContext(ctx, d.DockerPath, <span class="st">"ps"</span>, <span class="st">"-aq"</span>, <span class="st">"--filter"</span>, <span class="st">"name=judge-"</span>).Output()
+	<span class="kw">if</span> err != <span class="kw">nil</span> {
+		<span class="kw">return</span>
+	}
+	<span class="kw">for</span> _, id := <span class="kw">range</span> strings.Fields(string(out)) {
+		_ = exec.CommandContext(ctx, d.DockerPath, <span class="st">"rm"</span>, <span class="st">"-f"</span>, id).Run()
+	}
+}</code></pre>
+
+    <p><strong><code>Ping</code>。</strong> <code>docker version</code> を叩き、デーモン（サーバ）のバージョンが取れるかで疎通を確かめます。取れなければ「Docker が起動していない」ということなので、バックエンドは起動時にこれを見て、不通なら<strong>黙って IE を返し続けるのではなく、明示的に警告</strong>します。序章と Step 4 の落とし穴で触れた「クジラが Running か疑え」の実体がこの関数です。</p>
+    <p><strong><code>HasImage</code>。</strong> <code>docker image inspect &lt;image&gt;</code> が成功するかで、ジャッジイメージ（<code>judge-go</code> 等）が手元にあるかを確かめます。無ければ <code>docker run</code> は exit 125 で失敗するので、<strong>起動時に先回りして気づく（fail-fast）</strong>ためのチェックです。</p>
+    <p><strong><code>CleanupResidue</code>。</strong> <code>docker ps -aq --filter name=judge-</code> で<strong><code>judge-</code> という接頭辞のコンテナを全部列挙</strong>し、一つずつ <code>docker rm -f</code> で消します。Step 6 で全コンテナ名を <code>judge-</code> で始めたのは、この一括掃除のためでした。前回ジャッジが異常終了して <code>forceRemove</code> が走れなかったとしても、<strong>次の起動時にここで残骸を一掃</strong>できます。使い捨ての原則を、異常系まで含めて守り切るための最後の一手です。</p>
+
+    <div class="gonote"><div class="box-k">GO メモ · CombinedOutput / .Output() / .Run() の使い分け</div>
+      <p><code>os/exec</code> でコマンドを走らせて結果を得る方法は3つあり、使い分けています。<code>cmd.Run()</code> は<strong>実行して終了を待つだけ</strong>（出力は要らない、成否だけ知りたいとき——<code>HasImage</code>・<code>forceRemove</code>）。<code>cmd.Output()</code> は<strong>標準出力を <code>[]byte</code> で受け取る</strong>（<code>CleanupResidue</code> でコンテナ ID の一覧を読むとき）。<code>cmd.CombinedOutput()</code> は<strong>標準出力と標準エラーを混ぜて受け取る</strong>（<code>Ping</code> でエラー時の理由も含めて拾いたいとき）。なお本命の <code>Run</code>（Step 4）だけは、これらの「全部読む」系を<strong>使わず</strong>、<code>cmd.Stdout</code> に <code>capWriter</code> を差して<strong>上限つきで読んでいる</strong>——提出コードの出力だけは信用できないので、量を必ず縛る、という区別です。</p>
+    </div>
+
+    <h2 class="step" id="step-8"><span class="step-no">Step 8</span>第03章の対応表を回収する — 脅威 → フラグ → フィールド</h2>
+    <p>この章の締めくくりに、第03章で作った「脅威 → 防御」の表を、<strong>実装の3層（<code>RunSpec</code> フィールド → <code>docker run</code> フラグ → 効果）</strong>まで通した完成形で並べ直します。第03章の抽象的な脅威が、この章の具体的なコードで<strong>全部塞がれた</strong>ことを、目で確認してください。</p>
+    <table>
+      <tr><th>第03章の脅威</th><th>RunSpec フィールド</th><th>docker run フラグ</th><th>効果</th></tr>
+      <tr><td>ファイルの破壊・改変（<code>rm -rf</code> 等）</td><td><code>ReadOnly</code> / <code>Tmpfs</code></td><td><code>--read-only</code> / <code>--tmpfs</code></td><td>FS は読み取り専用。書けるのは有界の tmpfs だけ<br><span class="cm">※実行段の話。コンパイル段は <code>ReadOnly=false</code>（Step 3 の落とし穴）</span></td></tr>
+      <tr><td>ネットワーク越しの攻撃・カンニング</td><td>（常時）</td><td><code>--network none</code></td><td>NIC を与えず、外部通信を完全遮断</td></tr>
+      <tr><td>メモリ枯渇でホスト巻き添え</td><td><code>MemoryMB</code></td><td><code>--memory</code> / <code>--memory-swap</code></td><td>物理メモリ上限を確定。超過は OOM kill（137→MLE）</td></tr>
+      <tr><td>fork 爆弾（プロセス増殖）</td><td><code>PidsLimit</code></td><td><code>--pids-limit</code></td><td>プロセス数に天井。増殖が頭打ちに</td></tr>
+      <tr><td>CPU 占有</td><td><code>CPUs</code></td><td><code>--cpus</code></td><td>使える CPU を割り当て分に制限</td></tr>
+      <tr><td>権限昇格・特権操作</td><td>（常時）</td><td><code>--cap-drop ALL</code> / <code>no-new-privileges</code> / <code>--user 65534</code></td><td>capability 全剥奪・昇格封じ・非 root 実行</td></tr>
+      <tr><td>無限ループ（実行が終わらない）</td><td><code>WallTimeout</code></td><td>コンテナ内 <code>timeout</code> ＋ <code>CommandContext</code></td><td>二重の締め切り。残ればコンテナも名指し削除</td></tr>
+      <tr><td>巨大出力でジャッジ側 OOM</td><td><code>StdoutLimit</code></td><td>（ホスト側 <code>capWriter</code>）</td><td>ホストが読む量に上限。溢れたら Truncated→IE</td></tr>
+    </table>
+    <p>この表が、第03章と第04章を貫く1本の背骨です。<strong>脅威を数え上げ（03章）、その一つずつに <code>RunSpec</code> のフィールドと <code>docker run</code> のフラグを当て（04章）、コードで確かに立てた。</strong> 「他人のコードは敵」という前提から出発して、その敵を逃げ場のない檻に閉じ込めるところまで、私たちは自分の手で組み上げました。これが本書のセキュリティの心臓部です。</p>
+
+    <div class="box do"><div class="box-k">▸ 動かして確認</div>
+      <p>この章の <code>sandbox.go</code> の一部は Docker がないと動かせませんが、<strong>tar の受け渡し（<code>MakeTar</code>）とプロトコル解釈は Docker 不要</strong>で検証できます。まずそこを緑にします。</p>
+      <pre class="term"><code><span class="ps">$</span> cd backend
+<span class="ps">$</span> go test ./internal/judge/ -run 'TestMakeTarRoundtrip|TestParseRunOutput' -v
+<span class="out">=== RUN   TestMakeTarRoundtrip
+--- PASS: TestMakeTarRoundtrip (0.00s)
+=== RUN   TestParseRunOutput
+--- PASS: TestParseRunOutput (0.00s)
+=== RUN   TestParseRunOutputIncomplete
+--- PASS: TestParseRunOutputIncomplete (0.00s)
+=== RUN   TestParseRunOutputMalformed
+--- PASS: TestParseRunOutputMalformed (0.00s)
+PASS
+ok      judge/internal/judge    1.116s</span></code></pre>
+      <p><code>TestMakeTarRoundtrip</code> は「<code>MakeTar</code> でファイル群を tar に固め、読み戻すと同じ内容が復元できる」を確かめます——Step 4 の③「stdin に tar を流す」で送り込むデータの正しさです。<code>TestParseRunOutput</code> 系は、コンテナが stdout に吐くフレーム（<code>___CASE___ …</code>）を <code>RunResult.Stdout</code> から解釈する部分を検証します。</p>
+      <p>実際にコンテナを起動する採点まで通したいなら、<strong>Docker Desktop を起動</strong>し、ジャッジイメージをビルドしてから全テスト＋実起動を試します。</p>
+      <pre class="term"><code><span class="cm"># Docker Desktop を Running にしてから</span>
+<span class="ps">$</span> docker run --rm hello-world      <span class="cm"># 疎通確認（序章と同じ）</span>
+<span class="cm"># PowerShell 5.1 では && が使えないので2行に分ける</span>
+<span class="ps">$</span> cd images                        <span class="cm"># judge-go / judge-node / judge-sql をビルド</span>
+<span class="ps">$</span> ./build.ps1
+<span class="ps">$</span> cd ../backend
+<span class="ps">$</span> go test ./... -count=1
+<span class="out">?       judge/cmd/server        [no test files]
+?       judge/internal/api      [no test files]
+ok      judge/internal/judge    1.512s
+?       judge/internal/store    [no test files]</span></code></pre>
+      <p>テストが載っているのは <code>internal/judge</code> だけなので、それ以外のパッケージは <code>[no test files]</code> と出るのが正常です（表示はパッケージ名のアルファベット順）。</p>
+      <p><strong>ここで大事な線引きを1つ。この <code>go test</code> は、Docker が起動していなくても緑になります。</strong> 本書のテスト9本は、出力比較（<code>compare_test.go</code>）と受け渡しプロトコルの解釈（<code>protocol_test.go</code>）だけを対象にしていて、<strong>実際にコンテナを起動するテストは1本もありません</strong>。だから「Docker を落としたままテストが赤い」なら、それは Docker のせいではなく<strong>自分の変更のせい</strong>です——切り分けに迷わないでください。</p>
+      <div class="ascii">何に Docker が要るか（この章の境界線）
+  go test ./...          → Docker 不要。純粋なロジックだけを検収する
+  go run ./cmd/server    → Docker 必須。起動時に Ping / HasImage で確かめる
+  提出して採点させる     → Docker 必須。毎回 docker run が走る</div>
+      <p>Docker が要るのは、この次の <code>go run ./cmd/server</code> からです。サーバを立てたとき、起動ログに <code>警告: Docker に接続できません…</code> や <code>警告: ジャッジイメージ … がありません</code> が<strong>出なければ</strong>、この章の <code>Ping</code> / <code>HasImage</code> による疎通・イメージ確認が通っている証拠です（成功時はこれらの警告を出さず、静かに <code>CleanupResidue</code> まで進みます）。</p>
+    </div>
+
+    <h2>つまずき FAQ</h2>
+    <details class="qa"><summary>なぜ bind mount や <code>docker cp</code> でファイルを渡さず、わざわざ stdin に tar を流すの?</summary>
+      <div class="qa-body"><p>Windows での<strong>パス変換・CRLF 問題</strong>を避けるためです（<code>sandbox.go</code> のコメントにも明記）。bind mount はホストのパスをコンテナにマウントしますが、Windows のパス（<code>C:\…</code>）を Docker Desktop 経由で渡すと変換の罠があり、テキストファイルの改行が <code>\r\n</code> に化けることもあります。<code>docker cp</code> はコンテナが起動してからでないと使えず、ライフサイクルが複雑になる。対して<strong>stdin に tar を流し込む</strong>方式は、<code>docker run -i</code> さえあればホストにファイルを一切書かずに資材を届けられ、OS 差の影響を受けません。<code>MakeTar</code> でメモリ上に tar を組み、<code>cmd.Stdin</code> に差すだけ——シンプルで移植性が高い、というのが選定理由です。</p></div>
+    </details>
+    <details class="qa"><summary><code>--rm</code> を付けているのに、なぜ <code>forceRemove</code> でもう一度消すの? 二重では?</summary>
+      <div class="qa-body"><p>効くタイミングが違うからです。<code>--rm</code> は<strong>コンテナが自力で終了したとき</strong>にだけ自動削除します。ところが壁時計タイムアウトで <code>exec.CommandContext</code> が <code>docker</code> CLI を kill すると、殺されるのは<strong>クライアント（CLI）</strong>で、その先の<strong>実コンテナは生き残ることがある</strong>。CLI が死ねば <code>--rm</code> は発動しないので、コンテナがゾンビとして残る。<code>forceRemove</code> は、この「<code>--rm</code> が効かなかったケース」を<strong>名指しで確実に始末する</strong>ための保険です。通常終了なら <code>--rm</code> が消し、<code>forceRemove</code> は空振り（既に無いものを消そうとするだけ）で無害。二重ではなく<strong>取りこぼしを塞ぐ二段構え</strong>です。</p></div>
+    </details>
+    <details class="qa"><summary>コンテナに <code>--memory 256m</code> を掛けているのに、なぜ stdout の読み取りにも上限（<code>StdoutLimit</code>）が要るの?</summary>
+      <div class="qa-body"><p>効く場所が<strong>まったく別</strong>だからです。<code>--memory</code> は<strong>コンテナの中</strong>で提出コードが使えるメモリを縛ります。しかし、その提出コードが吐いた<strong>出力を受け取るのは、コンテナの外にいるジャッジ（ホスト）</strong>です。ホスト側のメモリは <code>--memory</code> の管轄外——提出が <code>for { print("x") }</code> で無限に出力すると、それを全部読もうとするジャッジのメモリが食い尽くされ、<strong>採点基盤ごと落ちます</strong>。だから「檻の中の資源制限（<code>--memory</code>）」とは別に、「檻の外で読む量の制限（<code>StdoutLimit</code>＋<code>capWriter</code>）」が要る。両方あって初めて、コンテナもホストも守られます。</p></div>
+    </details>
+
+    <h2>理解度チェック</h2>
+    <p>次の問いに<strong>自分の言葉で</strong>答えられたら、この章は卒業です。</p>
+    <details class="qa"><summary>1. <code>Run</code> の引数から <code>--network none</code> を1行削ったら、何が起きるか。なぜテストでは気づきにくいか。</summary>
+      <div class="qa-body"><p>コンテナがデフォルトでネットワークに繋がり、<strong>提出コードが外部と自由に通信できてしまう</strong>。競プロ文脈なら答えを外部から取るカンニング、セルフホストなら内部ネットワークへの踏み台化が可能になる。テストで気づきにくいのは、<strong>ネットワークを使わない通常の提出は正しく採点され、緑が出てしまう</strong>から。防御フラグは「無いと動かない」のではなく「無くても動くが穴が空く」性質を持つため、機能テストでは顕在化しない。だから引数配列をいじるときは、この一行を消していないか毎回確認する必要がある。</p></div>
+    </details>
+    <details class="qa"><summary>2. <code>capWriter.Write</code> が、上限を超えても <code>len(p), nil</code>（＝全部書けた・エラー無し）を返すのはなぜか。</summary>
+      <div class="qa-body"><p><strong>採点を壊さず、かつパイプを詰まらせないため</strong>。もし「もう満杯だ」とエラーを返すと、<code>os/exec</code> は出力先が壊れたと見なして<strong>パイプの読み端を閉じる</strong>。すると書き手であるコンテナ内の提出プロセスは次の <code>write</code> で <code>EPIPE</code>（<code>SIGPIPE</code>）を食らって<strong>即死し、<code>cmd.Run()</code> 自体もエラーを返して採点が壊れる</strong>。逆に、エラーは返さずとも<strong>消費を止めて（読まなくなって）</strong>しまえば、今度はパイプが埋まって<strong>コンテナ側の <code>write</code> がブロック（詰まる）</strong>し、タイムアウトまで無駄に生きて実行時間の計測も狂う。どちらもまずいので、<code>capWriter</code> は<strong>「受け取ったふりをして、上限を超えた分は静かに捨て続ける」</strong>——読み端を閉じず、消費も止めない。量は <code>limit</code> で頭打ちにしてホストの OOM を防ぎつつ、書き込み自体は常に成功として受け続け、コンテナをスムーズに走り切らせる。溢れた事実は <code>truncated</code> フラグで外に伝え、採点側が <code>IE</code> に倒す。</p></div>
+    </details>
+    <details class="qa"><summary>3. 無限ループする提出に対する防御が「三重」だと言った。その三段を挙げ、それぞれ何を止めるか説明せよ。</summary>
+      <div class="qa-body"><p>①<strong>コンテナ内の <code>timeout</code> コマンド</strong>（第一防衛線）：制限時間で提出プロセスに SIGTERM を送り、exit 124 を返す。TLE を経過時間に頼らず終了コードで確定できる。②<strong>ホスト側の <code>WallTimeout</code> 付き <code>CommandContext</code></strong>（第二防衛線）：ケース数×TL+余裕の壁時計を超えたら、<code>docker</code> CLI プロセスを kill する。コンテナ内 timeout をすり抜けた暴走を、ホストから断ち切る。③<strong><code>forceRemove</code></strong>（後始末）：②で CLI を殺したあと生き残ったコンテナを、一意な <code>--name</code> で名指しして <code>docker rm -f</code> で確実に消す。この三段で「暴走提出は必ず・確実に・痕跡を残さず止まる」を保証する。</p></div>
+    </details>
+
+    <h2>まとめ — 次の層へ</h2>
+    <p>この章で、私たちは<strong>他人のコードを閉じ込める檻</strong>を組み上げました。<code>Sandbox</code> インターフェースで実行機構を採点の芯から切り離し、<code>RunSpec</code> という「防御の設定表」の各フィールドを、<code>docker run</code> のフラグ（<code>--network none</code> / <code>--read-only</code>＋<code>--tmpfs</code> / <code>--memory</code> / <code>--pids-limit</code> / <code>--cpus</code> / capability 剥奪）へ一つずつ翻訳した。<code>os/exec</code> で <code>docker run</code> を起動し、<strong>stdin に tar を流し、stdout を上限つきの <code>capWriter</code> で受け取り</strong>、<code>context</code> が切れたらコンテナを名指しで葬る。コンテナは使い捨て、残骸は起動時に一掃。第03章で数えた脅威は、この章のコードで<strong>一つ残らず塞がれ</strong>ました。</p>
+    <p>ただし、まだ<strong>詰め切れていない急所</strong>が2つあります。第一に、この章では制限を<strong>「掛けた」</strong>だけで、それが破られたとき——メモリを超えた、時間を超えた——を<strong>verdict にどう変換するか</strong>の詰めは、まだ第00章 <code>decideCase</code> の分岐（<code>137</code>→MLE、<code>124</code>→TLE）に頼っています。第二に、その終了コードを正しく生む<strong>コンテナ内のランナー</strong>（<code>timeout</code> と <code>time</code> をどう組み合わせて exit コードと経過時間・MaxRSS を作るか）を、まだ開けていません。次の第05章「時間とメモリを断ち切る」では、この<strong>制限の破れを検知し、TLE / MLE として確定させる仕組み</strong>——コンテナ内のランナースクリプトと、それが吐く終了コードの設計——を、ホスト側の判定と噛み合わせて仕上げます。檻は組んだ。次は、檻の中で起きた「破れ」を、正しく読み取る番です。</p>
+
+    <div class="chap-foot">
+      <a class="pager" href="03-threat.html"><span class="dir">← 前へ</span>第03章 · なぜ他人のコードは危険か</a>
+      <a class="pager next" href="05-limits.html"><span class="dir">次へ →</span>第05章 · 時間とメモリを断ち切る</a>
+    </div>
+  </main>
+</div>
+</body>
+</html>

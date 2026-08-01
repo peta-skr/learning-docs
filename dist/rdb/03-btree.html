@@ -1,0 +1,1356 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>第03章 B+Tree 索引 — ディスクからつくるデータベース</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500;600&family=Source+Serif+4:opsz,wght@8..60,400;8..60,600;8..60,700&family=Noto+Serif+JP:wght@400;600;700&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<div class="shell">
+
+  <aside class="spine">
+    <a class="wordmark" href="index.html">MINIDB · from scratch</a>
+    <div class="book-title">ディスクから<br>つくるデータベース</div>
+    <div class="book-sub">Go で B+Tree から SQL まで</div>
+
+    <div class="legend"><span>読む <b>↓</b></span><span>組む <b>↑</b></span></div>
+
+    <nav aria-label="目次">
+      <ul class="toc">
+        <li><a class="nav-item" href="index.html"><span class="nav-num">序</span><span class="nav-label">はじめに・準備<span class="nav-tag">Setup</span></span></a></li>
+        <li><a class="nav-item" href="00-disk.html"><span class="nav-num">00</span><span class="nav-label">ディスクとページ<span class="nav-tag">Disk</span></span></a></li>
+        <li><a class="nav-item" href="01-page.html"><span class="nav-num">01</span><span class="nav-label">ページの中身<span class="nav-tag">Page</span></span></a></li>
+        <li><a class="nav-item" href="02-buffer.html"><span class="nav-num">02</span><span class="nav-label">バッファプール<span class="nav-tag">Buffer</span></span></a></li>
+        <li><a class="nav-item current" aria-current="page" href="03-btree.html"><span class="nav-num">03</span><span class="nav-label">B+Tree 索引<span class="nav-tag">Index</span></span></a></li>
+        <li><a class="nav-item" href="04-catalog.html"><span class="nav-num">04</span><span class="nav-label">表とカタログ<span class="nav-tag">Catalog</span></span></a></li>
+        <li><a class="nav-item" href="05-sql.html"><span class="nav-num">05</span><span class="nav-label">SQL を実行する<span class="nav-tag">Query</span></span></a></li>
+        <li><a class="nav-item" href="06-wal.html"><span class="nav-num">06</span><span class="nav-label">壊れない仕組み<span class="nav-tag">WAL</span></span></a></li>
+        <li><a class="nav-item" href="07-txn.html"><span class="nav-num">07</span><span class="nav-label">索引とトランザクション<span class="nav-tag">Txn</span></span></a></li>
+      </ul>
+    </nav>
+
+    <div class="spine-foot">
+      各章は一つの層。<br>下（ディスク）から上（SQL）へ<br>積み上げて動かしていく。
+    </div>
+  </aside>
+
+  <main class="reading">
+    <div class="progress-tag">第03章 / 全8章 · 層: INDEX · 読了目安 4〜6時間</div>
+    <div class="eyebrow"><span>Index</span><span class="depth">— 速く見つける</span></div>
+    <h1>B+Tree 索引</h1>
+    <p class="lede">全ページを端から探せば、いつか見つかります。でも数百万行ではそれは遅すぎる。キーで一瞬にたどり着き、範囲もなめらかに走査できる木 — B+Tree を、ページの上に組み上げます。本書でいちばん重く、いちばん面白い章です。</p>
+
+    <div class="box goal"><div class="box-k">◈ この章のゴール</div>
+      <p><code>internal/btree</code> の全コード（約530行）を読み切り、挿入・分割・等値検索・範囲走査・削除の全経路を自分の言葉で説明できるようになる。仕上げに、<strong>5000件をランダム順に入れた木の等値検索が「触るノード3枚」で終わる</strong>ことをテストで実測する。</p>
+    </div>
+
+    <div class="box map"><div class="box-k">☰ この章のステップ</div>
+      <ol>
+        <li><a href="#step-1">重複キーを飼いならす — TID と複合キー</a></li>
+        <li><a href="#step-2">ノード = 1ページ — レイアウトとアクセサ</a></li>
+        <li><a href="#step-3">ノードの中を探す・詰める — 二分探索と挿入</a></li>
+        <li><a href="#step-4">木の骨格 — メタページと根の間接参照</a></li>
+        <li><a href="#step-5">挿入の背骨 — 再帰で降りて、分割を上へ運ぶ</a></li>
+        <li><a href="#step-6">分割 — 葉のコピーアップ、内部のプッシュアップ、根の成長</a></li>
+        <li><a href="#step-7">探索 — 木を降り、葉を横に歩く</a></li>
+        <li><a href="#step-8">削除 — 併合しない、という割り切り</a></li>
+      </ol>
+    </div>
+
+    <h2>いまの minidb は「探すのが苦手」</h2>
+    <p>第00〜02章で、minidb は「ファイルを4KBのページに切り、ページの中にレコードを置き、よく使うページをメモリにキャッシュする」ところまで来ました。データを<strong>置く</strong>力は付きました。でも<strong>探す</strong>手段は、まだひとつしかありません。端のページから順に全部読む — <strong>全走査</strong>です。</p>
+    <p>数字で見てみましょう。1ページに50行入るとして、100万行なら2万ページ。<code>WHERE id = 4972</code> の答えがたった1行でも、最悪2万回のページ読み（= 2万回のディスクI/O）が要ります。第00章で体感したとおり、ディスクI/Oは1回あたりミリ秒級の世界。2万回なら数十秒です。データが倍になれば時間も倍。これはデータ量 N に比例するコスト、いわゆる <em>O(N)</em> です。</p>
+    <p>そこで<strong>索引（インデックス）</strong>を作ります。索引とは「キー → 行の住所」の対応を、探しやすい形に整理して持つ<strong>別のデータ構造</strong>のこと。本の巻末索引と同じで、本文（ヒープ）はそのまま、探すための地図だけを別に持ちます。行の住所には、第01章で決めた TID（ページ番号とスロット番号の組）をそのまま使います。</p>
+
+    <div class="ascii">「id = 4972 の行はどこ?」
+
+  全走査（いまの minidb）              B+Tree 索引（この章の後）
+  page0 → page1 → … → page19999       メタ → 根 → 葉 → TID
+  最悪 2 万ページ読む                  2〜3 ページ読んで到着
+  データ量に比例 O(N)                  データ量の対数 O(log N)</div>
+
+    <h2>ソート済みなら速い — でも挿入で崩れる</h2>
+    <p>探しやすい形の代表は「ソート済み」です。キー順に並んだ列なら<strong>二分探索</strong>が使えます。二分探索とは、真ん中を見て「目当てはその左か右か」を決める、を繰り返す探し方。1回ごとに候補が半分になるので、5000件なら13回、100万件でも20回の比較で決着します。これが対数 <em>O(log N)</em> の威力です。</p>
+    <p>では「ソート済みの巨大な配列」をディスクに置けば終わりでしょうか。残念ながら、それは<strong>挿入</strong>で破綻します。</p>
+
+    <div class="ascii">ソート済み配列: 探すのは速いが、挿入が重い
+
+  [10 20 30 40 50 60 70 80 ………………]   探す: 二分探索で log₂(N) 回
+        ↑ ここに 25 を入れたい
+
+  [10 20 25 30 40 50 60 70 80 ……]    25 より後ろを全部 1 個ずらす
+   ─────→ ずらす量は平均 N/2 個 = ディスク上では大量ページの書き直し</div>
+
+    <p>途中に1件入れるたびに、後ろの全要素をずらす。メモリ上でも O(N)、ディスク上では「後ろの全ページを書き直す」大惨事です。検索も挿入も速い構造が要る — その答えが<strong>木</strong>です。二分探索木（各ノードがキー1個と左右の子を持つ木）なら、検索も挿入も木を根から降りるだけ。高さは（バランスが保たれていれば）log₂(N) 程度に収まります。</p>
+
+    <h2>木を「太らせる」 — 1ノード = 1ページ = 1回の I/O</h2>
+    <p>ところが二分探索木をそのままディスクに置くと、今度は別の問題が出ます。ノード（木の節点。キーと子への参照を持つ入れ物）1個がキー1個しか持たないので、5000件で高さ約13。そしてディスク上では、<strong>ノードを1個たどる = ページを1枚読む = I/O 1回</strong>。つまり1回の検索に13回のI/Oです。せっかくの対数が、I/Oの世界では全然安くない。</p>
+    <p>ここで発想を変えます。<strong>どうせ1回のI/Oで4096バイトまるごと読むのだから、ノードを4KBぎっしりまで太らせればいい。</strong>1ノードにキーを数百個詰めれば、1回のI/Oで数百方向に分岐できます。1ノードから出る子の数を<strong>ファンアウト</strong>と呼びますが、ファンアウト200なら、高さ2で4万件、高さ3で数百万件に届きます。これが1970年代に生まれた <strong>B木（B-tree）</strong>の中心思想です。</p>
+
+    <div class="ascii">細い木 vs 太い木
+
+  二分探索木（メモリ向き）             B+Tree（ディスク向き）
+  1 ノード = キー 1 個                 1 ノード = 1 ページ = キー数百個
+
+         [50]                          [ k₁ | k₂ | …… | k₂₀₀ ]
+        /    \                         /    |     …        \
+     [25]    [75]                    葉    葉               葉
+     /  \    /  \
+    …… 高さ ≈ 13 段 ……                高さ 2〜3 段で数百万件
+
+  5000 件の検索 = I/O 13 回           ノード 1 枚 = ページ 1 枚 = I/O 1 回
+                                      → 検索 = I/O 2〜3 回で決着</div>
+
+    <h2>B+Tree の姿 — データは葉に、内部は道しるべ</h2>
+    <p>minidb が実装するのは、B木の改良版である <strong>B+Tree</strong> です。B木との違いは2点だけ。</p>
+    <ul>
+      <li><strong>データ（この章では TID）は葉ノードにだけ置く。</strong>途中の<strong>内部ノード</strong>は「どのキーならどの子へ」という道しるべ専用。だから内部ノードはさらに太くでき、木はさらに低くなります。</li>
+      <li><strong>葉ノードを右隣へのリンクで数珠つなぎにする。</strong>キー順に降りた後、リンクを横に歩くだけで範囲走査ができます。<code>WHERE age BETWEEN 20 AND 29</code> や <code>ORDER BY</code> が速い理由は、まさにこの鎖です。</li>
+    </ul>
+
+    <div class="ascii">B+Tree: データは葉にだけ、葉は横に鎖でつなぐ
+
+               内部ノード（道しるべ: キーと子の対応だけ）
+                     [ 30 | 60 ]
+                    /     |     \
+        [10 20] ──→ [30 45] ──→ [60 80] ──→ (終端)
+         葉ノード: TID はここにだけある。link で右隣へつながる
+
+   等値検索:  上から 1 回降りるだけ（高さ = 2〜3 ノード）
+   範囲検索:  降りた葉から、link を横に歩くだけ</div>
+
+    <p>用語を一度ここでまとめておきます。以降は断りなく使います。</p>
+    <table>
+      <tr><th>用語</th><th>意味</th></tr>
+      <tr><td>ノード</td><td>木の節点。<strong>この章では 1 ノード = 1 ページ（4096 バイト）</strong></td></tr>
+      <tr><td>根（ルート）</td><td>一番上のノード。検索も挿入もここから始まる</td></tr>
+      <tr><td>葉（リーフ）</td><td>一番下のノード。キーと TID の実データを持つ</td></tr>
+      <tr><td>内部ノード</td><td>根と葉の間（根を含む）。「このキー以上はこの子へ」の道しるべだけを持つ</td></tr>
+      <tr><td>高さ</td><td>根から葉までのノード数。検索 1 回で読むページ数の目安</td></tr>
+      <tr><td>ファンアウト</td><td>1 ノードから出る子の数。太いほど木は低い</td></tr>
+      <tr><td>セパレータキー</td><td>内部ノードに置く境界キー。「これ以上は右」を表す</td></tr>
+    </table>
+
+    <p>この章の登場ファイルは2つです。<code>node.go</code> が「1枚のページをノードとして読み書きする道具」、<code>btree.go</code> が「その道具で木のアルゴリズムを回す本体」。そして相手にするのは、序章で顔合わせした3メソッドの <code>Store</code> インターフェースだけです。テストでは第02章のバッファプールを差し込みますが、B+Tree のコードは相手がプールか生ディスクかを一切知りません。層の積み上げが、ここで最初の配当を生みます。</p>
+
+    <h2 class="step" id="step-1"><span class="step-no">Step 1</span>重複キーを飼いならす — TID と複合キー</h2>
+    <p>コードに入る前に、教科書の B+Tree が黙っている現実問題をひとつ片付けます。<strong>キーの重複</strong>です。</p>
+    <p>教科書の B+Tree はキーが一意（同じキーは1個だけ）という前提で書かれています。しかし索引の現実は違います。<code>age</code> 列に索引を張れば、<code>age = 30</code> の行は何行もある。同じキーで違う TID のエントリを、木はどう共存させればいいのでしょうか。</p>
+    <p>選択肢は大きく2つです。(a) 葉の値を「TID のリスト」にする — 値が可変長になり、ページ管理がぐっと複雑になります。(b) <strong>キーの側を一意にしてしまう</strong> — ユーザーキーの末尾に TID を連結した<strong>複合キー</strong>を木の中のキーにする。TID は行ごとに必ず違うので、複合キーは必ず一意です。minidb は (b) を選びます。木のアルゴリズム本体が「キーは一意」という単純な世界のまま書けるからです。</p>
+
+    <div class="ascii">複合キー = ユーザーキー ++ TID（6 バイト固定）
+
+            ユーザーキー（可変長）         TID（6 バイト固定）
+           ┌─────────────────────────┐  ┌───────────┬─────────┐
+           │ …キーのバイト列…          │  │ Page: 4B  │ Slot: 2B │
+           └─────────────────────────┘  └───────────┴─────────┘
+                                          ↑ ビッグエンディアンで焼く
+                                            = bytes.Compare で番号順に並ぶ
+
+  ユーザーキー 30 の行が 3 行あるとき、木の中の並びは:
+
+   … [30|(7,2)] [30|(9,0)] [30|(12,5)] [31|(2,1)] …
+      └────── 同じユーザーキーは必ず隣り合う ──────┘</div>
+
+    <p>この設計のご褒美は図の最後の行です。複合キーで並べても、先頭はユーザーキーなので、<strong>同じユーザーキーを持つエントリは木の中で必ず隣り合います</strong>。「<code>age = 30</code> を全部探す」は「30 の一番左まで降りて、ユーザーキーが 30 の間だけ右に読む」に変わる。重複キーが、範囲走査のただの特殊ケースになるのです。</p>
+    <p>ではコードです。まずパッケージの看板と、TID まわりの部品から。</p>
+
+    <div class="file-tag">internal/btree/node.go</div>
+<pre><code><span class="cm">// Package btree はページ上に構築する B+Tree 索引（M3, M7）。</span>
+<span class="cm">//</span>
+<span class="cm">// キーは順序保存エンコード済みのバイト列（bytes.Compare で比較できる形）を前提とする。</span>
+<span class="cm">// 重複キーを許すため、内部では「ユーザーキー + TID（6バイト）」の複合キーで一意化する。</span>
+<span class="cm">// 検索時はユーザーキー部分だけを比較する。</span>
+<span class="kw">package</span> btree
+
+<span class="kw">import</span> (
+	<span class="st">"bytes"</span>
+	<span class="st">"encoding/binary"</span>
+
+	<span class="st">"minidb/internal/storage"</span>
+)</code></pre>
+
+    <p>冒頭のコメントに、この章全体の前提がひとつ書かれています。「キーは<strong>順序保存エンコード済み</strong>のバイト列（<code>bytes.Compare</code> で比較できる形）を前提とする」。つまり B+Tree は、渡されたキーをただのバイト列として辞書順に比較するだけで、それが数値として正しい大小順になるようなエンコードは<strong>呼び出し側の責任</strong>です。この仕掛け（INT や TEXT を順序保存バイト列に焼く方法）は第04章で作ります。この章のテストでは <code>intKey</code> という小さなヘルパがその役を務めます（Step 6 で登場）。</p>
+
+    <div class="file-tag">internal/btree/node.go</div>
+<pre><code><span class="cm">// TID はヒープ上の行識別子 (PageID, SlotNo)。索引の値にあたる。</span>
+<span class="kw">type</span> <span class="ty">TID</span> <span class="kw">struct</span> {
+	<span class="ty">Page</span> storage.<span class="ty">PageID</span>
+	Slot <span class="kw">uint16</span>
+}
+
+<span class="kw">const</span> tidLen = <span class="st">6</span>
+
+<span class="cm">// encodeTID は比較可能な固定長 6 バイト（ビッグエンディアン）にする。</span>
+<span class="kw">func</span> encodeTID(t <span class="ty">TID</span>) []<span class="kw">byte</span> {
+	<span class="kw">var</span> b [tidLen]<span class="kw">byte</span>
+	binary.BigEndian.PutUint32(b[<span class="st">0</span>:<span class="st">4</span>], <span class="kw">uint32</span>(t.<span class="ty">Page</span>))
+	binary.BigEndian.PutUint16(b[<span class="st">4</span>:<span class="st">6</span>], t.Slot)
+	<span class="kw">return</span> b[:]
+}
+
+<span class="kw">func</span> decodeTID(b []<span class="kw">byte</span>) <span class="ty">TID</span> {
+	<span class="kw">return</span> <span class="ty">TID</span>{
+		<span class="ty">Page</span>: storage.<span class="ty">PageID</span>(binary.BigEndian.Uint32(b[<span class="st">0</span>:<span class="st">4</span>])),
+		Slot: binary.BigEndian.Uint16(b[<span class="st">4</span>:<span class="st">6</span>]),
+	}
+}
+
+<span class="cm">// composite はユーザーキーに TID を連結した一意キー。</span>
+<span class="kw">func</span> composite(userKey []<span class="kw">byte</span>, t <span class="ty">TID</span>) []<span class="kw">byte</span> {
+	ck := <span class="kw">make</span>([]<span class="kw">byte</span>, <span class="st">0</span>, <span class="kw">len</span>(userKey)+tidLen)
+	ck = <span class="kw">append</span>(ck, userKey...)
+	<span class="kw">return</span> <span class="kw">append</span>(ck, encodeTID(t)...)
+}
+
+<span class="cm">// userPart は複合キーからユーザーキー部分を取り出す。</span>
+<span class="kw">func</span> userPart(ck []<span class="kw">byte</span>) []<span class="kw">byte</span> { <span class="kw">return</span> ck[:<span class="kw">len</span>(ck)-tidLen] }</code></pre>
+
+    <p>読みどころは3つあります。</p>
+    <ul>
+      <li><strong><code>encodeTID</code> はビッグエンディアン。</strong>第00〜01章のページ内メタデータはリトルエンディアンでしたが、TID は複合キーの一部としてそのまま <code>bytes.Compare</code> に食わされます。<code>bytes.Compare</code> は左のバイトから順に比べる辞書順比較なので、「大きい桁を先に置く」ビッグエンディアンにしておけば、バイト列の辞書順 = 数値の大小順が一致します（序章の <code>encoding/binary</code> の話がここで効きます）。</li>
+      <li><strong>固定長6バイトであることが本質。</strong>ユーザーキーは可変長でも、TID が常に末尾6バイトと決まっているから、<code>userPart</code> は「末尾6バイトを切り落とすだけ」で複合キーからユーザーキーを取り戻せます。長さの記録は一切不要です。</li>
+      <li><code>composite</code> は <code>make([]byte, 0, cap)</code> で正確な容量を先に確保してから <code>append</code> しています。結果は常に新しいスライスで、引数の <code>userKey</code> を壊しません。</li>
+    </ul>
+
+    <div class="gonote"><div class="box-k">GO メモ · bytes.Compare と bytes.Equal</div>
+      <p><code>bytes.Compare(a, b)</code> は2つのバイト列を辞書順（先頭から1バイトずつ、最初に違ったバイトの大小。等しいまま尽きたら短い方が小）で比べ、a が小さければ <code>-1</code>、等しければ <code>0</code>、大きければ <code>+1</code> を返します。この章の「キーの大小」はすべてこの1関数に集約されます。等しいかどうかだけ知りたい場所では <code>bytes.Equal(a, b)</code> を使います（Step 8 の削除で登場）。</p>
+    </div>
+
+    <div class="box do"><div class="box-k">▸ 動かして確認</div>
+      <p>複合キーの狙い —「同じユーザーキーに複数の TID をぶら下げられる」— は、テストにそのまま書き下されています。完成コードの特権で、先取りして動かしてしまいましょう。同じキー <code>"dup"</code> を TID だけ変えて50回入れ、50件全部返ることを確かめるテストです。</p>
+    </div>
+
+    <div class="file-tag">internal/btree/btree_test.go（抜粋）</div>
+<pre><code><span class="cm">// 重複キー: 同じキーに複数の TID をぶら下げられる（セカンダリ索引で必須）。</span>
+<span class="kw">func</span> TestBTreeDuplicateKeys(t *testing.T) {
+	tree, _, _ := newTree(t)
+	key := []<span class="kw">byte</span>(<span class="st">"dup"</span>)
+	<span class="kw">for</span> i := <span class="st">0</span>; i &lt; <span class="st">50</span>; i++ {
+		<span class="kw">if</span> err := tree.Insert(key, <span class="ty">TID</span>{<span class="ty">Page</span>: storage.<span class="ty">PageID</span>(i), Slot: <span class="st">0</span>}); err != <span class="kw">nil</span> {
+			t.Fatal(err)
+		}
+	}
+	tids, err := tree.SearchEqual(key)
+	<span class="kw">if</span> err != <span class="kw">nil</span> {
+		t.Fatal(err)
+	}
+	<span class="kw">if</span> <span class="kw">len</span>(tids) != <span class="st">50</span> {
+		t.Fatalf(<span class="st">"重複キーの検索で %d 件, want 50"</span>, <span class="kw">len</span>(tids))
+	}
+}</code></pre>
+
+    <pre class="term"><code><span class="ps">$</span> go test ./internal/btree -run TestBTreeDuplicateKeys -v
+<span class="out">=== RUN   TestBTreeDuplicateKeys
+--- PASS: TestBTreeDuplicateKeys (0.00s)
+PASS
+ok  	minidb/internal/btree	0.907s</span></code></pre>
+
+    <h2 class="step" id="step-2"><span class="step-no">Step 2</span>ノード = 1ページ — レイアウトとアクセサ</h2>
+    <p>次に、ノードそのものを作ります。大事なのは、ノードが Go の構造体（メモリ上のオブジェクト）では<strong>ない</strong>ことです。木は再起動後も残らなければならないし、「ノード1個 = I/O 1回」の等式を成立させたい。だからノードの実体は <strong>1枚のページ、つまり 4096 バイトのバイト列そのもの</strong>で、<code>node.go</code> はそのバイト列を読み書きする「ものさし」の集まりです。</p>
+    <p>レイアウトは、第01章のスロット化ページの再演です。前から<strong>セルポインタ配列</strong>（キー昇順に並んだ2バイトのオフセット）、後ろから<strong>セル実体</strong>（キー等の本体）、間に空き。理由も第01章と同じ — セルはキーが可変長なので固定位置に置けず、順序の維持はポインタ配列の並べ替えだけで済ませたいからです。索引の心臓部にも、新しい魔法は要りません。</p>
+
+    <div class="ascii">1 ノード = 1 ページ（4096 バイト）— 第 01 章のスロット化ページと同じ設計
+
+  0        1        3        7        9
+  ┌────────┬────────┬────────┬────────┬──────────────┬────────┬────────────┐
+  │ 種別   │ セル数 │ link   │ freeEnd│ セルポインタ  │ ←空き→ │ セル実体    │
+  │ 1=葉   │ uint16 │ PageID │ uint16 │ uint16 × N   │        │ （後ろ詰め）│
+  │ 2=内部 │        │        │        │ キー昇順      │        │            │
+  └────────┴────────┴────────┴────────┴──────────────┴────────┴────────────┘
+    前から伸びる →                                      ← 後ろから伸びる
+
+  link（オフセット 3〜6）の意味は種別で変わる二役:
+    葉ノード   → 右隣の葉の PageID（範囲走査で横に歩く鎖）
+    内部ノード → 最左の子の PageID（Step 3 で理由が分かる）</div>
+
+    <div class="file-tag">internal/btree/node.go</div>
+<pre><code><span class="cm">// ---- ノードのページ内レイアウト ----</span>
+<span class="cm">//</span>
+<span class="cm">//	[0]     ノード種別（1=葉, 2=内部）</span>
+<span class="cm">//	[1:3)   セル数 uint16</span>
+<span class="cm">//	[3:7)   葉: 右隣の葉の PageID / 内部: 最左の子の PageID</span>
+<span class="cm">//	[7:9)   freeEnd uint16（セル実体は [freeEnd, PageSize) に後ろ詰め）</span>
+<span class="cm">//	[9:..)  セルポインタ配列（uint16 × セル数、キー昇順）</span>
+<span class="cm">//</span>
+<span class="cm">// セル本体:</span>
+<span class="cm">//</span>
+<span class="cm">//	葉:   [keyLen uint16][複合キー]                     … TID は複合キー末尾 6 バイト</span>
+<span class="cm">//	内部: [keyLen uint16][複合キー][child PageID uint32] … 「キー以上は child へ」</span>
+
+<span class="kw">const</span> (
+	leafNode     = <span class="st">1</span>
+	internalNode = <span class="st">2</span>
+
+	nodeHeaderSize = <span class="st">9</span>
+	ptrSize        = <span class="st">2</span>
+
+	<span class="cm">// MaxKeyLen はユーザーキー長の上限。分割後もノードに複数セル入る大きさに抑える。</span>
+	MaxKeyLen = <span class="st">512</span>
+)</code></pre>
+
+    <p>ヘッダはたった9バイトです。<code>link</code> の二役だけ、先に種明かしをしておきます。葉では「右隣の葉」— これは概念図の鎖そのものです。内部ノードでは「最左の子」。内部ノードのセルは「キー k 以上はこの子へ」という対を持ちますが、<strong>一番左の子だけは「〜未満」の受け皿</strong>なので対になるキーがありません。相方のいない子をヘッダの link 欄に住まわせる、という設計です（Step 3 の <code>childFor</code> で実際に使います）。</p>
+    <p><code>MaxKeyLen = 512</code> は安全弁です。もし 4KB 近い巨大キーを許すと、分割してもノードにセルが1個しか入らず、木が成立しません。512 バイトに抑えれば、最悪でもセルは 520 バイト程度 — 1ページに7個は入り、分割後の各ノードに必ず複数のセルが残ります。</p>
+    <p>セルの中身は葉と内部で少しだけ違います。</p>
+
+    <div class="ascii">セルの中身 — 葉と内部で違う
+
+  葉のセル    [ keyLen(2B) │ 複合キー ]
+                             └ TID は複合キーの末尾 6 バイトに埋まっている
+                               （葉のセル = 索引のデータ本体）
+
+  内部のセル  [ keyLen(2B) │ 複合キー │ child PageID(4B) ]
+                             └「このキー以上（次のセル未満）は child へ」の道しるべ</div>
+
+    <p>では、このレイアウトを読み書きする道具たちです。まず骨組みとヘッダのアクセサ。</p>
+
+    <div class="file-tag">internal/btree/node.go</div>
+<pre><code><span class="kw">type</span> <span class="ty">node</span> <span class="kw">struct</span>{ p *storage.<span class="ty">Page</span> }
+
+<span class="kw">func</span> initNode(p *storage.<span class="ty">Page</span>, typ <span class="kw">byte</span>) <span class="ty">node</span> {
+	n := <span class="ty">node</span>{p}
+	p[<span class="st">0</span>] = typ
+	n.setNumCells(<span class="st">0</span>)
+	n.setLink(storage.InvalidPageID)
+	n.setFreeEnd(storage.PageSize)
+	<span class="kw">return</span> n
+}
+
+<span class="kw">func</span> (n <span class="ty">node</span>) typ() <span class="kw">byte</span>             { <span class="kw">return</span> n.p[<span class="st">0</span>] }
+<span class="kw">func</span> (n <span class="ty">node</span>) isLeaf() <span class="kw">bool</span>          { <span class="kw">return</span> n.p[<span class="st">0</span>] == leafNode }
+<span class="kw">func</span> (n <span class="ty">node</span>) numCells() <span class="kw">int</span>         { <span class="kw">return</span> <span class="kw">int</span>(binary.LittleEndian.Uint16(n.p[<span class="st">1</span>:<span class="st">3</span>])) }
+<span class="kw">func</span> (n <span class="ty">node</span>) setNumCells(c <span class="kw">int</span>)     { binary.LittleEndian.PutUint16(n.p[<span class="st">1</span>:<span class="st">3</span>], <span class="kw">uint16</span>(c)) }
+<span class="kw">func</span> (n <span class="ty">node</span>) link() storage.<span class="ty">PageID</span>  { <span class="kw">return</span> storage.<span class="ty">PageID</span>(binary.LittleEndian.Uint32(n.p[<span class="st">3</span>:<span class="st">7</span>])) }
+<span class="kw">func</span> (n <span class="ty">node</span>) setLink(id storage.<span class="ty">PageID</span>) {
+	binary.LittleEndian.PutUint32(n.p[<span class="st">3</span>:<span class="st">7</span>], <span class="kw">uint32</span>(id))
+}
+<span class="kw">func</span> (n <span class="ty">node</span>) freeEnd() <span class="kw">int</span>         { <span class="kw">return</span> <span class="kw">int</span>(binary.LittleEndian.Uint16(n.p[<span class="st">7</span>:<span class="st">9</span>])) }
+<span class="kw">func</span> (n <span class="ty">node</span>) setFreeEnd(o <span class="kw">int</span>)     { binary.LittleEndian.PutUint16(n.p[<span class="st">7</span>:<span class="st">9</span>], <span class="kw">uint16</span>(o)) }
+<span class="kw">func</span> (n <span class="ty">node</span>) cellPtr(i <span class="kw">int</span>) <span class="kw">int</span> {
+	base := nodeHeaderSize + i*ptrSize
+	<span class="kw">return</span> <span class="kw">int</span>(binary.LittleEndian.Uint16(n.p[base : base+<span class="st">2</span>]))
+}
+<span class="kw">func</span> (n <span class="ty">node</span>) setCellPtr(i, off <span class="kw">int</span>) {
+	base := nodeHeaderSize + i*ptrSize
+	binary.LittleEndian.PutUint16(n.p[base:base+<span class="st">2</span>], <span class="kw">uint16</span>(off))
+}</code></pre>
+
+    <p><code>node</code> 型は <code>*storage.Page</code>（ページへのポインタ）を1個持つだけの、紙のように薄いラッパです。<code>initNode</code> は種別を書き、セル数0・link 無効・freeEnd をページ末尾（4096）に置く — 「空のノード」をページの上に開店させる儀式です。以降のアクセサは全部、序章でやった <code>binary.LittleEndian</code> の読み書きの反復にすぎません。ページ内メタデータは比較されない数値なので、第00〜01章と同じリトルエンディアンで統一しています（ビッグエンディアンなのは <code>bytes.Compare</code> に食わせる TID だけ。章末 FAQ も参照）。</p>
+
+    <div class="gonote"><div class="box-k">GO メモ · ポインタを1個だけ持つ構造体を「値」で配る</div>
+      <p><code>type node struct{ p *storage.Page }</code> のメソッドは、すべて値レシーバ（<code>func (n node) …</code>）です。ポインタレシーバでなくていいの? と思うかもしれませんが、<code>node</code> の中身はポインタ1個（8バイト）だけなので、値でコピーしてもコピーされるのは<strong>ポインタであってページ本体ではありません</strong>。どの <code>node</code> のコピーも同じ 4096 バイトを指すので、<code>setNumCells</code> のような書き込みもちゃんと本体に届きます。「小さな構造体は値で気軽に配る」は Go の常套手段です。</p>
+    </div>
+
+    <p>続いて、セルの中身を取り出す道具と、セルを作る道具です。</p>
+
+    <div class="file-tag">internal/btree/node.go</div>
+<pre><code><span class="cm">// key は i 番目のセルの複合キー（ページ内バイト列への参照。コピーしない）。</span>
+<span class="kw">func</span> (n <span class="ty">node</span>) key(i <span class="kw">int</span>) []<span class="kw">byte</span> {
+	off := n.cellPtr(i)
+	kl := <span class="kw">int</span>(binary.LittleEndian.Uint16(n.p[off : off+<span class="st">2</span>]))
+	<span class="kw">return</span> n.p[off+<span class="st">2</span> : off+<span class="st">2</span>+kl]
+}
+
+<span class="cm">// child は内部ノードの i 番目セルの子 PageID。</span>
+<span class="kw">func</span> (n <span class="ty">node</span>) child(i <span class="kw">int</span>) storage.<span class="ty">PageID</span> {
+	off := n.cellPtr(i)
+	kl := <span class="kw">int</span>(binary.LittleEndian.Uint16(n.p[off : off+<span class="st">2</span>]))
+	<span class="kw">return</span> storage.<span class="ty">PageID</span>(binary.LittleEndian.Uint32(n.p[off+<span class="st">2</span>+kl : off+<span class="st">6</span>+kl]))
+}
+
+<span class="cm">// cellBytes は i 番目のセル全体のコピー（分割・再構築の作業用）。</span>
+<span class="kw">func</span> (n <span class="ty">node</span>) cellBytes(i <span class="kw">int</span>) []<span class="kw">byte</span> {
+	off := n.cellPtr(i)
+	kl := <span class="kw">int</span>(binary.LittleEndian.Uint16(n.p[off : off+<span class="st">2</span>]))
+	size := <span class="st">2</span> + kl
+	<span class="kw">if</span> !n.isLeaf() {
+		size += <span class="st">4</span>
+	}
+	out := <span class="kw">make</span>([]<span class="kw">byte</span>, size)
+	<span class="kw">copy</span>(out, n.p[off:off+size])
+	<span class="kw">return</span> out
+}
+
+<span class="kw">func</span> cellKeyOf(cell []<span class="kw">byte</span>) []<span class="kw">byte</span> {
+	kl := <span class="kw">int</span>(binary.LittleEndian.Uint16(cell[<span class="st">0</span>:<span class="st">2</span>]))
+	<span class="kw">return</span> cell[<span class="st">2</span> : <span class="st">2</span>+kl]
+}
+
+<span class="kw">func</span> makeLeafCell(ck []<span class="kw">byte</span>) []<span class="kw">byte</span> {
+	cell := <span class="kw">make</span>([]<span class="kw">byte</span>, <span class="st">2</span>+<span class="kw">len</span>(ck))
+	binary.LittleEndian.PutUint16(cell[<span class="st">0</span>:<span class="st">2</span>], <span class="kw">uint16</span>(<span class="kw">len</span>(ck)))
+	<span class="kw">copy</span>(cell[<span class="st">2</span>:], ck)
+	<span class="kw">return</span> cell
+}
+
+<span class="kw">func</span> makeInternalCell(ck []<span class="kw">byte</span>, child storage.<span class="ty">PageID</span>) []<span class="kw">byte</span> {
+	cell := <span class="kw">make</span>([]<span class="kw">byte</span>, <span class="st">2</span>+<span class="kw">len</span>(ck)+<span class="st">4</span>)
+	binary.LittleEndian.PutUint16(cell[<span class="st">0</span>:<span class="st">2</span>], <span class="kw">uint16</span>(<span class="kw">len</span>(ck)))
+	<span class="kw">copy</span>(cell[<span class="st">2</span>:], ck)
+	binary.LittleEndian.PutUint32(cell[<span class="st">2</span>+<span class="kw">len</span>(ck):], <span class="kw">uint32</span>(child))
+	<span class="kw">return</span> cell
+}
+
+<span class="cm">// freeSpace はセルポインタ配列とセル実体に挟まれた空き。</span>
+<span class="kw">func</span> (n <span class="ty">node</span>) freeSpace() <span class="kw">int</span> {
+	<span class="kw">return</span> n.freeEnd() - (nodeHeaderSize + n.numCells()*ptrSize)
+}</code></pre>
+
+    <p>ここで<strong>コピーするか、しないか</strong>という設計上の使い分けが登場します。</p>
+    <ul>
+      <li><code>key(i)</code> は<strong>コピーしません</strong>。返ってくるのはページ内バイト列への「窓」（序章で覚えたスライスの参照性質）です。二分探索のように「その場で比べて捨てる」用途では、1回ごとにコピーしていたら遅くて仕方ないからです。</li>
+      <li><code>cellBytes(i)</code> は<strong>コピーします</strong>。分割や再構築のときは、これからページ自体を書き換えるので、書き換え前の内容を安全な場所（新しいスライス）に避難させる必要があるからです。内部ノードのセルには child の4バイトが付くぶん、サイズ計算が分岐しています。</li>
+    </ul>
+    <p><code>makeLeafCell</code> / <code>makeInternalCell</code> は図のセル形式をそのままバイト列に組み立てるだけ、<code>freeSpace</code> は「ポインタ配列の末尾」と「セル実体の先頭（freeEnd）」の間の隙間を測るだけです。</p>
+
+    <div class="box hazard"><div class="box-k">⚠ 落とし穴 · key() の戻り値は「ページの一部」</div>
+      <p><code>key(i)</code> が返すスライスはページ本体への参照なので、<strong>ページを書き換えた後まで持ち続けてはいけません</strong>。ノードを <code>rebuild</code>（Step 3）した瞬間、そのスライスの中身は別のデータに化けます。「比較にはノーコピーの <code>key</code>、ページの外に持ち出すならコピー」— この規律が破られかけるスリリングな場面が Step 6 の分割で出てきます。</p>
+    </div>
+
+    <div class="box do"><div class="box-k">▸ 動かして確認</div>
+      <p>このレイアウトが可変長キーを正しく収納できることは、長さがバラバラの文字列キー500件を入れて引き当てるテストで確認できます。</p>
+      <pre class="term"><code><span class="ps">$</span> go test ./internal/btree -run TestBTreeVariableLengthKeys -v
+<span class="out">=== RUN   TestBTreeVariableLengthKeys
+--- PASS: TestBTreeVariableLengthKeys (0.00s)
+PASS
+ok  	minidb/internal/btree	0.799s</span></code></pre>
+    </div>
+
+    <h2 class="step" id="step-3"><span class="step-no">Step 3</span>ノードの中を探す・詰める — 二分探索と挿入</h2>
+    <p>ノードのレイアウトができたので、ノード<strong>1枚の中</strong>で完結する操作を仕上げます。作るのは4つ — 「どこにあるか探す」（<code>lowerBound</code>）、「どの子に降りるか選ぶ」（<code>childFor</code>）、「セルを差し込む」（<code>insertCellAt</code>）、「まるごと組み直す」（<code>rebuild</code>）。木のアルゴリズム（btree.go）は、この4つの道具の組み合わせだけで書かれます。</p>
+    <p>まず <code>lowerBound</code>。名前は C++ 由来の慣用語で、<strong>「ck 以上になる最初の位置」</strong>を返します。セルポインタ配列はキー昇順なので、二分探索が使えます。</p>
+
+    <div class="ascii">lowerBound(ck) = 「ck 以上」になる最初のセル位置
+
+  セル:      [10]  [20]  [30]  [40]
+  位置:        0     1     2     3
+
+  lowerBound(25) → 2   （30 が最初の「25 以上」。25 を挿入すべき位置でもある）
+  lowerBound(20) → 1   （20 自身が「20 以上」。等しい位置に着地する）
+  lowerBound(50) → 4   （どれも 50 未満 → セル数と同じ = 末尾）</div>
+
+    <div class="file-tag">internal/btree/node.go</div>
+<pre><code><span class="cm">// lowerBound は ck 以上の最初のセル位置（二分探索）。</span>
+<span class="kw">func</span> (n <span class="ty">node</span>) lowerBound(ck []<span class="kw">byte</span>) <span class="kw">int</span> {
+	lo, hi := <span class="st">0</span>, n.numCells()
+	<span class="kw">for</span> lo &lt; hi {
+		mid := (lo + hi) / <span class="st">2</span>
+		<span class="kw">if</span> bytes.Compare(n.key(mid), ck) &lt; <span class="st">0</span> {
+			lo = mid + <span class="st">1</span>
+		} <span class="kw">else</span> {
+			hi = mid
+		}
+	}
+	<span class="kw">return</span> lo
+}
+
+<span class="cm">// childFor は内部ノードで ck を含む子を選ぶ。</span>
+<span class="cm">// セル (key_i, child_i) は「key_i 以上（次のセル未満）は child_i」。どのセルにも満たなければ最左の子。</span>
+<span class="kw">func</span> (n <span class="ty">node</span>) childFor(ck []<span class="kw">byte</span>) storage.<span class="ty">PageID</span> {
+	lo, hi := <span class="st">0</span>, n.numCells()
+	<span class="kw">for</span> lo &lt; hi { <span class="cm">// ck 以下の最後のセルを探す</span>
+		mid := (lo + hi) / <span class="st">2</span>
+		<span class="kw">if</span> bytes.Compare(n.key(mid), ck) &lt;= <span class="st">0</span> {
+			lo = mid + <span class="st">1</span>
+		} <span class="kw">else</span> {
+			hi = mid
+		}
+	}
+	<span class="kw">if</span> lo == <span class="st">0</span> {
+		<span class="kw">return</span> n.link() <span class="cm">// 最左の子</span>
+	}
+	<span class="kw">return</span> n.child(lo - <span class="st">1</span>)
+}</code></pre>
+
+    <p><code>lowerBound</code> のループは、「答えは必ず区間 [lo, hi] のどこかにある」を保ちながら区間を半分に削っていきます。真ん中のキーが ck より小さければ答えはもっと右（<code>lo = mid + 1</code>）、そうでなければ mid 自身が答え候補（<code>hi = mid</code>）。lo と hi がぶつかった場所が答えです。比較はもちろん <code>bytes.Compare</code> 一発。</p>
+    <p><code>childFor</code> は同じ二分探索の変奏ですが、探すものが違います。内部ノードのセル <code>(key_i, child_i)</code> は「key_i 以上（次のセル未満）は child_i へ」という意味なので、ck の行き先は<strong>「ck 以下の最後のセル」</strong>の子です。だから比較が <code>&lt;</code> ではなく <code>&lt;=</code> になっています（この一字の違いは章末 FAQ でもう一度）。そして、どのセルのキーよりも ck が小さいとき（<code>lo == 0</code>）に登場するのが、Step 2 で仕込んだ「最左の子 = link」です。</p>
+
+    <div class="ascii">childFor — 道しるべの読み方
+
+  内部ノード:   link=P0   [30 → P1]   [60 → P2]
+                「30 未満は P0 / 30 以上 60 未満は P1 / 60 以上は P2」
+
+  ck = 12 → 「12 以下」のセルが無い（lo==0）→ link の P0 へ
+  ck = 45 → 「45 以下」の最後 = (30→P1)      → P1 へ
+  ck = 60 → 「60 以下」の最後 = (60→P2)      → P2 へ</div>
+
+    <p>残る2つは書き込み系です。</p>
+
+    <div class="file-tag">internal/btree/node.go</div>
+<pre><code><span class="cm">// insertCellAt は位置 idx にセルを挿入する。空きが足りなければ false。</span>
+<span class="kw">func</span> (n <span class="ty">node</span>) insertCellAt(idx <span class="kw">int</span>, cell []<span class="kw">byte</span>) <span class="kw">bool</span> {
+	<span class="kw">if</span> n.freeSpace() &lt; <span class="kw">len</span>(cell)+ptrSize {
+		<span class="kw">return</span> <span class="kw">false</span>
+	}
+	newEnd := n.freeEnd() - <span class="kw">len</span>(cell)
+	<span class="kw">copy</span>(n.p[newEnd:], cell)
+	<span class="cm">// ポインタ配列を右へずらす</span>
+	<span class="kw">for</span> i := n.numCells(); i &gt; idx; i-- {
+		n.setCellPtr(i, n.cellPtr(i-<span class="st">1</span>))
+	}
+	n.setCellPtr(idx, newEnd)
+	n.setFreeEnd(newEnd)
+	n.setNumCells(n.numCells() + <span class="st">1</span>)
+	<span class="kw">return</span> <span class="kw">true</span>
+}
+
+<span class="cm">// rebuild はノードをセル一覧から組み直す（削除・分割用）。link は維持する。</span>
+<span class="kw">func</span> rebuild(p *storage.<span class="ty">Page</span>, typ <span class="kw">byte</span>, link storage.<span class="ty">PageID</span>, cells [][]<span class="kw">byte</span>) {
+	n := initNode(p, typ)
+	n.setLink(link)
+	<span class="kw">for</span> i, c := <span class="kw">range</span> cells {
+		<span class="kw">if</span> !n.insertCellAt(i, c) {
+			<span class="cm">// 呼び出し側が容量内に収めてから呼ぶ契約。ここに来たら実装バグ。</span>
+			<span class="kw">panic</span>(<span class="st">"btree: rebuild overflow"</span>)
+		}
+	}
+}</code></pre>
+
+    <p><code>insertCellAt</code> の手順は3拍子です。①空きが「セル本体 + ポインタ2バイト」ぶんあるか確認（足りなければ <code>false</code> — この false が Step 6 の分割の引き金になります）。②セル実体を freeEnd の手前に書く（後ろ詰め）。③ポインタ配列の idx 以降を1個ずつ右にずらし、空いた idx に新セルのオフセットを置く。実体は動かさず、2バイトのポインタだけをずらすことで、「キー昇順」が安く維持されます。</p>
+
+    <div class="box hazard"><div class="box-k">⚠ 落とし穴 · ずらすループは「後ろから」</div>
+      <p>ポインタをずらすループが <code>for i := n.numCells(); i &gt; idx; i--</code> と<strong>末尾から逆順</strong>に回っていることに注目してください。もし前から（idx から昇順に）ずらすと、<code>setCellPtr(i, cellPtr(i-1))</code> ではなく逆向きのコピーになってしまい、最初の1個の値で後続が全部上書きされます。配列を右にシフトするときは右端から — 自前で書くと一度は踏む古典的バグです。</p>
+    </div>
+
+    <p><code>rebuild</code> は「ノードをまっさらにして、渡されたセル一覧を順に詰め直す」豪快な道具です。削除と分割は、ページ内でセルをちまちま動かす代わりに「残すべきセルの一覧を作って全部組み直す」方針で実装します。1ページ4KBのメモリ内コピーは一瞬なので、コードの分かりやすさを優先した学習実装らしい割り切りです。中の <code>panic</code> は「呼び出し側が容量内に収めてから呼ぶ」という契約の破れ、つまり実装バグの検出器です。エラーとして返すと呼び出し側が握りつぶして壊れたページがディスクに書かれかねないので、即座に大声で死ぬ方を選んでいます。</p>
+
+    <div class="box do"><div class="box-k">▸ 動かして確認</div>
+      <p>この Step の関数群は木のアルゴリズムから呼ばれる裏方なので、単体の派手な出力はありません。ここではコンパイルが通ること（型・レイアウト計算に矛盾がないこと）を確認して先へ進みます。Go のビルドは<strong>沈黙が成功の合図</strong>です。</p>
+      <pre class="term"><code><span class="cm"># 何も表示されなければ成功（問題があればコンパイルエラーがここに出る）</span>
+<span class="ps">$</span> go build ./internal/btree</code></pre>
+    </div>
+
+    <h2 class="step" id="step-4"><span class="step-no">Step 4</span>木の骨格 — メタページと根の間接参照</h2>
+    <p>ここから <code>btree.go</code> に入ります。最初は木の「入れ物」と、地味ながら効いてくる工夫 — <strong>メタページ</strong>です。</p>
+    <p>木を使う側（第04章で作るカタログ）は、「この索引はどこ?」という手がかりを1個だけ永続的に覚えておく必要があります。素直に考えれば根の PageID ですが、これには罠があります。<strong>根は分割のたびに別のページに変わる</strong>のです（Step 6 で見ます）。根が変わるたびにカタログ側の記録を書き換えて回るのは、依存の向きが逆で筋が悪い。</p>
+    <p>そこで一段の間接参照を挟みます。<strong>「現在の根の PageID」だけを書いた固定のページ = メタページ</strong>を作り、外の世界にはメタページの番号を渡す。根が動いても、書き換わるのはメタページの中の4バイトだけで、外の参照は永久に不変です。第01章で「レコードの位置を直接教えず、スロット番号を教える」ことで中の引っ越しを自由にしたのと、まったく同じ発想です。</p>
+
+    <div class="ascii">メタページ — 根が動いても、外の参照は不変
+
+  カタログ ─「索引 = ページ 8」→ ┌ メタページ #8 ┐     ┌ 根 #12 ┐
+                                  │  root = 12    │ ──→ │  ……    │
+                                  └───────────────┘     └────────┘
+  根が分割してページ 31 に変わると……
+
+  カタログ ─「索引 = ページ 8」→ ┌ メタページ #8 ┐     ┌ 新しい根 #31 ┐
+     （変更不要！）               │  root = 31    │ ──→ │  ……          │
+                                  └───────────────┘     └──────────────┘</div>
+
+    <div class="file-tag">internal/btree/btree.go</div>
+<pre><code><span class="kw">package</span> btree
+
+<span class="kw">import</span> (
+	<span class="st">"bytes"</span>
+	<span class="st">"encoding/binary"</span>
+	<span class="st">"fmt"</span>
+
+	<span class="st">"minidb/internal/storage"</span>
+)
+
+<span class="cm">// BTree はメタページ経由でルートを参照する B+Tree。</span>
+<span class="cm">// メタページを固定の入口にすることで、ルートが分割で移動しても</span>
+<span class="cm">// カタログ側の参照（メタページ ID）は不変に保てる。</span>
+<span class="kw">type</span> <span class="ty">BTree</span> <span class="kw">struct</span> {
+	st   storage.<span class="ty">Store</span>
+	meta storage.<span class="ty">PageID</span>
+
+	<span class="cm">// NodeReads は検索・挿入で触ったノード数の累計（NFR-05: 対数性の観測用）。</span>
+	NodeReads <span class="kw">uint64</span>
+}</code></pre>
+
+    <p><code>BTree</code> 構造体が持つのは <code>Store</code> とメタページの番号、それに <code>NodeReads</code> — 検索・挿入で触ったノード数を数えるだけのカウンタです。飾りに見えますが、この章のゴール「対数コストの実測」のための計器で、要件定義（NFR-05「性質が観測できること」）から来ています。<strong>速いはずだ、ではなく、触ったページ数を数えて確かめる。</strong>この姿勢は本書全体で繰り返します。</p>
+
+    <div class="file-tag">internal/btree/btree.go</div>
+<pre><code><span class="cm">// Create は空の木（メタページ + 空の葉ルート）を作り、メタページ ID を返す。</span>
+<span class="kw">func</span> Create(st storage.<span class="ty">Store</span>) (storage.<span class="ty">PageID</span>, <span class="ty">error</span>) {
+	root, err := st.Allocate(<span class="kw">func</span>(_ storage.<span class="ty">PageID</span>, p *storage.<span class="ty">Page</span>) <span class="ty">error</span> {
+		initNode(p, leafNode)
+		<span class="kw">return</span> <span class="kw">nil</span>
+	})
+	<span class="kw">if</span> err != <span class="kw">nil</span> {
+		<span class="kw">return</span> storage.InvalidPageID, err
+	}
+	<span class="kw">return</span> st.Allocate(<span class="kw">func</span>(_ storage.<span class="ty">PageID</span>, p *storage.<span class="ty">Page</span>) <span class="ty">error</span> {
+		binary.LittleEndian.PutUint32(p[<span class="st">0</span>:<span class="st">4</span>], <span class="kw">uint32</span>(root))
+		<span class="kw">return</span> <span class="kw">nil</span>
+	})
+}
+
+<span class="cm">// Open は既存の木を開く。</span>
+<span class="kw">func</span> Open(st storage.<span class="ty">Store</span>, meta storage.<span class="ty">PageID</span>) *<span class="ty">BTree</span> {
+	<span class="kw">return</span> &amp;<span class="ty">BTree</span>{st: st, meta: meta}
+}
+
+<span class="kw">func</span> (t *<span class="ty">BTree</span>) root() (storage.<span class="ty">PageID</span>, <span class="ty">error</span>) {
+	<span class="kw">var</span> id storage.<span class="ty">PageID</span>
+	err := t.st.Read(t.meta, <span class="kw">func</span>(p *storage.<span class="ty">Page</span>) <span class="ty">error</span> {
+		id = storage.<span class="ty">PageID</span>(binary.LittleEndian.Uint32(p[<span class="st">0</span>:<span class="st">4</span>]))
+		<span class="kw">return</span> <span class="kw">nil</span>
+	})
+	<span class="kw">return</span> id, err
+}
+
+<span class="kw">func</span> (t *<span class="ty">BTree</span>) setRoot(id storage.<span class="ty">PageID</span>) <span class="ty">error</span> {
+	<span class="kw">return</span> t.st.Write(t.meta, <span class="kw">func</span>(p *storage.<span class="ty">Page</span>) <span class="ty">error</span> {
+		binary.LittleEndian.PutUint32(p[<span class="st">0</span>:<span class="st">4</span>], <span class="kw">uint32</span>(id))
+		<span class="kw">return</span> <span class="kw">nil</span>
+	})
+}</code></pre>
+
+    <p><code>Create</code> は2ページ確保します。①空の葉を1枚 — これが最初の根です（要素0個の木は、空っぽの葉1枚の木）。②メタページを1枚作り、先頭4バイトに根の PageID を書く。返すのはメタページの番号の方です。<code>Open</code> は番号を構造体に包むだけでI/Oゼロ。<code>root()</code> / <code>setRoot()</code> がメタページ経由の読み書きを一手に引き受け、以降のコードに「メタページ」という概念は二度と顔を出しません。</p>
+    <p>ところで、テストが木をどう組み立てているかを見ると、層の積み上げが一望できます。</p>
+
+    <div class="file-tag">internal/btree/btree_test.go（抜粋）</div>
+<pre><code><span class="kw">func</span> newTree(t *testing.T) (*<span class="ty">BTree</span>, <span class="kw">string</span>, storage.<span class="ty">PageID</span>) {
+	t.Helper()
+	path := filepath.Join(t.TempDir(), <span class="st">"test.db"</span>)
+	d, err := storage.OpenDiskManager(path)
+	<span class="kw">if</span> err != <span class="kw">nil</span> {
+		t.Fatal(err)
+	}
+	t.Cleanup(<span class="kw">func</span>() { d.Close() })
+	pool := buffer.New(d, <span class="st">64</span>)
+	meta, err := Create(pool)
+	<span class="kw">if</span> err != <span class="kw">nil</span> {
+		t.Fatal(err)
+	}
+	<span class="kw">return</span> Open(pool, meta), path, meta
+}</code></pre>
+
+    <p>ディスクマネージャ（第00章）の上にバッファプール（第02章、フレーム64枚）を重ね、その上に <code>Create</code> / <code>Open</code>。B+Tree のコードは <code>pool</code> を <code>Store</code> としか思っていません。第07章でここにトランザクション層が割り込んできても、btree.go は1行も変わりません。</p>
+
+    <div class="box do"><div class="box-k">▸ 動かして確認</div>
+      <p>「メタページの番号さえ覚えていれば、プロセスを終了して開き直しても木は戻ってくる」— 永続化テストがそれを検証しています。2000件入れて、フラッシュして、閉じて、開き直して、全件が返ることを見るテストです。</p>
+    </div>
+
+    <div class="file-tag">internal/btree/btree_test.go（抜粋 — 前半では 2000 件を挿入している）</div>
+<pre><code>	<span class="kw">if</span> err := pool.FlushAll(); err != <span class="kw">nil</span> {
+		t.Fatal(err)
+	}
+	<span class="kw">if</span> err := d.Close(); err != <span class="kw">nil</span> {
+		t.Fatal(err)
+	}
+
+	<span class="cm">// ---- 再起動 ----</span>
+	d2, err := storage.OpenDiskManager(path)
+	<span class="kw">if</span> err != <span class="kw">nil</span> {
+		t.Fatal(err)
+	}
+	<span class="kw">defer</span> d2.Close()
+	tree2 := Open(buffer.New(d2, <span class="st">64</span>), meta)
+	tids, err := tree2.SearchRange(intKey(<span class="st">0</span>), intKey(<span class="st">1999</span>))
+	<span class="kw">if</span> err != <span class="kw">nil</span> {
+		t.Fatal(err)
+	}
+	<span class="kw">if</span> <span class="kw">len</span>(tids) != <span class="st">2000</span> {
+		t.Fatalf(<span class="st">"再オープン後の全件範囲検索が %d 件, want 2000"</span>, <span class="kw">len</span>(tids))
+	}
+}</code></pre>
+
+    <pre class="term"><code><span class="ps">$</span> go test ./internal/btree -run TestBTreePersistence -v
+<span class="out">=== RUN   TestBTreePersistence
+--- PASS: TestBTreePersistence (0.02s)
+PASS
+ok  	minidb/internal/btree	0.854s</span></code></pre>
+
+    <h2 class="step" id="step-5"><span class="step-no">Step 5</span>挿入の背骨 — 再帰で降りて、分割を上へ運ぶ</h2>
+    <p>いよいよ挿入です。コードの前に、アルゴリズムを日本語で通しておきます。挿入は「下りの旅」と「上りの伝言」でできています。</p>
+    <ol>
+      <li><strong>下り</strong>: 根から <code>childFor</code> で子を選びながら、複合キー ck が属すべき葉まで降りる。</li>
+      <li><strong>着地</strong>: 葉に ck のセルを差し込む。空きがあればここで終わり。</li>
+      <li><strong>分割</strong>: 空きが無ければ葉を二つに割り、「境界キー sep 以上は新しいノード right にあります」という<strong>伝言</strong>を親に返す。</li>
+      <li><strong>上り</strong>: 伝言を受け取った親は、道しるべ <code>(sep → right)</code> を自分に差し込む。親も満杯なら親自身が割れて、さらに上へ伝言。</li>
+      <li><strong>根の分割</strong>: 伝言が根を割ったら、新しい根を作って木が1段伸びる。</li>
+    </ol>
+
+    <div class="ascii">Insert(ck) — 下りは「どの子へ」、上りは「割れたよ」
+
+     下り（insertRec が再帰で降りる）      上り（戻り値 *split が運ぶ伝言）
+     根     ── childFor ──┐               ┌── 根まで届いたら木が伸びる
+     内部   ── childFor ──┤               ├── 親もあふれたら親も分割
+     葉     ← ck を挿入 ──┘               └── 収まったら nil（伝言なし）</div>
+
+    <p>「上りの伝言」を型にしたのが <code>split</code> です。そしてこの往復を書き下したのが <code>Insert</code> と <code>insertRec</code>。</p>
+
+    <div class="file-tag">internal/btree/btree.go</div>
+<pre><code><span class="cm">// split は子の分割結果。sep 以上のキーは right にある。</span>
+<span class="kw">type</span> <span class="ty">split</span> <span class="kw">struct</span> {
+	sep   []<span class="kw">byte</span>
+	right storage.<span class="ty">PageID</span>
+}
+
+<span class="cm">// Insert はユーザーキーと TID の組を登録する。重複キーは TID で一意化して共存する。</span>
+<span class="kw">func</span> (t *<span class="ty">BTree</span>) Insert(userKey []<span class="kw">byte</span>, tid <span class="ty">TID</span>) <span class="ty">error</span> {
+	<span class="kw">if</span> <span class="kw">len</span>(userKey) &gt; MaxKeyLen {
+		<span class="kw">return</span> fmt.Errorf(<span class="st">"btree: キー長 %d は上限 %d を超えている"</span>, <span class="kw">len</span>(userKey), MaxKeyLen)
+	}
+	ck := composite(userKey, tid)
+	rootID, err := t.root()
+	<span class="kw">if</span> err != <span class="kw">nil</span> {
+		<span class="kw">return</span> err
+	}
+	sp, err := t.insertRec(rootID, ck)
+	<span class="kw">if</span> err != <span class="kw">nil</span> {
+		<span class="kw">return</span> err
+	}
+	<span class="kw">if</span> sp == <span class="kw">nil</span> {
+		<span class="kw">return</span> <span class="kw">nil</span>
+	}
+	<span class="cm">// ルートが割れた: 新しいルート（内部ノード）を作る</span>
+	newRoot, err := t.st.Allocate(<span class="kw">func</span>(_ storage.<span class="ty">PageID</span>, p *storage.<span class="ty">Page</span>) <span class="ty">error</span> {
+		n := initNode(p, internalNode)
+		n.setLink(rootID) <span class="cm">// 最左の子 = 旧ルート</span>
+		<span class="kw">if</span> !n.insertCellAt(<span class="st">0</span>, makeInternalCell(sp.sep, sp.right)) {
+			<span class="kw">return</span> fmt.Errorf(<span class="st">"btree: 新ルートへのセル挿入に失敗"</span>)
+		}
+		<span class="kw">return</span> <span class="kw">nil</span>
+	})
+	<span class="kw">if</span> err != <span class="kw">nil</span> {
+		<span class="kw">return</span> err
+	}
+	<span class="kw">return</span> t.setRoot(newRoot)
+}</code></pre>
+
+    <p><code>Insert</code> は玄関です。キー長を検問し、ユーザーキーと TID から複合キーを作り、根から <code>insertRec</code> の旅を始めます。戻ってきた <code>sp</code> が <code>nil</code> なら伝言なし — どこかのノードに収まったということ。<code>nil</code> でなければ<strong>根が割れた</strong>ということなので、新しい根（内部ノード）を作ります。この後半のコードの意味は、分割そのものを見た後の Step 6 の最後にもう一度戻って味わいます。いまは「根が割れたら新しい根を作って <code>setRoot</code>」とだけ頭に置いてください。</p>
+
+    <div class="file-tag">internal/btree/btree.go</div>
+<pre><code><span class="kw">func</span> (t *<span class="ty">BTree</span>) insertRec(id storage.<span class="ty">PageID</span>, ck []<span class="kw">byte</span>) (*<span class="ty">split</span>, <span class="ty">error</span>) {
+	t.NodeReads++
+	<span class="kw">var</span> isLeaf <span class="kw">bool</span>
+	<span class="kw">var</span> childID storage.<span class="ty">PageID</span>
+	err := t.st.Read(id, <span class="kw">func</span>(p *storage.<span class="ty">Page</span>) <span class="ty">error</span> {
+		n := <span class="ty">node</span>{p}
+		isLeaf = n.isLeaf()
+		<span class="kw">if</span> !isLeaf {
+			childID = n.childFor(ck)
+		}
+		<span class="kw">return</span> <span class="kw">nil</span>
+	})
+	<span class="kw">if</span> err != <span class="kw">nil</span> {
+		<span class="kw">return</span> <span class="kw">nil</span>, err
+	}
+
+	<span class="kw">if</span> isLeaf {
+		<span class="kw">return</span> t.insertIntoNode(id, makeLeafCell(ck), ck)
+	}
+	childSplit, err := t.insertRec(childID, ck)
+	<span class="kw">if</span> err != <span class="kw">nil</span> {
+		<span class="kw">return</span> <span class="kw">nil</span>, err
+	}
+	<span class="kw">if</span> childSplit == <span class="kw">nil</span> {
+		<span class="kw">return</span> <span class="kw">nil</span>, <span class="kw">nil</span>
+	}
+	<span class="kw">return</span> t.insertIntoNode(id, makeInternalCell(childSplit.sep, childSplit.right), childSplit.sep)
+}</code></pre>
+
+    <p><code>insertRec</code> が再帰の本体です。流れを追うと —</p>
+    <ul>
+      <li>まず <code>Read</code> でノードを覗き、<strong>種別と（内部なら）行き先の子</strong>だけをメモしてすぐクロージャを抜けます。第02章で学んだとおり、<code>Read</code> の間ページはピン留めされています。クロージャの中で深い再帰に潜ってピンを持ちっぱなしにしないよう、必要な情報だけ取り出して即返す — バッファプールと同居するコードの行儀作法です。</li>
+      <li>葉に着いたら <code>makeLeafCell(ck)</code> を差し込みに行きます。</li>
+      <li>内部ノードなら子へ再帰し、子から伝言（<code>childSplit</code>）が返ってきたときだけ、<code>makeInternalCell(sep, right)</code> — 新しい道しるべ — を<strong>自分に</strong>差し込みます。伝言が <code>nil</code> ならそのまま <code>nil</code> を上へ。</li>
+    </ul>
+    <p>美しいのは、葉への挿入も内部への挿入も、<strong>同じ <code>insertIntoNode</code> に行き着く</strong>ことです。「セルをノードに入れる。あふれたら割って伝言を返す」という仕事は、葉でも内部でも共通だからです。その共通部分の骨組みだけ先に見ておきます。</p>
+
+    <div class="file-tag">internal/btree/btree.go（骨組みのみ — 分割部は Step 6 で全文）</div>
+<pre><code><span class="cm">// insertIntoNode はノードにセルを挿入し、あふれたら分割して分割情報を返す。</span>
+<span class="kw">func</span> (t *<span class="ty">BTree</span>) insertIntoNode(id storage.<span class="ty">PageID</span>, cell []<span class="kw">byte</span>, ck []<span class="kw">byte</span>) (*<span class="ty">split</span>, <span class="ty">error</span>) {
+	<span class="kw">var</span> sp *<span class="ty">split</span>
+	err := t.st.Write(id, <span class="kw">func</span>(p *storage.<span class="ty">Page</span>) <span class="ty">error</span> {
+		n := <span class="ty">node</span>{p}
+		idx := n.lowerBound(ck)
+		<span class="kw">if</span> n.insertCellAt(idx, cell) {
+			<span class="kw">return</span> <span class="kw">nil</span> <span class="cm">// 収まった</span>
+		}
+		<span class="cm">// ---- 分割 ---- …（あふれた場合。この続きは Step 6 で全文を読む）</span>
+	})
+	<span class="kw">if</span> err != <span class="kw">nil</span> {
+		<span class="kw">return</span> <span class="kw">nil</span>, err
+	}
+	<span class="kw">return</span> sp, <span class="kw">nil</span>
+}</code></pre>
+
+    <p><code>lowerBound</code> で位置を探し、<code>insertCellAt</code> が <code>true</code> を返せば（= 空きに収まれば）それで終わり。<code>sp</code> は <code>nil</code> のまま返り、伝言は発生しません。木の絵で想像すると、ほとんどの挿入はこの「収まった」で終わります — 分割は、あふれたときにだけ起きる例外的イベントです。</p>
+
+    <div class="gonote"><div class="box-k">GO メモ · 再帰 — 木構造との相性</div>
+      <p><code>insertRec</code> は自分自身を呼ぶ関数 — <strong>再帰</strong>です。初見だと目が回りますが、読み方のコツは「いま見ている1ノードのことだけ考える」。①自分が葉なら挿入して結果を返す（これ以上潜らない終点 = <strong>基底条件</strong>）。②自分が内部なら「子に任せて、子の報告に対処する」。子の中で何段の分割が起きようと、自分には <code>*split</code> か <code>nil</code> しか返ってきません。木は「同じ形が入れ子になった構造」なので、各段で同じ判断を繰り返す再帰と好相性なのです。深さが心配になりますが、この木の高さは数百万件でも3〜4段（概念導入で見たとおり）なので、スタックはまったく問題になりません。</p>
+    </div>
+
+    <div class="box do"><div class="box-k">▸ 動かして確認</div>
+      <p>挿入はこのパッケージの全テストが通る背骨です。まとめて流して、全経路が生きていることを確認しておきます。</p>
+      <pre class="term"><code><span class="ps">$</span> go test ./internal/btree
+<span class="out">ok  	minidb/internal/btree	0.899s</span></code></pre>
+    </div>
+
+    <h2 class="step" id="step-6"><span class="step-no">Step 6</span>分割 — 葉のコピーアップ、内部のプッシュアップ、根の成長</h2>
+    <p>この章の山場に来ました。「B+Tree を分かっている」と「B+Tree を作れる」を分けるのは、結局この<strong>分割（split）</strong>を書き切れるかどうかだと言われます。幸い、部品はすべて Step 3 までに揃っています。落ち着いて、まず葉の分割を絵で確定させましょう。話を小さくするため「葉には最大4セル」という架空の小さいページで描きます（実際は数百セルですが、理屈は同じです）。</p>
+
+    <div class="ascii">葉の分割（コピーアップ）— 満杯の葉 [10 20 30 40] に 25 を入れる
+
+  分割前:      [10 20 30 40] ──link──→ (次の葉)
+                + 25 → insertCellAt が false（入らない！）
+
+  ①全セル+新セルをキー順に並べる: cells = [10 20 25 30 40]
+  ②真ん中で割る:                  mid = 5/2 = 2
+
+  分割後:
+                親への伝言: sep = 25 の「コピー」, right = 新ページ
+                     │
+      左（元のページ）             右（新しいページ）
+      [10 20] ────link────→ [25 30 40] ────link────→ (次の葉)
+                              ↑ 25 のセルは右の葉に「残っている」
+                                = コピーアップ（葉はデータを失えない）</div>
+
+    <p>押さえるべきポイントは3つです。</p>
+    <ul>
+      <li><strong>図では省略しているが、実際に上がるのは「複合キー」全体。</strong>上の図は読みやすさのため <code>sep = 25</code> とユーザーキーだけで書いていますが、Step 2 で決めたとおり minidb のキーは<strong>ユーザーキー + TID（6 バイト）</strong>という複合キーでした。コードの <code>cellKeyOf(cells[mid])</code> が取り出すのも、その全体です。つまり実物の <code>sep</code> は、8 バイトのキーなら 14 バイトあります。この事実は Step 8（削除）で効いてくるので、頭の隅に置いておいてください。</li>
+      <li><strong>境界キー sep は親へ「コピー」される。</strong>25 のセル（TID を含むデータ本体）は右の葉にちゃんと残り、親には道しるべとして 25 の複製だけが上がります。葉はデータの唯一の置き場所なので、1個でも失うわけにはいきません。これが<strong>コピーアップ</strong>で、B+Tree の「データは葉に全部ある」という性質（= B木との違い、「+」の由来）を守る仕掛けです。</li>
+      <li><strong>link の付け替えで鎖が繋がったまま。</strong>右ノードは旧ノードの link（次の葉）を引き継ぎ、左ノードの link は新しい右ノードを指す。分割しても葉の数珠つなぎは一瞬も切れません。</li>
+    </ul>
+    <p>では全文です。Step 5 で省略した「---- 分割 ----」から先に注目してください。</p>
+
+    <div class="file-tag">internal/btree/btree.go</div>
+<pre><code><span class="cm">// insertIntoNode はノードにセルを挿入し、あふれたら分割して分割情報を返す。</span>
+<span class="kw">func</span> (t *<span class="ty">BTree</span>) insertIntoNode(id storage.<span class="ty">PageID</span>, cell []<span class="kw">byte</span>, ck []<span class="kw">byte</span>) (*<span class="ty">split</span>, <span class="ty">error</span>) {
+	<span class="kw">var</span> sp *<span class="ty">split</span>
+	err := t.st.Write(id, <span class="kw">func</span>(p *storage.<span class="ty">Page</span>) <span class="ty">error</span> {
+		n := <span class="ty">node</span>{p}
+		idx := n.lowerBound(ck)
+		<span class="kw">if</span> n.insertCellAt(idx, cell) {
+			<span class="kw">return</span> <span class="kw">nil</span> <span class="cm">// 収まった</span>
+		}
+
+		<span class="cm">// ---- 分割 ----</span>
+		<span class="cm">// 全セル + 新セルをキー順に並べ、半分ずつに分ける</span>
+		cells := <span class="kw">make</span>([][]<span class="kw">byte</span>, <span class="st">0</span>, n.numCells()+<span class="st">1</span>)
+		<span class="kw">for</span> i := <span class="st">0</span>; i &lt; n.numCells(); i++ {
+			cells = <span class="kw">append</span>(cells, n.cellBytes(i))
+		}
+		cells = <span class="kw">append</span>(cells[:idx:idx], <span class="kw">append</span>([][]<span class="kw">byte</span>{cell}, cells[idx:]...)...)
+		mid := <span class="kw">len</span>(cells) / <span class="st">2</span>
+
+		typ := n.typ()
+		oldLink := n.link()
+
+		<span class="kw">if</span> typ == leafNode {
+			<span class="cm">// 右ノードへ後半を移す。sep = 右の先頭キー（コピーアップ）</span>
+			right, err := t.st.Allocate(<span class="kw">func</span>(_ storage.<span class="ty">PageID</span>, rp *storage.<span class="ty">Page</span>) <span class="ty">error</span> {
+				rebuild(rp, leafNode, oldLink, cells[mid:]) <span class="cm">// 右の link = 旧ノードの右隣</span>
+				<span class="kw">return</span> <span class="kw">nil</span>
+			})
+			<span class="kw">if</span> err != <span class="kw">nil</span> {
+				<span class="kw">return</span> err
+			}
+			rebuild(p, leafNode, right, cells[:mid]) <span class="cm">// 左の link = 新しい右ノード</span>
+			sp = &amp;<span class="ty">split</span>{sep: bytes.Clone(cellKeyOf(cells[mid])), right: right}
+			<span class="kw">return</span> <span class="kw">nil</span>
+		}
+
+		<span class="cm">// 内部ノード: 中央キーはムーブアップ（右には残さない）。</span>
+		<span class="cm">// 右ノードの最左の子 = 中央セルの子。</span>
+		midCell := cells[mid]
+		midKey := bytes.Clone(cellKeyOf(midCell))
+		midChild := storage.<span class="ty">PageID</span>(binary.LittleEndian.Uint32(midCell[<span class="st">2</span>+<span class="kw">len</span>(midKey):]))
+		right, err := t.st.Allocate(<span class="kw">func</span>(_ storage.<span class="ty">PageID</span>, rp *storage.<span class="ty">Page</span>) <span class="ty">error</span> {
+			rebuild(rp, internalNode, midChild, cells[mid+<span class="st">1</span>:])
+			<span class="kw">return</span> <span class="kw">nil</span>
+		})
+		<span class="kw">if</span> err != <span class="kw">nil</span> {
+			<span class="kw">return</span> err
+		}
+		rebuild(p, internalNode, oldLink, cells[:mid]) <span class="cm">// 最左の子は変わらない</span>
+		sp = &amp;<span class="ty">split</span>{sep: midKey, right: right}
+		<span class="kw">return</span> <span class="kw">nil</span>
+	})
+	<span class="kw">if</span> err != <span class="kw">nil</span> {
+		<span class="kw">return</span> <span class="kw">nil</span>, err
+	}
+	<span class="kw">return</span> sp, <span class="kw">nil</span>
+}</code></pre>
+
+    <p>分割の実装方針は <code>rebuild</code>（Step 3）と同じ豪快路線です。ページの中で器用にセルをやりくりするのではなく、<strong>全セル + 新セルをいったんメモリ上のスライス <code>cells</code> に吸い出して、キー順の完全な一覧を作ってから、半分ずつ2ページに組み直す</strong>。<code>idx</code> は <code>lowerBound</code> が返した挿入位置なので、その位置に新セルを挟めば一覧はキー順です。</p>
+
+    <div class="gonote"><div class="box-k">GO メモ · フルスライス式 a[:idx:idx] — append の上書き事故を防ぐ</div>
+      <p><code>cells = append(cells[:idx:idx], append([][]byte{cell}, cells[idx:]...)...)</code> は1行で「idx の位置に cell を挟んだ新しい並び」を作っています。見慣れない <code>cells[:idx:idx]</code> は<strong>フルスライス式</strong>で、3つ目の idx は「このスライスの容量（cap）も idx で打ち止め」という指定です。実はこの式に限れば、内側の <code>append([][]byte{cell}, cells[idx:]...)</code> が先に完全評価され、cap 1 のリテラルからの append は必ず新しい配列にコピーするので、後半のデータが上書きされる事故はそもそも起きません。それでも cap を切っておくのは、「切ってから伸ばす」挿入イディオムの定石だからです。普通に <code>cells[:idx]</code> と書くと、cap には元の配列の続き — つまり <code>cells[idx:]</code> の領域 — が含まれ、書き方次第では <code>append</code> がそこへ<strong>直接上書き</strong>し得ます。cap を切っておけば、どう書いても append は新しい配列を確保するしかない。第03章の bytes.Clone と同じで、この式では実害が無くても機械的に守る方が、後でコードをいじったときに事故りません。</p>
+    </div>
+
+    <p>そして、この関数でいちばん語りたいのが<strong>書き込みの順序</strong>です。コードは必ずこの順で進みます。</p>
+    <ol>
+      <li><strong>右ノードを先に、完全な形で作る</strong>（<code>Allocate</code> して後半のセルで <code>rebuild</code>）。この時点で右ページはまだ<strong>誰からも指されていません</strong>。木を上からたどっても絶対に到達できない、ただの下書きです。</li>
+      <li><strong>左（元のページ）を前半のセルで組み直す</strong>。link を新しい右ノードに向けた瞬間、鎖経由で右が木に編み込まれます。</li>
+      <li><strong>最後に親へ伝言 <code>sp</code> を返す</strong>。親に <code>(sep → right)</code> が入って、上からの経路も開通します。</li>
+    </ol>
+    <p>順序を逆にするとどうなるか。先に左を半分に削ってしまうと、「右がまだ存在しないのに、後半のキーが左から消えている」瞬間が生まれます。もしそこでエラーが起きて処理が中断したら、木は後半のキーを永久に失う。右から作る限り、途中でどこで失敗しても<strong>既存の木は常に完全なまま</strong>です（失敗の結果は「誰にも参照されないページが1枚無駄になる」だけ）。<strong>壊れた中間状態を作らない順序で書く</strong> — この感覚は、第06章の WAL で主役に昇格します。</p>
+
+    <div class="box hazard"><div class="box-k">⚠ 落とし穴 · sep を bytes.Clone している理由</div>
+      <p>葉の分割で <code>sp = &amp;split{sep: bytes.Clone(cellKeyOf(cells[mid])), …}</code> と、わざわざキーを複製しています。Step 2 の落とし穴の回収です。もしここで <code>n.key(mid)</code> のような<strong>ページへの参照</strong>を sep にすると、直後の <code>rebuild(p, …)</code> がページを書き換えた瞬間、sep の中身は別物に化けます。実はこのコードの <code>cells[mid]</code> は <code>cellBytes</code> が作ったコピーなので Clone しなくても動くのですが、「ページ由来かもしれないバイト列をクロージャの外へ持ち出すときは必ず複製する」を機械的に守る方が、後でコードをいじったときに事故りません。<code>bytes.Clone(b)</code> は「b と同じ内容の新しいスライス」を返す Go 1.20 からの標準関数です。</p>
+    </div>
+
+    <h3>内部ノードの分割 — 中央キーは「引っ越す」</h3>
+    <p>コードの後半、内部ノードの分割は、葉と<strong>一箇所だけ決定的に違います</strong>。中央のキーが、右ノードに残らないのです。</p>
+
+    <div class="ascii">内部ノードの分割（プッシュアップ）— 最大 4 セルと仮定
+
+  分割前:  link=P0 [25→P1][30→P2][40→P3][60→P4]
+            + (50→P9) → 入らない！
+
+  ①並べる: cells = [25→P1][30→P2][40→P3][50→P9][60→P4] , mid = 2
+  ②中央セル (40→P3) を取り出す:
+      キー 40   → 親へ「移動」（右には残さない = プッシュアップ）
+      子   P3   → 右ノードの link（最左の子）に住み替え
+
+  分割後:
+                親への伝言: sep = 40, right = 新ページ
+                     │
+      左（元のページ）              右（新しいページ）
+      link=P0 [25→P1][30→P2]       link=P3 [50→P9][60→P4]
+
+  ※ 葉との違い: 40 は左にも右にもいない。親にだけいる。</div>
+
+    <p>なぜ葉はコピーで、内部は移動なのか。<strong>内部ノードのキーはただの道しるべで、データではない</strong>からです。「40 以上は右へ」という案内が親に置かれた時点で、その仕事は完了しています。同じ 40 を右ノードにも残すと、案内が二重になるだけでなく、もっと実務的な問題が起きます — 右ノードに残した <code>(40→P3)</code> セルの左側、つまり「40 未満の受け皿」が空席になるのです。そこで中央セルを分解し、<strong>キーは親へ、子 P3 は右ノードの link（最左の子）へ</strong>と引っ越させます。セルの数を数えると、左に mid 個、右に mid を除いた後半、親に1個 — 1個も増えず減らず、全員に新しい住所が割り当たります。</p>
+    <p>コードでは <code>midChild</code> の取り出しがその分解です。<code>midCell</code> のキーの後ろ4バイトから子 PageID を読み（Step 2 のセル形式そのまま）、<code>rebuild(rp, internalNode, midChild, cells[mid+1:])</code> — 右ノードの link 引数に midChild を渡しているのが「住み替え」の1行です。</p>
+
+    <h3>根の分割 — 木はてっぺんから伸びる</h3>
+    <p>分割の伝言が根まで届き、根自身が割れると、伝言 <code>sp</code> は <code>insertRec</code> の再帰の外まで転がり出てきます。それを受け止めるのが、Step 5 で棚上げした <code>Insert</code> の後半です（再掲）。</p>
+
+    <div class="file-tag">internal/btree/btree.go（再掲 — Insert の後半）</div>
+<pre><code>	<span class="kw">if</span> sp == <span class="kw">nil</span> {
+		<span class="kw">return</span> <span class="kw">nil</span>
+	}
+	<span class="cm">// ルートが割れた: 新しいルート（内部ノード）を作る</span>
+	newRoot, err := t.st.Allocate(<span class="kw">func</span>(_ storage.<span class="ty">PageID</span>, p *storage.<span class="ty">Page</span>) <span class="ty">error</span> {
+		n := initNode(p, internalNode)
+		n.setLink(rootID) <span class="cm">// 最左の子 = 旧ルート</span>
+		<span class="kw">if</span> !n.insertCellAt(<span class="st">0</span>, makeInternalCell(sp.sep, sp.right)) {
+			<span class="kw">return</span> fmt.Errorf(<span class="st">"btree: 新ルートへのセル挿入に失敗"</span>)
+		}
+		<span class="kw">return</span> <span class="kw">nil</span>
+	})
+	<span class="kw">if</span> err != <span class="kw">nil</span> {
+		<span class="kw">return</span> err
+	}
+	<span class="kw">return</span> t.setRoot(newRoot)</code></pre>
+
+    <div class="ascii">根の分割 = 木が 1 段伸びる瞬間
+
+     分割前                              分割後
+  メタ → 根（葉）                    メタ → 新しい根（内部ノード）
+         [10 20 30 40] ＋50                 link=旧根 [30 → 右]
+                                            /             \
+                                     旧根 [10 20] ──→ 右 [30 40 50]
+
+  ・新しい根のセルはたった 1 個: (sep → right)。最左の子 link = 旧根
+  ・メタページの root を新しい根に書き換えて完了（外の参照は不変！）</div>
+
+    <p>新しい根は、link に旧ルート、セル1個に <code>(sep → right)</code> を持つ内部ノードです。ここで大事な観察がひとつ。<strong>B+Tree の背が伸びるのは、常に「てっぺん」でだけ</strong>です。根が割れると、すべての葉の深さが同時に1増える。だからこの木は、どんな順序でどれだけ挿入しても、片側だけ深い「いびつな木」に絶対なりません。二分探索木で悩みの種になる偏り（ソート済みデータを入れると一直線に退化する、あの問題）が、構造的に起きないのです。挿入のたびに回転で整える赤黒木などと違い、<strong>何もしなくてもバランスが保たれる</strong> — B+Tree がデータベースの王座に居続ける理由のひとつです。</p>
+    <p>最後に <code>setRoot</code> でメタページを更新して、根の引っ越し完了。カタログが覚えているメタページ番号は、何も変わっていません（Step 4 の伏線回収です）。</p>
+
+    <div class="box do"><div class="box-k">▸ 動かして確認</div>
+      <p>分割が正しく動いている何よりの証拠は、<strong>大量に入れても木が低いまま</strong>なことです。それを実測するテストを読んでから動かします。まず、テストがキーを作るのに使うヘルパ <code>intKey</code> — 「順序保存エンコード」の小さな見本です。</p>
+    </div>
+
+    <div class="file-tag">internal/btree/btree_test.go（抜粋）</div>
+<pre><code><span class="cm">// intKey は int64 を順序保存バイト列にする（符号ビット反転 + ビッグエンディアン）。</span>
+<span class="kw">func</span> intKey(v <span class="kw">int64</span>) []<span class="kw">byte</span> {
+	<span class="kw">var</span> b [<span class="st">8</span>]<span class="kw">byte</span>
+	binary.BigEndian.PutUint64(b[:], <span class="kw">uint64</span>(v)^(<span class="st">1</span>&lt;&lt;<span class="st">63</span>))
+	<span class="kw">return</span> b[:]
+}</code></pre>
+
+    <p>int64 をそのままビッグエンディアンにすると、負数は最上位ビットが1なので正数より大きいバイト列になってしまいます。そこで符号ビットだけ反転（<code>^(1&lt;&lt;63)</code>）してから焼くと、負→正の全域で <code>bytes.Compare</code> の順序が数値の順序と一致します。第04章で作る順序保存エンコードの、これが原型です。そして本命のテスト。</p>
+
+    <div class="file-tag">internal/btree/btree_test.go（抜粋）</div>
+<pre><code><span class="cm">// L-02: 検索コストが対数的であることを観測する。</span>
+<span class="cm">// 5000 件でも 1 回の検索で触るノード数は木の高さ程度（≦5）に収まる。</span>
+<span class="kw">func</span> TestBTreeSearchIsLogarithmic(t *testing.T) {
+	tree, _, _ := newTree(t)
+	<span class="kw">const</span> n = <span class="st">5000</span>
+	<span class="kw">for</span> v := <span class="st">0</span>; v &lt; n; v++ {
+		<span class="kw">if</span> err := tree.Insert(intKey(<span class="kw">int64</span>(v)), <span class="ty">TID</span>{<span class="ty">Page</span>: storage.<span class="ty">PageID</span>(v)}); err != <span class="kw">nil</span> {
+			t.Fatal(err)
+		}
+	}
+	tree.NodeReads = <span class="st">0</span>
+	<span class="kw">if</span> _, err := tree.SearchEqual(intKey(<span class="st">2500</span>)); err != <span class="kw">nil</span> {
+		t.Fatal(err)
+	}
+	<span class="kw">if</span> tree.NodeReads &gt; <span class="st">6</span> {
+		t.Fatalf(<span class="st">"%d 件の等値検索で %d ノードも触っている（対数的でない）"</span>, n, tree.NodeReads)
+	}
+	t.Logf(<span class="st">"5000件の等値検索で触ったノード数: %d"</span>, tree.NodeReads)
+}</code></pre>
+
+    <p>5000件入れた後、カウンタをゼロにして等値検索を1回だけ実行し、<code>NodeReads</code> が6以下であることを要求しています。実測はいくつでしょうか。</p>
+
+    <pre class="term"><code><span class="ps">$</span> go test ./internal/btree -run TestBTreeSearchIsLogarithmic -v
+<span class="out">=== RUN   TestBTreeSearchIsLogarithmic
+    btree_test.go:97: 5000件の等値検索で触ったノード数: 3
+--- PASS: TestBTreeSearchIsLogarithmic (0.01s)
+PASS
+ok  	minidb/internal/btree	0.853s</span></code></pre>
+
+    <p><strong>3枚。</strong>5000件を素朴に全走査すれば数十ページ読むところを、根1枚 + 葉1枚（下りで到達）+ 葉1枚（走査で読み直し。次の Step で仕組みを見ます）= 3回のノード読みで決着しています。この木の高さは2 — 概念導入の「太い木は低い」が、いま自分のコードの実測値になりました。キーを10倍に増やしても、高さはせいぜい1段しか増えません。それが対数ということです。</p>
+
+    <h2 class="step" id="step-7"><span class="step-no">Step 7</span>探索 — 木を降り、葉を横に歩く</h2>
+    <p>挿入という難所を越えたので、検索は気楽です。作るのは「木を降りて目的の葉に着く」<code>descendToLeaf</code> と、その葉から「横に歩いて集める」<code>scan</code>、そして外向けの顔 <code>SearchEqual</code> / <code>SearchRange</code> の4つ。実は等値検索と範囲検索は、中身が<strong>同じ1本の関数</strong>です。</p>
+
+    <div class="ascii">SearchEqual(2500) — 5000 件・高さ 2 の木での実測経路
+
+  メタページ ── root を読む（NodeReads には数えない。木のノードではない）
+      │
+      ▼ ①根（内部）: childFor(2500 の複合キー) で行き先を選ぶ   … 1 枚目
+      ▼ ②葉に到着（isLeaf を確認して降りる旅は終わり）           … 2 枚目
+      ▼ ③scan が同じ葉を開き直し、lowerBound から右へ回収        … 3 枚目
+           [… 2499 2500 2501 …]
+                  └─┘ ユーザーキー一致はここだけ → TID 1 件を返す
+
+  Step 6 の実測「触ったノード数: 3」の内訳がこれ</div>
+
+    <div class="file-tag">internal/btree/btree.go</div>
+<pre><code><span class="cm">// descendToLeaf は ck を含むべき葉の PageID を返す。</span>
+<span class="kw">func</span> (t *<span class="ty">BTree</span>) descendToLeaf(ck []<span class="kw">byte</span>) (storage.<span class="ty">PageID</span>, <span class="ty">error</span>) {
+	id, err := t.root()
+	<span class="kw">if</span> err != <span class="kw">nil</span> {
+		<span class="kw">return</span> storage.InvalidPageID, err
+	}
+	<span class="kw">for</span> {
+		t.NodeReads++
+		<span class="kw">var</span> isLeaf <span class="kw">bool</span>
+		<span class="kw">var</span> next storage.<span class="ty">PageID</span>
+		err := t.st.Read(id, <span class="kw">func</span>(p *storage.<span class="ty">Page</span>) <span class="ty">error</span> {
+			n := <span class="ty">node</span>{p}
+			isLeaf = n.isLeaf()
+			<span class="kw">if</span> !isLeaf {
+				next = n.childFor(ck)
+			}
+			<span class="kw">return</span> <span class="kw">nil</span>
+		})
+		<span class="kw">if</span> err != <span class="kw">nil</span> {
+			<span class="kw">return</span> storage.InvalidPageID, err
+		}
+		<span class="kw">if</span> isLeaf {
+			<span class="kw">return</span> id, <span class="kw">nil</span>
+		}
+		id = next
+	}
+}</code></pre>
+
+    <p><code>descendToLeaf</code> は <code>insertRec</code> の下りと同じ動きの、再帰ではなくループ版です。ノードを覗き、葉ならその PageID を返し、内部なら <code>childFor</code> で次へ。挿入と検索が「同じ降り方」をするのは当然で、挿入がそのキーを置いた道筋を、検索がなぞり直しているわけです。</p>
+
+    <div class="file-tag">internal/btree/btree.go</div>
+<pre><code><span class="cm">// SearchEqual はユーザーキーが一致する全 TID を返す（重複キー対応）。</span>
+<span class="kw">func</span> (t *<span class="ty">BTree</span>) SearchEqual(userKey []<span class="kw">byte</span>) ([]<span class="ty">TID</span>, <span class="ty">error</span>) {
+	<span class="kw">return</span> t.scan(userKey, userKey)
+}
+
+<span class="cm">// SearchRange は lo &lt;= key &lt;= hi の TID をキー昇順で返す。lo/hi が nil なら無限端。</span>
+<span class="kw">func</span> (t *<span class="ty">BTree</span>) SearchRange(lo, hi []<span class="kw">byte</span>) ([]<span class="ty">TID</span>, <span class="ty">error</span>) {
+	<span class="kw">return</span> t.scan(lo, hi)
+}
+
+<span class="kw">func</span> (t *<span class="ty">BTree</span>) scan(lo, hi []<span class="kw">byte</span>) ([]<span class="ty">TID</span>, <span class="ty">error</span>) {
+	<span class="cm">// 開始位置: lo + 最小 TID の複合キーの lower bound（lo が nil なら最左端）</span>
+	start := []<span class="kw">byte</span>{}
+	<span class="kw">if</span> lo != <span class="kw">nil</span> {
+		start = composite(lo, <span class="ty">TID</span>{<span class="ty">Page</span>: <span class="st">0</span>, Slot: <span class="st">0</span>})
+	}
+	leaf, err := t.descendToLeaf(start)
+	<span class="kw">if</span> err != <span class="kw">nil</span> {
+		<span class="kw">return</span> <span class="kw">nil</span>, err
+	}
+
+	<span class="kw">var</span> out []<span class="ty">TID</span>
+	<span class="kw">for</span> leaf != storage.InvalidPageID {
+		t.NodeReads++
+		<span class="kw">var</span> nextLeaf storage.<span class="ty">PageID</span>
+		done := <span class="kw">false</span>
+		err := t.st.Read(leaf, <span class="kw">func</span>(p *storage.<span class="ty">Page</span>) <span class="ty">error</span> {
+			n := <span class="ty">node</span>{p}
+			nextLeaf = n.link()
+			<span class="kw">for</span> i := n.lowerBound(start); i &lt; n.numCells(); i++ {
+				ck := n.key(i)
+				uk := userPart(ck)
+				<span class="kw">if</span> hi != <span class="kw">nil</span> &amp;&amp; bytes.Compare(uk, hi) &gt; <span class="st">0</span> {
+					done = <span class="kw">true</span>
+					<span class="kw">return</span> <span class="kw">nil</span>
+				}
+				out = <span class="kw">append</span>(out, decodeTID(ck[<span class="kw">len</span>(ck)-tidLen:]))
+			}
+			<span class="kw">return</span> <span class="kw">nil</span>
+		})
+		<span class="kw">if</span> err != <span class="kw">nil</span> {
+			<span class="kw">return</span> <span class="kw">nil</span>, err
+		}
+		<span class="kw">if</span> done {
+			<span class="kw">break</span>
+		}
+		leaf = nextLeaf
+		start = []<span class="kw">byte</span>{} <span class="cm">// 2 枚目以降は先頭から</span>
+	}
+	<span class="kw">return</span> out, <span class="kw">nil</span>
+}</code></pre>
+
+    <p><code>SearchEqual(k)</code> が <code>scan(k, k)</code> の一行で済んでいるのがこの設計のうまみです。「k 以上 k 以下」という幅ゼロの範囲検索。重複キーがあれば、その全部が範囲に入って返ります。<code>scan</code> の中身を順に読みます。</p>
+    <ul>
+      <li><strong>開始位置の作り方</strong> — <code>composite(lo, TID{Page: 0, Slot: 0})</code>。lo に最小の TID を付けた複合キーは、「ユーザーキー lo を持つあらゆるエントリ以下」の値になります。この複合キーで <code>descendToLeaf</code> すれば、lo の<strong>一番左の出現</strong>のいる葉に確実に着地します。lo が <code>nil</code>（下限なし）なら空のバイト列 — あらゆるキー以下なので最左端の葉に降ります。</li>
+      <li><strong>葉の中</strong> — <code>lowerBound(start)</code> の位置から右へ順にセルを読み、複合キーからユーザーキー部分（<code>userPart</code>）を剥がして上限 hi と比べます。hi を超えたら <code>done</code> を立てて打ち切り。超えるまでは TID（複合キーの末尾6バイト）を回収します。</li>
+      <li><strong>葉から葉へ</strong> — 打ち切られずに葉を読み終えたら、link で右隣へ。<strong>2枚目以降は <code>start</code> を空に戻す</strong>のを見落とさないでください。開始位置の二分探索が要るのは最初の葉だけで、次の葉は必ず先頭から続きです（戻し忘れても<strong>答えは正しいまま</strong>です — 2枚目以降の葉は必ず全部 start 以上なので、二分探索の結果はどのみち0になります。つまりこれは正しさではなく<strong>無駄の問題</strong>で、戻さないと葉を1枚読むたびに「必ず0になる二分探索」を毎回走らせることになります。空にすれば lowerBound は常に0を返すだけの無害な呼び出しになります）。</li>
+      <li><strong>終端</strong> — 右端の葉の link は <code>InvalidPageID</code> なのでループが自然に終わります。hi が <code>nil</code>（上限なし）なら打ち切り条件が発火しないだけ。</li>
+    </ul>
+
+    <div class="ascii">SearchRange(1000, 1099) — 降りて、横に歩く
+
+  ①降りる: composite(1000, 最小TID) で葉まで
+                   ▼ lowerBound でここから
+     葉A [ … 998 999 1000 1001 … 1060 ] ──link──→ 葉B [ 1061 … 1099 1100 … ]
+                     └────── 回収 ──────┘             └── 回収 ──┘ ↑
+                                                          1100 &gt; hi で打ち切り
+  結果: TID がキー昇順で 100 件 — ソート不要で「並んだまま」出てくる</div>
+
+    <p>範囲の結果が<strong>最初からキー昇順</strong>で出てくることに注目してください。並べ替えという工程がそもそも存在しません。葉が常にソート済みで、鎖がその順に繋がっているからです。第05章で <code>WHERE</code> 句を索引に振り向けるとき、この性質がそのまま利きます。</p>
+    <p>この動きを端から検証しているのが、パッケージ最大のテストです。</p>
+
+    <div class="file-tag">internal/btree/btree_test.go（抜粋）</div>
+<pre><code><span class="cm">// M3 受け入れ基準: 大量データで等値・範囲検索が順序通り・高速に行える。</span>
+<span class="kw">func</span> TestBTreeLargeInsertAndSearch(t *testing.T) {
+	tree, _, _ := newTree(t)
+
+	<span class="kw">const</span> n = <span class="st">5000</span>
+	rng := rand.New(rand.NewSource(<span class="st">42</span>))
+	perm := rng.Perm(n) <span class="cm">// ランダム順で挿入</span>
+	<span class="kw">for</span> _, v := <span class="kw">range</span> perm {
+		<span class="kw">if</span> err := tree.Insert(intKey(<span class="kw">int64</span>(v)), <span class="ty">TID</span>{<span class="ty">Page</span>: storage.<span class="ty">PageID</span>(v), Slot: <span class="kw">uint16</span>(v % <span class="st">100</span>)}); err != <span class="kw">nil</span> {
+			t.Fatal(err)
+		}
+	}
+
+	<span class="cm">// 等値検索</span>
+	<span class="kw">for</span> _, v := <span class="kw">range</span> []<span class="kw">int64</span>{<span class="st">0</span>, <span class="st">1</span>, <span class="st">2500</span>, <span class="st">4998</span>, <span class="st">4999</span>} {
+		tids, err := tree.SearchEqual(intKey(v))
+		<span class="kw">if</span> err != <span class="kw">nil</span> {
+			t.Fatal(err)
+		}
+		<span class="kw">if</span> <span class="kw">len</span>(tids) != <span class="st">1</span> || tids[<span class="st">0</span>].<span class="ty">Page</span> != storage.<span class="ty">PageID</span>(v) {
+			t.Fatalf(<span class="st">"SearchEqual(%d) = %v, want 1件 Page=%d"</span>, v, tids, v)
+		}
+	}
+	<span class="cm">// 存在しないキー</span>
+	<span class="kw">if</span> tids, _ := tree.SearchEqual(intKey(<span class="st">99999</span>)); <span class="kw">len</span>(tids) != <span class="st">0</span> {
+		t.Fatalf(<span class="st">"存在しないキーで %d 件返った"</span>, <span class="kw">len</span>(tids))
+	}
+
+	<span class="cm">// 範囲検索: 順序通り・過不足なし</span>
+	tids, err := tree.SearchRange(intKey(<span class="st">1000</span>), intKey(<span class="st">1099</span>))
+	<span class="kw">if</span> err != <span class="kw">nil</span> {
+		t.Fatal(err)
+	}
+	<span class="kw">if</span> <span class="kw">len</span>(tids) != <span class="st">100</span> {
+		t.Fatalf(<span class="st">"範囲 [1000,1099] で %d 件, want 100"</span>, <span class="kw">len</span>(tids))
+	}
+	<span class="kw">for</span> i, tid := <span class="kw">range</span> tids {
+		<span class="kw">if</span> tid.<span class="ty">Page</span> != storage.<span class="ty">PageID</span>(<span class="st">1000</span>+i) {
+			t.Fatalf(<span class="st">"範囲検索の %d 番目が Page=%d（昇順になっていない）"</span>, i, tid.<span class="ty">Page</span>)
+		}
+	}
+}</code></pre>
+
+    <p>意地悪なのは <code>rng.Perm(n)</code> — 0〜4999 を<strong>ランダムな順序</strong>で挿入するところです。昇順挿入は常に右端に足すだけの楽な仕事ですが、ランダム挿入は木のあちこちで分割を起こします（種42固定なので毎回同じ「ランダム」= 再現可能。テストの基本作法です）。そのうえで、①両端と中央の等値検索、②存在しないキーがゼロ件であること、③範囲 [1000, 1099] がちょうど100件・昇順であることを検めています。範囲検索の結果が1件でもずれたり順序が乱れたりすれば、分割のどこかが壊れている — 分割の検収テストでもあるのです。</p>
+
+    <div class="box do"><div class="box-k">▸ 動かして確認</div>
+      <pre class="term"><code><span class="ps">$</span> go test ./internal/btree -run TestBTreeLargeInsertAndSearch -v
+<span class="out">=== RUN   TestBTreeLargeInsertAndSearch
+--- PASS: TestBTreeLargeInsertAndSearch (0.01s)
+PASS
+ok  	minidb/internal/btree	0.890s</span></code></pre>
+    </div>
+
+    <h2 class="step" id="step-8"><span class="step-no">Step 8</span>削除 — 併合しない、という割り切り</h2>
+    <p>最後は削除です。教科書の B+Tree では、削除でノードがスカスカになったら隣から借りたり（再配分）、隣とくっつけたり（併合）して占有率を保ちます。しかしこれを真面目に書くと、分割と同じ規模のコードがもう1セット、しかも逆向きの伝播つきで必要になります。</p>
+    <p>minidb は<strong>やりません</strong>。削除は「葉からセルを取り除くだけ」。スカスカのノードは放置します。これは手抜きというより、費用対効果の判断です。①検索の正しさには一切影響しない（道しるべが多少古くても、指す先に該当キーが無いだけ）。②挿入が続く用途なら空きはやがて再利用される。③本物の DB にも近い割り切りの例があります — たとえば PostgreSQL の B-Tree は削除で即座にページを併合せず、完全に空になったページだけを後で回収する方式で、半端に空いたページはそのまま放置します。「空きすぎたノードを許容する」は、実務でも通用する現実解なのです（※兄弟ページとの併合・再配分をきちんと行う DB もあります。minidb はそれを省いた、というのが正確な立ち位置です）。</p>
+    <p>ただし<strong>タダの割り切りではありません</strong>。代償がどこに出るかは、はっきりさせておきましょう。空になった葉も<strong>鎖（link）には繋がったまま残る</strong>ので、範囲走査はそれを 1 枚ずつ律儀に読みに行きます。手元で 3000 件を入れてから全件削除し、範囲走査で読んだ葉の枚数を数えると、こうなります。</p>
+    <div class="ascii">全3000件あるとき: 結果=3000件 / 読んだ葉=28枚
+全件削除後:       結果=0件    なのに 読んだ葉=28枚  ← 空の葉を28枚めくっている</div>
+    <p>1 件も返さないのに、削除前とまったく同じ 28 枚を読んでいます。つまり<strong>①検索の「正しさ」には影響しないが、②範囲走査の「コスト」には影響する</strong>。大量に消して二度と入れない使い方をすると、空の葉が鎖に溜まり続けます。本物の DB が併合や、PostgreSQL のように「完全に空のページを後から回収する」仕組みを持つのは、この代償を払いたくないからです。</p>
+    <p>そのぶん実装は簡潔です。複合キーは一意なので、「(userKey, tid) の組」で指名すれば消すべきセルは高々1個。<code>lowerBound</code> で当たりを付けて、一致したら <code>rebuild</code> で組み直すだけです。</p>
+
+    <div class="file-tag">internal/btree/btree.go</div>
+<pre><code><span class="cm">// Delete は (userKey, tid) の組を木から取り除く。見つからなければエラー。</span>
+<span class="cm">// ノードの併合・再配分は行わない（学習スコープ: 空きすぎたノードは許容する）。</span>
+<span class="kw">func</span> (t *<span class="ty">BTree</span>) Delete(userKey []<span class="kw">byte</span>, tid <span class="ty">TID</span>) <span class="ty">error</span> {
+	ck := composite(userKey, tid)
+	leaf, err := t.descendToLeaf(ck)
+	<span class="kw">if</span> err != <span class="kw">nil</span> {
+		<span class="kw">return</span> err
+	}
+	<span class="cm">// 複合キーは一意なので、あるとすれば lower bound の位置。</span>
+	<span class="cm">// ちょうど葉の境界で右隣に置かれた場合に備え、右隣まで見る。</span>
+	<span class="kw">for</span> leaf != storage.InvalidPageID {
+		found := <span class="kw">false</span>
+		<span class="kw">var</span> nextLeaf storage.<span class="ty">PageID</span>
+		err := t.st.Write(leaf, <span class="kw">func</span>(p *storage.<span class="ty">Page</span>) <span class="ty">error</span> {
+			n := <span class="ty">node</span>{p}
+			nextLeaf = n.link()
+			idx := n.lowerBound(ck)
+			<span class="kw">if</span> idx &lt; n.numCells() &amp;&amp; bytes.Equal(n.key(idx), ck) {
+				cells := <span class="kw">make</span>([][]<span class="kw">byte</span>, <span class="st">0</span>, n.numCells()-<span class="st">1</span>)
+				<span class="kw">for</span> i := <span class="st">0</span>; i &lt; n.numCells(); i++ {
+					<span class="kw">if</span> i == idx {
+						<span class="kw">continue</span>
+					}
+					cells = <span class="kw">append</span>(cells, n.cellBytes(i))
+				}
+				rebuild(p, leafNode, n.link(), cells)
+				found = <span class="kw">true</span>
+			}
+			<span class="kw">return</span> <span class="kw">nil</span>
+		})
+		<span class="kw">if</span> err != <span class="kw">nil</span> {
+			<span class="kw">return</span> err
+		}
+		<span class="kw">if</span> found {
+			<span class="kw">return</span> <span class="kw">nil</span>
+		}
+		<span class="cm">// この葉の全キーが ck より大きければもう存在しない</span>
+		<span class="kw">var</span> pastIt <span class="kw">bool</span>
+		err = t.st.Read(leaf, <span class="kw">func</span>(p *storage.<span class="ty">Page</span>) <span class="ty">error</span> {
+			n := <span class="ty">node</span>{p}
+			pastIt = n.numCells() &gt; <span class="st">0</span> &amp;&amp; bytes.Compare(n.key(<span class="st">0</span>), ck) &gt; <span class="st">0</span>
+			<span class="kw">return</span> <span class="kw">nil</span>
+		})
+		<span class="kw">if</span> err != <span class="kw">nil</span> {
+			<span class="kw">return</span> err
+		}
+		<span class="kw">if</span> pastIt {
+			<span class="kw">break</span>
+		}
+		leaf = nextLeaf
+	}
+	<span class="kw">return</span> fmt.Errorf(<span class="st">"btree: 削除対象のキーが見つからない"</span>)
+}</code></pre>
+
+    <p>骨子は「<code>descendToLeaf</code> で着地 → <code>lowerBound(ck)</code> の位置が <code>bytes.Equal</code> で完全一致なら、そのセルだけ除いた一覧で <code>rebuild</code>」。<code>rebuild</code> に <code>n.link()</code> を渡して<strong>鎖を維持したまま</strong>組み直しているのが芸の細かいところです（link を落とすと、その葉から右が範囲走査で迷子になります）。</p>
+    <p>ひとつだけ用心深いのが、見つからなかったときに<strong>右隣の葉まで歩いてから諦める</strong>ループ構造です。分割の境界キーは「右ノードの先頭キーのコピー」でした。つまり探しているちょうどそのキーが、葉と葉の境界線上 — 右隣の先頭 — に位置するケースがあり得ます。降り方の解釈が紙一重ずれても正しく消せるよう、「探した葉に無ければ、その葉（2周目以降は隣の葉）の先頭キーが ck を追い越していないか確かめてから次へ進む」保険を掛けています（<code>pastIt</code>: いま探し終えた葉の先頭キーが ck より大きければ、その葉から右にはもう ck 以上しか無い＝どこにも無いと確定して打ち切り）。最後まで見つからなければ、きちんとエラーで報告します — 静かに「消えたつもり」になるのが一番怖いからです。</p>
+    <p>テストは、消したものだけが消える<strong>外科手術の精度</strong>を見ています。</p>
+
+    <div class="file-tag">internal/btree/btree_test.go（抜粋）</div>
+<pre><code><span class="cm">// Delete: 指定した (key, tid) だけが消える。</span>
+<span class="kw">func</span> TestBTreeDelete(t *testing.T) {
+	tree, _, _ := newTree(t)
+	<span class="kw">for</span> v := <span class="st">0</span>; v &lt; <span class="st">1000</span>; v++ {
+		<span class="kw">if</span> err := tree.Insert(intKey(<span class="kw">int64</span>(v)), <span class="ty">TID</span>{<span class="ty">Page</span>: storage.<span class="ty">PageID</span>(v)}); err != <span class="kw">nil</span> {
+			t.Fatal(err)
+		}
+	}
+	<span class="kw">if</span> err := tree.Delete(intKey(<span class="st">500</span>), <span class="ty">TID</span>{<span class="ty">Page</span>: <span class="st">500</span>}); err != <span class="kw">nil</span> {
+		t.Fatal(err)
+	}
+	<span class="kw">if</span> tids, _ := tree.SearchEqual(intKey(<span class="st">500</span>)); <span class="kw">len</span>(tids) != <span class="st">0</span> {
+		t.Fatal(<span class="st">"削除したキーがまだ検索に出る"</span>)
+	}
+	<span class="kw">if</span> tids, _ := tree.SearchEqual(intKey(<span class="st">501</span>)); <span class="kw">len</span>(tids) != <span class="st">1</span> {
+		t.Fatal(<span class="st">"削除していないキーが巻き添えで消えた"</span>)
+	}
+	<span class="kw">if</span> err := tree.Delete(intKey(<span class="st">500</span>), <span class="ty">TID</span>{<span class="ty">Page</span>: <span class="st">500</span>}); err == <span class="kw">nil</span> {
+		t.Fatal(<span class="st">"二重削除がエラーにならない"</span>)
+	}
+}</code></pre>
+
+    <p>500 を消したら、500 は出なくなり、501 は<strong>巻き添えを食っていない</strong>こと。そして同じものをもう一度消そうとしたらエラーになること（消えていない何よりの証拠は「二度消せてしまう」ことなので、これは大事な検問です）。</p>
+
+    <div class="box do"><div class="box-k">▸ 動かして確認</div>
+      <pre class="term"><code><span class="ps">$</span> go test ./internal/btree -run TestBTreeDelete -v
+<span class="out">=== RUN   TestBTreeDelete
+--- PASS: TestBTreeDelete (0.00s)
+PASS
+ok  	minidb/internal/btree	0.852s</span></code></pre>
+    </div>
+
+    <h2>つまずき FAQ</h2>
+
+    <details class="qa"><summary>B木と B+Tree は結局どこが違うんですか?</summary>
+      <div class="qa-body"><p>B木は<strong>内部ノードにもデータ（この章なら TID）を置きます</strong>。B+Tree はデータを葉に全部集め、内部ノードは道しるべ（キーと子の対応）専用にしたうえで、葉同士をリンクでつなぎます。得られるのは2つ — ①内部ノードがキーだけなので太くなり、木がさらに低くなる。②範囲走査が「降りてから葉を横に歩くだけ」になる（B木では範囲を出すのに木を上下に行き来する羽目になります）。葉の分割で境界キーを親に「コピー」する（Step 6）のは、データを葉から失わないための B+Tree 固有の作法です。</p></div>
+    </details>
+
+    <details class="qa"><summary>セル数などはリトルエンディアンなのに、TID はビッグエンディアン。なぜ混ぜるんですか?</summary>
+      <div class="qa-body"><p>使い道が違うからです。セル数・オフセット・PageID などのページ内メタデータは、<code>binary.LittleEndian.Uint16(…)</code> のように<strong>必ず数値に戻してから</strong>使うので、どちらのエンディアンでも正しく動きます。本書は第00章からの慣例でリトルエンディアンに統一しています。一方 TID は複合キーの一部として<strong>バイト列のまま <code>bytes.Compare</code> で大小比較される</strong>ので、辞書順 = 数値順になるビッグエンディアンでなければ壊れます。「比較されるものだけビッグエンディアン」と覚えてください。テストの <code>intKey</code>（符号ビット反転 + ビッグエンディアン）も同じ理由です。</p></div>
+    </details>
+
+    <details class="qa"><summary>lowerBound と childFor、どちらも二分探索なのに条件が &lt; と &lt;= で違うのはなぜ?</summary>
+      <div class="qa-body"><p>探しているものが違うからです。<code>lowerBound</code> は「ck <strong>以上</strong>になる最初の位置」— 挿入位置や走査の開始点で、ck と等しいセルがあればその位置に着地したい。だから「mid が ck <strong>未満</strong>なら右へ」（<code>&lt;</code>）。<code>childFor</code> は「ck <strong>以下</strong>の最後のセル」— 道しるべは「キー以上は右」なので、ck と等しいキーのセルは<strong>その子に含む</strong>必要があり、「mid が ck <strong>以下</strong>なら右へ」（<code>&lt;=</code>）。例: セルが [30→P1] のとき ck=30 は P1 に行くべきで、もし <code>&lt;</code> で書くと 30 が最左の子に流れてしまい、挿入したはずのキーが検索で見つからなくなります。一字違いで木が静かに壊れる、この章屈指の急所です。</p></div>
+    </details>
+
+    <details class="qa"><summary>rebuild の panic は乱暴では? エラーを返すべきでは?</summary>
+      <div class="qa-body"><p><code>error</code> は「正しいプログラムでも起こり得る事態」（ファイルが無い、ディスクが満杯…）のためのもの。一方 rebuild のあふれは「呼び出し側が容量内に収めてから呼ぶ」という<strong>コード内の契約</strong>の違反で、起きたなら分割の計算のどこかにバグがあります。これをエラーで返すと、呼び出し側が握りつぶして<strong>壊れたノードがそのままディスクに書かれる</strong>危険があります。バグは静かに進行させず、その場で大きな音を立てて止まる — <code>panic</code> はその意思表示です。標準ライブラリも同種の契約違反（スライス範囲外など）で panic します。</p></div>
+    </details>
+
+    <details class="qa"><summary>分割すると各ノードが半分空になりますよね。ページの無駄では?</summary>
+      <div class="qa-body"><p>分割直後は確かに約50%です。でもそのノードには続きの挿入が入ってくるので、埋まってはまた割れ、を繰り返します。ランダムな挿入を続けたときの B+Tree の平均占有率はおよそ ln 2 ≈ 69% に落ち着くことが知られていて、実運用の DB もだいたいその水準で動いています。「3割の空きは、挿入のたびに大規模な詰め直しをしないための保険料」と考えるのが正解です。逆に昇順挿入だけを続けると右端でばかり分割が起きて占有率が下がるため、本物の DB には「右端分割のときは半分ではなく端で割る」といった最適化を入れるものもあります（minidb では割り切って省略しています）。</p></div>
+    </details>
+
+    <h2>理解度チェック</h2>
+    <p>次の問いに自分の言葉で答えてから、答えを開いてください。</p>
+
+    <details class="qa"><summary>Q1. B+Tree のノードを「1ページ = 4096バイト」ちょうどにするのはなぜ? 「大きな構造体」ではだめな理由も含めて。</summary>
+      <div class="qa-body"><p>ディスクI/Oの単位が1ページだからです（第00章）。ノード = 1ページなら「ノードを1個たどる = I/O 1回」となり、検索コストが「木の高さ = 読むページ数」に直結します。ノードがページより大きいと1ノードに複数回のI/Oが要り、ページ境界をまたぐ更新は壊れやすくなります（本書全体の禁じ手）。逆に小さすぎるとファンアウトが細り、木が高くなってI/Oが増えます。「1回のI/Oで読める最大の塊を、1回の分岐に使い切る」のが B+Tree の設計原理です。</p></div>
+    </details>
+
+    <details class="qa"><summary>Q2.（紙上トレース）葉に最大4セル入る小さな木に、キー 10, 20, 30, 40, 50 をこの順で挿入します。最初の分割が起きるのはいつで、直後の木はどんな形になりますか? Step 6 のコードの mid の計算に忠実に。</summary>
+      <div class="qa-body"><p>10〜40 までは1枚の葉（= 根）に収まり、<strong>50 を入れようとした瞬間</strong>にあふれて分割します。<code>cells = [10 20 30 40 50]</code>、<code>mid = 5/2 = 2</code> なので、左 = <code>[10 20]</code>、右 = <code>[30 40 50]</code>、sep = 右の先頭 30 の<strong>コピー</strong>。割れたのは根（葉）なので新しい根（内部ノード）が作られ、木はこうなります。</p>
+        <div class="ascii">        新しい根: link=左葉 [30 → 右葉]
+                 /            \
+        左葉 [10 20] ──link──→ 右葉 [30 40 50]</div>
+      <p>ポイントは、①mid が「切り捨て除算」なので左が2個・右が3個になること、②30 は右の葉に残ったまま親にコピーが上がること（コピーアップ）、③新しい根のセルは1個だけで、最左の子は link 欄に入ることです。</p></div>
+    </details>
+
+    <details class="qa"><summary>Q3. 葉の分割と内部ノードの分割の違いを、「なぜそうでなければならないか」まで含めて一言で。</summary>
+      <div class="qa-body"><p>葉は境界キーを親へ<strong>コピー</strong>し（コピーアップ）、内部は中央キーを親へ<strong>移動</strong>します（プッシュアップ）。葉のセルは TID を含むデータ本体なので失えず、右の葉に残したまま複製だけを道しるべとして上げます。内部のキーはただの道しるべなので親に引っ越せば用済み — さらに、中央セルの子は右ノードの「最左の子」（link 欄）として住み替えることで、右ノードの「〜未満」の受け皿が埋まります。</p></div>
+    </details>
+
+    <details class="qa"><summary>Q4. <code>age = 30</code> の行が100行ある表の age 索引で <code>SearchEqual(30)</code> を呼ぶと、内部で何が起きますか?</summary>
+      <div class="qa-body"><p><code>scan(30, 30)</code> に化けます。開始キーは <code>composite(30, TID{0,0})</code> — 「age=30 のあらゆるエントリ以下」の複合キーなので、木を降りると 30 の<strong>一番左の出現</strong>がいる葉に着地します。あとは <code>lowerBound</code> の位置から右へ、複合キーのユーザーキー部分が 30 を超えるまで TID を回収し続けるだけ。複合キーの設計により 100 件は木の中で<strong>必ず隣り合っている</strong>ので、葉を数枚横に歩けば全件そろいます。等値検索は「幅ゼロの範囲検索」なのです。</p></div>
+    </details>
+
+    <details class="qa"><summary>Q5. 分割のコードは、なぜ「右ノードを先に完成させてから」左を組み直すのですか? 逆順だと何がまずい?</summary>
+      <div class="qa-body"><p>作りかけの右ノードは、まだ誰からも（親からも link からも）参照されていない「下書き」だからです。この順序なら、処理がどの時点で失敗しても既存の木は分割前の完全な姿のまま — 失われるのは無参照ページ1枚だけです。逆に左を先に半分へ削ると、「後半のキーがどこにも存在しない」壊れた中間状態が生まれ、そこで中断すればデータ消失になります。「参照されていない場所で完成させてから、参照を切り替える」— 第06章の WAL やアトミックな更新につながる、ディスクに書くコードの基本姿勢です。</p></div>
+    </details>
+
+    <details class="qa"><summary>Q6. メタページをやめて、カタログに根の PageID を直接記録すると何が壊れますか?</summary>
+      <div class="qa-body"><p>根の分割のたびに根の PageID が変わるので、索引を1回育てるだけでカタログ側の記録が古くなります。以後その索引を開くと「かつて根だったただの内部ノード」から探索を始めてしまい、そのノードより上に置かれたキーが見つからなくなる。防ぐにはカタログが根の移動を毎回追跡して書き換える必要があり、下の層の都合が上の層に漏れ出します。メタページという1段の間接参照は、「根は動くもの」という B+Tree の内部事情を B+Tree の中に閉じ込めるための壁です。</p></div>
+    </details>
+
+    <div class="box done"><div class="box-k">✓ 完了の合図</div>
+      <p>btree パッケージの全テスト — 大量挿入・対数コスト・重複キー・削除・可変長キー・永続化 — が通れば、この章は完了です。</p>
+      <pre class="term"><code><span class="ps">$</span> go test ./internal/btree -v
+<span class="out">=== RUN   TestBTreeLargeInsertAndSearch
+--- PASS: TestBTreeLargeInsertAndSearch (0.01s)
+=== RUN   TestBTreeSearchIsLogarithmic
+    btree_test.go:97: 5000件の等値検索で触ったノード数: 3
+--- PASS: TestBTreeSearchIsLogarithmic (0.00s)
+=== RUN   TestBTreeDuplicateKeys
+--- PASS: TestBTreeDuplicateKeys (0.00s)
+=== RUN   TestBTreeDelete
+--- PASS: TestBTreeDelete (0.00s)
+=== RUN   TestBTreeVariableLengthKeys
+--- PASS: TestBTreeVariableLengthKeys (0.00s)
+=== RUN   TestBTreePersistence
+--- PASS: TestBTreePersistence (0.02s)
+PASS
+ok  	minidb/internal/btree	0.856s</span></code></pre>
+    </div>
+
+    <h2>まとめ — 次の層へ</h2>
+    <p>この章で minidb は「探す力」を手に入れました。ページの上にノードを敷き、複合キーで重複を飼いならし、再帰で降りて分割を上へ運び、メタページで根の引っ越しを隠す。5000件から3回のノード読みで答えを引き当てる対数コストを、他人の受け売りではなく<strong>自分のコードの実測値</strong>として確かめました。等値も範囲も、キー順に、速く引けます。</p>
+    <p>でも、いまの minidb と会話してみてください。「<code>users</code> 表の <code>age</code> が30以上の行をください」— 通じません。この木が知っているのは「バイト列のキー → TID」だけ。<strong>表も、列も、INT や TEXT という型も、まだこの世界には存在しない</strong>のです。キーが「順序保存エンコード済みのバイト列」であるという、この章がずっと呼び出し側に押し付けてきた前提も、まだ誰も果たしていません（テストの <code>intKey</code> が肩代わりしていただけです）。</p>
+    <p>次の第04章では、ヒープと索引の上に「表」という言葉を建てます。行を1本のバイト列に焼くエンコード、INT を <code>bytes.Compare</code> で正しく並べる順序保存の仕掛け、そして「どんな表があるか」という定義情報そのものを<strong>ただの表として</strong>DB自身に格納する自己記述の美しさ。バイト列の世界に、名前と型がやってきます。</p>
+
+    <div class="chap-foot">
+      <a class="pager" href="02-buffer.html"><span class="dir">← 前へ</span>第02章 · バッファプール</a>
+      <a class="pager next" href="04-catalog.html"><span class="dir">次へ →</span>第04章 · 表とカタログ</a>
+    </div>
+  </main>
+</div>
+</body>
+</html>

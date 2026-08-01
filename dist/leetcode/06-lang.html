@@ -1,0 +1,523 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>第06章 いろんな言語で — 手を動かして作るオンラインジャッジ</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500;600&family=Source+Serif+4:opsz,wght@8..60,400;8..60,600;8..60,700&family=Noto+Serif+JP:wght@400;600;700&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<div class="shell">
+
+  <aside class="spine">
+    <a class="wordmark" href="index.html">JUDGE · from scratch</a>
+    <div class="book-title">手を動かして作る<br>オンラインジャッジ</div>
+    <div class="book-sub">Go で サンドボックスから Web まで</div>
+
+    <div class="legend"><span>読む <b>↓</b></span><span>組む <b>↑</b></span></div>
+
+    <nav aria-label="目次">
+      <ul class="toc">
+        <li><a class="nav-item" href="index.html"><span class="nav-num">序</span><span class="nav-label">はじめに・準備<span class="nav-tag">Setup</span></span></a></li>
+        <li><a class="nav-item" href="00-smallest.html"><span class="nav-num">00</span><span class="nav-label">いちばん小さいジャッジ<span class="nav-tag">Judge</span></span></a></li>
+        <li><a class="nav-item" href="01-process.html"><span class="nav-num">01</span><span class="nav-label">プロセスと標準入出力<span class="nav-tag">IO</span></span></a></li>
+        <li><a class="nav-item" href="02-verdict.html"><span class="nav-num">02</span><span class="nav-label">verdict — 判定の種類<span class="nav-tag">Verdict</span></span></a></li>
+        <li><a class="nav-item" href="03-threat.html"><span class="nav-num">03</span><span class="nav-label">なぜ他人のコードは危険か<span class="nav-tag">Threat</span></span></a></li>
+        <li><a class="nav-item" href="04-sandbox.html"><span class="nav-num">04</span><span class="nav-label">コンテナに閉じ込める<span class="nav-tag">Sandbox</span></span></a></li>
+        <li><a class="nav-item" href="05-limits.html"><span class="nav-num">05</span><span class="nav-label">時間とメモリを断ち切る<span class="nav-tag">Limits</span></span></a></li>
+        <li><a class="nav-item current" aria-current="page" href="06-lang.html"><span class="nav-num">06</span><span class="nav-label">いろんな言語で<span class="nav-tag">Lang</span></span></a></li>
+        <li><a class="nav-item" href="07-store.html"><span class="nav-num">07</span><span class="nav-label">問題とテストケースを持つ<span class="nav-tag">Store</span></span></a></li>
+        <li><a class="nav-item" href="08-queue.html"><span class="nav-num">08</span><span class="nav-label">提出を「あとで」捌く<span class="nav-tag">Queue</span></span></a></li>
+        <li><a class="nav-item" href="09-web.html"><span class="nav-num">09</span><span class="nav-label">画面をつける<span class="nav-tag">Web</span></span></a></li>
+      </ul>
+    </nav>
+
+    <div class="spine-foot">
+      各章は「実行の心臓部」から<br>始めて「Web」へ登る。<br>下（採点の核）から上（画面）へ<br>積み上げて動かしていく。
+    </div>
+  </aside>
+
+  <main class="reading">
+    <div class="progress-tag">第06章 / 全10章 · 層: LANG · 読了目安 2.5〜3.5時間</div>
+    <div class="eyebrow"><span>LANG</span><span class="depth">— 複数言語を1つの表で吸収する</span></div>
+    <h1>いろんな言語で</h1>
+    <p class="lede">ここまでのジャッジは、頭の中でずっと「Go の提出コード」を想定してきました。しかし本書のジャッジは Go・JavaScript・TypeScript・SQL の4言語を採点します。言語ごとに「どのコンテナで」「コンパイルするのか」「どう起動するのか」が違う——この違いを <code>if language == "go"</code> の山で分岐させると、言語を1つ足すたびにコード中に分岐が増殖します。この章の主題は、その混沌を <strong>1枚のデータ表</strong>に畳み込む設計です。そして最後に、4言語のうち SQL だけが<strong>採点ロジックそのものが違う</strong>こと——文字列比較ではなく「結果セット（行の集合）の比較」であること——を、その理由から深掘りします。</p>
+
+    <div class="box goal"><div class="box-k">◈ この章のゴール</div>
+      <p>次の 3 つを、自分の言葉で説明できたら達成です。</p>
+      <ol>
+        <li><code>LanguageSpec</code> が「言語 = イメージ + コンパイル手順 + 実行手順」をデータ化していること、そして <strong>言語追加が「表に1エントリ足すだけ」</strong>（要件 NF-10 が求める「後から言語を追加しやすい構造」）になる理由を説明できる。</li>
+        <li>Go（コンパイルあり）・JS（コンパイルなし）・TS（型検査のみ・成果物なし）・SQL（別物）の4行が、同じ表の中でどう違いを表しているかを読み解ける。</li>
+        <li>SQL 採点だけが <code>CompareOutput</code> ではなく <code>CompareResultSet</code> を使う理由——「なぜ SQL は文字列比較ではだめか」——を、canonical 化・数値正規化・複数結果セット拒否の3点から説明できる。</li>
+      </ol>
+    </div>
+
+    <div class="box map"><div class="box-k">☰ この章のステップ</div>
+      <ol>
+        <li><a href="#step-1">言語の違いは「実行手順の違い」に尽きる</a></li>
+        <li><a href="#step-2"><code>LanguageSpec</code> — 言語をデータにする — <code>lang.go</code></a></li>
+        <li><a href="#step-3">Languages 表を読む — Go / JS / TS / SQL の4行</a></li>
+        <li><a href="#step-4"><code>SpecFor</code> — 言語と問題タイプの整合を門で守る</a></li>
+        <li><a href="#step-5">なぜ SQL だけ採点が違うのか — 実行の比較 vs 結果セットの比較</a></li>
+        <li><a href="#step-6"><code>CompareResultSet</code> — 行の集合を canonical 化して比べる</a></li>
+        <li><a href="#step-7">数値正規化と行順 — <code>canonicalValue</code> の機微</a></li>
+        <li><a href="#step-8">複数結果セットを弾く — <code>parseRows</code> と <code>dec.More()</code></a></li>
+      </ol>
+    </div>
+
+    <h2>言語の違いをデータで吸収する</h2>
+    <p>オンラインジャッジに「対応言語を増やす」という要求は、必ず来ます。最初は Go だけでも、いずれ JavaScript、TypeScript、SQL……と広げたくなる。このとき、言語ごとの違いを<strong>コードの分岐で書く</strong>と何が起きるか。「Go ならコンパイルして、JS ならそのまま node で、TS なら型検査だけして tsx で、SQL なら sqlite3 で……」——この <code>switch language</code> が、コンパイル段にも、実行段にも、tar を組む場所にも、あちこちに散らばります。言語を1つ足すと、それら全部を漏れなく直す必要が生まれ、直し忘れると静かに壊れます。</p>
+    <p>本書の答えは、<strong>言語ごとの違いを1つの構造体（<code>LanguageSpec</code>）にまとめ、それを言語名で引ける表（<code>Languages</code>）にする</strong>ことです。実行部分のコードは「渡された <code>spec</code> の言うとおりに動く」だけになり、言語を知りません。言語を足すときは、表に1行足すだけ。要件 NF-10 が求めるのは「対応言語を後から追加しやすい構造であること」——言語追加が表への1エントリ追加とジャッジイメージの用意で済むこの設計は、まさにその答えです（<code>lang.go</code> の冒頭コメントも「表に1エントリ足し、対応するジャッジイメージを用意するだけでよい」と述べています）。この章の前半（Step 1〜4）で、その表を作ります。</p>
+
+    <h2>実行の比較 vs 結果セットの比較</h2>
+    <p>ところが、言語を「実行手順の表」で統一しても、4言語のうち SQL だけは<strong>もう一段深いところで違います</strong>。Go・JS・TS の3つは、いずれも「標準入力を受け取り、標準出力に答えを書く」プログラムです。だから採点は第00章の <code>CompareOutput</code>——<strong>標準出力の文字列比較</strong>——で済みます。しかし SQL の「答え」は<strong>クエリの結果（行の集合）</strong>であって、標準出力の文字列ではありません。<code>ORDER BY</code> を書かなければ行の順番は不定で、<code>1</code> と <code>1.0</code> は同じ値なのに文字列としては違う。この差を文字列比較で扱うと、正しい SQL を平気で WA にします。だから SQL には専用の <code>CompareResultSet</code> があります。この章の後半（Step 5〜8）で、「なぜ SQL だけ比較ロジックが違うのか」を、その一番奥まで潜ります。</p>
+
+    <h2 class="step" id="step-1"><span class="step-no">Step 1</span>言語の違いは「実行手順の違い」に尽きる</h2>
+    <p>コードを書く前に、「言語ごとに何が違うのか」を洗い出します。ジャッジから見た1つの言語は、次の質問に答えられれば十分です。</p>
+    <ul>
+      <li><strong>どのコンテナ（Docker イメージ）で走らせるか?</strong> Go なら Go ツールチェーンの入ったイメージ、JS/TS なら Node の入ったイメージ、SQL なら sqlite3 の入ったイメージ。</li>
+      <li><strong>コンパイル段は要るか?</strong> Go は要る（ソース → バイナリ）。JS は要らない（そのまま実行）。TS は「型検査」はするが実行用の成果物は作らない（後述）。SQL も要らない。</li>
+      <li><strong>実行段はどのコマンドで起動するか?</strong> Go はビルド済みバイナリを直接、JS は <code>node main.js</code>、TS は <code>tsx main.ts</code>、SQL は sqlite3 にクエリを食わせる専用スクリプト。</li>
+      <li><strong>コンテナに渡すファイルは何か?</strong> 提出コードをどんなファイル名で置くか、テストケースをどんな名前で置くか。</li>
+    </ul>
+    <p>驚くのは、<strong>これだけ</strong>だということです。「言語」という言葉は仰々しいですが、ジャッジにとっての言語の違いは「イメージ・コンパイル手順・実行手順・ファイル名」という<strong>4つの設定値の違い</strong>に還元できます。だとすれば、これらを構造体のフィールドに持たせれば、言語は「コード」ではなく「データ」になります。図にするとこうです。</p>
+
+    <div class="ascii">言語 = 4つの設定値（+ 問題タイプ）
+
+  ┌─────────────┬──────────┬──────────┬──────────────┬──────────────┐
+  │ 言語         │ Image    │ Compile  │ Run          │ 提出ファイル  │
+  ├─────────────┼──────────┼──────────┼──────────────┼──────────────┤
+  │ go          │ judge-go │ あり      │ prog(バイナリ)│ main.go      │
+  │ javascript  │ judge-node│ なし     │ node main.js │ main.js      │
+  │ typescript  │ judge-node│ 型検査のみ│ tsx main.ts  │ main.ts      │
+  │ sql         │ judge-sql│ なし      │ sqlloop.sh   │ query.sql    │
+  └─────────────┴──────────┴──────────┴──────────────┴──────────────┘
+        │
+        ▼   この表を Go の map にする → 実行部分は「spec の言うとおり」動くだけ</div>
+
+    <p>実行段のコード（第04〜05章で作ったサンドボックス）は、この表の1行（<code>spec</code>）を受け取り、「<code>spec.Image</code> のコンテナを起動し、<code>spec.CompileCmd</code> があればコンパイルし、<code>spec.RunCmd</code> で実行する」と書くだけになります。実行段は<strong>もう「言語」を知りません</strong>。知っているのは「渡された spec のとおりに動く」ことだけ。この分離が、言語追加を「表に1行」に押し込める鍵です。</p>
+
+    <h2 class="step" id="step-2"><span class="step-no">Step 2</span><code>LanguageSpec</code> — 言語をデータにする — lang.go</h2>
+    <p>洗い出した4つの設定値を、Go の構造体にします。ファイルは <code>internal/judge/lang.go</code>。まず型定義から。</p>
+
+    <div class="file-tag">internal/judge/lang.go</div>
+    <pre><code><span class="kw">package</span> judge
+
+<span class="kw">import</span> <span class="st">"fmt"</span>
+
+<span class="cm">// LanguageSpec は「言語 = イメージ + コンパイル手順 + 実行手順」の設定データ（NF-10）。</span>
+<span class="cm">// 言語追加はこの表に1エントリ足し、対応するジャッジイメージを用意するだけでよい。</span>
+<span class="kw">type</span> <span class="ty">LanguageSpec</span> <span class="kw">struct</span> {
+	Name        <span class="ty">string</span>
+	ProblemType <span class="ty">string</span> <span class="cm">// この言語が使える問題タイプ（"code" | "sql"）</span>
+	Image       <span class="ty">string</span>
+	<span class="cm">// CompileCmd が非 nil ならコンパイル段を実行する（失敗 = CE）</span>
+	CompileCmd   []<span class="ty">string</span>
+	CompileFiles <span class="kw">func</span>(code <span class="ty">string</span>) <span class="kw">map</span>[<span class="ty">string</span>][]<span class="ty">byte</span>
+	<span class="cm">// 実行段。tlSec は "2.0" のような秒文字列</span>
+	RunCmd <span class="kw">func</span>(tlSec <span class="ty">string</span>) []<span class="ty">string</span>
+	<span class="cm">// RunFiles は実行段 tar に入れる提出物。artifact はコンパイル成果物（なければ nil）</span>
+	RunFiles <span class="kw">func</span>(code <span class="ty">string</span>, artifact []<span class="ty">byte</span>) <span class="kw">map</span>[<span class="ty">string</span>][]<span class="ty">byte</span>
+	<span class="cm">// CaseFileName はテストケースの tar 内ファイル名</span>
+	CaseFileName <span class="kw">func</span>(name <span class="ty">string</span>) <span class="ty">string</span>
+}</code></pre>
+
+    <p>この構造体の8つのフィールドが、Step 1 で洗い出した「言語の違い」をそのまま写し取っています。順に意味を確かめます。</p>
+    <ul>
+      <li><code>Name</code> — 言語名（<code>"go"</code> など）。表のキーと一致させます。</li>
+      <li><code>ProblemType</code> — この言語が使える<strong>問題タイプ</strong>。<code>"code"</code>（標準入出力の普通の問題）か <code>"sql"</code>（SQL 問題）。Go/JS/TS は <code>"code"</code>、SQL は <code>"sql"</code>。この1フィールドが、Step 4 で「SQL 問題に Go を出す」ような不整合を門前払いする根拠になります。</li>
+      <li><code>Image</code> — 実行に使う Docker イメージ名。<code>judge-go</code> / <code>judge-node</code> / <code>judge-sql</code>。</li>
+      <li><code>CompileCmd</code> — コンパイル段で叩くコマンド（<code>[]string</code>）。<strong>ここが <code>nil</code> ならコンパイル段を丸ごと飛ばす</strong>。この「nil か否か」だけで「コンパイルする言語／しない言語」を1つのフィールドが表し分けています。</li>
+      <li><code>CompileFiles</code> — コンパイル段のコンテナに渡すファイル群を作る<strong>関数</strong>。提出コード文字列を受け取り、「ファイル名 → 中身」の map を返します。Go なら <code>{"main.go": code}</code>。</li>
+      <li><code>RunCmd</code> — 実行段の起動コマンドを作る<strong>関数</strong>。制限時間の秒文字列（<code>"2.0"</code>）を受け取り、起動コマンドを返します。時間制限を実行コマンドに埋め込むためのフックです（第05章の <code>timeout</code> 連携）。</li>
+      <li><code>RunFiles</code> — 実行段のコンテナに渡すファイル群を作る関数。提出コードと<strong>コンパイル成果物（<code>artifact</code>）</strong>を受け取ります。Go は成果物のバイナリ <code>prog</code> を渡し、JS/TS/SQL は成果物が無いので提出コードのソースをそのまま渡します。</li>
+      <li><code>CaseFileName</code> — テストケースをコンテナ内でどんなファイル名に置くかを決める関数。code 問題は <code>.in</code>（標準入力）、SQL 問題は <code>.seed.sql</code>（初期テーブル投入用）。</li>
+    </ul>
+
+    <div class="gonote"><div class="box-k">GO メモ · 関数を構造体フィールドに持つ</div>
+      <p>この構造体でいちばん見慣れないのは、<code>CompileFiles</code> や <code>RunCmd</code> が <strong>関数型のフィールド</strong>（<code>func(...) ...</code>）である点でしょう。Go では関数は<strong>第一級の値</strong>——変数に入れたり、構造体のフィールドにしたり、引数で渡したりできます。<code>RunCmd func(tlSec string) []string</code> は「<code>RunCmd</code> という名前で、文字列を受け取り <code>[]string</code> を返す関数を持つ」という意味です。<br>
+      なぜ単なる文字列ではなく関数にするのか? 「言語ごとに<strong>振る舞い</strong>が違う」からです。実行コマンドは制限時間によって変わり（<code>timeout 2.0 ...</code>）、渡すファイルは提出コードや成果物によって変わる。これらは「固定の値」ではなく「入力から値を組み立てる手続き」なので、関数で持つのが自然です。実行段のコードは <code>spec.RunCmd(tlSec)</code> と<strong>呼ぶ</strong>だけで、言語ごとに正しいコマンドが返ってきます。データ表の各セルに「計算のしかた」を埋め込む——これが分岐を表に畳み込む正体です。</p>
+    </div>
+
+    <h2 class="step" id="step-3"><span class="step-no">Step 3</span>Languages 表を読む — Go / JS / TS / SQL の4行</h2>
+    <p>型ができたので、いよいよ<strong>言語の表</strong>です。<code>Languages</code> は「言語名 → <code>LanguageSpec</code>」の map。この map リテラルこそが、本書のジャッジが対応する全言語の<strong>唯一の真実の場所</strong>です。まずイメージ名の定数から。</p>
+
+    <div class="file-tag">internal/judge/lang.go（つづき）</div>
+    <pre><code><span class="kw">const</span> (
+	ImageGo   = <span class="st">"judge-go"</span>
+	ImageNode = <span class="st">"judge-node"</span>
+	ImageSQL  = <span class="st">"judge-sql"</span>
+)</code></pre>
+
+    <p>Docker イメージ名を定数にまとめておくと、typo を型で防げますし、ヘルスチェック（起動時にこれらのイメージが揃っているか確認する）でも同じ定数を使い回せます。<strong>JS と TS が同じ <code>ImageNode</code> を共有する</strong>点に注目してください——TypeScript は Node のイメージの中で <code>tsx</code> を使って走らせるので、専用イメージは要りません。1つのイメージが2言語を賄います。</p>
+    <p>では、表の本体。4行を丸ごと載せます。長いですが、これが「言語追加は1行」の実物です。</p>
+
+    <div class="file-tag">internal/judge/lang.go（Languages 表）</div>
+    <pre><code><span class="kw">var</span> Languages = <span class="kw">map</span>[<span class="ty">string</span>]<span class="ty">LanguageSpec</span>{
+	<span class="st">"go"</span>: {
+		Name:        <span class="st">"go"</span>,
+		ProblemType: <span class="st">"code"</span>,
+		Image:       ImageGo,
+		CompileCmd:  []<span class="ty">string</span>{<span class="st">"/judge/compile.sh"</span>},
+		CompileFiles: <span class="kw">func</span>(code <span class="ty">string</span>) <span class="kw">map</span>[<span class="ty">string</span>][]<span class="ty">byte</span> {
+			<span class="kw">return</span> <span class="kw">map</span>[<span class="ty">string</span>][]<span class="ty">byte</span>{<span class="st">"main.go"</span>: []<span class="ty">byte</span>(code)}
+		},
+		RunCmd: <span class="kw">func</span>(tl <span class="ty">string</span>) []<span class="ty">string</span> { <span class="kw">return</span> []<span class="ty">string</span>{<span class="st">"/judge/loop.sh"</span>, tl, <span class="st">"/tmp/box/prog"</span>} },
+		RunFiles: <span class="kw">func</span>(code <span class="ty">string</span>, artifact []<span class="ty">byte</span>) <span class="kw">map</span>[<span class="ty">string</span>][]<span class="ty">byte</span> {
+			<span class="kw">return</span> <span class="kw">map</span>[<span class="ty">string</span>][]<span class="ty">byte</span>{<span class="st">"prog"</span>: artifact}
+		},
+		CaseFileName: <span class="kw">func</span>(name <span class="ty">string</span>) <span class="ty">string</span> { <span class="kw">return</span> <span class="st">"cases/"</span> + name + <span class="st">".in"</span> },
+	},
+	<span class="st">"javascript"</span>: {
+		Name:        <span class="st">"javascript"</span>,
+		ProblemType: <span class="st">"code"</span>,
+		Image:       ImageNode,
+		RunCmd:      <span class="kw">func</span>(tl <span class="ty">string</span>) []<span class="ty">string</span> { <span class="kw">return</span> []<span class="ty">string</span>{<span class="st">"/judge/loop.sh"</span>, tl, <span class="st">"node"</span>, <span class="st">"/tmp/box/main.js"</span>} },
+		RunFiles: <span class="kw">func</span>(code <span class="ty">string</span>, _ []<span class="ty">byte</span>) <span class="kw">map</span>[<span class="ty">string</span>][]<span class="ty">byte</span> {
+			<span class="kw">return</span> <span class="kw">map</span>[<span class="ty">string</span>][]<span class="ty">byte</span>{<span class="st">"main.js"</span>: []<span class="ty">byte</span>(code)}
+		},
+		CaseFileName: <span class="kw">func</span>(name <span class="ty">string</span>) <span class="ty">string</span> { <span class="kw">return</span> <span class="st">"cases/"</span> + name + <span class="st">".in"</span> },
+	},
+	<span class="st">"typescript"</span>: {
+		Name:        <span class="st">"typescript"</span>,
+		ProblemType: <span class="st">"code"</span>,
+		Image:       ImageNode,
+		CompileCmd:  []<span class="ty">string</span>{<span class="st">"/judge/tscheck.sh"</span>}, <span class="cm">// 型検査のみ（成果物なし）。実行は tsx</span>
+		CompileFiles: <span class="kw">func</span>(code <span class="ty">string</span>) <span class="kw">map</span>[<span class="ty">string</span>][]<span class="ty">byte</span> {
+			<span class="kw">return</span> <span class="kw">map</span>[<span class="ty">string</span>][]<span class="ty">byte</span>{<span class="st">"main.ts"</span>: []<span class="ty">byte</span>(code)}
+		},
+		RunCmd: <span class="kw">func</span>(tl <span class="ty">string</span>) []<span class="ty">string</span> { <span class="kw">return</span> []<span class="ty">string</span>{<span class="st">"/judge/loop.sh"</span>, tl, <span class="st">"tsx"</span>, <span class="st">"/tmp/box/main.ts"</span>} },
+		RunFiles: <span class="kw">func</span>(code <span class="ty">string</span>, _ []<span class="ty">byte</span>) <span class="kw">map</span>[<span class="ty">string</span>][]<span class="ty">byte</span> {
+			<span class="kw">return</span> <span class="kw">map</span>[<span class="ty">string</span>][]<span class="ty">byte</span>{<span class="st">"main.ts"</span>: []<span class="ty">byte</span>(code)}
+		},
+		CaseFileName: <span class="kw">func</span>(name <span class="ty">string</span>) <span class="ty">string</span> { <span class="kw">return</span> <span class="st">"cases/"</span> + name + <span class="st">".in"</span> },
+	},
+	<span class="st">"sql"</span>: {
+		Name:        <span class="st">"sql"</span>,
+		ProblemType: <span class="st">"sql"</span>,
+		Image:       ImageSQL,
+		RunCmd:      <span class="kw">func</span>(tl <span class="ty">string</span>) []<span class="ty">string</span> { <span class="kw">return</span> []<span class="ty">string</span>{<span class="st">"/judge/sqlloop.sh"</span>, tl} },
+		RunFiles: <span class="kw">func</span>(code <span class="ty">string</span>, _ []<span class="ty">byte</span>) <span class="kw">map</span>[<span class="ty">string</span>][]<span class="ty">byte</span> {
+			<span class="kw">return</span> <span class="kw">map</span>[<span class="ty">string</span>][]<span class="ty">byte</span>{<span class="st">"query.sql"</span>: []<span class="ty">byte</span>(code)}
+		},
+		CaseFileName: <span class="kw">func</span>(name <span class="ty">string</span>) <span class="ty">string</span> { <span class="kw">return</span> <span class="st">"cases/"</span> + name + <span class="st">".seed.sql"</span> },
+	},
+}</code></pre>
+
+    <p>4行を「同じ列で」見比べると、言語ごとの違いが浮かび上がります。<strong>1行ずつ、その言語が何を選んだか</strong>を読みます。</p>
+
+    <h3>go — コンパイルあり、成果物を実行</h3>
+    <p>Go は本書で唯一の「フルコンパイル言語」です。<code>CompileCmd</code> に <code>/judge/compile.sh</code> が入っている（＝<strong>非 nil</strong>）ので、実行の前にコンパイル段が走ります。<code>CompileFiles</code> は提出コードを <code>main.go</code> という名でコンテナに渡し、コンパイル段がそれをビルドして<strong>バイナリ</strong>を吐きます。実行段の <code>RunFiles</code> は、そのビルド済みバイナリ（<code>artifact</code>）を <code>prog</code> という名で渡し、<code>RunCmd</code> は <code>/tmp/box/prog</code> を直接起動します。ソースを実行時に読むのではなく、<strong>事前にビルドしたバイナリを走らせる</strong>——これが Go の型です。<code>artifact</code> 引数を実際に使う唯一の言語でもあります。</p>
+
+    <h3>javascript — コンパイルなし、ソースをそのまま実行</h3>
+    <p>JS は対照的に、<strong><code>CompileCmd</code> がありません</strong>（フィールドを書いていない = <code>nil</code>）。だからコンパイル段は丸ごと飛ばされ、<code>CompileFiles</code> も要りません。実行段はソースの <code>main.js</code> をそのまま渡し（<code>RunFiles</code>）、<code>node /tmp/box/main.js</code> で起動します。<code>RunFiles</code> の第2引数が <code>_ []byte</code>（成果物を<strong>受け取るが使わない</strong>）になっているのは、コンパイルしないので成果物が存在しないためです。「コンパイルしない言語」は、このように <code>CompileCmd</code> を書かないだけで表現されます。</p>
+
+    <h3>typescript — 「型検査だけ」する第三の道</h3>
+    <p>TS がこの章でいちばん面白い行です。TypeScript は<strong>「コンパイルはするが、成果物は作らない」</strong>という、Go と JS の中間にいます。<code>CompileCmd</code> は <code>/judge/tscheck.sh</code>——名前のとおり<strong>型検査（type check）だけ</strong>を行うスクリプトです。ここで型エラーがあれば <code>CE</code>（コンパイルエラー）になりますが、<strong>実行用の JavaScript は生成しません</strong>。では実行段は何を動かすのか? <code>RunFiles</code> を見ると、成果物ではなく<strong>元の <code>main.ts</code> ソース</strong>を渡し、<code>RunCmd</code> は <code>tsx /tmp/box/main.ts</code>——<code>tsx</code>（TypeScript をトランスパイルしながら直接実行するランナー）でソースをそのまま走らせます。</p>
+    <p>つまり TS の採点は<strong>「型検査（コンパイル段）で文法・型の正しさを見る」＋「tsx で実行（実行段）して出力を見る」</strong>の二段構え。コンパイル段の役割が「バイナリを作ること」ではなく「型が正しいことを保証すること」に変わっているのが、Go との決定的な違いです。この設計のおかげで、TypeScript の型エラーは <code>WA</code>（実行してみたら出力が違った）ではなく <code>CE</code>（そもそも型が通らない）として正しく提出者に返せます。<code>CompileCmd</code> が「バイナリを作る」だけの手続きではなく、「<strong>提出を前に進めてよいかの検問</strong>」だと捉え直すと、この3つ目の道がすっきり収まります。</p>
+
+    <h3>sql — 問題タイプが違う「別世界」</h3>
+    <p>SQL 行だけ、<code>ProblemType</code> が <code>"sql"</code> です（他は全部 <code>"code"</code>）。この1点が、SQL を他の3言語から切り離します。<code>CompileCmd</code> は無く（コンパイル不要）、実行は <code>/judge/sqlloop.sh</code> という専用スクリプト。<code>RunFiles</code> は提出クエリを <code>query.sql</code> で渡します。そして決定的なのが <code>CaseFileName</code>——他の3言語がテストケースを <code>.in</code>（標準入力）として渡すのに対し、SQL は <code>.seed.sql</code>（<strong>初期テーブルを作る種データ</strong>）として渡します。SQL 問題のテストケースは「標準入力の文字列」ではなく「クエリを実行する前に用意しておくテーブルの中身」なのです。この違いは表の中では <code>CaseFileName</code> の1行に見えますが、その裏では<strong>採点の仕方そのものが違う</strong>——それが Step 5 以降の主題です。</p>
+
+    <div class="box hazard"><div class="box-k">⚠ 落とし穴 — 表に足すだけで「動く」わけではない</div>
+      <p>NF-10 の「言語追加は表に1エントリ」は強力ですが、<strong>表に1行足せば魔法で動く</strong>という意味ではありません。その言語のツールチェーンを入れた<strong>Docker イメージ</strong>（<code>images/</code> 配下）と、コンテナ内で呼ばれる<strong>スクリプト</strong>（<code>compile.sh</code> / <code>loop.sh</code> など）を用意して初めて動きます。表が保証するのは「実行段（<code>runCases</code>）は言語を知らないので触らずに済み、判定段もほぼ共通のまま済む」——分岐が散らばらない——という一点です（判定段の唯一の例外は node のヒープ自死を MLE に読み替える1分岐で、これは言語追加ごとに増えるものではありません）。逆に言えば、言語追加で触る場所が「<code>Languages</code> の表」と「<code>images/</code> のイメージ・スクリプト」の2箇所に<strong>限定される</strong>ことこそが、この設計の値打ちです。触る場所が予測できるから、追加が怖くなくなります。</p>
+    </div>
+
+    <div class="gonote"><div class="box-k">GO メモ · map リテラルと struct リテラルの入れ子</div>
+      <p><code>var Languages = map[string]LanguageSpec{ "go": {...}, ... }</code> は、map を<strong>リテラル</strong>（その場で中身を書き下す記法）で初期化しています。キーが言語名の文字列、値が <code>LanguageSpec</code> です。値の <code>{...}</code> の中で <code>LanguageSpec{...}</code> の型名を省略できるのは、map の値型が <code>LanguageSpec</code> だと分かっているから——Go が型を推論してくれます（この省略記法を「複合リテラルの要素の型省略」と呼びます）。<br>
+      各フィールドは <code>Name: "go",</code> のように<strong>名前付き</strong>で書いています。<code>CompileCmd</code> のように書かなかったフィールドは、その型の<strong>ゼロ値</strong>——スライスや関数なら <code>nil</code>——になります。JS 行が <code>CompileCmd</code> を省略すると自動的に <code>nil</code> になり、「コンパイルしない」が表現される。<strong>「書かない」ことが意味を持つ</strong>設計で、名前付きフィールドとゼロ値の組み合わせが効いています。</p>
+    </div>
+
+    <h2 class="step" id="step-4"><span class="step-no">Step 4</span><code>SpecFor</code> — 言語と問題タイプの整合を門で守る</h2>
+    <p>表はできました。あとは「言語名を渡したら、対応する <code>spec</code> を返す」入口があればよい。それが <code>SpecFor</code> です。ただしこの関数は単なる map 引きではなく、<strong>2つの検問</strong>を通します。第00章で <code>JudgeSubmission</code> の先頭が <code>SpecFor</code> を呼び、失敗すれば <code>IE</code> を返していたのを思い出してください。その門番の中身です。</p>
+
+    <div class="file-tag">internal/judge/lang.go（SpecFor と RequiredImages）</div>
+    <pre><code><span class="cm">// RequiredImages はヘルスチェック用のイメージ一覧。</span>
+<span class="kw">func</span> RequiredImages() []<span class="ty">string</span> {
+	<span class="kw">return</span> []<span class="ty">string</span>{ImageGo, ImageNode, ImageSQL}
+}
+
+<span class="kw">func</span> SpecFor(language, problemType <span class="ty">string</span>) (<span class="ty">LanguageSpec</span>, <span class="ty">error</span>) {
+	spec, ok := Languages[language]
+	<span class="kw">if</span> !ok {
+		<span class="kw">return</span> <span class="ty">LanguageSpec</span>{}, fmt.Errorf(<span class="st">"unsupported language: %s"</span>, language)
+	}
+	<span class="kw">if</span> spec.ProblemType != problemType {
+		<span class="kw">return</span> <span class="ty">LanguageSpec</span>{}, fmt.Errorf(<span class="st">"language %s cannot be used for %s problems"</span>, language, problemType)
+	}
+	<span class="kw">return</span> spec, <span class="kw">nil</span>
+}</code></pre>
+
+    <p><code>SpecFor</code> の2つの検問を、順に。</p>
+    <p><strong>第一の門: 言語が表にあるか。</strong> <code>spec, ok := Languages[language]</code> は Go の map 引きの定石で、2つ目の戻り値 <code>ok</code> が「キーが存在したか」を <code>bool</code> で返します。<code>!ok</code>（存在しない）なら「未対応言語」としてエラー。<code>"cobol"</code> のような知らない言語名が来たら、ここで止まります。第00章で見たとおり、この <code>err</code> を受けた <code>JudgeSubmission</code> は <code>IE</code> を返します——提出者が対応言語を選ぶ UI では通常起きませんが、「万一おかしな言語名が来ても、静かに壊れず IE で正直に止まる」という守りです。</p>
+    <p><strong>第二の門: 言語と問題タイプが噛み合うか。</strong> ここが <code>ProblemType</code> フィールドの出番です。<code>spec.ProblemType != problemType</code> —— 例えば <strong>SQL 問題（<code>problemType == "sql"</code>）に Go（<code>spec.ProblemType == "code"</code>）を提出</strong>しようとすると、ここで弾かれます。「言語 go は sql 問題には使えない」というエラー。逆に、code 問題に SQL を出すのも同様に止まります。<strong>言語と問題が別々の軸で選ばれる</strong>以上、その組み合わせが妥当かは1箇所で検問すべきで、<code>ProblemType</code> はそのための鍵として表に埋め込まれていました。Step 3 で「SQL だけ <code>ProblemType</code> が違う」と強調した伏線が、ここで回収されます。</p>
+    <p>ついでに <code>RequiredImages</code> にも触れておきます。これは採点ではなく<strong>起動時のヘルスチェック</strong>用——「必要な Docker イメージ（<code>judge-go</code> / <code>judge-node</code> / <code>judge-sql</code>）が全部揃っているか」を確認するためのリストです。序章と第04章で「バックエンドは起動時に Docker の疎通とイメージの存在を確認する」と述べた（序章は疎通を、第04章は <code>HasImage</code> によるイメージ存在確認を扱いました）、その根拠がこの1行です。イメージ名の定数を1箇所（Step 3 の <code>const</code>）にまとめておいたおかげで、表とヘルスチェックが<strong>同じ真実</strong>を見ています。</p>
+
+    <div class="box do"><div class="box-k">▸ 動かして確認</div>
+      <p>言語表まわりは Docker 不要でロジックだけ確かめられます。<code>internal/judge</code> のテストを通しておきます。</p>
+      <pre class="term"><code><span class="ps">$</span> cd backend
+<span class="ps">$</span> go test ./internal/judge/ -count=1
+<span class="out">ok      judge/internal/judge    0.412s</span></code></pre>
+      <p>言語の分岐が表に畳み込まれているおかげで、<code>SpecFor("go", "code")</code> は spec を返し、<code>SpecFor("go", "sql")</code> はエラーを返す——という整合を、頭の中で追えるはずです（<code>internal/judge</code> のテスト群はこの <code>SpecFor</code> を直接は呼びませんが、表は小さいので、迷ったら <code>lang.go</code> と <code>images/</code> を見比べれば数分で検算できます）。次からは、この章の後半の主役、SQL 採点の <code>CompareResultSet</code> を専用テストで検証します。</p>
+    </div>
+
+    <h2 class="step" id="step-5"><span class="step-no">Step 5</span>なぜ SQL だけ採点が違うのか — 実行の比較 vs 結果セットの比較</h2>
+    <p>ここから章の後半、SQL 採点の特殊性に潜ります。まず、なぜ SQL だけ<strong>採点ロジックそのもの</strong>が違うのか——その理由を腹落ちさせるところから始めます。第00章で <code>decideCase</code> が、出力比較の直前で問題タイプによって分岐していたのを思い出してください。</p>
+
+    <div class="file-tag">internal/judge/judge.go（decideCase の出力比較部分・再掲）</div>
+    <pre><code>	<span class="kw">if</span> p.Type == <span class="st">"sql"</span> {
+		ok, err := CompareResultSet(<span class="kw">string</span>(c.Stdout), tc.Expected, p.SQLOrderMatters)
+		<span class="kw">if</span> err != <span class="kw">nil</span> || !ok {
+			<span class="kw">return</span> WA
+		}
+		<span class="kw">return</span> AC
+	}
+	<span class="kw">if</span> !CompareOutput(<span class="kw">string</span>(c.Stdout), tc.Expected) {
+		<span class="kw">return</span> WA
+	}
+	<span class="kw">return</span> AC</code></pre>
+
+    <p>code 問題は <code>CompareOutput</code>（第00章の文字列比較）、SQL 問題は <code>CompareResultSet</code>。なぜ SQL は文字列比較ではだめなのか。理由は「SQL の<strong>答えの正体</strong>が、他言語と違う」ことにあります。3つの具体例で体感します。</p>
+
+    <p><strong>理由① 行の順番は、書かなければ不定。</strong> SQL のクエリは、<code>ORDER BY</code> を明示しない限り<strong>結果の行順を保証しません</strong>。<code>SELECT name FROM users</code> は、DB の都合で <code>[田中, 佐藤]</code> の順でも <code>[佐藤, 田中]</code> の順でも返しえます。どちらも「同じ結果」です。もし標準出力の文字列として比べると、行順が違うだけで WA になってしまう。問題が「順序を問わない」なら、採点は<strong>行の集合として</strong>——順番を無視して——比べるべきです。</p>
+    <p><strong>理由② <code>1</code> と <code>1.0</code> は同じ値。</strong> SQL の <code>COUNT(*)</code> は <code>3</code> を返し、<code>AVG(x)</code> は <code>3.0</code> を返すかもしれません。<code>SUM</code> の結果が <code>10</code> か <code>10.0</code> かは、DB や式の書き方で揺れます。人間にとって <code>1</code> と <code>1.0</code> は同じ数ですが、<strong>文字列としては別物</strong>です。文字列比較では、この揺れが即 WA になります。数として同一視する正規化が要ります。</p>
+    <p><strong>理由③ 「答え」は表形式で、列名も持つ。</strong> SQL の結果は「行の並び」であると同時に、各行は「列名 → 値」の対応（レコード）です。<code>{"id": 1, "name": "田中"}</code> のような構造を持ちます。この構造を無視して生テキストで比べると、列の並び順やフォーマットの差に振り回されます。結果を<strong>構造化データ（行の集合、各行はキー・値の写像）</strong>として捉え直す必要があります。</p>
+
+    <p>これら3つはすべて、<strong>SQL の答えが「文字列」ではなく「行の集合（result set）」だから</strong>起きます。だから SQL 採点では、標準出力を<strong>JSON として構造化</strong>（実行スクリプト <code>sqlloop.sh</code> が <code>sqlite3 -json</code> で結果を JSON 配列にして吐きます）し、それを「行の集合」として比較します。Go/JS/TS が「stdout の文字列を <code>==</code>」なら、SQL は「行の集合を、順序と数値表現の揺れを吸収して比較」。この根本的な差を実装したのが <code>CompareResultSet</code> です。図で対比します。</p>
+
+    <div class="ascii">2つの採点モデル
+
+  code 問題（Go/JS/TS）              sql 問題
+  ┌──────────────┐                 ┌──────────────────┐
+  │ 提出の stdout │                 │ sqlite3 -json の  │
+  │ "8\n"        │                 │ 出力（JSON配列）   │
+  └──────┬───────┘                 └────────┬─────────┘
+         │ 正規化して ==                     │ parseRows で行に
+         ▼                                  ▼
+  ┌──────────────┐                 ┌──────────────────┐
+  │ 期待 "8\n"    │                 │ 各行を canonical  │
+  │ と文字列比較   │                 │ 化 → 集合として比較│
+  └──────────────┘                 └──────────────────┘
+    文字列が一致すれば AC              行の集合が一致すれば AC
+                                    （順序・数値表現の揺れを吸収）</div>
+
+    <h2 class="step" id="step-6"><span class="step-no">Step 6</span><code>CompareResultSet</code> — 行の集合を canonical 化して比べる</h2>
+    <p>SQL 採点の中枢、<code>CompareResultSet</code> の全文です。第00章で「同じ <code>compare.go</code> に同居しているが第06章で扱う」と予告していた、その本体です。</p>
+
+    <div class="file-tag">internal/judge/compare.go（CompareResultSet）</div>
+    <pre><code><span class="cm">// CompareResultSet は sql 問題の結果セット比較。</span>
+<span class="cm">// actualJSON は sqlite3 -json の出力（空出力 = 0行）。expectedJSON は問題に登録された期待値。</span>
+<span class="cm">// 数値は正規化（1 と 1.0 を同一視）、orderMatters=false なら行順を無視して比較する。</span>
+<span class="kw">func</span> CompareResultSet(actualJSON, expectedJSON <span class="ty">string</span>, orderMatters <span class="ty">bool</span>) (<span class="ty">bool</span>, <span class="ty">error</span>) {
+	actual, err := parseRows(actualJSON)
+	<span class="kw">if</span> err != <span class="kw">nil</span> {
+		<span class="kw">return</span> <span class="kw">false</span>, fmt.Errorf(<span class="st">"actual: %w"</span>, err)
+	}
+	expected, err := parseRows(expectedJSON)
+	<span class="kw">if</span> err != <span class="kw">nil</span> {
+		<span class="kw">return</span> <span class="kw">false</span>, fmt.Errorf(<span class="st">"expected: %w"</span>, err)
+	}
+	a := canonicalRows(actual)
+	e := canonicalRows(expected)
+	<span class="kw">if</span> len(a) != len(e) {
+		<span class="kw">return</span> <span class="kw">false</span>, <span class="kw">nil</span>
+	}
+	<span class="kw">if</span> !orderMatters {
+		sort.Strings(a)
+		sort.Strings(e)
+	}
+	<span class="kw">for</span> i := <span class="kw">range</span> a {
+		<span class="kw">if</span> a[i] != e[i] {
+			<span class="kw">return</span> <span class="kw">false</span>, <span class="kw">nil</span>
+		}
+	}
+	<span class="kw">return</span> <span class="kw">true</span>, <span class="kw">nil</span>
+}</code></pre>
+
+    <p>この関数は<strong>5つの手順</strong>で「行の集合が一致するか」を判定します。上から順に。</p>
+    <p><strong>① 両方を「行の配列」に読み解く（<code>parseRows</code>）。</strong> <code>actualJSON</code>（提出クエリの実行結果 JSON）と <code>expectedJSON</code>（登録された期待値）を、それぞれ <code>parseRows</code> で <code>[]map[string]any</code>——「行の配列、各行は列名→値の map」——に変換します。ここでパースに失敗したら（壊れた JSON など）、<code>fmt.Errorf("actual: %w", err)</code> でエラーを返します。<code>%w</code> はエラーを<strong>ラップ</strong>する動詞で、「どちら側（actual か expected か）の JSON が壊れていたか」を情報として付け足しつつ、元のエラーを保持します。この <code>parseRows</code> は次の Step 8 で深掘りする、複数結果セット拒否の要でもあります。</p>
+    <p><strong>② 各行を canonical な文字列に落とす（<code>canonicalRows</code>）。</strong> ここが SQL 比較の核心です。行（map）をそのまま比べようとすると厄介です——map はキーの順序が不定で、値の <code>1</code> と <code>1.0</code> の揺れもある。そこで各行を「<strong>キー昇順・数値正規化済みの JSON 文字列</strong>」という<strong>正準形（canonical form）</strong>に変換します。<code>{"name":"田中","id":1}</code> も <code>{"id":1,"name":"田中"}</code> も、canonical 化すれば同じ文字列 <code>{"id":1,"name":"田中"}</code> になる。こうして各行が<strong>1本の比較可能な文字列</strong>になり、行の集合は<code>[]string</code>になります。<code>canonicalRows</code> と <code>canonicalValue</code> の中身は Step 7 で詳しく見ます。</p>
+    <p><strong>③ 行数が違えば即 <code>false</code>。</strong> <code>len(a) != len(e)</code>——期待が2行なのに提出が3行なら、その時点で不一致。集合として比べる前の、最も安いふるい落としです。</p>
+    <p><strong>④ 順序を問わないなら、両方をソートする。</strong> <code>orderMatters</code> が <code>false</code>（＝行順を問わない問題）なら、<code>sort.Strings(a)</code> と <code>sort.Strings(e)</code> で<strong>両方の文字列配列を同じ規則で並べ替え</strong>ます。②で各行が1本の文字列になっているからこそ、この一発ソートで「集合としての比較」に持ち込めます。ソート後に順に比べれば、元の行順が違っても中身の集合が同じなら一致します。<code>orderMatters</code> が <code>true</code>（<code>ORDER BY</code> を採点したい問題）なら、ソートせず<strong>並んだ順のまま</strong>比べます——順序も採点対象だからです。この <code>orderMatters</code> は問題ごとに <code>store.Problem</code> の <code>SQLOrderMatters</code> フィールドで持ち、<code>decideCase</code> から渡されます。</p>
+    <p><strong>⑤ 1行ずつ突き合わせる。</strong> <code>for i := range a</code> で各要素を <code>a[i] != e[i]</code> と比較し、1つでも違えば <code>false</code>。全部一致すれば <code>true</code>。②で行が canonical な文字列になっているので、比較は素朴な文字列 <code>!=</code> で済みます。難しさは全部 canonical 化に押し出し、最後の比較は単純にする——第00章の <code>CompareOutput</code> が「揃えると比べるを分けた」のと、まったく同じ思想です。</p>
+
+    <div class="box hazard"><div class="box-k">⚠ 落とし穴 — orderMatters の既定と、問題設計の責任</div>
+      <p><code>orderMatters</code> の扱いは、<strong>問題を作る側の責任</strong>と表裏一体です。もし問題が「順不同でよい」（<code>orderMatters=false</code>）なのに、提出者が <code>ORDER BY</code> を付けても<strong>付けなくても</strong>両方 AC になります——集合として合っていればよいので当然です。逆に問題が「順序も採点する」（<code>orderMatters=true</code>）なら、正しい行を返しても<strong>順番が違えば WA</strong> になります。つまり期待値を登録するとき、<code>orderMatters=true</code> の問題では<strong>期待値の行順それ自体が正解の一部</strong>になる。「並び替えを問う問題なのに <code>orderMatters=false</code> にしてしまう」と、<code>ORDER BY</code> を書かない手抜き解答まで AC になり、問題が問題として機能しません。<code>orderMatters</code> は単なる比較オプションではなく、<strong>その問題が何を問うているか</strong>の宣言だと捉えてください。</p>
+    </div>
+
+    <h2 class="step" id="step-7"><span class="step-no">Step 7</span>数値正規化と行順 — canonicalValue の機微</h2>
+    <p>Step 6 の②で「各行を canonical 化する」と言いました。その中身、<code>canonicalRows</code> と <code>canonicalValue</code> を逐行で読みます。ここに「キー昇順」と「数値正規化」の実装があります。まず行を文字列にする <code>canonicalRows</code>。</p>
+
+    <div class="file-tag">internal/judge/compare.go（canonicalRows）</div>
+    <pre><code><span class="cm">// canonicalRows は各行を「キー昇順・数値正規化済みの JSON 文字列」に落とす。</span>
+<span class="kw">func</span> canonicalRows(rows []<span class="kw">map</span>[<span class="ty">string</span>]<span class="ty">any</span>) []<span class="ty">string</span> {
+	out := <span class="kw">make</span>([]<span class="ty">string</span>, len(rows))
+	<span class="kw">for</span> i, row := <span class="kw">range</span> rows {
+		keys := <span class="kw">make</span>([]<span class="ty">string</span>, <span class="st">0</span>, len(row))
+		<span class="kw">for</span> k := <span class="kw">range</span> row {
+			keys = append(keys, k)
+		}
+		sort.Strings(keys)
+		<span class="kw">var</span> sb strings.<span class="ty">Builder</span>
+		sb.WriteString(<span class="st">"{"</span>)
+		<span class="kw">for</span> j, k := <span class="kw">range</span> keys {
+			<span class="kw">if</span> j &gt; <span class="st">0</span> {
+				sb.WriteString(<span class="st">","</span>)
+			}
+			kb, _ := json.Marshal(k)
+			sb.Write(kb)
+			sb.WriteString(<span class="st">":"</span>)
+			sb.WriteString(canonicalValue(row[k]))
+		}
+		sb.WriteString(<span class="st">"}"</span>)
+		out[i] = sb.String()
+	}
+	<span class="kw">return</span> out
+}</code></pre>
+
+    <p><code>canonicalRows</code> は各行（<code>map[string]any</code>）を、<strong>手作りで JSON 文字列に組み立て直します</strong>。なぜ標準の <code>json.Marshal(row)</code> を使わないのか? 理由は2つあり、それがこの関数の全部です。</p>
+    <p><strong>キーを昇順に固定する。</strong> Go の map はイテレーション順が<strong>毎回ランダム</strong>です。<code>json.Marshal(map)</code> は実はキーをソートしてくれますが、本書は<strong>キーの並びを自分で明示的に制御</strong>するため、<code>keys</code> にキーを集めて <code>sort.Strings(keys)</code> で昇順に並べ、その順で書き出します。これで <code>{"name":..,"id":..}</code> と <code>{"id":..,"name":..}</code> が<strong>同じ文字列</strong>に正準化されます。列の並びが違っても中身が同じなら一致——という「集合としての行比較」の土台です。<code>json.Marshal(k)</code> でキー自体を JSON 文字列化しているのは、キーに引用符やエスケープが必要な場合に正しく扱うためです。</p>
+    <p><strong>値を <code>canonicalValue</code> に通す。</strong> ここが数値正規化の入口。<code>json.Marshal</code> にそのまま任せず、値1つずつを <code>canonicalValue(row[k])</code> に通してから書き込みます。これが <code>1</code> と <code>1.0</code> を同一視する仕掛けの本体です。次に見ます。</p>
+
+    <div class="gonote"><div class="box-k">GO メモ · strings.Builder と、キーを集めてソートする定石</div>
+      <p><code>var sb strings.Builder</code> は<strong>文字列を効率よく継ぎ足していく</strong>ための型です。<code>s = s + "x"</code> を繰り返すと毎回新しい文字列を作って遅くなりますが、<code>Builder</code> は内部バッファに <code>WriteString</code> で書き足し、最後に <code>sb.String()</code> で一度だけ文字列化します。JSON を1文字ずつ組み立てるこの用途にぴったりです。<br>
+      <code>keys := make([]string, 0, len(row))</code> → ループで <code>append</code> → <code>sort.Strings(keys)</code> は、<strong>map のキーを決まった順で処理したいときの Go の定石</strong>です。<code>make([]string, 0, len(row))</code> の第3引数 <code>len(row)</code> は<strong>容量の事前確保</strong>——最終的に何個入るか分かっているので、あらかじめその分の領域を取って <code>append</code> の再確保を避けます。map をそのまま回すと順序が不定なので、「キーを取り出す → ソート → その順で使う」の3手が、map を決定的に扱う常套句になります。</p>
+    </div>
+
+    <p>いよいよ数値正規化の心臓、<code>canonicalValue</code> です。</p>
+
+    <div class="file-tag">internal/judge/compare.go（canonicalValue）</div>
+    <pre><code><span class="kw">func</span> canonicalValue(v <span class="ty">any</span>) <span class="ty">string</span> {
+	<span class="kw">switch</span> n := v.(<span class="kw">type</span>) {
+	<span class="kw">case</span> json.<span class="ty">Number</span>:
+		<span class="cm">// 1 と 1.0 を同一視する。整数で表せるものは整数表記に寄せる</span>
+		<span class="kw">if</span> i, err := n.Int64(); err == <span class="kw">nil</span> {
+			<span class="kw">return</span> fmt.Sprintf(<span class="st">"%d"</span>, i)
+		}
+		<span class="kw">if</span> f, err := n.Float64(); err == <span class="kw">nil</span> {
+			<span class="kw">if</span> f == <span class="kw">float64</span>(<span class="kw">int64</span>(f)) {
+				<span class="kw">return</span> fmt.Sprintf(<span class="st">"%d"</span>, <span class="kw">int64</span>(f))
+			}
+			<span class="kw">return</span> fmt.Sprintf(<span class="st">"%g"</span>, f)
+		}
+		<span class="kw">return</span> n.String()
+	<span class="kw">default</span>:
+		b, _ := json.Marshal(v)
+		<span class="kw">return</span> <span class="kw">string</span>(b)
+	}
+}</code></pre>
+
+    <p><code>canonicalValue</code> は「値が数値なら数値として正規化し、それ以外はそのまま JSON 化」します。<code>switch n := v.(type)</code> は Go の<strong>型スイッチ</strong>——<code>v</code>（<code>any</code> 型）の中身が実際にどの型かで分岐します。分岐は2つ。</p>
+    <p><strong><code>case json.Number</code>: 数値の正規化。</strong> JSON の数値は <code>json.Number</code>（数値を文字列として保持する型。理由は下の GO メモ）として来ます。ここで <code>1</code> と <code>1.0</code> を同じにするため、次の順で試します。</p>
+    <ul>
+      <li><code>n.Int64()</code> が成功する → その整数を <code>%d</code> で書き出す。<code>1</code> も <code>1.0</code>……ではなく、まず「整数として読めるか」を試すので、<code>3</code> のような値はここで <code>"3"</code> になります。</li>
+      <li>整数として読めなければ <code>n.Float64()</code> を試す。成功したら、さらに <strong><code>f == float64(int64(f))</code></strong> をチェック——これは「浮動小数点だが<strong>小数部がゼロか</strong>」の判定です。<code>1.0</code> は <code>int64(1.0)=1</code>、<code>float64(1)=1.0</code> で <code>1.0 == 1.0</code> が真なので、<strong>整数表記 <code>"1"</code> に寄せます</strong>。これで <code>1.0</code> と <code>1</code> が同じ <code>"1"</code> になり、めでたく同一視されます。小数部があるなら（<code>3.14</code> など）<code>%g</code> で書き出します（<code>%g</code> は余計なゼロを付けない数値書式）。</li>
+      <li>どちらでもなければ <code>n.String()</code> でそのまま。</li>
+    </ul>
+    <p><strong><code>default</code>: 数値以外。</strong> 文字列・真偽値・<code>null</code> などは、<code>json.Marshal(v)</code> でそのまま JSON 文字列化します。<code>"1"</code>（文字列の1）はここを通って <code>"\"1\""</code>（引用符付き）になり、数値の <code>1</code>（<code>case</code> を通って <code>"1"</code>）とは<strong>別物</strong>になります——これは正しい振る舞いで、SQL 上でも文字列 <code>'1'</code> と数値 <code>1</code> は違う値だからです。テスト <code>string vs number</code> がこの一線を守っています。<code>null</code> は <code>json.Marshal(nil)</code> で <code>"null"</code> になり、期待の <code>null</code> と一致します（テスト <code>null value</code>）。</p>
+
+    <div class="box hazard"><div class="box-k">⚠ 落とし穴 — 数値正規化が飲み込む「境界」を意識する</div>
+      <p>この数値正規化は「<code>1</code> と <code>1.0</code> を同じにする」ための<strong>意図的な同一視</strong>ですが、同一視は諸刃です。まず、<code>"007"</code> のような<strong>ゼロ埋め文字列</strong>——これは <code>default</code> 側（JSON の文字列）を通るので <code>"\"007\""</code> のまま、数値の <code>7</code> とは一致しません。もし SQL の答えが「郵便番号 <code>007</code>」のような<strong>ゼロ埋めが意味を持つ文字列</strong>なら、それを数値カラムで返すと <code>7</code> に化けて期待と食い違う——これは正規化の罪ではなく、<strong>問題設計とスキーマ選択の責任</strong>です（文字列で持つべきものを数値で返さない）。<br>
+      もう一つ、<code>1.0</code> を <code>"1"</code> に寄せる <code>f == float64(int64(f))</code> は、巨大な数や特殊値では素直に働きません。ただし本書のジャッジは<strong>自分専用の学習用</strong>で、扱う数値は素直な範囲に収まる前提です。「どこまでを同じとみなすか」の線引きは、汎用ジャッジなら悩みどころですが、本書では<strong>1 と 1.0 を同一視できれば十分</strong>と割り切っています。正規化は「便利」と同時に「暗黙の同一視を持ち込む」——その境界を意識しておくのが、ここの学びです。</p>
+    </div>
+
+    <div class="gonote"><div class="box-k">GO メモ · encoding/json の UseNumber と json.Number</div>
+      <p>普通に <code>json.Unmarshal</code> で JSON の数値をデコードすると、Go は数値をすべて <code>float64</code> にします。すると <code>10000000000000001</code> のような大きな整数が丸められたり、そもそも「元が整数だったか小数だったか」が<strong>失われます</strong>。これを避けるのが Step 8 で出てくる <code>dec.UseNumber()</code> で、数値を <code>float64</code> ではなく <strong><code>json.Number</code></strong>（元の数値表現を<strong>文字列のまま</strong>保持する型）としてデコードさせます。<br>
+      <code>json.Number</code> は「必要になったときに <code>.Int64()</code> や <code>.Float64()</code> で数値に変換する」型です。<code>canonicalValue</code> が <code>case json.Number</code> で受け、<code>Int64()</code> → <code>Float64()</code> の順に変換を試せるのは、元の表現が文字列として保たれているおかげ。もし <code>UseNumber()</code> を呼ばず全部 <code>float64</code> になっていたら、「整数として読めるか」の判定自体ができません。<strong>数値の正規化は、まず元の表現を壊さずに受け取るところから始まる</strong>——<code>UseNumber</code> と <code>json.Number</code> は、そのためのペアです。</p>
+    </div>
+
+    <h2 class="step" id="step-8"><span class="step-no">Step 8</span>複数結果セットを弾く — parseRows と dec.More()</h2>
+    <p>最後に、Step 6 の①で素通りした <code>parseRows</code> に戻ります。ここには、SQL 採点ならではの<strong>ずるを防ぐ関門</strong>が仕込まれています。</p>
+
+    <div class="file-tag">internal/judge/compare.go（parseRows）</div>
+    <pre><code><span class="kw">func</span> parseRows(s <span class="ty">string</span>) ([]<span class="kw">map</span>[<span class="ty">string</span>]<span class="ty">any</span>, <span class="ty">error</span>) {
+	s = strings.TrimSpace(s)
+	<span class="kw">if</span> s == <span class="st">""</span> {
+		<span class="kw">return</span> <span class="kw">nil</span>, <span class="kw">nil</span> <span class="cm">// 0行</span>
+	}
+	dec := json.NewDecoder(strings.NewReader(s))
+	dec.UseNumber()
+	<span class="kw">var</span> rows []<span class="kw">map</span>[<span class="ty">string</span>]<span class="ty">any</span>
+	<span class="kw">if</span> err := dec.Decode(&amp;rows); err != <span class="kw">nil</span> {
+		<span class="kw">return</span> <span class="kw">nil</span>, err
+	}
+	<span class="cm">// 提出 SQL が複数ステートメントを含み結果セットが2つ以上出た場合、</span>
+	<span class="cm">// sqlite3 -json は JSON 配列を続けて出力する。先頭だけ拾って AC にしないよう、</span>
+	<span class="cm">// 後続トークンが無い（＝単一結果セット）ことを必須にする。</span>
+	<span class="kw">if</span> dec.More() {
+		<span class="kw">return</span> <span class="kw">nil</span>, fmt.Errorf(<span class="st">"multiple result sets are not allowed"</span>)
+	}
+	<span class="kw">return</span> rows, <span class="kw">nil</span>
+}</code></pre>
+
+    <p><code>parseRows</code> は「JSON 文字列 → 行の配列」の変換ですが、4つの仕事をしています。順に。</p>
+    <p><strong>① 空出力は0行として扱う。</strong> <code>strings.TrimSpace(s)</code> で前後の空白を落とし、空文字列なら <code>nil, nil</code> を返します。SQL のクエリが「1行も返さない」結果は正当です（<code>WHERE</code> にマッチする行が無い等）。<code>sqlite3 -json</code> は0行のとき<strong>何も出力しません</strong>。だから「空出力 = 0行 = <code>nil</code> スライス」と定めます。テスト <code>empty both</code>（空文字列と <code>[]</code> がどちらも0行として一致）が、この扱いを固定しています。<code>nil</code> スライスと空の <code>[]</code> は Go では長さ0で同じに振る舞うので、両者が一致するのは正しい。</p>
+    <p><strong>② デコーダを <code>UseNumber</code> で構える。</strong> <code>json.NewDecoder</code> でストリーミングデコーダを作り、<code>dec.UseNumber()</code> を呼びます。Step 7 の GO メモのとおり、これで数値が <code>json.Number</code> として読まれ、<code>canonicalValue</code> の数値正規化が効くようになります。<code>json.Unmarshal</code> ではなく <code>Decoder</code> を使う理由が、次の④にあります。</p>
+    <p><strong>③ 行の配列にデコードする。</strong> <code>dec.Decode(&amp;rows)</code> で JSON 配列を <code>[]map[string]any</code> に読み込みます。失敗（壊れた JSON など）なら、その <code>err</code> をそのまま返す——呼び出し元の <code>CompareResultSet</code> が <code>"actual: %w"</code> でラップして、どちら側の異常かを付記します。テスト <code>broken actual</code>（<code>not json</code> を渡すとエラー）がここを守ります。</p>
+    <p><strong>④ 「まだ続きがある」なら拒否する。</strong> これがこの章の<strong>最後の山場</strong>です。<code>dec.Decode</code> は JSON の値を<strong>1つ</strong>読みます。読み終えたあと、<code>dec.More()</code> が「入力にまだ次のトークンが残っているか」を返します。<strong>残っていたら（<code>true</code>）、それは JSON 配列が2つ以上続いている</strong>ということ——つまり<strong>結果セットが複数出た</strong>ことを意味します。</p>
+    <p>なぜこれが問題なのか。<code>sqlite3 -json</code> は、提出 SQL が<strong>複数のステートメント</strong>を含んでいると、各ステートメントの結果を<strong>JSON 配列として続けて</strong>吐きます。例えば <code>SELECT * FROM answer; SELECT * FROM sqlite_master;</code> のように、<strong>本命のクエリのあとに余計なクエリをくっつける</strong>と、出力は <code>[{本命の答え}][{別の結果}]</code> のように配列が2つ並びます。もし <code>dec.Decode</code> が読んだ<strong>先頭の配列だけ</strong>で採点してしまうと、後ろにどんな余計なクエリを付けても<strong>先頭さえ合っていれば AC</strong> になってしまう。これは採点のずるを許す穴です。</p>
+    <p>そこで <code>dec.More()</code> が真なら「複数結果セットは許さない」とエラーを返します。<code>CompareResultSet</code> はこのエラーを受けると <code>err != nil</code> の枝で <strong><code>WA</code></strong> に倒します（<code>decideCase</code> の <code>if err != nil || !ok { return WA }</code>）。「1つの提出は1つの結果セットを返すべき」という規律を、デコーダの残りトークン検査で守っているわけです。テスト <code>multiple result sets rejected</code>（<code>[{"a":1}][{"b":2}]</code> がエラー）が、この防御を固定しています。</p>
+
+    <div class="box hazard"><div class="box-k">⚠ 落とし穴 — 「先頭だけ拾って AC」は、静かに通る危険</div>
+      <p><code>dec.More()</code> のチェックが<strong>無かったら</strong>どうなるかを想像してください。<code>dec.Decode(&amp;rows)</code> は最初の JSON 配列を読んで、素直に成功します。<strong>エラーは出ません</strong>。後ろに何が続いていようが、先頭の1配列が期待と一致すれば AC——テストも緑になり、一見なんの問題もなく見えます。これが<strong>いちばん怖い</strong>タイプのバグです。「間違った実装が、正しく動いているように見える」。<code>SELECT 本命; SELECT 偽装;</code> のように、本命の後ろに<strong>もう1つ結果を出すクエリ</strong>を足せば、出力は <code>[{本命}][{偽装}]</code> と配列が2つ並び、先頭さえ合えば AC になりかねません。<code>dec.More()</code> は「JSON を1つ読んで終わり、ではなく、<strong>1つだけであることを確かめる</strong>」——この「だけ」を検査する1行が、静かなずるを塞いでいます。ストリーミングデコーダ（<code>json.Decoder</code>）を <code>json.Unmarshal</code> の代わりに使っている理由が、まさにこの <code>More()</code> を呼ぶためだと分かります。</p>
+      <p>ただし <code>More()</code> の守備範囲は「<strong>出力を出す</strong>後続文」だけだと正確に押さえてください。<code>SELECT 本命; DROP TABLE users;</code> のような、後続が<strong>出力を生まないステートメント</strong>（<code>DROP</code> / <code>UPDATE</code> / <code>INSERT</code> など）だと、<code>sqlite3 -json</code> は2つ目の JSON 配列を<strong>出しません</strong>。すると <code>dec.More()</code> は <code>false</code> のまま通ってしまい、<code>More()</code> はこの手のクエリを止められません。ではなぜ危険でないのか。守っているのは別の2枚の壁です。① 採点は<strong>ケースごとの使い捨て DB</strong>で行われる（<code>sqlloop.sh</code> がケース名ごとに <code>/tmp/db_&lt;name&gt;.sqlite</code> を作り、そのケースが終われば消す）ので、<code>DROP TABLE</code> しても壊れるのは<strong>その場限りの一時 DB だけ</strong>。② 実行は <code>sqlite3 <strong>-safe</strong></code> で走る（<code>sqlloop.sh</code>）——<code>-safe</code> はファイル書き込みや <code>ATTACH</code> などの<strong>破壊的・危険な操作を封じる</strong>安全モードです。<strong>まとめると: 出力を出す後続文は <code>More()</code> が弾き、出力を出さない副作用文は使い捨て DB と <code>-safe</code> が無害化する</strong>——この2段構えで「余計なクエリを付けるずる」を全方位で塞いでいます。</p>
+    </div>
+
+    <div class="box do"><div class="box-k">▸ 動かして確認</div>
+      <p>SQL 比較のロジックは Docker 不要でテストできます。<code>CompareResultSet</code> の専用テストを走らせます。</p>
+      <pre class="term"><code><span class="ps">$</span> cd backend
+<span class="ps">$</span> go test ./internal/judge/ -run TestCompareResultSet -v
+<span class="out">=== RUN   TestCompareResultSet
+--- PASS: TestCompareResultSet (0.00s)
+PASS
+ok      judge/internal/judge    0.009s</span></code></pre>
+      <p><code>TestCompareResultSet</code> は、この章で読んだ振る舞いを1つずつ固定しています。<code>same order</code> / <code>diff order strict</code> / <code>diff order loose</code> が <code>orderMatters</code> の効き（Step 6 ④）を、<code>int vs float</code> が数値正規化（Step 7、<code>1.0</code> と <code>1</code> が一致）を、<code>string vs number</code>（<code>"1"</code> ≠ <code>1</code>）と <code>null value</code> が <code>canonicalValue</code> の型分岐を、<code>column mismatch</code> / <code>row count</code> が集合比較の基本を、<code>empty both</code> が0行の扱い（Step 8 ①）を、<code>broken actual</code> と <code>multiple result sets rejected</code> が <code>parseRows</code> のエラー検査（Step 8 ③④）を、<code>multiline json</code> が「sqlite3 が改行込みで返しても読める」ことを守ります。この12ケースが緑なら、あなたの SQL 採点は<strong>順序・数値・列・複数結果セット</strong>の全方位で正しく振る舞います。</p>
+    </div>
+
+    <div class="box do"><div class="box-k">▸ さらに手を動かすなら</div>
+      <p>SQL 比較の境界を、テストに1行足して体で確かめてみてください（答えは自分の目で確認できます）。</p>
+      <ol>
+        <li><code>{"float non-integer", `[{"a":3.14}]`, `[{"a":3.14}]`, true, true, false}</code> を足す。小数部があるので <code>%g</code> の枝を通り、<code>3.14</code> どうしで一致するはず。</li>
+        <li><code>{"loose keeps content", `[{"a":1},{"a":1}]`, `[{"a":1},{"a":2}]`, false, false, false}</code> を足す。<code>orderMatters=false</code> でも<strong>中身が違えば</strong>不一致——ソートは順序を無視するだけで、集合の中身は誤魔化せないことを確認する。</li>
+        <li>（実験）<code>parseRows</code> の <code>dec.More()</code> の <code>if</code> ブロックを一時的にコメントアウトし、<code>multiple result sets rejected</code> のテストが<strong>落ちる</strong>（複数結果セットが通ってしまう）ことを確かめる。「先頭だけ拾って AC」の穴を失敗から体感したら、必ず元に戻すこと。</li>
+      </ol>
+    </div>
+
+    <h2>つまずき FAQ</h2>
+    <details class="qa"><summary>言語を1つ足すには、具体的に何をどこに書けばいいの?</summary>
+      <div class="qa-body"><p>触るのは原則<strong>2箇所</strong>です。① <code>lang.go</code> の <code>Languages</code> 表に、その言語の <code>LanguageSpec</code> を1エントリ追加する（イメージ名・コンパイルの有無・実行コマンド・ファイル名を埋める）。② その言語のツールチェーンを入れた Docker イメージと、コンテナ内で呼ばれるスクリプト（コンパイル/実行）を <code>images/</code> に用意する。イメージ名を <code>const</code> に足し、<code>RequiredImages</code> にも加えればヘルスチェックも効きます。<strong>実行段（<code>runCases</code>）は言語を知らないので手を入れません。判定段もほぼ共通で触りません</strong>——唯一の例外は、判定段に1箇所だけある「node がヒープ上限で自死したのを MLE に読み替える」分岐（<code>decideCase</code> が <code>stderr</code> の <code>heap out of memory</code> を見る）くらいです。これが「言語をデータにした」設計の値打ちで、要件 NF-10 が言う「表に1エントリ」の実体です。</p></div>
+    </details>
+    <details class="qa"><summary>TypeScript は「コンパイルする」の? それとも「しない」の? Go とどう違う?</summary>
+      <div class="qa-body"><p>TS は<strong>「型検査はするが、実行用の成果物は作らない」</strong>——Go と JS の中間です。<code>CompileCmd</code> に <code>tscheck.sh</code>（型検査）が入っているので、コンパイル段は走り、型エラーがあれば <code>CE</code> になります。しかしそこでは<strong>実行用の JS を生成しません</strong>。実行段は元の <code>main.ts</code> を <code>tsx</code>（トランスパイルしながら直接実行するランナー）で走らせます。Go が「ソース→バイナリを作り、そのバイナリを実行」なのに対し、TS は「型検査で門をくぐらせ、ソースを tsx でそのまま実行」。<code>CompileCmd</code> を「バイナリ生成」ではなく<strong>「提出を前に進めてよいかの検問」</strong>と捉え直すと、この違いが腑に落ちます。</p></div>
+    </details>
+    <details class="qa"><summary>なぜ SQL は <code>CompareOutput</code>（文字列比較）ではだめなの?</summary>
+      <div class="qa-body"><p>SQL の「答え」が<strong>文字列ではなく「行の集合」</strong>だからです。① <code>ORDER BY</code> を書かなければ行順は不定なので、順不同の問題では順番の違いで WA にしてはいけない。② <code>1</code> と <code>1.0</code> は同じ数だが文字列としては別物で、文字列比較だと数値表現の揺れで落ちる。③ 各行は「列名→値」の構造を持つので、生テキストではなく構造化データとして比べるべき。これらを吸収するのが <code>CompareResultSet</code> で、結果を JSON（<code>sqlite3 -json</code>）として構造化し、各行を canonical 化（キー昇順・数値正規化）して、<code>orderMatters=false</code> ならソートして集合として比べます。Go/JS/TS が「stdout の文字列比較」で済むのは、それらの答えが本当に「標準出力の文字列」だからです。</p></div>
+    </details>
+
+    <h2>理解度チェック</h2>
+    <p>次の問いに<strong>自分の言葉で</strong>答えられたら、この章は卒業です。</p>
+    <details class="qa"><summary>1. <code>LanguageSpec</code> と <code>Languages</code> 表は、どんな設計上の問題を解いているか。「言語追加は表に1エントリ」がなぜ成り立つか。</summary>
+      <div class="qa-body"><p>解いているのは<strong>「言語ごとの違いを <code>if language == ...</code> の分岐で書くと、コンパイル段・実行段・tar 組み立てなど、あちこちに分岐が散らばり、言語追加のたびに全部直す羽目になる」</strong>という問題。<code>LanguageSpec</code> は言語の違いを「イメージ・コンパイル手順・実行手順・ファイル名」の4設定値（＋問題タイプ）に還元し、それを <code>Languages</code> map にまとめる。実行段のコードは「渡された spec のとおりに動く」だけで言語を知らない。だから言語追加は <code>Languages</code> に1行足す（＋対応 Docker イメージを用意する）だけで済み、Go 側のロジックには手を入れない——これが要件 NF-10 の実体。</p></div>
+    </details>
+    <details class="qa"><summary>2. Go・JS・TS・SQL の4行は、表の中で「コンパイルの有無」と「問題タイプ」をどう表し分けているか。</summary>
+      <div class="qa-body"><p><strong>コンパイルの有無</strong>は <code>CompileCmd</code> フィールドで表す。Go は <code>compile.sh</code>（非 nil = コンパイルしてバイナリを作り、それを実行）、TS は <code>tscheck.sh</code>（非 nil だが型検査のみで成果物なし、実行は元ソースを tsx）、JS と SQL は <code>CompileCmd</code> 自体を書かない（<code>nil</code> = コンパイル段を飛ばす）。<strong>問題タイプ</strong>は <code>ProblemType</code> フィールドで、Go/JS/TS は <code>"code"</code>、SQL だけ <code>"sql"</code>。この <code>ProblemType</code> を <code>SpecFor</code> が問題側のタイプと突き合わせ、「SQL 問題に Go を出す」ような不整合を門前払いする。</p></div>
+    </details>
+    <details class="qa"><summary>3. <code>CompareResultSet</code> が「1 と 1.0 を同一視」し、かつ「複数結果セットを弾く」のは、それぞれどこで・どうやっているか。</summary>
+      <div class="qa-body"><p><strong>数値の同一視</strong>は <code>canonicalValue</code> で。JSON 数値を <code>json.Number</code>（<code>UseNumber</code> で表現を保持）として受け、<code>Int64()</code> が通ればその整数表記、通らなくても <code>Float64()</code> の結果が <code>f == float64(int64(f))</code>（小数部ゼロ）なら整数表記に寄せる。これで <code>1.0</code> も <code>1</code> も <code>"1"</code> になる。<strong>複数結果セットの拒否</strong>は <code>parseRows</code> で。<code>json.Decoder</code> で JSON を1つ <code>Decode</code> したあと <code>dec.More()</code> を見て、まだ後続トークンがあれば（＝配列が2つ以上続く＝結果セットが複数）エラーを返す。これにより「本命の後ろに余計なクエリを付け、先頭だけ合わせて AC」というずるを防ぐ。<code>json.Unmarshal</code> ではなく <code>Decoder</code> を使う理由がこの <code>More()</code> にある。</p></div>
+    </details>
+
+    <h2>まとめ — 次の層へ</h2>
+    <p>この章で、ジャッジは<strong>4言語を1枚の表で扱える</strong>ようになりました。<code>LanguageSpec</code> が「言語 = イメージ + コンパイル手順 + 実行手順 + ファイル名」をデータ化し、Go（コンパイルあり）・JS（コンパイルなし）・TS（型検査のみ・実行は tsx）・SQL（問題タイプが別）という4つの異なる形を、同じ表の異なる行として吸収する。言語追加は表に1行——分岐が散らばらない設計を、実物で読みました。そして後半では、SQL だけが<strong>採点ロジックそのもの</strong>から違うこと——答えが「文字列」ではなく「行の集合」であること——を、<code>CompareResultSet</code> の canonical 化・数値正規化・複数結果セット拒否まで潜って確かめました。「なぜ SQL だけ比較が違うのか」に、もう自分のコードで答えられるはずです。</p>
+    <p>しかし、ここまでのジャッジには<strong>まだ「問題」がありません</strong>。<code>decideCase</code> は <code>p *store.Problem</code> や <code>tc store.Testcase</code>、<code>p.TimeLimitMS</code> や <code>p.SQLOrderMatters</code> を当たり前に受け取ってきましたが、<strong>その <code>Problem</code> や <code>Testcase</code> は、いったいどこに、どう保存されているのか?</strong> 問題文・制限時間・テストケース・期待出力・そして提出の履歴——これらを持つ器がまだ空白です。次の第07章では、SQLite を使ってそれらを<strong>持つ</strong>層を作ります。採点の芯（第00章）から言語（この章）まで積み上げた実行系の下に、ようやく「問題とデータ」の土台を敷きます。</p>
+
+    <div class="chap-foot">
+      <a class="pager" href="05-limits.html"><span class="dir">← 前へ</span>第05章 · 時間とメモリを断ち切る</a>
+      <a class="pager next" href="07-store.html"><span class="dir">次へ →</span>第07章 · 問題とテストケースを持つ</a>
+    </div>
+  </main>
+</div>
+</body>
+</html>

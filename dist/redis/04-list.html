@@ -1,0 +1,549 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>第04章 List — Redis をつくる</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500;600&family=Source+Serif+4:opsz,wght@8..60,400;8..60,600;8..60,700&family=Noto+Serif+JP:wght@400;600;700&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<div class="shell">
+
+  <aside class="spine">
+    <a class="wordmark" href="index.html">MINI-REDIS · from scratch</a>
+    <div class="book-title">Redis を<br>つくる</div>
+    <div class="book-sub">Go で RESP から Sorted Set まで</div>
+
+    <div class="legend"><span>読む <b>↓</b></span><span>組む <b>↑</b></span></div>
+
+    <nav aria-label="目次">
+      <ul class="toc">
+        <li><a class="nav-item" href="index.html"><span class="nav-num">序</span><span class="nav-label">はじめに・準備<span class="nav-tag">Setup</span></span></a></li>
+        <li><a class="nav-item" href="00-server.html"><span class="nav-num">00</span><span class="nav-label">返事をするサーバ<span class="nav-tag">RESP</span></span></a></li>
+        <li><a class="nav-item" href="01-keyspace.html"><span class="nav-num">01</span><span class="nav-label">キーと値<span class="nav-tag">Store</span></span></a></li>
+        <li><a class="nav-item" href="02-expire.html"><span class="nav-num">02</span><span class="nav-label">有効期限<span class="nav-tag">Expire</span></span></a></li>
+        <li><a class="nav-item" href="03-string.html"><span class="nav-num">03</span><span class="nav-label">数としての文字列<span class="nav-tag">String</span></span></a></li>
+        <li><a class="nav-item current" aria-current="page" href="04-list.html"><span class="nav-num">04</span><span class="nav-label">List<span class="nav-tag">List</span></span></a></li>
+        <li><a class="nav-item" href="05-hash.html"><span class="nav-num">05</span><span class="nav-label">Hash<span class="nav-tag">Hash</span></span></a></li>
+        <li><a class="nav-item" href="06-set.html"><span class="nav-num">06</span><span class="nav-label">Set とエンコーディング<span class="nav-tag">Set</span></span></a></li>
+        <li><a class="nav-item" href="07-zset.html"><span class="nav-num">07</span><span class="nav-label">Sorted Set と skiplist<span class="nav-tag">ZSet</span></span></a></li>
+        <li><a class="nav-item" href="08-pubsub.html"><span class="nav-num">08</span><span class="nav-label">Pub/Sub<span class="nav-tag">PubSub</span></span></a></li>
+        <li><a class="nav-item" href="09-finish.html"><span class="nav-num">09</span><span class="nav-label">仕上げと設計判断<span class="nav-tag">Finish</span></span></a></li>
+      </ul>
+    </nav>
+
+    <div class="spine-foot">
+      各章は一つのデータ型・機能。<br>下（RESP）から上（Sorted Set）へ<br>積み上げて動かしていく。
+    </div>
+  </aside>
+
+  <main class="reading">
+    <div class="progress-tag">第04章 / 全10章 · 層: LIST · 読了目安 2〜3時間</div>
+    <div class="eyebrow"><span>LIST</span><span class="depth">— キースペースに「型」が生まれる</span></div>
+    <h1>List</h1>
+    <p class="lede">ここまでキースペースにしまえたのは<strong>文字列</strong>だけでした。この章で、Redis に初めて<strong>「型」</strong>が生まれます。1つのキーの下に、順序を持った文字列の並び — <code>List</code> — をぶら下げる。<code>LPUSH</code> で左から、<code>RPUSH</code> で右から積み、<code>LPOP</code>/<code>RPOP</code> で両端から取り、<code>LRANGE</code> で範囲を切り出す。全部で 200 行ほど。終えたとき、あなたのサーバは <strong>キューにもスタックにもなる両端キュー</strong>を話せるようになり、そして「値には型がある」という Redis の骨格が、第01章で仕込んだ <code>any</code> の上にそのまま立ち上がります。</p>
+
+    <div class="box goal"><div class="box-k">◈ この章のゴール</div>
+      <p>次の 2 つを、自分の目と手で確認できたら達成です。</p>
+      <ol>
+        <li><code>go test -run TestList -v</code> で、<code>LPUSH</code>/<code>RPUSH</code>/<code>LPOP</code>/<code>RPOP</code>/<code>LRANGE</code>/<code>LLEN</code>/<code>LINDEX</code> の往復と、<strong>負インデックス</strong>・<strong>空になったキーの自動削除</strong>が PASS する。</li>
+        <li>（<code>redis-cli</code> がある人は）<code>redis-cli -p 6380 rpush l a b c</code> → <code>lrange l 0 -1</code> が <code>a b c</code> を返す。本物のクライアントが、自作 List と会話できることを目視する。</li>
+      </ol>
+    </div>
+
+    <div class="box map"><div class="box-k">☰ この章のステップ</div>
+      <ol>
+        <li><a href="#step-1">キースペースに型が生まれる — <code>any</code> に <code>*List</code> を入れる</a></li>
+        <li><a href="#step-2">型として取り出す — <code>getListLocked</code> と create フラグ</a></li>
+        <li><a href="#step-3">両端に積む — <code>Push</code> と先頭差し込みのコスト</a></li>
+        <li><a href="#step-4">両端から取り、空なら消す — <code>Pop</code></a></li>
+        <li><a href="#step-5">負インデックスを飼い慣らす — <code>normalizeRange</code></a></li>
+        <li><a href="#step-6"><code>LRange</code>・<code>LLen</code>・<code>LIndex</code> と、それらを RESP に繋ぐ</a></li>
+        <li><a href="#step-7">テストを読む — 両端キューと自動削除を機械で確かめる</a></li>
+      </ol>
+    </div>
+
+    <h2>なぜ List が「最初の型」なのか</h2>
+    <p>第03章までのキースペースは、キーに文字列を1つ結びつけるだけの単純な辞書でした。<code>SET k v</code>、<code>GET k</code>。値は常に文字列で、型を意識する必要はありませんでした。この章で入る <code>List</code> は、<strong>1つのキーの下に複数の値を順序つきで束ねる</strong>初めての構造です。ここから <code>Hash</code>（第05章）、<code>Set</code>（第06章）、<code>Sorted Set</code>（第07章）と続く「複合型」の連なりが始まります。List はその先頭打者で、いちばん素朴で、いちばん見通しがよい。</p>
+    <p>Redis の List は、正確には<strong>両端キュー（deque）</strong>です。左端（head）と右端（tail）の両方から出し入れできる。<code>LPUSH</code>+<code>RPOP</code> と使えば FIFO の<strong>キュー</strong>に、<code>LPUSH</code>+<code>LPOP</code> と使えば LIFO の<strong>スタック</strong>になる。ジョブキュー、最近使ったものリスト、タイムライン — 実務で Redis の List が使われる場面のほとんどは、この「両端から O(1) で出し入れできる並び」という性質に乗っかっています。本章の実装は素朴なスライス1本ですが、コマンドの<strong>意味論</strong>（何ができて、何が返るか）は本家とまったく同じものを再現します。</p>
+
+    <h2>この章がキースペースに約束すること</h2>
+    <p>第01章で、キースペースの値の型を <code>map[string]any</code> の <code>any</code> にしておいたのを覚えているでしょうか。あのとき「文字列以外の型も、後で同じ箱に入れる」と予告しました。この章がその回収です。約束はこうです。</p>
+    <ul>
+      <li>キーの値として、文字列の並びを持つ <code>*List</code> を <code>any</code> の箱に入れる。取り出すときは<strong>型スイッチ</strong>で <code>*List</code> かどうかを確かめる。</li>
+      <li>List のコマンドが、<strong>文字列型のキーに対して</strong>来たら <code>WRONGTYPE</code> エラーを返す。型の取り違えを、静かに握りつぶさず、はっきり叱る。</li>
+      <li><code>LPOP</code> などで List が空になったら、<strong>キーごと消す</strong>。「空の List が居座る」という状態を Redis は作らない。</li>
+    </ul>
+    <p>逆に、この章が<strong>やらない</strong>ことも書いておきます。本家 Redis の List は <code>listpack</code>（小さいうちは1本の連続バイト列）と <code>quicklist</code>（listpack を双方向連結リストで繋いだもの）を要素数・要素サイズで切り替える、手の込んだ内部表現を持ちます。本書はそこには踏み込まず、<strong><code>[]string</code> 1本</strong>で素朴に持ちます。速度特性は一部異なります（後述の落とし穴で正直に触れます）が、<strong>コマンドの意味論は完全に一致</strong>させます。「まず動く意味論を作り、内部表現の最適化は別問題として切り離す」— これも Redis を読むときに効く分け方です。</p>
+
+    <h2 class="step" id="step-1"><span class="step-no">Step 1</span>キースペースに型が生まれる — any に *List を入れる</h2>
+    <p>まず型そのものを定義します。作る（正確には既存 <code>src/</code> の <code>list.go</code> の冒頭）のは、拍子抜けするほど小さな構造体です。</p>
+
+    <div class="file-tag">list.go</div>
+    <pre><code><span class="kw">package</span> main
+
+<span class="kw">import</span> <span class="st">"strconv"</span>
+
+<span class="cm">// List は両端キュー。まずは素朴にスライスで持つ。</span>
+<span class="cm">// 本家は listpack → quicklist と持ち方を切り替えるが、コマンドの意味論は同じ。</span>
+<span class="kw">type</span> <span class="ty">List</span> <span class="kw">struct</span> {
+	items []<span class="ty">string</span>
+}</code></pre>
+
+    <p>これだけです。<code>List</code> は <code>items []string</code> を1つ持つだけの構造体。<code>["a","b","c"]</code> という並びが、そのまま <code>items</code> に入ります。左端が <code>items[0]</code>、右端が <code>items[len-1]</code>。「左」「右」という Redis の言葉が、スライスの「先頭」「末尾」に素直に対応します。</p>
+    <p>ここで立ち止まって考えたいのが、<strong>なぜ <code>List</code> をわざわざ構造体にして、しかも <code>*List</code>（ポインタ）で持つのか</strong>です。中身は <code>[]string</code> 1本なのだから、キースペースに直接 <code>[]string</code> を入れてもよさそうに見えます。ですが第01章の <code>Store</code> を思い出してください。値は <code>map[string]any</code> の <code>any</code> に入り、<code>typeName</code> は型スイッチで型名を判定していました。この章の値も、その仕組みにそのまま乗ります。</p>
+
+    <div class="file-tag">store.go（第01章で作った typeName・再掲）</div>
+    <pre><code><span class="cm">// typeName は TYPE コマンドが返す型名。</span>
+<span class="kw">func</span> typeName(v <span class="ty">any</span>) <span class="ty">string</span> {
+	<span class="kw">switch</span> v.(<span class="kw">type</span>) {
+	<span class="kw">case</span> <span class="ty">string</span>:
+		<span class="kw">return</span> <span class="st">"string"</span>
+	<span class="kw">case</span> *<span class="ty">List</span>:
+		<span class="kw">return</span> <span class="st">"list"</span>
+	<span class="cm">// … Hash / *Set / *ZSet も同様（後の章）</span>
+	<span class="kw">default</span>:
+		<span class="kw">return</span> <span class="st">"none"</span>
+	}
+}</code></pre>
+
+    <p><code>case *List:</code> の一行が示すとおり、キースペースには <code>*List</code>（<code>List</code> へのポインタ）が入ります。ポインタにする理由は2つあります。<strong>1つ目は「同じ実体を指し続けたい」から</strong>です。<code>LPUSH</code> でスライスが伸び、<code>LPOP</code> で縮むたびに、<code>l.items</code> の中身は差し替わります。もし <code>any</code> に <code>List</code>（値）を入れていたら、取り出した瞬間に<strong>コピー</strong>が作られ、そのコピーの <code>items</code> をいくら書き換えても、キースペースの中の本体には反映されません。<code>*List</code> なら、取り出したポインタ越しに本体の <code>items</code> を直接書き換えられます。</p>
+    <p><strong>2つ目は型スイッチの安定です</strong>。<code>v.(*List)</code> という型アサーションは「この <code>any</code> は <code>*List</code> か?」を一発で判定できます。文字列型のキーには <code>string</code> が入っているので <code>v.(*List)</code> は失敗し、そこで <code>WRONGTYPE</code> を返す — この分岐が、次の Step 2 の心臓になります。第01章で <code>any</code> という「なんでも箱」を選んだ判断が、ここで初めて<strong>型を増やせる拡張性</strong>として実を結びます。</p>
+
+    <div class="gonote"><div class="box-k">GO メモ · any と型スイッチ / 型アサーション</div>
+      <p>Go の <code>any</code>（= <code>interface{}</code>）は「どんな型の値でも入る箱」です。ただし中身を使うには、元の型を取り出す必要があります。取り出し方は2つ。<br>
+      <strong>型アサーション</strong> <code>l, ok := v.(*List)</code> は「<code>v</code> の中身は <code>*List</code> か? そうなら <code>l</code> に、違えば <code>ok=false</code>」。1つの型だけ確かめたいときに使います。<br>
+      <strong>型スイッチ</strong> <code>switch v.(type) { case string: … case *List: … }</code> は「中身の型で枝分かれ」。<code>typeName</code> のように複数の型を一度に振り分けたいときに使います。<br>
+      なお <code>List</code>（値）と <code>*List</code>（ポインタ）は<strong>別の型</strong>です。<code>any</code> に <code>&amp;List{}</code> を入れたら、取り出すのは <code>v.(*List)</code> であって <code>v.(List)</code> ではありません。この一致を取り違えると型アサーションが静かに失敗します。</p>
+    </div>
+
+    <h2 class="step" id="step-2"><span class="step-no">Step 2</span>型として取り出す — getListLocked と create フラグ</h2>
+    <p>List の全コマンドは、まず「このキーを List として取り出す」ところから始まります。その入口を1か所に集めたのが <code>getListLocked</code> です。この章でいちばん設計上おもしろい関数なので、じっくり読みます。</p>
+
+    <div class="file-tag">list.go（つづき）</div>
+    <pre><code><span class="cm">// getListLocked はリストとして値を取り出す。create=true なら無いキーに空リストを作る。</span>
+<span class="kw">func</span> (s *<span class="ty">Store</span>) getListLocked(key <span class="ty">string</span>, create <span class="ty">bool</span>) (*<span class="ty">List</span>, <span class="ty">error</span>) {
+	v, ok := s.getLocked(key)
+	<span class="kw">if</span> !ok {
+		<span class="kw">if</span> !create {
+			<span class="kw">return</span> <span class="kw">nil</span>, <span class="kw">nil</span>
+		}
+		l := &amp;<span class="ty">List</span>{}
+		s.data[key] = l
+		<span class="kw">return</span> l, <span class="kw">nil</span>
+	}
+	l, isList := v.(*<span class="ty">List</span>)
+	<span class="kw">if</span> !isList {
+		<span class="kw">return</span> <span class="kw">nil</span>, errWrongType
+	}
+	<span class="kw">return</span> l, <span class="kw">nil</span>
+}</code></pre>
+
+    <p>関数名の末尾 <code>Locked</code> は「<strong>呼び出し側がすでに <code>s.mu</code> をロックしている前提</strong>」という約束を表します。第01章の <code>getLocked</code>/<code>removeLocked</code> と同じ命名規約です。だから <code>getListLocked</code> の中では自分でロックを取らず、<code>s.data</code> を直接触れます。ロックの取得は、この章の各コマンド（<code>Push</code>/<code>Pop</code> …）の入口で一度だけ行います。</p>
+    <p>本体は<strong>3つの分岐</strong>です。順に追います。</p>
+    <ol>
+      <li><strong>キーが無い + <code>create=false</code></strong> → <code>nil, nil</code> を返す。「List は無かった。でもそれはエラーではない」。読み取り系（<code>LRANGE</code>/<code>LLEN</code>/<code>LINDEX</code>/<code>LPOP</code>）は、存在しないキーを「空っぽ」として穏当に扱いたいので、これで済ませます。</li>
+      <li><strong>キーが無い + <code>create=true</code></strong> → 空の <code>&amp;List{}</code> を作ってキースペースに登録し、それを返す。書き込み系（<code>LPUSH</code>/<code>RPUSH</code>）はここに来ます。「積むために取り出したら、無かった。じゃあ作る」。<code>RPUSH newkey a</code> が新しいキーを勝手に生やせるのは、この一手のおかげです。</li>
+      <li><strong>キーが有る</strong> → <code>v.(*List)</code> で <code>*List</code> に変換を試みる。成功すればそれを返す。<strong>失敗すれば（＝別の型だった）<code>errWrongType</code></strong>。文字列キー <code>k</code> に <code>LPUSH k x</code> したときの <code>WRONGTYPE</code> エラーは、この <code>!isList</code> の枝から出ます。</li>
+    </ol>
+    <p><code>create bool</code> という1つのフラグで、<strong>「無ければ作る」書き込み系と「無ければ nil」読み取り系を、同じ関数で両立</strong>させているのがこの設計の妙です。もしフラグが無かったら、書き込み用と読み取り用でほぼ同じ関数を2つ書くはめになり、型チェック（<code>WRONGTYPE</code> 判定）のロジックが2か所に散らばります。1か所に集めておけば、型の取り違えの扱いが全コマンドで必ず揃います。第05章以降の <code>Hash</code>/<code>Set</code>/<code>ZSet</code> も、まったく同じ形の <code>getXxxLocked(key, create)</code> を持ちます。この章は、その定型の初出です。</p>
+    <p>参照している <code>errWrongType</code> は第01章の <code>store.go</code> で定義済みの番兵エラーです。中身はこうでした。</p>
+
+    <div class="file-tag">store.go（第01章・再掲）</div>
+    <pre><code><span class="cm">// errWrongType は「そのキーは別の型で使われている」ことを表す。</span>
+<span class="cm">// 応答文字列への変換は dispatch 側で行う。</span>
+<span class="kw">var</span> errWrongType = errors.New(<span class="st">"WRONGTYPE Operation against a key holding the wrong kind of value"</span>)</code></pre>
+
+    <p>エラー文言が本家 Redis の <code>WRONGTYPE …</code> と一字一句同じであることに注目してください。<code>getListLocked</code> は <code>errWrongType</code> という「種類」を返すだけで、それを RESP のエラー行（<code>-WRONGTYPE …\r\n</code>）に変換するのは Step 6 のコマンドハンドラの仕事です。「エラーの<strong>種類</strong>を作る場所」と「エラーを<strong>文字列に整形する</strong>場所」を分ける — 第00章で <code>errProtocol</code> について語ったのと同じ規律が、ここでも効いています。</p>
+
+    <div class="box hazard"><div class="box-k">⚠ 落とし穴 — 空になったコレクションを消し忘れると EXISTS がずれる</div>
+      <p>この章では <code>getListLocked(key, true)</code> で<strong>空の List を作って登録します</strong>。ということは、もし後で List が空になったときにキーを消し忘れると、キースペースに<strong>「中身ゼロの List」が居座り続けます</strong>。すると <code>EXISTS l</code> が <code>1</code> を返し（キーは在る）、<code>LLEN l</code> は <code>0</code> を返す（中身は無い）という、本家 Redis には決して存在しない矛盾した状態が生まれます。Redis の流儀は<strong>「空になったコレクションはキーごと消える」</strong>。この後始末を Step 4 の <code>Pop</code> でどう入れるかが、この章の勘所の一つです。いま「作る側」で登録した以上、「空にした側」で必ず消す — この対称性を頭の隅に置いておいてください。</p>
+    </div>
+
+    <h2 class="step" id="step-3"><span class="step-no">Step 3</span>両端に積む — Push と先頭差し込みのコスト</h2>
+    <p>取り出せるようになったので、積みます。<code>LPUSH</code>（左から）と <code>RPUSH</code>（右から）は、方向が違うだけで骨格は同じ。だから <code>left bool</code> フラグ1つで両方を <code>Push</code> という1つのメソッドにまとめます。</p>
+
+    <div class="file-tag">list.go（つづき）</div>
+    <pre><code><span class="kw">func</span> (s *<span class="ty">Store</span>) Push(key <span class="ty">string</span>, left <span class="ty">bool</span>, vals ...<span class="ty">string</span>) (<span class="ty">int</span>, <span class="ty">error</span>) {
+	s.mu.Lock()
+	<span class="kw">defer</span> s.mu.Unlock()
+	l, err := s.getListLocked(key, <span class="kw">true</span>)
+	<span class="kw">if</span> err != <span class="kw">nil</span> {
+		<span class="kw">return</span> <span class="st">0</span>, err
+	}
+	<span class="kw">for</span> _, v := <span class="kw">range</span> vals {
+		<span class="kw">if</span> left {
+			l.items = append([]<span class="ty">string</span>{v}, l.items...) <span class="cm">// 先頭に1つずつ差し込む</span>
+		} <span class="kw">else</span> {
+			l.items = append(l.items, v)
+		}
+	}
+	<span class="kw">return</span> len(l.items), <span class="kw">nil</span>
+}</code></pre>
+
+    <p>まず入口で <code>s.mu.Lock()</code>、<code>defer s.mu.Unlock()</code>。これで以降 <code>s.data</code> を安全に触れます。次に <code>getListLocked(key, true)</code> — <strong>create=true</strong> なので、キーが無ければ空 List が作られて返ります。<code>err != nil</code>（＝別の型だった）なら、そのままエラーを返して <code>WRONGTYPE</code>。</p>
+    <p>あとは <code>vals</code> を1つずつ積むループです。<code>RPUSH</code>（<code>left=false</code>）側は素直に <code>append(l.items, v)</code>、末尾に足すだけ。問題は <code>LPUSH</code>（<code>left=true</code>）側の<strong>この行</strong>——</p>
+    <pre><code>l.items = append([]<span class="ty">string</span>{v}, l.items...) <span class="cm">// 先頭に1つずつ差し込む</span></code></pre>
+    <p>読み解きます。<code>[]string{v}</code> は「<code>v</code> だけが入った長さ1のスライス」。そこへ <code>l.items...</code>（既存の全要素を展開）を <code>append</code> で足す。結果は <code>[v, 既存の全部…]</code>、つまり <code>v</code> が<strong>先頭に来た新しいスライス</strong>です。これを <code>l.items</code> に代入し直す。「先頭に差し込む」を、Go のスライスで一番わかりやすく書いた形です。</p>
+    <p>そして <code>LPUSH l a b c</code> のように<strong>複数値</strong>を渡したときの順序に注意してください。ループは <code>a → b → c</code> の順で回り、毎回<strong>先頭に</strong>差し込みます。<code>a</code> を先頭に → <code>[a]</code>、<code>b</code> を先頭に → <code>[b,a]</code>、<code>c</code> を先頭に → <code>[c,b,a]</code>。だから <code>LPUSH l a b c</code> の結果は <code>[c, b, a]</code> と<strong>逆順</strong>になります。これは本家 Redis の仕様どおりで、Step 7 のテスト(<code>LPUSH l2 a b c</code> → <code>c b a</code>)が確かめます。「引数を1つずつ、順に、先頭へ」という素朴なループが、そのまま仕様の逆順を生む — コメントの「1つずつ」はこの挙動を指しています。</p>
+    <p>最後に <code>len(l.items)</code>（積んだ後の全長）を返す。<code>LPUSH</code>/<code>RPUSH</code> が「積んだ後のリスト長」を返すのは本家と同じで、Step 7 のテストで <code>RPUSH l b c</code> → <code>:2</code>、続く <code>LPUSH l a</code> → <code>:3</code> と確認します。</p>
+
+    <div class="box hazard"><div class="box-k">⚠ 落とし穴 — LPUSH の先頭 append は O(n) — 素朴実装の正直な弱点</div>
+      <p><code>append([]string{v}, l.items...)</code> は、<strong>既存の全要素をコピーして新しいスライスを作ります</strong>。要素が n 個あれば n 回のコピー。つまり <code>LPUSH</code> 1回が <strong>O(n)</strong> です。本家 Redis の List は quicklist（双方向連結リスト）なので、先頭挿入は本来 <strong>O(1)</strong>。ここが「素朴なスライス実装」の一番の弱点で、要素が多い List に大量に <code>LPUSH</code> すると急に遅くなります。<br>
+      本書があえてこの実装を選んだのは、<strong>意味論を先に、性能は後で</strong>という方針からです。学習のうえでは「なぜ本家は連結リストを使うのか」を体で理解するのに、むしろこの O(n) は良い教材になります。<code>RPUSH</code>（末尾 append）は amortized O(1) で速いので、<strong>どうしても速くしたいなら「右に積んで、読むときに逆順で見る」</strong>という手もある — 本家が持ち方を工夫している理由が、この非対称から透けて見えます。性能を詰める話は最終章（第09章）で改めて扱います。</p>
+    </div>
+
+    <div class="gonote"><div class="box-k">GO メモ · append と可変長引数の展開 slice...</div>
+      <p><code>append(dst, elems...)</code> の末尾 <code>...</code> は「スライスを可変長引数に<strong>展開</strong>して渡す」記法です。<code>append([]string{v}, l.items...)</code> は「<code>[v]</code> に、<code>l.items</code> の<strong>各要素を</strong>足す」意味になります（<code>...</code> が無いと「<code>[v]</code> に <code>l.items</code> という<strong>スライス1個</strong>を足す」ことになり型が合いません）。<br>
+      注意すべきは、この式が<strong>新しい下敷き配列を割り当てる</strong>点です。<code>append(l.items, v)</code>（末尾追加）は容量に余裕があれば既存配列をそのまま使い回せますが、<code>append([]string{v}, …)</code> は必ず先頭に <code>v</code> を置いた別物を作るので、毎回コピーが走ります。Go のスライスは「先頭への追加」が苦手 — これは Go 全般で覚えておくと良い性質です。</p>
+    </div>
+
+    <h2 class="step" id="step-4"><span class="step-no">Step 4</span>両端から取り、空なら消す — Pop</h2>
+    <p>積んだら、取り出します。<code>LPOP</code>（左端を1つ）と <code>RPOP</code>（右端を1つ）も、やはり <code>left bool</code> で1つの <code>Pop</code> にまとめます。ここに Step 2 の落とし穴で予告した<strong>「空になったらキーごと消す」</strong>の後始末が入ります。</p>
+
+    <div class="file-tag">list.go（つづき）</div>
+    <pre><code><span class="kw">func</span> (s *<span class="ty">Store</span>) Pop(key <span class="ty">string</span>, left <span class="ty">bool</span>) (<span class="ty">string</span>, <span class="ty">bool</span>, <span class="ty">error</span>) {
+	s.mu.Lock()
+	<span class="kw">defer</span> s.mu.Unlock()
+	l, err := s.getListLocked(key, <span class="kw">false</span>)
+	<span class="kw">if</span> err != <span class="kw">nil</span> || l == <span class="kw">nil</span> || len(l.items) == <span class="st">0</span> {
+		<span class="kw">return</span> <span class="st">""</span>, <span class="kw">false</span>, err
+	}
+	<span class="kw">var</span> v <span class="ty">string</span>
+	<span class="kw">if</span> left {
+		v = l.items[<span class="st">0</span>]
+		l.items = l.items[<span class="st">1</span>:]
+	} <span class="kw">else</span> {
+		v = l.items[len(l.items)-<span class="st">1</span>]
+		l.items = l.items[:len(l.items)-<span class="st">1</span>]
+	}
+	<span class="kw">if</span> len(l.items) == <span class="st">0</span> {
+		s.removeLocked(key) <span class="cm">// 空になったコレクションはキーごと消える（Redis の流儀）</span>
+	}
+	<span class="kw">return</span> v, <span class="kw">true</span>, <span class="kw">nil</span>
+}</code></pre>
+
+    <p>まず取り出しは <code>getListLocked(key, <strong>false</strong>)</code> — <strong>create=false</strong> です。取り出すために新しい空 List を作るのは無意味なので、無ければ <code>nil</code> でよい。続くガード行が3条件を一度に捌きます。<code>err != nil</code>（別の型 → <code>WRONGTYPE</code>）／<code>l == nil</code>（キーが無い）／<code>len(l.items) == 0</code>（在るけど空）。どれか1つでも当たれば <code>"", false, err</code> を返す。真ん中の戻り値 <code>false</code> が「取り出せなかった」の合図で、Step 6 のハンドラがこれを <code>$-1</code>（nil）に変換します。<code>err</code> をそのまま返しているのがポイントで、型違いのときだけ <code>err</code> が非 nil、他は <code>nil</code> のまま — つまり「WRONGTYPE エラー」と「単に空だった nil」を、呼び出し側で正しく区別できます。</p>
+    <p>本体の取り出しは、方向で2手に分かれます。</p>
+    <ul>
+      <li><strong>左（<code>left=true</code>）</strong>: 値は <code>l.items[0]</code>。残りは <code>l.items[1:]</code> — 先頭を1つ落としたスライス。</li>
+      <li><strong>右（<code>left=false</code>）</strong>: 値は <code>l.items[len-1]</code>。残りは <code>l.items[:len-1]</code> — 末尾を1つ落としたスライス。</li>
+    </ul>
+    <p><code>l.items[1:]</code> はスライスの「先頭をずらす」操作で、下敷きの配列はコピーせず<strong>見る窓を1つ右へずらすだけ</strong>。だから右 Pop も左 Pop も、この章の範囲では十分に速く書けます（厳密には <code>[1:]</code> は下敷き配列の先頭要素を解放しないので、長く使い続けると先頭側にゴミが溜まる余地がありますが、空になれば下で丸ごと消えるので実用上は問題になりません）。</p>
+    <p>そして<strong>この章のハイライト</strong>——</p>
+    <pre><code><span class="kw">if</span> len(l.items) == <span class="st">0</span> {
+	s.removeLocked(key) <span class="cm">// 空になったコレクションはキーごと消える（Redis の流儀）</span>
+}</code></pre>
+    <p>取り出した結果、List が空っぽになったら、<strong>キーそのものを消します</strong>。<code>removeLocked</code> は第01章の「<code>data</code> と <code>expires</code> の両方からキーを削除する」ヘルパー。これを入れておくことで、Step 2 の落とし穴で警告した「中身ゼロの List が居座る」矛盾を防げます。Step 7 のテストは、<code>l</code> を最後まで <code>POP</code> しきった直後に <code>EXISTS l</code> が <code>:0</code>（存在しない）を返し、さらにもう一度 <code>LPOP l</code> しても <code>$-1</code>（nil）が返る — つまり<strong>キーが確かに消えている</strong>ことを検証します。「作る側（Push の create）」と「消す側（Pop の空削除）」が対になって、初めてキースペースの整合が保たれます。</p>
+
+    <div class="box do"><div class="box-k">▸ 動かして確認</div>
+      <p>ここまでで <code>Push</code>/<code>Pop</code> が揃いました。両端キューとしての出し入れ、そして空削除を、<code>redis-cli</code> の代役テストで確かめられます（Step 6 の <code>LRANGE</code> なども含めた全部は最後にまとめて走らせます）。</p>
+      <pre class="term"><code><span class="ps">$</span> go test -run TestList -v
+<span class="out">=== RUN   TestList
+--- PASS: TestList (0.00s)
+PASS
+ok  	redisclone	0.21s</span></code></pre>
+      <p>この <code>TestList</code> の中に、<code>LPOP</code>/<code>RPOP</code> で最後の要素まで取り切ったあと <code>EXISTS l</code> が <code>:0</code> になる検証が含まれています。「空になったらキーごと消える」が、機械で証明されます。</p>
+    </div>
+
+    <h2 class="step" id="step-5"><span class="step-no">Step 5</span>負インデックスを飼い慣らす — normalizeRange</h2>
+    <p>Redis の List アクセスの特徴に、<strong>負のインデックス</strong>があります。<code>-1</code> は末尾、<code>-2</code> は末尾から2番目。<code>LRANGE l 0 -1</code> は「先頭から末尾まで全部」を意味する定番の書き方です。この「負インデックス + はみ出しの丸め」を1か所に閉じ込めたのが <code>normalizeRange</code> です。純粋な計算関数（<code>Store</code> のメソッドですらない）なので、単体でじっくり味わえます。</p>
+
+    <div class="file-tag">list.go（つづき）</div>
+    <pre><code><span class="cm">// normalizeRange は負のインデックス（-1 = 末尾）を 0 始まりに直し、範囲を丸める。</span>
+<span class="kw">func</span> normalizeRange(start, stop, n <span class="ty">int</span>) (<span class="ty">int</span>, <span class="ty">int</span>, <span class="ty">bool</span>) {
+	<span class="kw">if</span> start &lt; <span class="st">0</span> {
+		start += n
+	}
+	<span class="kw">if</span> stop &lt; <span class="st">0</span> {
+		stop += n
+	}
+	<span class="kw">if</span> start &lt; <span class="st">0</span> {
+		start = <span class="st">0</span>
+	}
+	<span class="kw">if</span> stop &gt;= n {
+		stop = n - <span class="st">1</span>
+	}
+	<span class="kw">if</span> n == <span class="st">0</span> || start &gt; stop || start &gt;= n {
+		<span class="kw">return</span> <span class="st">0</span>, <span class="st">0</span>, <span class="kw">false</span>
+	}
+	<span class="kw">return</span> start, stop, <span class="kw">true</span>
+}</code></pre>
+
+    <p>引数は <code>start</code>（開始）、<code>stop</code>（終了・<strong>含む</strong>）、<code>n</code>（リストの長さ）。戻り値は「丸め終えた <code>start</code>」「丸め終えた <code>stop</code>」「有効な範囲か（<code>bool</code>）」。4つのブロックを順に読みます。</p>
+    <ol>
+      <li><strong>負の <code>start</code>/<code>stop</code> を後ろから数え直す</strong>: <code>start += n</code>、<code>stop += n</code>。<code>n=3</code> のとき <code>-1</code> は <code>-1+3=2</code>（＝末尾）、<code>-3</code> は <code>0</code>（＝先頭）。「後ろから <code>k</code> 番目」を「前から <code>n-k</code> 番目」に翻訳する定番の一手です。</li>
+      <li><strong>下側にはみ出した <code>start</code> を 0 で止める</strong>: 負を足してもまだ負（例: <code>n=3</code> で <code>start=-100</code> → <code>-97</code>）なら、<code>start=0</code>。「行き過ぎた開始は先頭で頭打ち」。本家 Redis も、はみ出しをエラーにせず穏当に丸めます。</li>
+      <li><strong>上側にはみ出した <code>stop</code> を末尾で止める</strong>: <code>stop &gt;= n</code>（例: <code>LRANGE l 0 999</code>）なら <code>stop = n-1</code>。「行き過ぎた終了は末尾で頭打ち」。<code>0 -1</code> で全体、<code>0 999</code> でも全体になるのはこの丸めのおかげです。</li>
+      <li><strong>結局その範囲は空か?</strong>: <code>n==0</code>（そもそも空リスト）／<code>start &gt; stop</code>（丸めた結果、開始が終了を追い越した）／<code>start &gt;= n</code>（開始が末尾より後）のどれかなら、<strong>有効な範囲は無い</strong>ので <code>false</code> を返す。<code>LRANGE l 5 10</code> を長さ3のリストに投げると、<code>start=5 &gt;= n=3</code> でここに落ち、空配列 <code>*0</code> が返ります。</li>
+    </ol>
+    <p>この順序が大事です。<strong>まず負を絶対位置に直し（1）、次に両端の行き過ぎを丸め（2・3）、最後に空判定する（4）</strong>。もし空判定を先にやると、まだ負のままの <code>start</code>/<code>stop</code> で比較してしまい、判定を誤ります。「翻訳 → 丸め → 検証」の並びは、範囲を扱うコードで繰り返し現れる型です。<code>normalizeRange</code> が <code>bool</code> を返すことで、呼び出し側（<code>LRange</code>）は「<code>false</code> なら空配列を返す」と1行で分岐でき、丸めの細部を知らずに済みます。</p>
+
+    <div class="gonote"><div class="box-k">GO メモ · stop は「含む」・境界は inclusive</div>
+      <p>Go のスライスの範囲式 <code>a[start:stop]</code> は <code>stop</code> を<strong>含みません</strong>（half-open, exclusive）。ところが Redis の <code>LRANGE</code> の <code>stop</code> は<strong>含みます</strong>（inclusive）。この差を吸収するのが Step 6 で見る <code>l.items[start:stop+1]</code> の <code>+1</code> です。<code>normalizeRange</code> は「Redis 流の inclusive な <code>stop</code>」を返すので、Go のスライスに渡すときだけ <code>+1</code> して exclusive に直す — 境界の「含む/含まない」を取り違えると1個ずれる（off-by-one）ので、どちらの流儀の <code>stop</code> なのかを常に意識するのがコツです。</p>
+    </div>
+
+    <h2 class="step" id="step-6"><span class="step-no">Step 6</span>LRange・LLen・LIndex と、それらを RESP に繋ぐ</h2>
+    <p>残りの読み取り3種と、それらをコマンド（RESP 応答）に繋ぐハンドラをまとめて片づけます。まず <code>Store</code> 側のメソッド3つ。どれも「ロック → <code>getListLocked(key, false)</code> → 読むだけ」という同じ骨格です。</p>
+
+    <div class="file-tag">list.go（つづき）</div>
+    <pre><code><span class="kw">func</span> (s *<span class="ty">Store</span>) LRange(key <span class="ty">string</span>, start, stop <span class="ty">int</span>) ([]<span class="ty">string</span>, <span class="ty">error</span>) {
+	s.mu.Lock()
+	<span class="kw">defer</span> s.mu.Unlock()
+	l, err := s.getListLocked(key, <span class="kw">false</span>)
+	<span class="kw">if</span> err != <span class="kw">nil</span> || l == <span class="kw">nil</span> {
+		<span class="kw">return</span> <span class="kw">nil</span>, err
+	}
+	start, stop, ok := normalizeRange(start, stop, len(l.items))
+	<span class="kw">if</span> !ok {
+		<span class="kw">return</span> <span class="kw">nil</span>, <span class="kw">nil</span>
+	}
+	out := <span class="kw">make</span>([]<span class="ty">string</span>, stop-start+<span class="st">1</span>)
+	copy(out, l.items[start:stop+<span class="st">1</span>])
+	<span class="kw">return</span> out, <span class="kw">nil</span>
+}
+
+<span class="kw">func</span> (s *<span class="ty">Store</span>) LLen(key <span class="ty">string</span>) (<span class="ty">int</span>, <span class="ty">error</span>) {
+	s.mu.Lock()
+	<span class="kw">defer</span> s.mu.Unlock()
+	l, err := s.getListLocked(key, <span class="kw">false</span>)
+	<span class="kw">if</span> err != <span class="kw">nil</span> || l == <span class="kw">nil</span> {
+		<span class="kw">return</span> <span class="st">0</span>, err
+	}
+	<span class="kw">return</span> len(l.items), <span class="kw">nil</span>
+}
+
+<span class="kw">func</span> (s *<span class="ty">Store</span>) LIndex(key <span class="ty">string</span>, i <span class="ty">int</span>) (<span class="ty">string</span>, <span class="ty">bool</span>, <span class="ty">error</span>) {
+	s.mu.Lock()
+	<span class="kw">defer</span> s.mu.Unlock()
+	l, err := s.getListLocked(key, <span class="kw">false</span>)
+	<span class="kw">if</span> err != <span class="kw">nil</span> || l == <span class="kw">nil</span> {
+		<span class="kw">return</span> <span class="st">""</span>, <span class="kw">false</span>, err
+	}
+	<span class="kw">if</span> i &lt; <span class="st">0</span> {
+		i += len(l.items)
+	}
+	<span class="kw">if</span> i &lt; <span class="st">0</span> || i &gt;= len(l.items) {
+		<span class="kw">return</span> <span class="st">""</span>, <span class="kw">false</span>, <span class="kw">nil</span>
+	}
+	<span class="kw">return</span> l.items[i], <span class="kw">true</span>, <span class="kw">nil</span>
+}</code></pre>
+
+    <p><strong><code>LRange</code></strong> は Step 5 の <code>normalizeRange</code> を使います。<code>ok</code> が <code>false</code>（有効な範囲なし）なら <code>nil, nil</code> — 呼び出し側で空配列 <code>*0</code> になります。有効なら <code>make</code> で <code>stop-start+1</code> 個ぶんの器を用意し、<code>copy(out, l.items[start:stop+1])</code> で切り出す。<code>+1</code> は前の GO メモのとおり「Redis の inclusive な <code>stop</code>」を「Go の exclusive なスライス末尾」に直すぶんです。<br>
+    ここで <strong>スライスをそのまま返さず <code>copy</code> で写している</strong>のには理由があります。<code>l.items[start:stop+1]</code> をそのまま返すと、返したスライスは<strong>本体 <code>l.items</code> と下敷き配列を共有</strong>してしまい、呼び出し側がうっかり書き換えるとキースペースの中身が化けます。<code>make</code>+<code>copy</code> で独立した器に写しておけば、外に出す値と内部の実体が切り離され、安全です。</p>
+    <p><strong><code>LLen</code></strong> はいちばん単純で、<code>len(l.items)</code> を返すだけ。ただしキーが無ければ（<code>l == nil</code>）<code>0</code>。「存在しないリストの長さは0」という穏当な扱いです。</p>
+    <p><strong><code>LIndex</code></strong> は「<code>i</code> 番目の1要素」を返します。<code>i &lt; 0</code> なら <code>i += len</code> で後ろから数え直す（<code>normalizeRange</code> と同じ負インデックスの手口を、単一の添字向けに小さく再現）。翻訳後に <code>i &lt; 0 || i &gt;= len</code> ならはみ出しなので <code>"", false, nil</code>（見つからない → nil）。範囲内なら <code>l.items[i], true, nil</code>。真ん中の <code>bool</code> が「見つかったか」で、<code>Pop</code> と同じく <code>false</code> が <code>$-1</code>（nil）に化けます。</p>
+
+    <p>最後に、これらの <code>Store</code> メソッドを<strong>コマンド（RESP 応答）に繋ぐ</strong>ハンドラです。第00章の <code>dispatch</code> の <code>switch</code> から、コマンド名ごとにここへ振り分けられます。</p>
+
+    <div class="file-tag">list.go（つづき・コマンドハンドラ）</div>
+    <pre><code><span class="cm">// ---- コマンドハンドラ ----</span>
+
+<span class="kw">func</span> cmdPush(s *<span class="ty">Store</span>, args []<span class="ty">string</span>, left <span class="ty">bool</span>, name <span class="ty">string</span>) <span class="ty">string</span> {
+	<span class="kw">if</span> len(args) &lt; <span class="st">3</span> {
+		<span class="kw">return</span> errorMsg(<span class="st">"ERR wrong number of arguments for '"</span> + name + <span class="st">"' command"</span>)
+	}
+	n, err := s.Push(args[<span class="st">1</span>], left, args[<span class="st">2</span>:]...)
+	<span class="kw">if</span> err != <span class="kw">nil</span> {
+		<span class="kw">return</span> errorMsg(err.Error())
+	}
+	<span class="kw">return</span> integer(n)
+}
+
+<span class="kw">func</span> cmdPop(s *<span class="ty">Store</span>, args []<span class="ty">string</span>, left <span class="ty">bool</span>, name <span class="ty">string</span>) <span class="ty">string</span> {
+	<span class="kw">if</span> len(args) != <span class="st">2</span> {
+		<span class="kw">return</span> errorMsg(<span class="st">"ERR wrong number of arguments for '"</span> + name + <span class="st">"' command"</span>)
+	}
+	v, ok, err := s.Pop(args[<span class="st">1</span>], left)
+	<span class="kw">if</span> err != <span class="kw">nil</span> {
+		<span class="kw">return</span> errorMsg(err.Error())
+	}
+	<span class="kw">if</span> !ok {
+		<span class="kw">return</span> nullBulk()
+	}
+	<span class="kw">return</span> bulkString(v)
+}
+
+<span class="kw">func</span> cmdLRange(s *<span class="ty">Store</span>, args []<span class="ty">string</span>) <span class="ty">string</span> {
+	<span class="kw">if</span> len(args) != <span class="st">4</span> {
+		<span class="kw">return</span> errorMsg(<span class="st">"ERR wrong number of arguments for 'lrange' command"</span>)
+	}
+	start, err1 := strconv.Atoi(args[<span class="st">2</span>])
+	stop, err2 := strconv.Atoi(args[<span class="st">3</span>])
+	<span class="kw">if</span> err1 != <span class="kw">nil</span> || err2 != <span class="kw">nil</span> {
+		<span class="kw">return</span> errorMsg(<span class="st">"ERR value is not an integer or out of range"</span>)
+	}
+	items, err := s.LRange(args[<span class="st">1</span>], start, stop)
+	<span class="kw">if</span> err != <span class="kw">nil</span> {
+		<span class="kw">return</span> errorMsg(err.Error())
+	}
+	<span class="kw">return</span> bulkArray(items)
+}
+
+<span class="kw">func</span> cmdLLen(s *<span class="ty">Store</span>, args []<span class="ty">string</span>) <span class="ty">string</span> {
+	<span class="kw">if</span> len(args) != <span class="st">2</span> {
+		<span class="kw">return</span> errorMsg(<span class="st">"ERR wrong number of arguments for 'llen' command"</span>)
+	}
+	n, err := s.LLen(args[<span class="st">1</span>])
+	<span class="kw">if</span> err != <span class="kw">nil</span> {
+		<span class="kw">return</span> errorMsg(err.Error())
+	}
+	<span class="kw">return</span> integer(n)
+}
+
+<span class="kw">func</span> cmdLIndex(s *<span class="ty">Store</span>, args []<span class="ty">string</span>) <span class="ty">string</span> {
+	<span class="kw">if</span> len(args) != <span class="st">3</span> {
+		<span class="kw">return</span> errorMsg(<span class="st">"ERR wrong number of arguments for 'lindex' command"</span>)
+	}
+	i, err := strconv.Atoi(args[<span class="st">2</span>])
+	<span class="kw">if</span> err != <span class="kw">nil</span> {
+		<span class="kw">return</span> errorMsg(<span class="st">"ERR value is not an integer or out of range"</span>)
+	}
+	v, ok, err2 := s.LIndex(args[<span class="st">1</span>], i)
+	<span class="kw">if</span> err2 != <span class="kw">nil</span> {
+		<span class="kw">return</span> errorMsg(err2.Error())
+	}
+	<span class="kw">if</span> !ok {
+		<span class="kw">return</span> nullBulk()
+	}
+	<span class="kw">return</span> bulkString(v)
+}</code></pre>
+
+    <p>5つのハンドラは、どれも<strong>「引数を検証 → <code>Store</code> メソッドを呼ぶ → 結果を第00章の応答ヘルパーで RESP に変換」</strong>という同じ三段構えです。役割は「翻訳」に徹していて、ロジックは <code>Store</code> 側に寄せてある。順に要点だけ。</p>
+    <ul>
+      <li><strong><code>cmdPush</code></strong>: <code>len(args) &lt; 3</code>（<code>LPUSH key val…</code> で最低3語）を確認し、<code>args[2:]...</code>（3語目以降ぜんぶ）を <code>Push</code> に展開して渡す。返ってきた長さを <code>integer(n)</code>（<code>:3</code> のような整数応答）に。<code>err</code> があれば <code>errorMsg(err.Error())</code> — ここで <code>errWrongType</code> が <code>-WRONGTYPE …</code> という RESP エラー行に変換されます。Step 2 で予告した「エラーを文字列に整形する場所」がここです。</li>
+      <li><strong><code>cmdPop</code></strong>: <code>ok</code> が <code>false</code> なら <code>nullBulk()</code>（<code>$-1</code> ＝ nil）、真なら <code>bulkString(v)</code>。「取り出せなかった」を nil で返すのは <code>GET</code> の存在しないキーと同じ流儀です。</li>
+      <li><strong><code>cmdLRange</code></strong>: <code>start</code>/<code>stop</code> を <code>strconv.Atoi</code> で数値化。数値でなければ <code>ERR value is not an integer …</code>。結果の文字列スライスを <code>bulkArray(items)</code> — 第00章で作った「文字列一覧を Bulk String の配列にする」ヘルパー — に渡すだけで <code>*3\r\n$1\r\na\r\n…</code> が組み上がります。<code>items</code> が <code>nil</code>（空範囲）でも <code>bulkArray(nil)</code> は <code>*0\r\n</code> を返すので、そのまま素通しでよいのが気持ちいい設計です。</li>
+      <li><strong><code>cmdLLen</code></strong>: <code>integer(n)</code> を返すだけ。</li>
+      <li><strong><code>cmdLIndex</code></strong>: <code>cmdLRange</code> と同じく添字を <code>Atoi</code> し、<code>ok</code> の真偽で <code>bulkString</code> / <code>nullBulk</code> を出し分け。</li>
+    </ul>
+    <p>そして第00章の <code>dispatch</code> には、この章ぶんの <code>case</code> が7本足されます。<code>left</code> フラグ（<code>true</code>=左）と <code>name</code>（エラー文言用の小文字コマンド名）を渡し分けるだけで、<code>LPUSH</code>/<code>RPUSH</code>、<code>LPOP</code>/<code>RPOP</code> を1つのハンドラで賄っているのがわかります。</p>
+
+    <div class="file-tag">command.go（第00章の switch に足す List の case）</div>
+    <pre><code>	<span class="cm">// --- List ---</span>
+	<span class="kw">case</span> <span class="st">"LPUSH"</span>:
+		<span class="kw">return</span> cmdPush(s, args, <span class="kw">true</span>, <span class="st">"lpush"</span>)
+	<span class="kw">case</span> <span class="st">"RPUSH"</span>:
+		<span class="kw">return</span> cmdPush(s, args, <span class="kw">false</span>, <span class="st">"rpush"</span>)
+	<span class="kw">case</span> <span class="st">"LPOP"</span>:
+		<span class="kw">return</span> cmdPop(s, args, <span class="kw">true</span>, <span class="st">"lpop"</span>)
+	<span class="kw">case</span> <span class="st">"RPOP"</span>:
+		<span class="kw">return</span> cmdPop(s, args, <span class="kw">false</span>, <span class="st">"rpop"</span>)
+	<span class="kw">case</span> <span class="st">"LRANGE"</span>:
+		<span class="kw">return</span> cmdLRange(s, args)
+	<span class="kw">case</span> <span class="st">"LLEN"</span>:
+		<span class="kw">return</span> cmdLLen(s, args)
+	<span class="kw">case</span> <span class="st">"LINDEX"</span>:
+		<span class="kw">return</span> cmdLIndex(s, args)</code></pre>
+
+    <p>第00章で「<code>switch</code> は全10章を通じてずっと育つ背骨」と書きました。その予告どおり、<code>case</code> が7本増えました。この後の章でも、新しい型が入るたびにここへ <code>case</code> が積み上がっていきます。</p>
+
+    <div class="gonote"><div class="box-k">GO メモ · ポインタレシーバ *Store と、なぜ Push は値を書き換えられるのか</div>
+      <p>この章のメソッドはすべて <code>func (s *Store) …</code> という<strong>ポインタレシーバ</strong>です。<code>*Store</code>（ポインタ）にしているので、メソッドの中で <code>s.data[key] = l</code> のように書き換えると、<strong>呼び出し元が持っている同じ <code>Store</code> の中身が変わります</strong>。もし値レシーバ <code>func (s Store) …</code> だったら、メソッド呼び出しのたびに <code>Store</code> のコピーが渡され、<code>s.mu</code>（Mutex）までコピーされてロックが機能しなくなります。<strong>「状態を変える」「Mutex を持つ」型のメソッドは必ずポインタレシーバ</strong>、が Go の鉄則です。<br>
+      同じ理屈が Step 1 の <code>*List</code> にも効いています。<code>l.items = append(…)</code> で <code>l</code> の中身を書き換えると、キースペースに入っている <code>*List</code> が指す実体が変わる。だから <code>Push</code>/<code>Pop</code> の変更が、次の <code>LRANGE</code> にちゃんと見えるのです。</p>
+    </div>
+
+    <div class="box do"><div class="box-k">▸ 動かして確認</div>
+      <p>（<code>redis-cli</code> がある人向け）完成後のサーバに、両端キューとして話しかけてみましょう。</p>
+      <pre class="term"><code><span class="ps">$</span> redis-cli -p 6380 rpush l a b c
+<span class="out">(integer) 3</span>
+<span class="ps">$</span> redis-cli -p 6380 lpush l z
+<span class="out">(integer) 4</span>
+<span class="ps">$</span> redis-cli -p 6380 lrange l 0 -1
+<span class="out">1) "z"
+2) "a"
+3) "b"
+4) "c"</span>
+<span class="ps">$</span> redis-cli -p 6380 lindex l -1
+<span class="out">"c"</span>
+<span class="ps">$</span> redis-cli -p 6380 rpop l
+<span class="out">"c"</span></code></pre>
+      <p><code>lpush l z</code> が先頭に <code>z</code> を差し込み、<code>rpop l</code> が末尾の <code>c</code> を取る。両端から出し入れできる deque が、確かに動いています。</p>
+    </div>
+
+    <h2 class="step" id="step-7"><span class="step-no">Step 7</span>テストを読む — 両端キューと自動削除を機械で確かめる</h2>
+    <p>この章の受け入れ基準は「List が両端キューとして正しく振る舞い、空になったらキーごと消える」こと。それを機械で確かめるのが <code>TestList</code> です。第00章のテスト用クライアント（RESP を直接話す代役）を使い、<code>expect</code> で「このコマンドにこの RESP 応答が返る」を1行ずつ検証します。</p>
+
+    <div class="file-tag">commands_test.go（TestList）</div>
+    <pre><code><span class="kw">func</span> TestList(t *testing.<span class="ty">T</span>) {
+	srv := newServer()
+	expect(t, srv, <span class="st">":2\r\n"</span>, <span class="st">"RPUSH"</span>, <span class="st">"l"</span>, <span class="st">"b"</span>, <span class="st">"c"</span>)
+	expect(t, srv, <span class="st">":3\r\n"</span>, <span class="st">"LPUSH"</span>, <span class="st">"l"</span>, <span class="st">"a"</span>)
+	expect(t, srv, <span class="st">":3\r\n"</span>, <span class="st">"LLEN"</span>, <span class="st">"l"</span>)
+	expect(t, srv, <span class="st">"*3\r\n$1\r\na\r\n$1\r\nb\r\n$1\r\nc\r\n"</span>, <span class="st">"LRANGE"</span>, <span class="st">"l"</span>, <span class="st">"0"</span>, <span class="st">"-1"</span>)
+	expect(t, srv, <span class="st">"*2\r\n$1\r\nb\r\n$1\r\nc\r\n"</span>, <span class="st">"LRANGE"</span>, <span class="st">"l"</span>, <span class="st">"1"</span>, <span class="st">"2"</span>)
+	expect(t, srv, <span class="st">"*1\r\n$1\r\nc\r\n"</span>, <span class="st">"LRANGE"</span>, <span class="st">"l"</span>, <span class="st">"-1"</span>, <span class="st">"-1"</span>)
+	expect(t, srv, <span class="st">"*0\r\n"</span>, <span class="st">"LRANGE"</span>, <span class="st">"l"</span>, <span class="st">"5"</span>, <span class="st">"10"</span>)
+	expect(t, srv, <span class="st">"$1\r\na\r\n"</span>, <span class="st">"LINDEX"</span>, <span class="st">"l"</span>, <span class="st">"0"</span>)
+	expect(t, srv, <span class="st">"$1\r\nc\r\n"</span>, <span class="st">"LINDEX"</span>, <span class="st">"l"</span>, <span class="st">"-1"</span>)
+	expect(t, srv, <span class="st">"$-1\r\n"</span>, <span class="st">"LINDEX"</span>, <span class="st">"l"</span>, <span class="st">"9"</span>)
+	expect(t, srv, <span class="st">"$1\r\na\r\n"</span>, <span class="st">"LPOP"</span>, <span class="st">"l"</span>)
+	expect(t, srv, <span class="st">"$1\r\nc\r\n"</span>, <span class="st">"RPOP"</span>, <span class="st">"l"</span>)
+	expect(t, srv, <span class="st">"$1\r\nb\r\n"</span>, <span class="st">"LPOP"</span>, <span class="st">"l"</span>)
+	<span class="cm">// 空になったらキーごと消える</span>
+	expect(t, srv, <span class="st">":0\r\n"</span>, <span class="st">"EXISTS"</span>, <span class="st">"l"</span>)
+	expect(t, srv, <span class="st">"$-1\r\n"</span>, <span class="st">"LPOP"</span>, <span class="st">"l"</span>)
+	<span class="cm">// LPUSH の複数値は1つずつ先頭に積まれる</span>
+	run(srv, <span class="st">"LPUSH"</span>, <span class="st">"l2"</span>, <span class="st">"a"</span>, <span class="st">"b"</span>, <span class="st">"c"</span>)
+	expect(t, srv, <span class="st">"*3\r\n$1\r\nc\r\n$1\r\nb\r\n$1\r\na\r\n"</span>, <span class="st">"LRANGE"</span>, <span class="st">"l2"</span>, <span class="st">"0"</span>, <span class="st">"-1"</span>)
+}</code></pre>
+
+    <p>このテストは、本章で作った意味論を上から順に踏み固めていきます。読みどころは4か所です。</p>
+    <p><strong>① 両端積みと逆順の確認（冒頭）</strong>。<code>RPUSH l b c</code> で <code>[b,c]</code>（長さ2 → <code>:2</code>）、続く <code>LPUSH l a</code> で先頭に <code>a</code> が入り <code>[a,b,c]</code>（長さ3 → <code>:3</code>）。直後の <code>LRANGE l 0 -1</code> が <code>a b c</code> の配列を返すことで、左右の積みが正しく1本の並びになっていると分かります。</p>
+    <p><strong>② 負インデックスと範囲の丸め（中盤の LRANGE 4本）</strong>。<code>0 -1</code> で全体、<code>1 2</code> で <code>[b,c]</code>、<code>-1 -1</code> で末尾 <code>[c]</code> だけ、そして <code>5 10</code>（範囲外）で空配列 <code>*0</code>。Step 5 の <code>normalizeRange</code> の4ブロック — 翻訳・下丸め・上丸め・空判定 — が、この4行にちょうど1対1で対応しています。<code>LINDEX l -1</code> が末尾 <code>c</code>、<code>LINDEX l 9</code>（範囲外）が <code>$-1</code>(nil) を返すのも、負インデックスとはみ出し判定の検証です。</p>
+    <p><strong>③ 空削除の確認（テストの核心）</strong>。<code>a</code>/<code>c</code>/<code>b</code> と3回 <code>POP</code> して <code>l</code> を空にした直後、<code>EXISTS l</code> が <code>:0</code>（存在しない）。そしてもう一度 <code>LPOP l</code> しても <code>$-1</code>（nil）。Step 4 の <code>removeLocked</code> がちゃんと効いて、<strong>空の List が居座っていない</strong>ことの証明です。Step 2 の落とし穴で警告した矛盾（<code>EXISTS=1</code> かつ <code>LLEN=0</code>）が起きていないことを、機械が保証してくれます。</p>
+    <p><strong>④ 複数値 LPUSH の逆順（最後の2行）</strong>。<code>LPUSH l2 a b c</code> の結果を <code>LRANGE l2 0 -1</code> で見ると <code>c b a</code>。Step 3 で説明した「1つずつ順に先頭へ差し込むと逆順になる」が、期待値 <code>*3\r\n$1\r\nc\r\n$1\r\nb\r\n$1\r\na\r\n</code> としてそのまま書かれています。仕様の細部が、生の RESP バイト列で固定されているのが読み取れます。</p>
+
+    <div class="box do"><div class="box-k">▸ 動かして確認</div>
+      <p>この章のクライマックスです。実装した <code>list.go</code> と、第00章の <code>dispatch</code> に足した <code>case</code> がそろえば通ります。</p>
+      <pre class="term"><code><span class="ps">$</span> cd src
+<span class="ps">$</span> go test -run TestList -v
+<span class="out">=== RUN   TestList
+--- PASS: TestList (0.00s)
+PASS
+ok  	redisclone	0.19s</span></code></pre>
+      <p>ついでに、型の取り違えが正しく叱られることも確認しておくと安心です。文字列キーに List コマンドを投げる検証は <code>TestTypeAndWrongType</code> に含まれています。</p>
+      <pre class="term"><code><span class="ps">$</span> go test -run TestTypeAndWrongType -v
+<span class="out">--- PASS: TestTypeAndWrongType (0.00s)
+PASS</span></code></pre>
+      <p>PASS は「両端キューとして出し入れでき、負インデックスを解釈し、空になればキーごと消え、型を取り違えれば WRONGTYPE で叱る」の機械による証明です。</p>
+    </div>
+
+    <h2>つまずき FAQ</h2>
+    <details class="qa"><summary><code>LPUSH l a b c</code> が <code>[a,b,c]</code> ではなく <code>[c,b,a]</code> になるのはバグ?</summary>
+      <div class="qa-body"><p>いいえ、本家 Redis の仕様どおりの正しい挙動です。<code>LPUSH</code> は引数を<strong>左から順に、1つずつ先頭へ</strong>差し込みます。<code>a</code>→<code>[a]</code>、<code>b</code>→<code>[b,a]</code>、<code>c</code>→<code>[c,b,a]</code>。だから複数値を渡すと並びが反転します。「元の並びのまま右に積みたい」なら <code>RPUSH l a b c</code> を使うと <code>[a,b,c]</code> になります。この非対称は Step 3 の <code>append([]string{v}, l.items...)</code> をループで回す構造から自然に出てきます。</p></div>
+    </details>
+    <details class="qa"><summary>存在しないキーに <code>LRANGE</code> や <code>LPOP</code> するとエラーになる?</summary>
+      <div class="qa-body"><p>なりません。読み取り系・取り出し系は <code>getListLocked(key, <strong>false</strong>)</code> を使うので、キーが無ければ <code>l == nil</code> となり、<code>LRANGE</code> は空配列 <code>*0</code>、<code>LPOP</code> は <code>$-1</code>(nil)、<code>LLEN</code> は <code>:0</code> を穏当に返します。エラー（<code>WRONGTYPE</code>）になるのは<strong>「キーは在るが別の型（文字列など）だった」</strong>ときだけ。「無い」と「型違い」を区別するのが <code>getListLocked</code> の <code>l == nil</code>（無い）と <code>err != nil</code>（型違い）の2つの戻り値です。</p></div>
+    </details>
+    <details class="qa"><summary>本家は quicklist なのに <code>[]string</code> で済ませて、性能は本当に大丈夫?</summary>
+      <div class="qa-body"><p>意味論（返る値）は完全に一致しますが、<strong>性能特性は一部異なります</strong>。最大の違いは <code>LPUSH</code>（先頭差し込み）が本実装では <strong>O(n)</strong>（全要素コピー）である点。本家の quicklist なら O(1) です。<code>RPUSH</code>（末尾追加）は amortized O(1) なので実用的です。要素数が数百程度までなら体感差はほぼ無く、学習には十分。「なぜ本家はわざわざ連結リストを使うのか」を実感するには、むしろこの素朴実装が良い出発点になります。内部表現の最適化は最終章（第09章）で設計判断として振り返ります。</p></div>
+    </details>
+
+    <h2>理解度チェック</h2>
+    <p>次の問いに<strong>自分の言葉で</strong>答えられたら、この章は卒業です。</p>
+    <details class="qa"><summary>1. <code>getListLocked</code> の <code>create</code> フラグは、どのコマンドで <code>true</code>／<code>false</code> になり、それぞれ何を意味するか。</summary>
+      <div class="qa-body"><p><strong><code>create=true</code></strong>: 書き込み系の <code>Push</code>（<code>LPUSH</code>/<code>RPUSH</code>）。キーが無ければ<strong>空 List を作って登録</strong>する（<code>RPUSH newkey a</code> が新キーを生やせるのはこのため）。<strong><code>create=false</code></strong>: 読み取り・取り出し系の <code>Pop</code>/<code>LRange</code>/<code>LLen</code>/<code>LIndex</code>。キーが無ければ <code>nil</code> を返し、呼び出し側で「空っぽ」として穏当に扱う。1つのフラグで書き込み系と読み取り系を同じ関数に集約し、<code>WRONGTYPE</code> 判定を1か所にまとめている。</p></div>
+    </details>
+    <details class="qa"><summary>2. <code>LPOP</code> で最後の要素を取り出したあと、なぜキーを消すのか。消さないと何が起きるか。</summary>
+      <div class="qa-body"><p>Redis の流儀は「<strong>空になったコレクションはキーごと消える</strong>」。<code>Pop</code> の末尾で <code>len(l.items)==0</code> なら <code>removeLocked(key)</code> でキーを削除する。消さないと、キースペースに<strong>中身ゼロの List が居座り</strong>、<code>EXISTS l</code> が <code>1</code>（在る）を返す一方 <code>LLEN l</code> は <code>0</code>（空）を返す、という本家に存在しない矛盾状態が生まれる。<code>Push</code> の <code>create</code> で「作った」ぶんを、<code>Pop</code> の空削除で「消す」ことで対称性を保つ。</p></div>
+    </details>
+    <details class="qa"><summary>3. <code>normalizeRange</code> は、なぜ「翻訳→丸め→空判定」の順で処理するのか。</summary>
+      <div class="qa-body"><p>まず負インデックス（<code>-1</code>=末尾）を <code>+= n</code> で<strong>絶対位置に翻訳</strong>し、次に下側の行き過ぎを <code>start=0</code>、上側の行き過ぎを <code>stop=n-1</code> に<strong>丸め</strong>、最後に <code>n==0 || start&gt;stop || start&gt;=n</code> で<strong>空かどうか判定</strong>する。この順序でないと成立しない: 空判定を先にやると、まだ負のままの <code>start</code>/<code>stop</code> で比較して誤判定する。翻訳して初めて大小比較に意味が出るため、翻訳→丸め→検証の並びが必然になる。</p></div>
+    </details>
+
+    <h2>まとめ — 次の層へ</h2>
+    <p>この章で、Redis のキースペースに初めて<strong>「型」</strong>が宿りました。第01章で仕込んだ <code>any</code> の箱に <code>*List</code> をポインタで入れ、型スイッチで取り出す。<code>getListLocked</code> の <code>create</code> フラグ1つで書き込み系と読み取り系を束ね、型違いは <code>WRONGTYPE</code> で叱る。<code>Push</code>/<code>Pop</code> で両端から出し入れし、<code>normalizeRange</code> で負インデックスを飼い慣らし、そして<strong>空になったコレクションはキーごと消す</strong> — この4つの意味論は、これから続く全ての複合型に共通する<strong>ひな型</strong>です。素朴なスライス実装ゆえの O(n) という弱点も正直に見ました。</p>
+    <p>次の第05章では、同じひな型に乗せて <code>Hash</code> — 1つのキーの下に<strong>フィールドと値のペアの集まり</strong>を持つ型 — を作ります。<code>getHashLocked(key, create)</code> という双子のような関数が現れ、<code>HSET</code>/<code>HGET</code>/<code>HDEL</code> が並び、そしてやはり「最後のフィールドを消したらキーごと消える」空削除が出てきます。この章で身につけた型の扱い方が、そのまま次の型に流用できる — Redis の複合型たちが、いかに同じ設計の変奏なのかを、次章で味わってください。</p>
+
+    <div class="chap-foot">
+      <a class="pager" href="03-string.html"><span class="dir">← 前へ</span>第03章 · 数としての文字列</a>
+      <a class="pager next" href="05-hash.html"><span class="dir">次へ →</span>第05章 · Hash</a>
+    </div>
+  </main>
+</div>
+</body>
+</html>
