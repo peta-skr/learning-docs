@@ -1,0 +1,7 @@
+node_modules/
+
+# 母艦から同期してきた教材の一時置き場（Phase 1 以降で使う）
+.sync-tmp/
+
+.DS_Store
+Thumbs.db

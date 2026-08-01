@@ -1,0 +1,108 @@
+name: deploy
+
+# Phase 0 時点の骨組み。まだビルドは一切していない。
+# dist/ にコミット済みのプレースホルダをそのまま Pages へ流し、配信経路とURLを確定させるだけ。
+#
+# Phase 1 以降でここに追記していく:
+#   - 母艦から教材をコピーする sync ジョブ（scripts/sync.mjs）
+#   - 教材ごとのビルドを matrix で並列（群A VitePress 10件 / 群C 個別ビルド 5件）
+#   - 成果物を dist/<教材名>/ に集約
+#   - dist/ への危険ファイル混入を弾く安全ネット（下の guard ジョブを本格化させる）
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+# Pages のデプロイは同時に1本しか走れない。走行中の push は後発を優先して打ち切る
+concurrency:
+  group: pages
+  cancel-in-progress: true
+
+jobs:
+  # dist/ に出てはいけないものが混ざっていないかの検査。
+  # 同期スクリプトの allowlist を唯一の防波堤にしないための二重化（DEPLOY_PLAN.md Phase 0）。
+  # 教材を載せ始める前から通しておき、混入した瞬間に赤くなる状態を保つ。
+  guard:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: 実行系ファイルの混入を検査
+        run: |
+          # 教材サイトの成果物にこれらが出る正当な理由はない。
+          # security/test6 の docs/labs/（実物の攻撃環境）や
+          # vulnerable-commerce-lab/src/ が紛れ込んだ場合ここで落ちる。
+          hits=$(find dist \
+            -type f \( \
+              -name 'Dockerfile' -o \
+              -name 'docker-compose.y*ml' -o \
+              -name '*.py' -o \
+              -name '*.sh' \
+            \) -print)
+          if [ -n "$hits" ]; then
+            echo "::error::dist/ に実行系ファイルが混入しています"
+            echo "$hits"
+            exit 1
+          fi
+          echo "実行系ファイルの混入なし"
+
+      - name: 公開してはいけないパスを検査
+        run: |
+          # ゲーム系6件はオーナー判断で対象外。
+          # vulnerable-commerce-lab は docs/ のみ公開（src/ test/ scripts/ public/ runtime/ は禁止）。
+          forbidden='
+          dist/vulnerable-commerce-lab/src
+          dist/vulnerable-commerce-lab/test
+          dist/vulnerable-commerce-lab/scripts
+          dist/vulnerable-commerce-lab/public
+          dist/vulnerable-commerce-lab/runtime
+          dist/security-test6/labs
+          dist/test6/labs
+          dist/debugger-dive
+          dist/merge-quest
+          dist/packet-metro
+          dist/riscv-puzzle
+          dist/sql-dungeon
+          dist/hack-dungeon
+          '
+          failed=0
+          for p in $forbidden; do
+            if [ -e "$p" ]; then
+              echo "::error::公開対象外のパスが存在します: $p"
+              failed=1
+            fi
+          done
+          [ "$failed" -eq 0 ] || exit 1
+          echo "公開対象外パスの混入なし"
+
+  deploy:
+    needs: guard
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/configure-pages@v5
+
+      - uses: actions/upload-pages-artifact@v3
+        with:
+          path: dist
+
+      - id: deployment
+        uses: actions/deploy-pages@v4
+
+      - name: 確定した配信URLを表示
+        run: |
+          echo "### 配信URL" >> "$GITHUB_STEP_SUMMARY"
+          echo "" >> "$GITHUB_STEP_SUMMARY"
+          echo '${{ steps.deployment.outputs.page_url }}' >> "$GITHUB_STEP_SUMMARY"
+          echo "" >> "$GITHUB_STEP_SUMMARY"
+          echo "VitePress / Astro / Next の \`base\` にはこのパス部分を設定する。" >> "$GITHUB_STEP_SUMMARY"
