@@ -1,0 +1,23 @@
+# 配信物の改行コードを LF に固定する。
+#
+# 開発は Windows（core.autocrlf=true）だが、配信先は Linux の GitHub Pages。
+# 指定が無いと、チェックアウト時に CRLF へ変換されたビルド成果物が
+# 再ビルドのたびに「全ファイル変更」として差分に出る。
+# VitePress 教材は1件あたり 170 ファイルあるため、これが起きると
+# 本当の変更が差分に埋もれて見えなくなる。
+
+* text=auto eol=lf
+
+# ビルド成果物はテキスト変換をかけない（生成物をそのまま配信する）。
+dist/**/*.js  -text
+dist/**/*.css -text
+dist/**/*.json -text
+
+# バイナリ
+*.png  binary
+*.jpg  binary
+*.jpeg binary
+*.gif  binary
+*.ico  binary
+*.woff binary
+*.woff2 binary

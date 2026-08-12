@@ -6,22 +6,47 @@
 
 ## 現在の状態
 
-**Phase 0（土台とURL確定）進行中。** まだ教材は1件も入っていない。`dist/` にあるのは配信経路確認用のプレースホルダのみ。
+**8教材を配信中。** 自前HTML 7件（群B）＋ VitePress 1件（群A: jakarta-migration）。
 
-計画の正本は母艦の `workspace/projects/learning/DEPLOY_PLAN.md`。
+計画の正本は母艦の `workspace/projects/learning/DEPLOY_PLAN.md`、
+配信方針は `DESKTOP_MATERIALS.md`。
+
+## 教材の追加手順
+
+**このリポジトリは CI でビルドしない。** ビルド済みの成果物を `dist/` にコミットして配信する。
+
+### 群B（自前HTML・ビルド不要）
+
+`scripts/sync.mjs` の `GROUP_B` に `{ slug, from }` を足して `node scripts/sync.mjs`。
+
+### 群A（VitePress）
+
+1. 母艦の教材側で `base: '/learning-docs/<slug>/'` を `config.mts` に設定する
+   （**未設定だとサブパス配信でアセットが全滅する**）
+2. 教材ディレクトリで `npm run docs:build`
+3. `scripts/sync.mjs` の `GROUP_A` に `{ slug, from, src }` を足す
+   - `from` … ビルド成果物（`.vitepress/dist`）
+   - `src` … ソース（ビルドが古くないかの検査に使う）
+4. `node scripts/sync.mjs --check` で検査 → 問題なければ `node scripts/sync.mjs`
+5. `dist/index.html` にリンクを足す（章数は実測して書く）
+
+`sync.mjs` は群A に対して次を実測で検査し、引っかかると**同期せず exit 1** で止まる。
+
+- ビルド成果物が存在するか / `index.html` があるか
+- `index.html` に `base` が焼き込まれているか（**これが無いと白紙のページが配信される**）
+- **ビルドがソースより古くないか**（古いまま同期すると「直したのに直っていない」が起きる）
 
 ## 構成
 
 ```
 learning-docs/
-├── .github/workflows/deploy.yml   ビルド + Pages へのデプロイ
+├── .github/workflows/deploy.yml   guard + Pages へのデプロイ（ビルドはしない）
+├── scripts/sync.mjs               母艦から dist/ へ教材を同期する（allowlist）
 └── dist/                          Pages が配信するルート
     ├── .nojekyll                  Jekyll を通さない（_ 始まりのパスを消させない）
-    ├── index.html                 索引（現在はプレースホルダ）
-    └── _probe/                    サブパス配下の相対パス解決の確認用
+    ├── index.html                 索引（手で管理する。教材を足したらリンクも足す）
+    └── <教材名>/                  教材ごとに1サイト
 ```
-
-教材が入ると `dist/<教材名>/` が並ぶ。
 
 ## 配信
 
@@ -38,8 +63,16 @@ workflow には `guard` ジョブがあり、`dist/` に以下が混入してい
 
 ## ローカルでの確認
 
-静的ファイルなのでビルド不要。
+静的ファイルなのでビルド不要。ただし **`npx serve dist` では VitePress 教材の検証にならない。**
+`base` が `/learning-docs/<slug>/` 前提で焼き込まれているため、`dist` を直接ルートに配信すると
+アセットが 404 になる（本番と逆の結果が出る）。
+
+配信構造ごと再現して確認する。
 
 ```bash
-npx serve dist
+mkdir -p /tmp/probe/learning-docs && cp -r dist/* /tmp/probe/learning-docs/
+npx serve -l 4173 /tmp/probe
+# → http://localhost:4173/learning-docs/
 ```
+
+**トップだけでなく最深の1ページまで開く**（過去に「ビルド緑・dist 正常なのに 404」を踏んでいる）。
