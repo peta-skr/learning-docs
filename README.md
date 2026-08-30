@@ -6,7 +6,7 @@
 
 ## 現在の状態
 
-**8教材を配信中。** 自前HTML 7件（群B）＋ VitePress 1件（群A: jakarta-migration）。
+**9教材を配信中。** 自前HTML 7件（群B）＋ VitePress 2件（群A: java-web-primer / jakarta-migration）。
 
 計画の正本は母艦の `workspace/projects/learning/DEPLOY_PLAN.md`、
 配信方針は `DESKTOP_MATERIALS.md`。

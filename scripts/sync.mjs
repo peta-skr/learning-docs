@@ -61,6 +61,12 @@ const GROUP_A = [
     from: 'docs/jakarta-migration/docs/.vitepress/dist',
     src: 'docs/jakarta-migration/docs',
   },
+  // jakarta-migration の「手前の一段」。読む順は java-web-primer → jakarta-migration。
+  {
+    slug: 'java-web-primer',
+    from: 'docs/java-web-primer/docs/.vitepress/dist',
+    src: 'docs/java-web-primer/docs',
+  },
 ]
 
 // 教材ディレクトリに同居している作業用ファイル。読者向けの成果物ではないので配信しない。
